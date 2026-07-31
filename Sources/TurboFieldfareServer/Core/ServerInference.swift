@@ -139,7 +139,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                                            context: context,
                                            maxContext: maxContext,
                                            runtimeConfiguration: runtime)
-        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize)
+        let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
+                                               logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
             .map { String(format: "%02x", $0) }
             .joined()
