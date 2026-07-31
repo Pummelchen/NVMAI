@@ -433,10 +433,19 @@ The current runtime supports text-only generation with the pinned Gemma 4
 26B-A4B instruction checkpoint. The source model supports image input, but
 TurboFieldfare omits its vision tower.
 
+Qwen 3.6 35B-A3B is additionally supported as an experimental second
+architecture, selected from `manifest.json -> arch.family`. It is a hybrid of
+30 gated-DeltaNet linear-attention layers and 10 gated full-attention layers,
+with 256 routed experts per layer and a gated shared expert. Its vision tower
+is omitted in the same way. Acceptance evidence for it covers a 24 GB host at
+4K context; it has not been validated on the 8 GB configuration that governs
+the Gemma path. See [Qwen 3.6 performance notes](QWEN36_PERFORMANCE.md).
+
 The Mac app offers 4K, 8K, 16K, 32K, and 64K context lengths. Published app
 and CLI acceptance evidence covers up to 4K. Vision input, training,
 fine-tuning, server batching, remote serving, and general model support are
-outside the current scope. The optional HTTP server is loopback-only, owns one
+outside the current scope; the two architectures above are enumerated
+explicitly rather than discovered. The optional HTTP server is loopback-only, owns one
 warm model, serializes generation, and retains one verified conversational KV
 prefix by default. It retains only that prefix. See the
 [local server guide](OPENAI_SERVER.md).
