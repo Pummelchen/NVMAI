@@ -50,6 +50,34 @@ Each of these was measured before being ruled out.
   2931 ms, but the synchronous advice calls cost what the reads saved; total
   decode was unchanged (19.3 vs 19.3 tok/s). It stays off by default.
 
+## Why Qwen 3.6 decodes slower than Gemma 4 here
+
+Gemma 4 reads *more* routed-expert data per token than Qwen 3.6 yet decodes
+roughly twice as fast on the same host:
+
+| | expert bytes/token | slot coverage | observed | implied expert read rate |
+| --- | ---: | ---: | ---: | ---: |
+| Gemma 4 26B-A4B | 769 MiB (8 of 128 x 30 layers) | 16/128 = 12.5% | 41.5 tok/s | 31.2 GB/s |
+| Qwen 3.6 35B-A3B | 540 MiB (8 of 256 x 40 layers) | 16/256 = 6.2% | 19.4 tok/s | 10.2 GB/s |
+
+The Gemma figure is a HUD reading from the Mac app on the same machine, not a
+run reproduced by this document; only Qwen is installed here.
+
+Two effects compound, and neither is a defect in the Qwen path:
+
+1. **Install size versus RAM.** Gemma's 14.3 GB install stays largely resident
+   in the OS page cache on a 24 GB host, so most expert reads are memcpy at
+   30+ GB/s. Qwen's 19.55 GB install does not fit alongside everything else,
+   so a large share of its reads reach the SSD (measured 5-10 GB/s for
+   scattered reads across the expert files).
+2. **Slot coverage.** With the same 16 slots, Qwen caches 6.2% of a layer's
+   experts against Gemma's 12.5%, so it misses about twice as often.
+
+Raising slots to 32 restores Gemma-equivalent coverage and is worth about 4%
+(19.0 to 19.8 tok/s) — the page-cache term dominates. Both effects follow from
+the checkpoint's shape and the host's memory, not from the runtime, and
+neither is addressable inside the 2 GB process budget.
+
 ## Round-trip latency
 
 Decode performs one `commit` + `waitUntilCompleted` per layer to read the
