@@ -123,7 +123,7 @@ public struct GFTokenizer: @unchecked Sendable {
         self.tokenizer = tokenizer
 
         let dialect: ChatDialect =
-            tokenizer.convertTokenToId(Self.imEndMark) != nil ? .chatml : .gemma
+            Self.specialTokenID(tokenizer, Self.imEndMark) != nil ? .chatml : .gemma
         let resolved = dialect == .chatml
             ? try Self.resolveChatMLTokens(tokenizer)
             : try Self.resolveGemmaTokens(tokenizer)
@@ -207,11 +207,19 @@ public struct GFTokenizer: @unchecked Sendable {
             vocabSize: 262_144)
     }
 
+    /// Resolves a token string to its ID, rejecting the unk-token fallback
+    /// some tokenizers substitute for out-of-vocabulary strings.
+    private static func specialTokenID(_ tokenizer: any Tokenizer, _ token: String) -> Int? {
+        guard let id = tokenizer.convertTokenToId(token),
+              tokenizer.convertIdToToken(id) == token else { return nil }
+        return id
+    }
+
     private static func resolveChatMLTokens(
         _ tokenizer: any Tokenizer
     ) throws -> ResolvedSpecialTokens {
         func id(_ token: String) throws -> Int32 {
-            guard let value = tokenizer.convertTokenToId(token) else {
+            guard let value = specialTokenID(tokenizer, token) else {
                 throw GFTokenizerError.missingSpecialToken(token)
             }
             return Int32(value)
