@@ -104,31 +104,37 @@ Each of these was measured before being ruled out.
 
 ## Why Qwen 3.6 decodes slower than Gemma 4 here
 
-Gemma 4 reads *more* routed-expert data per token than Qwen 3.6 yet decodes
-roughly twice as fast on the same host:
+The repository's published M5 Pro rows put Gemma 4 at 31-35 tok/s; Qwen 3.6
+measures 18.8-23.1 tok/s on this M5. Two facts about that gap are measured
+here, and the explanation for it is not.
 
-| | expert bytes/token | slot coverage | observed | implied expert read rate |
-| --- | ---: | ---: | ---: | ---: |
-| Gemma 4 26B-A4B | 769 MiB (8 of 128 x 30 layers) | 16/128 = 12.5% | 41.5 tok/s | 31.2 GB/s |
-| Qwen 3.6 35B-A3B | 540 MiB (8 of 256 x 40 layers) | 16/256 = 6.2% | 19.4 tok/s | 10.2 GB/s |
+Measured:
 
-The Gemma figure is a HUD reading from the Mac app on the same machine, not a
-run reproduced by this document; only Qwen is installed here.
+- Decode is 53% expert-I/O wait, and I/O is serial with GPU work.
+- Qwen's throughput does not depend on the OS page cache. Repeated runs of the
+  same case do not speed up (21.4, 22.1, 20.8 tok/s back to back), and
+  constraining the host to an ~8 GB working set does not slow it down. Both
+  point to its expert reads already being served from SSD rather than cache.
+- Qwen reads *fewer* routed-expert bytes per token than Gemma: at most 540 MiB
+  (40 layers x 8 experts x 1.69 MiB) against at most 769 MiB (30 x 8 x
+  3.36 MiB). So the gap is not read volume.
+- With the same 16 slots, Qwen caches at most 6.2% of a layer's 256 experts
+  against Gemma's 12.5% of 128, so it misses more often. Raising Qwen to 32
+  slots recovers Gemma-equivalent coverage and is worth about 4%.
 
-Two effects compound, and neither is a defect in the Qwen path:
+Not measured, and stated here as a hypothesis rather than a finding: that
+Gemma is faster mainly because its 12.9 GB expert pool largely stays in the OS
+page cache on a 24 GB host while Qwen's 18.1 GB pool does not, so Gemma's reads
+are served from memory and Qwen's from SSD. It is consistent with everything
+above, and with scattered reads across Qwen's expert files measuring 5-10 GB/s
+against 30+ GB/s for reads that hit cache. But confirming it requires running
+Gemma 4 under the same protocol on this host, and only Qwen is installed here.
+The actual per-run cache hit rate was also not instrumented, so no
+bytes-per-second figure is quoted for either model.
 
-1. **Install size versus RAM.** Gemma's 14.3 GB install stays largely resident
-   in the OS page cache on a 24 GB host, so most expert reads are memcpy at
-   30+ GB/s. Qwen's 19.55 GB install does not fit alongside everything else,
-   so a large share of its reads reach the SSD (measured 5-10 GB/s for
-   scattered reads across the expert files).
-2. **Slot coverage.** With the same 16 slots, Qwen caches 6.2% of a layer's
-   experts against Gemma's 12.5%, so it misses about twice as often.
-
-Raising slots to 32 restores Gemma-equivalent coverage and is worth about 4%
-(19.0 to 19.8 tok/s) — the page-cache term dominates. Both effects follow from
-the checkpoint's shape and the host's memory, not from the runtime, and
-neither is addressable inside the 2 GB process budget.
+Whatever the split between those effects, both follow from the checkpoint's
+shape against the host's memory rather than from the runtime, and neither is
+addressable inside the 2 GB process budget.
 
 ## Round-trip latency
 
