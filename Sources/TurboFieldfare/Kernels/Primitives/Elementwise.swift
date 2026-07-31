@@ -8,11 +8,37 @@ final class Elementwise {
     private let sigmoidGateMulPSO: MTLComputePipelineState
     private let sigmoidScalarMulPSO: MTLComputePipelineState
     private let residualAddPSO: MTLComputePipelineState
+    private let splitQGatePSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
         self.sigmoidScalarMulPSO = try context.pipeline("sigmoid_scalar_mul_fp16")
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
+        self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
+    }
+
+    /// packed [H, 2D] per-head [query ; gate] → q [H, D], gate [H, D].
+    /// `rows` > 1 processes consecutive token rows (packed stride 2*H*D,
+    /// output strides H*D).
+    func encodeSplitQGate(commandBuffer: MTLCommandBuffer,
+                          packed: MTLBuffer, packedOffset: Int = 0,
+                          q: MTLBuffer, qOffset: Int = 0,
+                          gate: MTLBuffer, gateOffset: Int = 0,
+                          heads: Int, dim: Int, rows: Int = 1) {
+        let rowElems = heads * dim
+        for row in 0..<rows {
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+            encoder.setComputePipelineState(splitQGatePSO)
+            encoder.setBuffer(packed, offset: packedOffset + row * 2 * rowElems * 2, index: 0)
+            encoder.setBuffer(q, offset: qOffset + row * rowElems * 2, index: 1)
+            encoder.setBuffer(gate, offset: gateOffset + row * rowElems * 2, index: 2)
+            var headCount = UInt32(heads)
+            var headDim = UInt32(dim)
+            encoder.setBytes(&headCount, length: MemoryLayout<UInt32>.size, index: 3)
+            encoder.setBytes(&headDim, length: MemoryLayout<UInt32>.size, index: 4)
+            dispatch(encoder, pipeline: splitQGatePSO, threads: rowElems)
+            encoder.endEncoding()
+        }
     }
 
     /// out[i] *= sigmoid(gate[i])

@@ -58,6 +58,26 @@ void sigmoid_scalar_mul_fp16(
     y[tid] = half(float(y[tid]) / (1.0f + exp(-g)));
 }
 
+// Qwen 3.6 q_proj emits per-head [query(D) ; gate(D)] pairs. Split them into
+// contiguous q [H, D] and gate [H, D] so the per-head norm, RoPE, and
+// attention kernels see their usual layout.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void split_q_gate_fp16(
+    device const half* packed [[buffer(0)]],   // [H, 2*D]
+    device half*       q      [[buffer(1)]],   // [H, D]
+    device half*       gate   [[buffer(2)]],   // [H, D]
+    constant uint&     heads  [[buffer(3)]],
+    constant uint&     dim    [[buffer(4)]],
+    uint               tid   [[thread_position_in_grid]]
+) {
+    const uint total = heads * dim;
+    if (tid >= total) return;
+    const uint h = tid / dim;
+    const uint d = tid % dim;
+    q[tid] = packed[h * 2u * dim + d];
+    gate[tid] = packed[h * 2u * dim + dim + d];
+}
+
 // hidden[i] += delta[i] — plain pre-norm residual add for architectures
 // without Gemma's fused sandwich tail.
 [[kernel, max_total_threads_per_threadgroup(256)]]
