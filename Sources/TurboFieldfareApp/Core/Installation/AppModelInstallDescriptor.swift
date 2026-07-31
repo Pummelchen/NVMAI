@@ -58,10 +58,15 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self == .qwen36 ? "qwen36.gturbo" : "gemma4.gturbo"
     }
 
-    /// The descriptor the app products select at launch. Defaults to Gemma 4;
-    /// `TURBO_FIELDFARE_MODEL=qwen36` selects Qwen 3.6.
+    /// The descriptor the app products select at launch. Defaults to Gemma 4.
+    /// `TURBO_FIELDFARE_MODEL=qwen36` in the environment wins; otherwise the
+    /// persisted preference (`defaults write TurboFieldfare model qwen36`)
+    /// applies, so GUI launches without an environment also select Qwen.
     public static var selected: AppModelInstallDescriptor {
-        switch ProcessInfo.processInfo.environment["TURBO_FIELDFARE_MODEL"] {
+        let environmentValue = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_MODEL"]
+        let preferenceValue = UserDefaults(suiteName: "TurboFieldfare")?
+            .string(forKey: "model")
+        switch environmentValue ?? preferenceValue {
         case "qwen36": return .qwen36
         default: return .default
         }

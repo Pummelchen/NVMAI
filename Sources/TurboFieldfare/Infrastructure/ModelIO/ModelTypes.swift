@@ -251,6 +251,37 @@ public struct ArchConfig: Sendable, Equatable {
         .qwen36: .qwen36_35B_A3B,
     ]
 
+    /// Resident INT4 GEMV shapes this architecture issues during decode, for
+    /// pipeline specialization. Constant-folding the loop bounds measurably
+    /// raises achieved bandwidth on the narrower projections.
+    public var decodeInt4GEMVShapes: [(m: Int, n: Int)] {
+        var shapes: [(m: Int, n: Int)] = []
+        if attnOutputGate {
+            shapes.append((m: 2 * numHeads * fullHeadDim, n: hiddenSize))
+        } else {
+            shapes.append((m: numHeads * fullHeadDim, n: hiddenSize))
+        }
+        shapes.append((m: numFullKVHeads * fullHeadDim, n: hiddenSize))
+        shapes.append((m: hiddenSize, n: numHeads * fullHeadDim))
+        if hasLinearAttentionLayers {
+            let la = linearAttention
+            shapes.append((m: la.qkvDim, n: hiddenSize))
+            shapes.append((m: la.valueDim, n: hiddenSize))
+            shapes.append((m: hiddenSize, n: la.valueDim))
+        }
+        shapes.append((m: intermediateSize, n: hiddenSize))
+        shapes.append((m: hiddenSize, n: intermediateSize))
+        return shapes
+    }
+
+    /// Resident INT8 GEMV shapes issued during decode (router and, when the
+    /// architecture has one, the shared-expert scalar gate).
+    public var decodeInt8GEMVShapes: [(m: Int, n: Int)] {
+        var shapes: [(m: Int, n: Int)] = [(m: numExperts, n: hiddenSize)]
+        if sharedExpertGated { shapes.append((m: 1, n: hiddenSize)) }
+        return shapes
+    }
+
     /// Layer kind helpers over the mask encoding.
     public func layerIsFull(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 1 }
     public func layerIsLinear(_ layer: Int) -> Bool { fullAttentionLayerMask[layer] == 2 }
