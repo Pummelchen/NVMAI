@@ -27,6 +27,36 @@ using namespace metal;
 
 constant constexpr float kGdnRmsEps = 1e-6f;
 
+constant uint FC_GDN_IN_QKV    [[function_constant(90)]];
+constant uint FC_GDN_IN_Z      [[function_constant(91)]];
+constant uint FC_GDN_IN_AB     [[function_constant(92)]];
+constant uint FC_GDN_IN_N      [[function_constant(93)]];
+constant bool FC_GDN_IN_USE_FC [[function_constant(94)]];
+
+static inline bool gdn_in_use_fc() {
+    return is_function_constant_defined(FC_GDN_IN_USE_FC) && FC_GDN_IN_USE_FC;
+}
+
+static inline uint gdn_in_fc_qkv(constant uint& rows) {
+    return (gdn_in_use_fc() && is_function_constant_defined(FC_GDN_IN_QKV))
+        ? FC_GDN_IN_QKV : rows;
+}
+
+static inline uint gdn_in_fc_z(constant uint& rows) {
+    return (gdn_in_use_fc() && is_function_constant_defined(FC_GDN_IN_Z))
+        ? FC_GDN_IN_Z : rows;
+}
+
+static inline uint gdn_in_fc_ab(constant uint& rows) {
+    return (gdn_in_use_fc() && is_function_constant_defined(FC_GDN_IN_AB))
+        ? FC_GDN_IN_AB : rows;
+}
+
+static inline uint gdn_in_fc_n(constant uint& n) {
+    return (gdn_in_use_fc() && is_function_constant_defined(FC_GDN_IN_N))
+        ? FC_GDN_IN_N : n;
+}
+
 static inline float gdn_silu(float x) {
     return x / (1.0f + exp(-x));
 }
@@ -35,6 +65,84 @@ static inline float gdn_softplus(float x) {
     // log1p(exp(x)) with the standard large-x shortcut; matches
     // mlx.nn.softplus to FP32 precision.
     return (x > 20.0f) ? x : log(1.0f + exp(x));
+}
+
+// ----------------------------------------------------------------------------
+// Fused GDN input projection. Decode issues four INT4 GEMVs that all read the
+// same hidden vector `x` (N = hiddenSize): in_proj_qkv (qkvRows), in_proj_z
+// (zRows), in_proj_a and in_proj_b (abRows each — 32 rows for Qwen 3.6, i.e.
+// four near-empty threadgroups apiece). This kernel dispatches over the
+// concatenated row space and routes each row to its own weight/scale/bias base
+// and output buffer with a 4-way compare on the global row index.
+//
+// The per-row math is `dequant_int4_gemv_simd_body` verbatim (dequant_int4.metal
+// precedes gdn.metal in the combined shader source), called with the sub-matrix
+// local row, so results are bit-identical to the four separate dispatches.
+// That body reads packed weights via `ushort*`: sub-tensor offsets are only
+// 2-byte aligned, so the ushort-pair path must stay.
+//
+// Eight rows per threadgroup, one SIMD per row (256 threads).
+// ----------------------------------------------------------------------------
+kernel void gdn_in_proj_gemv_simd(
+    device const uint8_t* qkvW     [[buffer(0)]],
+    device const bfloat*  qkvS     [[buffer(1)]],
+    device const bfloat*  qkvB     [[buffer(2)]],
+    device const uint8_t* zW       [[buffer(3)]],
+    device const bfloat*  zS       [[buffer(4)]],
+    device const bfloat*  zB       [[buffer(5)]],
+    device const uint8_t* aW       [[buffer(6)]],
+    device const bfloat*  aS       [[buffer(7)]],
+    device const bfloat*  aB       [[buffer(8)]],
+    device const uint8_t* bW       [[buffer(9)]],
+    device const bfloat*  bS       [[buffer(10)]],
+    device const bfloat*  bB       [[buffer(11)]],
+    device const half*    x        [[buffer(12)]],
+    device half*          qkvY     [[buffer(13)]],
+    device half*          zY       [[buffer(14)]],
+    device half*          aY       [[buffer(15)]],
+    device half*          bY       [[buffer(16)]],
+    constant uint&        qkvRows  [[buffer(17)]],
+    constant uint&        zRows    [[buffer(18)]],
+    constant uint&        abRows   [[buffer(19)]],
+    constant uint&        N        [[buffer(20)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint QKV = gdn_in_fc_qkv(qkvRows);
+    const uint Z   = gdn_in_fc_z(zRows);
+    const uint AB  = gdn_in_fc_ab(abRows);
+    const uint NN  = gdn_in_fc_n(N);
+
+    const uint global_row = tg_idx * rows_per_tg + sg_idx;
+    if (global_row >= QKV + Z + 2u * AB) return;
+
+    device const uint8_t* W;
+    device const bfloat*  scales;
+    device const bfloat*  biases;
+    device half*          y;
+    uint local_row;
+    uint M;
+    if (global_row < QKV) {
+        W = qkvW; scales = qkvS; biases = qkvB; y = qkvY;
+        local_row = global_row;
+        M = QKV;
+    } else if (global_row < QKV + Z) {
+        W = zW; scales = zS; biases = zB; y = zY;
+        local_row = global_row - QKV;
+        M = Z;
+    } else if (global_row < QKV + Z + AB) {
+        W = aW; scales = aS; biases = aB; y = aY;
+        local_row = global_row - QKV - Z;
+        M = AB;
+    } else {
+        W = bW; scales = bS; biases = bB; y = bY;
+        local_row = global_row - QKV - Z - AB;
+        M = AB;
+    }
+    dequant_int4_gemv_simd_body(W, scales, biases, x, y, M, NN,
+                                1u, local_row, 0u, lane);
 }
 
 // ----------------------------------------------------------------------------

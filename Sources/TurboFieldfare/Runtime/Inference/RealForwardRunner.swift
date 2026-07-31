@@ -323,7 +323,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             || cfg.hasLinearAttentionLayers
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
         if cfg.hasLinearAttentionLayers {
-            self.gdn = try GDN(context: context, config: cfg.linearAttention)
+            self.gdn = try GDN(context: context, config: cfg.linearAttention,
+                               specializedHiddenSize: cfg.hiddenSize)
             self.gdnState = try GDNStateManager(device: context.device, config: cfg)
         } else {
             self.gdn = nil
@@ -2184,17 +2185,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let dtBias = try model.linearDtBias(layer: L)
         let gatedNormW = try model.linearNorm(layer: L)
 
-        func gemv(_ w: TensorView, y: MTLBuffer, rows: Int) {
-            int4.encode(commandBuffer: cb,
-                        weights: w.buffer, weightsOffset: Int(w.offset),
-                        scales: w.buffer, scalesOffset: Int(w.scaleOffset),
-                        biases: w.buffer, biasesOffset: Int(w.biasOffset),
-                        x: normed, y: y, m: UInt32(rows), n: D)
-        }
-        gemv(qkvW, y: gdnQKVRaw, rows: la.qkvDim)
-        gemv(zW, y: gdnZ, rows: la.valueDim)
-        gemv(aW, y: gdnA, rows: la.numVHeads)
-        gemv(bW, y: gdnB, rows: la.numVHeads)
+        // One dispatch over the concatenated qkv/z/a/b row space instead of four
+        // separate GEMVs (a and b were 4 threadgroups each).
+        gdn.encodeInputProjections(commandBuffer: cb,
+                                   x: normed,
+                                   qkv: qkvW, qkvOut: gdnQKVRaw,
+                                   z: zW, zOut: gdnZ,
+                                   a: aW, aOut: gdnA,
+                                   b: bW, bOut: gdnB,
+                                   hiddenSize: cfg.hiddenSize)
 
         gdn.encodeConvDecode(commandBuffer: cb,
                              tail: gdnState.convTailBuffer(layer: L),
