@@ -351,9 +351,12 @@ swift run -c release TurboFieldfareCLI \
 
 The Mac app selects Qwen with `TURBO_FIELDFARE_MODEL=qwen36` in the
 environment; the server auto-detects the installed model and serves it as
-`qwen3.6-35b-a3b` with the ChatML template and Qwen tool-call format. Qwen
-support is validated against unit and synthetic-model tests; it has not yet
-been benchmarked on the 8 GB validation hardware.
+`qwen3.6-35b-a3b` with the ChatML template and Qwen tool-call format.
+
+First measured reference point (not a ceiling): on a 24 GB M5, short-context
+CLI decode ran at 17.0-18.3 tok/s with a peak memory footprint of about
+1.5 GB. Qwen support is additionally validated by unit and synthetic-model
+tests; it has not yet been benchmarked on the 8 GB validation hardware.
 
 ### Future work
 
