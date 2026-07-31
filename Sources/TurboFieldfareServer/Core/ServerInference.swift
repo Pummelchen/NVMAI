@@ -104,6 +104,17 @@ public actor ServerCoordinator {
 }
 
 public actor ServerModelSession: ServerInferenceBackend {
+    /// Chat dialect of the loaded tokenizer; drives request-validation rules.
+    public nonisolated let chatDialect: ChatDialect
+    /// Family-derived API model identifier used when --model-id is absent.
+    public nonisolated var defaultModelID: String {
+        switch modelFamily {
+        case .gemma4: return "gemma-4-26b-a4b-it"
+        case .qwen36: return "qwen3.6-35b-a3b"
+        }
+    }
+    private nonisolated let modelFamily: ModelFamily
+
     private let context: MetalContext
     private let model: Model
     private let tokenizer: GFTokenizer
@@ -186,6 +197,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
+        self.chatDialect = tokenizer.dialect
+        self.modelFamily = model.config.family
         self.runner = runner
         self.scratch = scratch
         self.prefillConfig = prefillConfig

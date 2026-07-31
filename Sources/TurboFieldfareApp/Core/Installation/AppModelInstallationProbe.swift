@@ -19,7 +19,11 @@ public enum AppModelInstallationProbe {
         }
 
         do {
-            let manifest = try ManifestReader.load(directoryURL: directory, expecting: .gemma4_26B_A4B)
+            let family = try ManifestReader.peekFamily(directoryURL: directory)
+            guard let baseline = ArchConfig.knownArchitectures[family] else {
+                return .partial("unknown model family \(family.rawValue)")
+            }
+            let manifest = try ManifestReader.load(directoryURL: directory, expecting: baseline)
             let expectedSource = "sha256:" + descriptor.sourceIndexSHA256
             guard manifest.sourceSnapshotHash == expectedSource else {
                 return .partial("installed checkpoint does not match \(descriptor.displayName)")
