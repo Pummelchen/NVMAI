@@ -2,8 +2,11 @@
 
 Measured 2026-07-31 on an Apple M5 with 24 GB of memory, macOS 26.5, against
 the installed `scratch/qwen36.gturbo` (19.55 GB) with the production runtime
-profile: 16 expert slots, 4K context, RDADVISE off, greedy decode of 128
-tokens from a 10-token prompt.
+profile: 16 expert slots, 4K context, RDADVISE off. The phase breakdown below
+uses a greedy 128-token decode from a 10-token prompt; the headline throughput
+and memory figures come from the
+[community benchmark protocol](COMMUNITY_BENCHMARKS.md) and are reported in
+[Benchmarks](BENCHMARKS.md#qwen-36-35b-a3b-measured-decode).
 
 These are measurements from one host, not performance ceilings. Decode rate is
 sensitive to OS page-cache state; see [Warming the page cache backfires]
@@ -33,16 +36,23 @@ smaller.
 about 8 GB for the OS, the page cache, and the model process. Greedy decode of
 128 tokens, 4K context, 16 slots:
 
-| | tok/s | peak footprint | max RSS |
-| --- | ---: | ---: | ---: |
-| Unconstrained (24 GB) | 19.8 | 1.49 GB | 1.15 GB |
-| Emulated 8 GB | 19.7 | 1.52 GB | 1.22 GB |
+Running the community benchmark's short-explanation case (fixed seed, app
+sampling defaults, 4K context) both ways:
+
+| | tok/s | peak footprint | max RSS | output |
+| --- | ---: | ---: | ---: | --- |
+| Unconstrained (24 GB) | 23.05 | 1,447 MiB | 1,139 MiB | reference |
+| ~8 GB working set | 23.36 | 1,448 MiB | 1,194 MiB | byte-identical |
 
 Throughput and footprint are unchanged within noise. That is the expected
 result: the 18.1 GB expert pool never fits the page cache on either
 configuration, so decode is already streaming from SSD, and shrinking
-available memory does not change what the runtime reads. Output was verified
-identical to the unconstrained run.
+available memory does not change what the runtime reads.
+
+This is emulated pressure on M5 hardware, not a physical 8 GB Mac. A real
+8 GB machine has a slower SSD and GPU, so expect lower absolute throughput
+there — compare the 8 GB M2 and 24 GB M5 Gemma 4 rows in
+[Benchmarks](BENCHMARKS.md).
 
 The practical 8 GB requirement is therefore disk, not memory: the install
 needs about 19.6 GB free, against Gemma's 14.3 GB.

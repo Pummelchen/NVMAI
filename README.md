@@ -353,12 +353,21 @@ The Mac app selects Qwen with `TURBO_FIELDFARE_MODEL=qwen36` in the
 environment; the server auto-detects the installed model and serves it as
 `qwen3.6-35b-a3b` with the ChatML template and Qwen tool-call format.
 
-First measured reference point (not a ceiling): on an M5, short-context CLI
-decode ran at about 19.7 tok/s with a 1.52 GB peak process footprint — and
-measured the same on that host constrained to an 8 GB working set, so Qwen 3.6
-holds the same bounded-memory contract as Gemma 4. Its install needs about
-19.6 GB of disk. Qwen support is additionally validated by unit and synthetic-model
-tests; it has not yet been benchmarked on the 8 GB validation hardware.
+Measured on an M5 following the
+[community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md) — the three frozen
+prompts, fixed seeds, one warmup then one measured run per case in a fresh
+process, every footer reporting `stop=endOfTurn`:
+
+| Case | Prompt / generated | Decode | Peak footprint |
+| --- | --- | ---: | ---: |
+| short-explanation | 62 / 493 | 23.05 tok/s | 1,447 MiB |
+| medium-review | 426 / 697 | 21.20 tok/s | 1,448 MiB |
+| long-synthesis | 2,940 / 700 | 18.84 tok/s | 1,464 MiB |
+
+Rerunning the short case with 16 GB pinned elsewhere — leaving an ~8 GB working
+set — gave 23.36 tok/s at a 1,448 MiB footprint and byte-identical output, so
+Qwen 3.6 holds the same bounded-memory contract as Gemma 4 while using about
+0.7 GB less. Its install needs about 19.6 GB of disk.
 
 ### Future work
 
