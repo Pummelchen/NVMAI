@@ -9,6 +9,44 @@ These are measurements from one host, not performance ceilings. Decode rate is
 sensitive to OS page-cache state; see [Warming the page cache backfires]
 (#warming-the-page-cache-backfires).
 
+## Memory: the 8 GB envelope
+
+The whole point of the runtime is a 26B-class MoE on an 8 GB Mac in about
+2 GB of process memory. Qwen 3.6 meets that budget with more headroom than
+Gemma 4, because its experts are half the size and only 10 of its 40 layers
+keep a KV cache:
+
+| Component | Qwen 3.6 35B-A3B | Gemma 4 26B-A4B |
+| --- | ---: | ---: |
+| Common weights (mapped, file-backed) | 1.39 GB | 1.35 GB |
+| Routed-expert slots, 16 per layer | 1.13 GB | 1.61 GB |
+| KV cache at 4K | 84 MB | 320 MB |
+| Gated-DeltaNet recurrent state | 64 MB | — |
+| Routed-expert files on disk | 18.1 GB | 12.9 GB |
+
+Only the on-disk footprint is larger; every resident component is equal or
+smaller.
+
+### Measured under an emulated 8 GB machine
+
+16 GB of this 24 GB host was pinned resident by a separate process, leaving
+about 8 GB for the OS, the page cache, and the model process. Greedy decode of
+128 tokens, 4K context, 16 slots:
+
+| | tok/s | peak footprint | max RSS |
+| --- | ---: | ---: | ---: |
+| Unconstrained (24 GB) | 19.8 | 1.49 GB | 1.15 GB |
+| Emulated 8 GB | 19.7 | 1.52 GB | 1.22 GB |
+
+Throughput and footprint are unchanged within noise. That is the expected
+result: the 18.1 GB expert pool never fits the page cache on either
+configuration, so decode is already streaming from SSD, and shrinking
+available memory does not change what the runtime reads. Output was verified
+identical to the unconstrained run.
+
+The practical 8 GB requirement is therefore disk, not memory: the install
+needs about 19.6 GB free, against Gemma's 14.3 GB.
+
 ## Where decode time goes
 
 `TURBO_FIELDFARE_PHASES=1` on the CLI reports the runner's phase counters:

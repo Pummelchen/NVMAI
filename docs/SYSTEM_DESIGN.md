@@ -437,9 +437,13 @@ Qwen 3.6 35B-A3B is additionally supported as an experimental second
 architecture, selected from `manifest.json -> arch.family`. It is a hybrid of
 30 gated-DeltaNet linear-attention layers and 10 gated full-attention layers,
 with 256 routed experts per layer and a gated shared expert. Its vision tower
-is omitted in the same way. Acceptance evidence for it covers a 24 GB host at
-4K context; it has not been validated on the 8 GB configuration that governs
-the Gemma path. See [Qwen 3.6 performance notes](QWEN36_PERFORMANCE.md).
+is omitted in the same way. It holds the same bounded-memory contract: a
+measured 1.52 GB peak process footprint at 4K context, verified under an
+emulated 8 GB machine, with every resident component equal to or smaller than
+the Gemma path's. Its install needs about 19.6 GB of disk against Gemma's
+14.3 GB. Acceptance evidence covers 4K context on a 24 GB host and the same
+host constrained to 8 GB. See
+[Qwen 3.6 performance notes](QWEN36_PERFORMANCE.md).
 
 The Mac app offers 4K, 8K, 16K, 32K, and 64K context lengths. Published app
 and CLI acceptance evidence covers up to 4K. Vision input, training,
