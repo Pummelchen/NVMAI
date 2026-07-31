@@ -481,9 +481,10 @@ public final class AppModel {
     }
 
     private func refreshInstallReadiness(at outputDirectory: URL) {
-        installationStatus = AppModelInstallationProbe.status(
-            at: outputDirectory,
-            descriptor: installer.descriptor)
+        // Accept whichever supported model is installed here; the runtime
+        // detects the family from the manifest at load. Only the post-install
+        // check below pins the result to the descriptor we downloaded.
+        installationStatus = AppModelInstallationProbe.status(at: outputDirectory)
         guard !isModelInstalled else { return }
         installReadiness = .checking
         do {

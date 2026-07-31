@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfare
 import TurboFieldfareRepackCore
 
 public struct AppModelInstallDescriptor: Equatable, Sendable {
@@ -52,6 +53,14 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes: 19_546_491_213,
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 1_073_741_824)
+
+    /// The shipped descriptor for a model family, if one exists.
+    public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
+        switch family {
+        case .gemma4: return .default
+        case .qwen36: return .qwen36
+        }
+    }
 
     /// Basename of the installed `.gturbo` directory for this descriptor.
     public var installDirectoryName: String {
