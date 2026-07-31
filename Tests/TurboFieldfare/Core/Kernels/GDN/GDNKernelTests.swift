@@ -379,6 +379,161 @@ import TurboFieldfareValidationSupport
         #expect(maxErr <= 5e-2, "state divergence \(maxErr)")
     }
 
+    // MARK: - Fused input projection
+
+    /// One INT4 projection packed as a single resident-style buffer holding
+    /// `[pad | weights | scales | biases]`, mirroring the repacker's layout
+    /// (2-byte but not 4-byte aligned sub-tensor offsets).
+    private struct PackedProjection {
+        let view: TensorView
+
+        init(device: MTLDevice, rows: Int, n: Int, weightPad: Int,
+             rng: inout SplitMix64) {
+            let packedPerRow = n / 2
+            let groups = n / Quantization.groupSize
+            var weights = [UInt8](repeating: 0, count: rows * packedPerRow)
+            var scales = [UInt16](repeating: 0, count: rows * groups)
+            var biases = [UInt16](repeating: 0, count: rows * groups)
+            for row in 0..<rows {
+                let values = (0..<n).map { _ in rng.uniform(-0.5, 0.5) }
+                let q = Quantization.quantizeInt4Affine(values)
+                for i in 0..<packedPerRow {
+                    weights[row * packedPerRow + i] = q.packed[i]
+                }
+                for i in 0..<groups {
+                    scales[row * groups + i] = q.scales[i]
+                    biases[row * groups + i] = q.biases[i]
+                }
+            }
+            let weightsOffset = weightPad
+            let scaleOffset = weightsOffset + weights.count
+            let biasOffset = scaleOffset + scales.count * 2
+            let total = biasOffset + biases.count * 2
+            var bytes = [UInt8](repeating: 0, count: total)
+            bytes.replaceSubrange(weightsOffset..<(weightsOffset + weights.count),
+                                  with: weights)
+            scales.withUnsafeBufferPointer { src in
+                let raw = UnsafeRawBufferPointer(src)
+                bytes.replaceSubrange(scaleOffset..<(scaleOffset + raw.count), with: raw)
+            }
+            biases.withUnsafeBufferPointer { src in
+                let raw = UnsafeRawBufferPointer(src)
+                bytes.replaceSubrange(biasOffset..<(biasOffset + raw.count), with: raw)
+            }
+            let buffer = device.makeBuffer(bytes: bytes, length: total,
+                                           options: .storageModeShared)!
+            self.view = TensorView(buffer: buffer,
+                                   offset: UInt64(weightsOffset),
+                                   length: UInt64(weights.count),
+                                   scaleOffset: UInt64(scaleOffset),
+                                   scaleLength: UInt64(scales.count * 2),
+                                   biasOffset: UInt64(biasOffset),
+                                   biasLength: UInt64(biases.count * 2),
+                                   shape: (UInt32(rows), UInt32(n), 1, 1),
+                                   dtype: 0)
+        }
+    }
+
+    /// The fused four-way input projection must be bit-identical to the four
+    /// separate INT4 GEMVs it replaces — greedy decode output depends on it.
+    private static func expectFusedInProjMatchesSeparateGEMVs(
+        cfg: LinearAttentionConfig,
+        hiddenSize: Int,
+        weightPad: Int,
+        specialize: Bool,
+        seed: UInt64
+    ) throws {
+        var rng = SplitMix64(seed: seed)
+        let ctx = try MetalContext()
+        let gdn = try GDN(context: ctx, config: cfg,
+                          specializedHiddenSize: specialize ? hiddenSize : nil)
+        let gemv = try DequantInt4GEMV(context: ctx)
+
+        let qkv = PackedProjection(device: ctx.device, rows: cfg.qkvDim,
+                                   n: hiddenSize, weightPad: weightPad, rng: &rng)
+        let z = PackedProjection(device: ctx.device, rows: cfg.valueDim,
+                                 n: hiddenSize, weightPad: weightPad, rng: &rng)
+        let a = PackedProjection(device: ctx.device, rows: cfg.numVHeads,
+                                 n: hiddenSize, weightPad: weightPad, rng: &rng)
+        let b = PackedProjection(device: ctx.device, rows: cfg.numVHeads,
+                                 n: hiddenSize, weightPad: weightPad, rng: &rng)
+        let x = (0..<hiddenSize).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: x),
+              let qkvRef = Fp16Buffer.make(ctx.device, count: cfg.qkvDim),
+              let zRef = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let aRef = Fp16Buffer.make(ctx.device, count: cfg.numVHeads),
+              let bRef = Fp16Buffer.make(ctx.device, count: cfg.numVHeads),
+              let qkvGot = Fp16Buffer.make(ctx.device, count: cfg.qkvDim),
+              let zGot = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let aGot = Fp16Buffer.make(ctx.device, count: cfg.numVHeads),
+              let bGot = Fp16Buffer.make(ctx.device, count: cfg.numVHeads),
+              let cb = ctx.queue.makeCommandBuffer() else {
+            Issue.record("Failed to allocate buffers"); return
+        }
+
+        for (proj, out, rows) in [(qkv, qkvRef, cfg.qkvDim), (z, zRef, cfg.valueDim),
+                                  (a, aRef, cfg.numVHeads), (b, bRef, cfg.numVHeads)] {
+            let v = proj.view
+            gemv.encode(commandBuffer: cb,
+                        weights: v.buffer, weightsOffset: Int(v.offset),
+                        scales: v.buffer, scalesOffset: Int(v.scaleOffset),
+                        biases: v.buffer, biasesOffset: Int(v.biasOffset),
+                        x: xBuf, y: out,
+                        m: UInt32(rows), n: UInt32(hiddenSize))
+        }
+        gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
+                                   qkv: qkv.view, qkvOut: qkvGot,
+                                   z: z.view, zOut: zGot,
+                                   a: a.view, aOut: aGot,
+                                   b: b.view, bOut: bGot,
+                                   hiddenSize: hiddenSize)
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let error = cb.error {
+            Issue.record("Command buffer failed: \(error)"); return
+        }
+
+        func rawBytes(_ buffer: MTLBuffer, count: Int) -> [UInt8] {
+            Array(UnsafeBufferPointer(
+                start: buffer.contents().assumingMemoryBound(to: UInt8.self),
+                count: count * MemoryLayout<Float16>.size))
+        }
+        #expect(rawBytes(qkvRef, count: cfg.qkvDim) == rawBytes(qkvGot, count: cfg.qkvDim),
+                "qkv projection differs")
+        #expect(rawBytes(zRef, count: cfg.valueDim) == rawBytes(zGot, count: cfg.valueDim),
+                "z projection differs")
+        #expect(rawBytes(aRef, count: cfg.numVHeads) == rawBytes(aGot, count: cfg.numVHeads),
+                "a projection differs")
+        #expect(rawBytes(bRef, count: cfg.numVHeads) == rawBytes(bGot, count: cfg.numVHeads),
+                "b projection differs")
+    }
+
+    @Test func fusedInputProjectionMatchesSeparateGEMVs() throws {
+        try Self.expectFusedInProjMatchesSeparateGEMVs(
+            cfg: Self.cfg, hiddenSize: 128, weightPad: 0, specialize: false,
+            seed: 0x1D_0001)
+    }
+
+    @Test func fusedInputProjectionMatchesSeparateGEMVs_specialized() throws {
+        try Self.expectFusedInProjMatchesSeparateGEMVs(
+            cfg: Self.cfg, hiddenSize: 256, weightPad: 0, specialize: true,
+            seed: 0x1D_0002)
+    }
+
+    /// 2-byte-but-not-4-byte-aligned weight offsets (the repacker's guarantee)
+    /// with a row total that is not a multiple of the 8 rows per threadgroup,
+    /// so the trailing threadgroup runs partly out of range.
+    @Test func fusedInputProjectionMatchesSeparateGEMVs_offsetAndRagged() throws {
+        let ragged = LinearAttentionConfig(numKHeads: 1, numVHeads: 2,
+                                           keyHeadDim: 32, valueHeadDim: 32,
+                                           convKernelSize: 4)
+        // 128 + 64 + 2 + 2 = 196 rows -> 25 threadgroups, last one 4/8 idle.
+        try Self.expectFusedInProjMatchesSeparateGEMVs(
+            cfg: ragged, hiddenSize: 192, weightPad: 2, specialize: true,
+            seed: 0x1D_0003)
+    }
+
     @Test func shortChunkTailCarry() throws {
         // T < convKernelSize - 1 exercises the ordered-shift path in
         // gdn_conv_tail_update: feed 2 single-row chunks then compare the tail

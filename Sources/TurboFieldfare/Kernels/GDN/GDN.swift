@@ -18,10 +18,17 @@ final class GDN {
     private let deltaDecodePSO: MTLComputePipelineState
     private let deltaPrefillPSO: MTLComputePipelineState
     private let gatedNormPSO: MTLComputePipelineState
+    private let inProjPSO: MTLComputePipelineState
+    private let inProjSpecializedPSO: MTLComputePipelineState?
 
     let config: LinearAttentionConfig
 
-    init(context: MetalContext, config: LinearAttentionConfig) throws {
+    /// `specializedHiddenSize` compiles a constant-folded variant of the fused
+    /// input projection for the decode shape. Measured elsewhere in this
+    /// package: an unspecialized INT4 GEMV runs ~102 GB/s against ~141 GB/s
+    /// specialized, so the runtime path must not be the only one available.
+    init(context: MetalContext, config: LinearAttentionConfig,
+         specializedHiddenSize: Int? = nil) throws {
         precondition(config.keyHeadDim > 0 && config.keyHeadDim % 32 == 0,
                      "keyHeadDim must be a positive multiple of 32")
         precondition(config.keyHeadDim / 32 <= 8,
@@ -38,6 +45,69 @@ final class GDN {
         self.deltaDecodePSO = try context.pipeline("gdn_delta_step_decode")
         self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
         self.gatedNormPSO = try context.pipeline("gdn_gated_norm")
+        self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",
+                                              constants: [],
+                                              maxTotalThreadsPerThreadgroup: 512)
+        if let n = specializedHiddenSize {
+            self.inProjSpecializedPSO = try context.pipeline(
+                "gdn_in_proj_gemv_simd",
+                constants: [
+                    MetalFunctionConstant(index: 90, value: .uint32(UInt32(config.qkvDim))),
+                    MetalFunctionConstant(index: 91, value: .uint32(UInt32(config.valueDim))),
+                    MetalFunctionConstant(index: 92, value: .uint32(UInt32(config.numVHeads))),
+                    MetalFunctionConstant(index: 93, value: .uint32(UInt32(n))),
+                    MetalFunctionConstant(index: 94, value: .bool(true)),
+                ],
+                maxTotalThreadsPerThreadgroup: 512)
+        } else {
+            self.inProjSpecializedPSO = nil
+        }
+    }
+
+    /// Fused `in_proj_qkv` / `in_proj_z` / `in_proj_a` / `in_proj_b` INT4 GEMV.
+    /// One dispatch over the concatenated row space replaces four, of which two
+    /// (a and b, `numVHeads` rows each) were near-empty launches. Bit-identical
+    /// to the four separate GEMVs — the per-row body and its operand order are
+    /// unchanged.
+    func encodeInputProjections(commandBuffer: MTLCommandBuffer,
+                                x: MTLBuffer, xOffset: Int = 0,
+                                qkv: TensorView, qkvOut: MTLBuffer,
+                                z: TensorView, zOut: MTLBuffer,
+                                a: TensorView, aOut: MTLBuffer,
+                                b: TensorView, bOut: MTLBuffer,
+                                hiddenSize: Int) {
+        precondition(hiddenSize % Quantization.groupSize == 0,
+                     "hiddenSize must be a multiple of \(Quantization.groupSize)")
+        // The row body reads packed weights through a `ushort*`; the repacker
+        // guarantees two-byte sub-tensor alignment but not four-byte.
+        precondition(Int(qkv.offset) % 2 == 0 && Int(z.offset) % 2 == 0 &&
+                     Int(a.offset) % 2 == 0 && Int(b.offset) % 2 == 0,
+                     "gdn_in_proj_gemv_simd needs 2-aligned weights offsets")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(inProjSpecializedPSO ?? inProjPSO)
+        for (slot, view) in [qkv, z, a, b].enumerated() {
+            encoder.setBuffer(view.buffer, offset: Int(view.offset), index: slot * 3)
+            encoder.setBuffer(view.buffer, offset: Int(view.scaleOffset), index: slot * 3 + 1)
+            encoder.setBuffer(view.buffer, offset: Int(view.biasOffset), index: slot * 3 + 2)
+        }
+        encoder.setBuffer(x, offset: xOffset, index: 12)
+        encoder.setBuffer(qkvOut, offset: 0, index: 13)
+        encoder.setBuffer(zOut, offset: 0, index: 14)
+        encoder.setBuffer(aOut, offset: 0, index: 15)
+        encoder.setBuffer(bOut, offset: 0, index: 16)
+        var qkvRows = UInt32(config.qkvDim)
+        var zRows = UInt32(config.valueDim)
+        var abRows = UInt32(config.numVHeads)
+        var n = UInt32(hiddenSize)
+        encoder.setBytes(&qkvRows, length: MemoryLayout<UInt32>.size, index: 17)
+        encoder.setBytes(&zRows, length: MemoryLayout<UInt32>.size, index: 18)
+        encoder.setBytes(&abRows, length: MemoryLayout<UInt32>.size, index: 19)
+        encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 20)
+        let totalRows = config.qkvDim + config.valueDim + 2 * config.numVHeads
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (totalRows + 7) / 8, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     /// Decode: conv over [tail | current row] with SiLU, shifting the tail in
