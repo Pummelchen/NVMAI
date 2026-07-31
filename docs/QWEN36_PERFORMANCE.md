@@ -36,13 +36,17 @@ smaller.
 about 8 GB for the OS, the page cache, and the model process. Greedy decode of
 128 tokens, 4K context, 16 slots:
 
-Running the community benchmark's short-explanation case (fixed seed, app
-sampling defaults, 4K context) both ways:
+Running all three community benchmark cases (fixed seeds, app sampling
+defaults, 4K context) both ways:
 
-| | tok/s | peak footprint | max RSS | output |
-| --- | ---: | ---: | ---: | --- |
-| Unconstrained (24 GB) | 23.05 | 1,447 MiB | 1,139 MiB | reference |
-| ~8 GB working set | 23.36 | 1,448 MiB | 1,194 MiB | byte-identical |
+| Case | Decode, 24 GB | Decode, ~8 GB | Footprint, 24 GB | Footprint, ~8 GB |
+| --- | ---: | ---: | ---: | ---: |
+| short-explanation | 23.05 tok/s | 22.95 tok/s | 1,447 MiB | 1,464 MiB |
+| medium-review | 21.20 tok/s | 21.35 tok/s | 1,448 MiB | 1,448 MiB |
+| long-synthesis | 18.84 tok/s | 18.62 tok/s | 1,464 MiB | 1,388 MiB |
+
+All three still reported `stop=endOfTurn`, and every generated file matched its
+unconstrained counterpart byte for byte.
 
 Throughput and footprint are unchanged within noise. That is the expected
 result: the 18.1 GB expert pool never fits the page cache on either

@@ -99,21 +99,25 @@ phase.
 
 ### Under an 8 GB working set
 
-The same host was constrained by pinning 16 GB resident in a separate
-process, leaving about 8 GB for the OS, page cache, and model. The
-short-explanation case was rerun unchanged:
+The same host was constrained by pinning 16 GB resident in a separate process,
+leaving about 8 GB for the OS, page cache, and the model. All three cases were
+rerun unchanged, in fresh processes, with the same seeds:
 
-| Configuration | Decode | Peak RSS / footprint | Output |
-| --- | ---: | ---: | --- |
-| Unconstrained (24 GB) | 23.05 tok/s | 1,139 / 1,447 MiB | reference |
-| ~8 GB working set | 23.36 tok/s | 1,194 / 1,448 MiB | byte-identical |
+| Case | Decode, 24 GB | Decode, ~8 GB | Footprint, 24 GB | Footprint, ~8 GB | Output |
+| --- | ---: | ---: | ---: | ---: | --- |
+| short-explanation | 23.05 tok/s | 22.95 tok/s | 1,447 MiB | 1,464 MiB | byte-identical |
+| medium-review | 21.20 tok/s | 21.35 tok/s | 1,448 MiB | 1,448 MiB | byte-identical |
+| long-synthesis | 18.84 tok/s | 18.62 tok/s | 1,464 MiB | 1,388 MiB | byte-identical |
 
-Throughput and footprint are unchanged within run-to-run noise, because the
-expert pool never fits the page cache on either configuration and decode is
-already streaming from SSD. This is emulated pressure on M5 hardware, not a
-measurement on a physical 8 GB Mac; a real 8 GB machine has a slower SSD and
-GPU and should be expected to decode more slowly, as the M2 rows above show
-for Gemma 4.
+Every case still reported `stop=endOfTurn`, and each generated file matched its
+unconstrained counterpart byte for byte. Throughput and footprint are unchanged
+within run-to-run noise, because the 18.1 GB expert pool does not fit the page
+cache on either configuration — decode is already streaming from SSD, so
+shrinking available memory does not change what the runtime reads.
+
+This is emulated pressure on M5 hardware, not a measurement on a physical 8 GB
+Mac; a real 8 GB machine has a slower SSD and GPU and should be expected to
+decode more slowly, as the M2 rows above show for Gemma 4.
 
 ## Same-host MLX comparison
 
