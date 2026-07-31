@@ -72,7 +72,8 @@ public func run(args: Args,
             maxContext: args.maxContext,
             runtimeConfiguration: runtime)
         let scratch = try RawCompletionScratch(context: context,
-                                               vocab: model.config.vocabSize)
+                                               vocab: model.config.vocabSize,
+                                               logitSoftcap: Float(model.config.finalLogitSoftcap))
         let stats = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
