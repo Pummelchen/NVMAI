@@ -16,7 +16,7 @@ Runs use the app sampling defaults with fixed seeds: temperature `0.2`, Top-K
 
 ## Prepare the Mac
 
-Install the model with the [README instructions](../README.md#command-line-interface),
+Install the model with the [original README instructions](https://github.com/drumih/turbo-fieldfare#command-line-interface),
 connect a laptop to power, turn off Low Power Mode, quit other demanding apps,
 and build the release CLI:
 

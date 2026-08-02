@@ -6,7 +6,7 @@ generated length, cache state, and hardware all change throughput, so ranges
 across workloads are not run-to-run variation.
 
 Each table states its workload and decoding settings. TurboFieldfare uses the
-model installed by the [command-line instructions](../README.md#command-line-interface).
+model installed by the [original command-line instructions](https://github.com/drumih/turbo-fieldfare#command-line-interface).
 Decode rate excludes model installation, model loading, and prompt prefill.
 
 ## Results at a glance
