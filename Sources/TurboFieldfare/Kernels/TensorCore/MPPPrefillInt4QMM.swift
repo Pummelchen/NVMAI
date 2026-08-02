@@ -13,13 +13,16 @@ final class MPPPrefillInt4QMM {
 
     private var pipeline: MTLComputePipelineState?
 
-    init(context: MetalContext) {
+    init(context: MetalContext, weightBits: Int = 4) {
+        precondition([4, 6, 8].contains(weightBits))
         do {
             let library = try Self.compileTensorOpsLibrary(device: context.device)
-            guard let function = library.makeFunction(
-                name: "mpp_prefill_affine_threadgroup_f16") else {
-                throw MetalError.missingFunction("mpp_prefill_affine_threadgroup_f16")
-            }
+            let constants = MTLFunctionConstantValues()
+            var bits = UInt32(weightBits)
+            constants.setConstantValue(&bits, type: .uint, index: 78)
+            let function = try library.makeFunction(
+                name: "mpp_prefill_affine_threadgroup_f16",
+                constantValues: constants)
             self.pipeline = try context.device.makeComputePipelineState(function: function)
         } catch {
             self.pipeline = nil

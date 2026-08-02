@@ -5,7 +5,8 @@ import TurboFieldfareValidationSupport
 @testable import TurboFieldfare
 
 extension PrefillGroupedRoutedMoETests {
-  @Test func streamedBatchedMatchesReferenceAcrossPartialMicrobatch() throws {
+  @Test(arguments: [4, 6, 8])
+  func streamedBatchedMatchesReferenceAcrossPartialMicrobatch(weightBits: Int) throws {
     let d = 64
     let f = 64
     let rows = 3
@@ -23,7 +24,10 @@ extension PrefillGroupedRoutedMoETests {
       topK: topK,
       numExperts: 16,
       tileExpertCount: 16)
-    let pool = Self.makeSyntheticExpertPool(numExperts: 16, d: d, f: f)
+    let pool = Self.makeSyntheticExpertPool(numExperts: 16,
+                                            d: d,
+                                            f: f,
+                                            weightBits: weightBits)
     let hidden = (0..<(rows * d)).map { i in
       Float16(Float((i % 17) - 8) * 0.01)
     }
@@ -37,7 +41,8 @@ extension PrefillGroupedRoutedMoETests {
       f: f)
 
     let ctx = try MetalContext()
-    let grouped = try PrefillGroupedRoutedMoE(context: ctx)
+    let grouped = try PrefillGroupedRoutedMoE(context: ctx,
+                                              weightBits: weightBits)
     guard let hiddenBuffer = Fp16Buffer.make(ctx.device, halves: hidden),
       let pairBuffer = ctx.device.makeBuffer(
         bytes: routes.sortedPairs,
@@ -98,7 +103,8 @@ extension PrefillGroupedRoutedMoETests {
       max($0, abs(Float($1.0) - Float($1.1)))
     }
     #expect(microbatches == 2)
-    #expect(maxAbsoluteError <= 0.0015, "maxAbsoluteError=\(maxAbsoluteError)")
+    #expect(maxAbsoluteError <= 0.0015,
+            "weightBits=\(weightBits) maxAbsoluteError=\(maxAbsoluteError)")
     #expect(binding.views.allSatisfy { $0.offset > 0 })
   }
 

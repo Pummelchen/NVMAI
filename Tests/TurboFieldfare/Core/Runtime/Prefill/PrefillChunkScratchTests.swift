@@ -32,7 +32,14 @@ import Metal
 
     @Test func layoutClampsChunkSizeToRuntimeBounds() {
         #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 0).chunkTokens == 1)
-        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 512).chunkTokens == 128)
+        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 2_048).chunkTokens == 1_024)
+    }
+
+    @Test func qwenLongChunkScratchRemainsBounded() {
+        let layout = PrefillChunkScratchLayout(config: .qwen36_35B_A3B,
+                                               chunkTokens: 1_024)
+        #expect(layout.chunkTokens == 1_024)
+        #expect(layout.totalPersistentBytes < 256 * 1_048_576)
     }
 
     @Test func allocationUsesPrivateScratchAndSharedRouteMetadata() throws {

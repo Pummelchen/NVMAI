@@ -249,9 +249,14 @@ and reproducible comparisons.
 
 ## Prefill
 
-The production profile handles up to 128 prompt tokens at a time. Execution
-stays layer-major: it moves each bounded group of rows through the transformer
-one layer at a time, without holding expert activations for the full prompt.
+The Mac app retains its 32-, 64-, and 128-token prefill choices. The server and
+CLI automatically use chunks of up to 1,024 tokens for Qwen 3.6 while keeping
+the 128-token default for Gemma. A production Qwen 1,024-token arena remains
+below 256 MiB. Execution stays layer-major: it moves each bounded group of
+rows through the transformer one layer at a time, without holding expert
+activations for the full prompt. Larger Qwen chunks amortize streamed-expert
+reads across more prompt rows, which is important for tool-heavy coding-agent
+requests.
 
 For each chunk and layer, TurboFieldfare:
 
@@ -265,11 +270,13 @@ For each chunk and layer, TurboFieldfare:
 - never reuses a slot while queued GPU work still owns it; and
 - combines the resident shared branch and routed branch before the layer tail.
 
-Eligible 4-bit prefill projections use staged affine Metal Performance
-Primitives (MPP). The runtime unpacks each tile of affine-quantized weights into
-bounded FP16 staging, then passes it to MPP. Grouped routed MoE reuses its
-argument and activation scratch. The language-model head runs only for the
-final prompt row needed to start generation.
+Eligible 4-bit, 6-bit, and 8-bit prefill projections use staged affine Metal
+Performance Primitives (MPP). The runtime specializes packed-value extraction
+for the checkpoint's weight width, unpacks each tile into bounded FP16 staging,
+then passes it to MPP. Batched embedding and grouped routed MoE use the same
+bit-width contract. Grouped routed MoE reuses its argument and activation
+scratch. The language-model head runs only for the final prompt row needed to
+start generation.
 
 ## Decode
 
@@ -350,10 +357,11 @@ logits path, temperature `0` selects the argmax after any repetition penalty.
 ## Metal execution
 
 TurboFieldfare compiles its Metal source at runtime. Decode uses custom affine
-INT4 and INT8 GEMV kernels that consume the checkpoint's packed values, BF16
-scales, and BF16 biases directly. MPP prefill dequantizes one bounded weight
-tile into FP16 threadgroup memory and passes FP16 tensors to `matmul2d`. The
-routed MoE kernels fuse affine decode, GeGLU, and the weighted expert reduction.
+4-bit, 6-bit, and 8-bit GEMV kernels that consume the checkpoint's packed
+values, BF16 scales, and BF16 biases directly. MPP prefill dequantizes one
+bounded weight tile into FP16 threadgroup memory and passes FP16 tensors to
+`matmul2d`. The routed MoE kernels fuse affine decode, the configured gated
+activation, and the weighted expert reduction.
 The relevant Apple API sources are listed under
 [Apple Metal](IMPLEMENTATION_REFERENCES.md#apple-metal).
 

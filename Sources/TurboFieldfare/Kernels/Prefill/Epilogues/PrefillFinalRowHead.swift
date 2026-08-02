@@ -3,14 +3,19 @@ import Metal
 
 final class PrefillFinalRowHeadInt4 {
     private let rms: RMSNorm
-    private let int4: DequantInt4GEMV
+    private let int4: DequantInt4GEMV?
+    private let affine: AffineQuantGEMV?
     private let normed: MTLBuffer
     private let maxD: Int
 
-    init(context: MetalContext, maxD: Int = 2816) throws {
+    init(context: MetalContext, maxD: Int = 2816, weightBits: Int = 4) throws {
         precondition(maxD > 0, "maxD must be positive")
+        precondition([4, 6, 8].contains(weightBits))
         self.rms = try RMSNorm(context: context)
-        self.int4 = try DequantInt4GEMV(context: context)
+        self.int4 = weightBits == 4 ? try DequantInt4GEMV(context: context) : nil
+        self.affine = weightBits == 4
+            ? nil
+            : try AffineQuantGEMV(context: context, weightBits: weightBits)
         self.maxD = maxD
         guard let normed = context.device.makeBuffer(length: maxD * MemoryLayout<Float16>.size,
                                                      options: .storageModePrivate) else {
@@ -50,17 +55,32 @@ final class PrefillFinalRowHeadInt4 {
                         out: normed,
                         d: d,
                         eps: rmsEps)
-        int4.encode(commandBuffer: commandBuffer,
-                    weights: weights,
-                    weightsOffset: weightsOffset,
-                    scales: scales,
-                    scalesOffset: scalesOffset,
-                    biases: biases,
-                    biasesOffset: biasesOffset,
-                    x: normed,
-                    y: logits,
-                    yOffset: logitsOffset,
-                    m: vocab,
-                    n: d)
+        if let affine {
+            affine.encode(commandBuffer: commandBuffer,
+                          weights: weights,
+                          weightsOffset: weightsOffset,
+                          scales: scales,
+                          scalesOffset: scalesOffset,
+                          biases: biases,
+                          biasesOffset: biasesOffset,
+                          x: normed,
+                          y: logits,
+                          yOffset: logitsOffset,
+                          m: vocab,
+                          n: d)
+        } else {
+            int4!.encode(commandBuffer: commandBuffer,
+                         weights: weights,
+                         weightsOffset: weightsOffset,
+                         scales: scales,
+                         scalesOffset: scalesOffset,
+                         biases: biases,
+                         biasesOffset: biasesOffset,
+                         x: normed,
+                         y: logits,
+                         yOffset: logitsOffset,
+                         m: vocab,
+                         n: d)
+        }
     }
 }

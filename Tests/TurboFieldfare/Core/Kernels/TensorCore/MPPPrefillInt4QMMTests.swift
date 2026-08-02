@@ -11,6 +11,7 @@ private let mppTensorOpsAvailable: Bool = {
 
 @Suite struct MPPPrefillInt4QMMTests {
     private struct Inputs {
+        let bits: Int
         let packed: [UInt8]
         let scales: [UInt16]
         let biases: [UInt16]
@@ -20,9 +21,10 @@ private let mppTensorOpsAvailable: Bool = {
     private static func makeInputs(m: Int,
                                    n: Int,
                                    k: Int,
+                                   bits: Int = 4,
                                    adversarialAffine: Bool = false) -> Inputs {
         let groups = k / Quantization.groupSize
-        var packed = [UInt8](repeating: 0, count: n * k / 2)
+        var packed = [UInt8](repeating: 0, count: n * k * bits / 8)
         for index in packed.indices {
             packed[index] = UInt8(truncatingIfNeeded: index &* 37 &+ 0x29)
         }
@@ -58,7 +60,7 @@ private let mppTensorOpsAvailable: Bool = {
         for index in x.indices {
             x[index] = Float16(Float((index * 11) % 29 - 14) / 64.0)
         }
-        return Inputs(packed: packed, scales: scales, biases: biases, x: x)
+        return Inputs(bits: bits, packed: packed, scales: scales, biases: biases, x: x)
     }
 
     private static func makeBuffer<T>(device: MTLDevice,
@@ -82,7 +84,8 @@ private let mppTensorOpsAvailable: Bool = {
                                      n: Int,
                                      k: Int) -> [Float] {
         let groups = k / Quantization.groupSize
-        let rowBytes = k / 2
+        let rowBytes = k * inputs.bits / 8
+        let mask = UInt32((1 << inputs.bits) - 1)
         var output = [Float](repeating: 0, count: m * n)
         for token in 0..<m {
             for row in 0..<n {
@@ -92,8 +95,14 @@ private let mppTensorOpsAvailable: Bool = {
                     let bias = Quantization.bf16ToFloat(inputs.biases[row * groups + group])
                     for localK in 0..<Quantization.groupSize {
                         let column = group * Quantization.groupSize + localK
-                        let byte = inputs.packed[row * rowBytes + column / 2]
-                        let q = column.isMultiple(of: 2) ? byte & 0x0f : byte >> 4
+                        let bitOffset = column * inputs.bits
+                        let byteOffset = row * rowBytes + bitOffset / 8
+                        let shift = bitOffset % 8
+                        var word = UInt32(inputs.packed[byteOffset])
+                        if shift + inputs.bits > 8 {
+                            word |= UInt32(inputs.packed[byteOffset + 1]) << 8
+                        }
+                        let q = (word >> shift) & mask
                         let weight = Float(q) * scale + bias
                         accumulator.addProduct(weight, Float(inputs.x[token * k + column]))
                     }
@@ -111,13 +120,14 @@ private let mppTensorOpsAvailable: Bool = {
                                  m: Int,
                                  n: Int,
                                  k: Int,
+                                 bits: Int = 4,
                                  adversarialAffine: Bool = false,
                                  weightOffset: Int = 0,
                                  scaleOffset: Int = 0,
                                  biasOffset: Int = 0,
                                  compareCPUReference: Bool = false) throws
         -> MPPPrefillInt4QMM.Path {
-        let inputs = makeInputs(m: m, n: n, k: k,
+        let inputs = makeInputs(m: m, n: n, k: k, bits: bits,
                                 adversarialAffine: adversarialAffine)
         guard let weights = makeBuffer(device: context.device,
                                        values: inputs.packed,
@@ -206,6 +216,25 @@ private let mppTensorOpsAvailable: Bool = {
             m: 17, n: 35, k: 128, adversarialAffine: true,
             weightOffset: 13, scaleOffset: 2, biasOffset: 6,
             compareCPUReference: true)
+    }
+
+    @Test(.enabled(if: mppTensorOpsAvailable,
+                   "Requires runtime MPP TensorOps support"),
+          arguments: [6, 8])
+    func affineThreadgroupSupportsHigherBitWeights(bits: Int) throws {
+        let context = try MetalContext()
+        let candidate = MPPPrefillInt4QMM(context: context, weightBits: bits)
+        let baseline = try PrefillInt4QMM(context: context, weightBits: bits)
+        #expect(candidate.isAvailable)
+        try Self.runShape(context: context,
+                          candidate: candidate,
+                          baseline: baseline,
+                          m: 33,
+                          n: 35,
+                          k: 128,
+                          bits: bits,
+                          adversarialAffine: true,
+                          compareCPUReference: true)
     }
 
     @Test(.enabled(if: mppTensorOpsAvailable,

@@ -168,7 +168,7 @@ public struct PrefillRuntimeConfig: Sendable, Equatable {
         case chunked
     }
 
-    public static let maxChunkTokens = 128
+    public static let maxChunkTokens = 1_024
 
     public let mode: Mode
     public let chunkTokens: Int

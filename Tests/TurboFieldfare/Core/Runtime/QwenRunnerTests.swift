@@ -23,17 +23,19 @@ import TurboFieldfareValidationSupport
     }
 
     @Test(arguments: [6, 8])
-    func decodeAndScalarPrefillSupportHigherBitCheckpoints(bits: Int) async throws {
+    func decodeAndChunkedPrefillSupportHigherBitCheckpoints(bits: Int) async throws {
         let (dir, ctx, runner) = try makeRunner(weightBits: bits)
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect(!runner.usesFusedGreedyHead)
         let logits = try makeLogits(ctx, vocab: 1024)
         let tokens: [Int32] = [1, 2]
+        var progress: [Int] = []
         let result = try await runner.prefillChunked(
             tokens: tokens[...], startPosition: 0, outputMode: .logits,
             config: .production(chunkTokens: 32), into: logits,
-            onProgress: { _ in })
+            onProgress: { progress.append($0) })
         #expect(result == PrefillResult(newPosition: 2, seed: .logitsWritten))
+        #expect(progress == [2])
         try await runner.produce(token: 3, position: 2, into: logits)
         #expect(runner.continuationPosition == 3)
         let values = Fp16Buffer.read(logits, count: 1024)

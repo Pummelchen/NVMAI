@@ -2,7 +2,7 @@ import Testing
 @testable import TurboFieldfare
 
 @Suite struct PrefillRuntimeConfigTests {
-    @Test(arguments: [32, 64, 128])
+    @Test(arguments: [32, 64, 128, 256, 512, 1_024])
     func productionUsesCompleteChunkedPath(_ chunkTokens: Int) throws {
         let config = PrefillRuntimeConfig.production(chunkTokens: chunkTokens)
         #expect(config.mode == .chunked)
@@ -22,6 +22,15 @@ import Testing
             config: .production(chunkTokens: 64))
         #expect(spans.map(\.tokenCount) == [64, 64, 2])
         #expect(spans.map(\.startPosition) == [7, 71, 135])
+    }
+
+    @Test func plannerSupportsLongQwenChunks() {
+        let spans = PrefillChunkPlanner.spans(
+            tokenCount: 2_050,
+            startPosition: 0,
+            config: .production(chunkTokens: 1_024))
+        #expect(spans.map(\.tokenCount) == [1_024, 1_024, 2])
+        #expect(spans.map(\.startPosition) == [0, 1_024, 2_048])
     }
 
     @Test func diagnosticsPreserveUnknownValues() {

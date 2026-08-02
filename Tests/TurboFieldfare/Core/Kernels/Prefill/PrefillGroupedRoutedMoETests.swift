@@ -109,9 +109,14 @@ import TurboFieldfareValidationSupport
         let bytes: [UInt8]
         let offsets: MoEExpertOffsets
         let stride: Int
+        let weightBits: Int
     }
 
-    static func makeSyntheticExpertPool(numExperts: Int, d: Int, f: Int) -> SyntheticExpertPool {
+    static func makeSyntheticExpertPool(numExperts: Int,
+                                        d: Int,
+                                        f: Int,
+                                        weightBits: Int = 4) -> SyntheticExpertPool {
+        precondition([4, 6, 8].contains(weightBits))
         var allBytes: [UInt8] = []
         var offsets: MoEExpertOffsets?
         var stride = 0
@@ -120,41 +125,50 @@ import TurboFieldfareValidationSupport
             let gateWOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 0),
                                   to: &bytes,
-                                  component: .packed)
+                                  component: .packed,
+                                  weightBits: weightBits)
             let gateSOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 0),
                                   to: &bytes,
-                                  component: .scales)
+                                  component: .scales,
+                                  weightBits: weightBits)
             let gateBOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 0),
                                   to: &bytes,
-                                  component: .biases)
+                                  component: .biases,
+                                  weightBits: weightBits)
 
             let upWOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 1),
                                   to: &bytes,
-                                  component: .packed)
+                                  component: .packed,
+                                  weightBits: weightBits)
             let upSOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 1),
                                   to: &bytes,
-                                  component: .scales)
+                                  component: .scales,
+                                  weightBits: weightBits)
             let upBOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: f, cols: d, expert: expert, role: 1),
                                   to: &bytes,
-                                  component: .biases)
+                                  component: .biases,
+                                  weightBits: weightBits)
 
             let downWOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: d, cols: f, expert: expert, role: 2),
                                   to: &bytes,
-                                  component: .packed)
+                                  component: .packed,
+                                  weightBits: weightBits)
             let downSOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: d, cols: f, expert: expert, role: 2),
                                   to: &bytes,
-                                  component: .scales)
+                                  component: .scales,
+                                  weightBits: weightBits)
             let downBOff = UInt32(bytes.count)
             Self.appendProjection(rows: Self.syntheticRows(rows: d, cols: f, expert: expert, role: 2),
                                   to: &bytes,
-                                  component: .biases)
+                                  component: .biases,
+                                  weightBits: weightBits)
 
             let currentOffsets = MoEExpertOffsets(gateWOff: gateWOff,
                                                   gateSOff: gateSOff,
@@ -175,7 +189,10 @@ import TurboFieldfareValidationSupport
             }
             allBytes.append(contentsOf: bytes)
         }
-        return SyntheticExpertPool(bytes: allBytes, offsets: offsets!, stride: stride)
+        return SyntheticExpertPool(bytes: allBytes,
+                                   offsets: offsets!,
+                                   stride: stride,
+                                   weightBits: weightBits)
     }
 
     enum ProjectionComponent {
@@ -186,8 +203,9 @@ import TurboFieldfareValidationSupport
 
     static func appendProjection(rows: [[Float]],
                                          to bytes: inout [UInt8],
-                                         component: ProjectionComponent) {
-        let quantized = rows.map { Quantization.quantizeInt4Affine($0) }
+                                         component: ProjectionComponent,
+                                         weightBits: Int = 4) {
+        let quantized = rows.map { Self.quantizeAffine($0, bits: weightBits) }
         switch component {
         case .packed:
             for row in quantized {
@@ -202,6 +220,52 @@ import TurboFieldfareValidationSupport
                 Self.appendU16(row.biases, to: &bytes)
             }
         }
+    }
+
+    struct SyntheticAffineRow {
+        let packed: [UInt8]
+        let scales: [UInt16]
+        let biases: [UInt16]
+    }
+
+    static func quantizeAffine(_ row: [Float], bits: Int) -> SyntheticAffineRow {
+        precondition(row.count.isMultiple(of: Quantization.groupSize))
+        let groups = row.count / Quantization.groupSize
+        let levels = Float((1 << bits) - 1)
+        var packed = [UInt8](repeating: 0, count: row.count * bits / 8)
+        var scales = [UInt16](repeating: 0, count: groups)
+        var biases = [UInt16](repeating: 0, count: groups)
+        for group in 0..<groups {
+            let start = group * Quantization.groupSize
+            let values = row[start..<(start + Quantization.groupSize)]
+            let minimum = values.min()!
+            let maximum = values.max()!
+            let scaleBits = Quantization.bf16Bits(
+                maximum == minimum ? 1 : (maximum - minimum) / levels)
+            let biasBits = Quantization.bf16Bits(minimum)
+            scales[group] = scaleBits
+            biases[group] = biasBits
+            let scale = Quantization.bf16ToFloat(scaleBits)
+            let bias = Quantization.bf16ToFloat(biasBits)
+            for local in 0..<Quantization.groupSize {
+                let column = start + local
+                let q = max(0, min(Int(levels),
+                    Int(((row[column] - bias) / scale).rounded())))
+                let bitOffset = column * bits
+                let byteOffset = bitOffset / 8
+                let shift = bitOffset % 8
+                var word = UInt32(q) << shift
+                var remaining = bits + shift
+                var index = byteOffset
+                while remaining > 0 {
+                    packed[index] |= UInt8(truncatingIfNeeded: word)
+                    word >>= 8
+                    remaining -= 8
+                    index += 1
+                }
+            }
+        }
+        return SyntheticAffineRow(packed: packed, scales: scales, biases: biases)
     }
 
     static func syntheticRows(rows: Int, cols: Int, expert: Int, role: Int) -> [[Float]] {
@@ -240,51 +304,56 @@ import TurboFieldfareValidationSupport
             let x = (0..<d).map { Float(hidden[xBase + $0]) }
             var act = [Float16](repeating: 0, count: f)
             for row in 0..<f {
-                let gate = Self.cpuInt4Dot(bytes: pool.bytes,
+                let gate = Self.cpuAffineDot(bytes: pool.bytes,
                                            base: expertBase,
                                            wOff: Int(pool.offsets.gateWOff),
                                            sOff: Int(pool.offsets.gateSOff),
                                            bOff: Int(pool.offsets.gateBOff),
                                            row: row,
                                            n: d,
-                                           x: x)
-                let up = Self.cpuInt4Dot(bytes: pool.bytes,
+                                           x: x,
+                                           bits: pool.weightBits)
+                let up = Self.cpuAffineDot(bytes: pool.bytes,
                                          base: expertBase,
                                          wOff: Int(pool.offsets.upWOff),
                                          sOff: Int(pool.offsets.upSOff),
                                          bOff: Int(pool.offsets.upBOff),
                                          row: row,
                                          n: d,
-                                         x: x)
+                                         x: x,
+                                         bits: pool.weightBits)
                 act[row] = Float16(MoeRef.geluTanh([gate])[0] * up)
             }
             let actFloat = act.map { Float($0) }
             let outBase = (Int(pair.token) * topK + Int(pair.rank)) * d
             for row in 0..<d {
-                let value = Self.cpuInt4Dot(bytes: pool.bytes,
+                let value = Self.cpuAffineDot(bytes: pool.bytes,
                                             base: expertBase,
                                             wOff: Int(pool.offsets.downWOff),
                                             sOff: Int(pool.offsets.downSOff),
                                             bOff: Int(pool.offsets.downBOff),
                                             row: row,
                                             n: f,
-                                            x: actFloat)
+                                            x: actFloat,
+                                            bits: pool.weightBits)
                 out[outBase + row] = Float16(value)
             }
         }
         return out
     }
 
-    static func cpuInt4Dot(bytes: [UInt8],
+    static func cpuAffineDot(bytes: [UInt8],
                                    base: Int,
                                    wOff: Int,
                                    sOff: Int,
                                    bOff: Int,
                                    row: Int,
                                    n: Int,
-                                   x: [Float]) -> Float {
+                                   x: [Float],
+                                   bits: Int) -> Float {
         let groups = n / Quantization.groupSize
-        let rowBytes = n / 2
+        let rowBytes = n * bits / 8
+        let mask = UInt32((1 << bits) - 1)
         let wRow = base + wOff + row * rowBytes
         let sRow = base + sOff + row * groups * MemoryLayout<UInt16>.stride
         let bRow = base + bOff + row * groups * MemoryLayout<UInt16>.stride
@@ -294,8 +363,14 @@ import TurboFieldfareValidationSupport
             let bias = Quantization.bf16ToFloat(Self.readU16(bytes, bRow + group * 2))
             for k in 0..<Quantization.groupSize {
                 let col = group * Quantization.groupSize + k
-                let packed = bytes[wRow + col / 2]
-                let q = (k & 1) == 0 ? Float(packed & 0x0F) : Float(packed >> 4)
+                let bitOffset = col * bits
+                let byteOffset = wRow + bitOffset / 8
+                let shift = bitOffset % 8
+                var word = UInt32(bytes[byteOffset])
+                if shift + bits > 8 {
+                    word |= UInt32(bytes[byteOffset + 1]) << 8
+                }
+                let q = Float((word >> shift) & mask)
                 acc += (q * scale + bias) * x[col]
             }
         }

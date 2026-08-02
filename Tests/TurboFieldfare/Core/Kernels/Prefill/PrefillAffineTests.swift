@@ -5,6 +5,33 @@ import Metal
 import TurboFieldfareValidationSupport
 
 @Suite struct PrefillAffineTests {
+    private static func packAffineValues(bits: Int,
+                                         rows: Int,
+                                         columns: Int) -> [UInt8] {
+        precondition([4, 6, 8].contains(bits))
+        let rowBytes = columns * bits / 8
+        let mask = UInt32((1 << bits) - 1)
+        var packed = [UInt8](repeating: 0, count: rows * rowBytes)
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let value = UInt32((row * 17 + column * 5 + 3) & Int(mask))
+                let bitOffset = column * bits
+                let byteOffset = row * rowBytes + bitOffset / 8
+                let shift = bitOffset % 8
+                var word = value << shift
+                var remaining = bits + shift
+                var index = byteOffset
+                while remaining > 0 {
+                    packed[index] |= UInt8(truncatingIfNeeded: word)
+                    word >>= 8
+                    remaining -= 8
+                    index += 1
+                }
+            }
+        }
+        return packed
+    }
+
     private static func packWeights(_ rows: [Quantization.Int4AffineRow])
         -> (packed: [UInt8], scales: [UInt16], biases: [UInt16])
     {
@@ -188,6 +215,73 @@ import TurboFieldfareValidationSupport
                                                k: shape.k,
                                                seed: 0x6100 + UInt64(index))
         }
+    }
+
+    @Test(arguments: [6, 8])
+    func affineQMMMatchesRepeatedGEMV(bits: Int) throws {
+        let t = 7
+        let n = 65
+        let k = 128
+        let groups = k / Quantization.groupSize
+        let packed = Self.packAffineValues(bits: bits, rows: n, columns: k)
+        let scales = [UInt16](repeating: Quantization.bf16Bits(0.002),
+                              count: n * groups)
+        let biases = [UInt16](repeating: Quantization.bf16Bits(-0.01),
+                              count: n * groups)
+        let x = (0..<(t * k)).map { index in
+            Float16(Float((index * 13) % 31 - 15) / 64)
+        }
+
+        let ctx = try MetalContext()
+        let gemv = try AffineQuantGEMV(context: ctx, weightBits: bits)
+        let qmm = try PrefillInt4QMM(context: ctx, weightBits: bits)
+        guard let weights = ctx.device.makeBuffer(bytes: packed,
+                                                  length: packed.count),
+              let scaleBuffer = ctx.device.makeBuffer(
+                bytes: scales,
+                length: scales.count * MemoryLayout<UInt16>.stride),
+              let biasBuffer = ctx.device.makeBuffer(
+                bytes: biases,
+                length: biases.count * MemoryLayout<UInt16>.stride),
+              let input = Fp16Buffer.make(ctx.device, halves: x),
+              let expected = Fp16Buffer.make(ctx.device, count: t * n),
+              let actual = Fp16Buffer.make(ctx.device, count: t * n),
+              let commandBuffer = ctx.queue.makeCommandBuffer() else {
+            Issue.record("allocation failed")
+            return
+        }
+
+        for row in 0..<t {
+            gemv.encode(commandBuffer: commandBuffer,
+                        weights: weights,
+                        scales: scaleBuffer,
+                        biases: biasBuffer,
+                        x: input,
+                        xOffset: row * k * MemoryLayout<Float16>.stride,
+                        y: expected,
+                        yOffset: row * n * MemoryLayout<Float16>.stride,
+                        m: UInt32(n),
+                        n: UInt32(k))
+        }
+        qmm.encode(commandBuffer: commandBuffer,
+                   weights: weights,
+                   scales: scaleBuffer,
+                   biases: biasBuffer,
+                   x: input,
+                   y: actual,
+                   t: t,
+                   n: n,
+                   k: k)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        if let error = commandBuffer.error { throw error }
+
+        let reference = Fp16Buffer.read(expected, count: t * n)
+        let result = Fp16Buffer.read(actual, count: t * n)
+        let maxAbs = RelError.maxAbsDiff(result, reference)
+        let rel = RelError.compute(actual: result, reference: reference)
+        #expect(maxAbs <= 0.002, "bits=\(bits) maxAbs=\(maxAbs) rel=\(rel)")
+        #expect(rel <= 0.0005, "bits=\(bits) maxAbs=\(maxAbs) rel=\(rel)")
     }
 
     @Test func int4QMMProductionShapesMatchRepeatedGEMV() throws {

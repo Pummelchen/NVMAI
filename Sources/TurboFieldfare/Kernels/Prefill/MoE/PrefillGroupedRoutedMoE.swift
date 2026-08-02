@@ -358,10 +358,18 @@ final class PrefillGroupedRoutedMoE {
         return PrefillStreamedTileArgumentBuffer(buffer: buffer)
     }
 
-    init(context: MetalContext, siluActivation: Bool = false) throws {
-        let activationConstants: [MetalFunctionConstant] = siluActivation
-            ? [MetalFunctionConstant(index: 77, value: .bool(true))]
-            : []
+    init(context: MetalContext,
+         siluActivation: Bool = false,
+         weightBits: Int = 4) throws {
+        precondition([4, 6, 8].contains(weightBits))
+        var activationConstants: [MetalFunctionConstant] = [
+            MetalFunctionConstant(index: 78,
+                                  value: .uint32(UInt32(weightBits)))
+        ]
+        if siluActivation {
+            activationConstants.append(
+                MetalFunctionConstant(index: 77, value: .bool(true)))
+        }
         self.batchedPhase1PSO = try context.pipeline(
             "prefill_grouped_routed_moe_batched_phase1",
             constants: activationConstants)

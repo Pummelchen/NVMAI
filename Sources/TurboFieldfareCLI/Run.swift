@@ -53,7 +53,7 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
-        let runtime = RuntimeConfiguration(
+        let loadRuntime = RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             forceLogitsHead: !config.isPureGreedy)
@@ -65,9 +65,18 @@ public func run(args: Args,
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
-            streamingMode: .pread(slotCount: runtime.expertCacheSlots),
-            expertCachePolicy: runtime.modelExpertCachePolicy,
+            streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
+            expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
+        let runtime = RuntimeConfiguration(
+            expertCacheSlots: loadRuntime.expertCacheSlots,
+            expertCachePolicy: loadRuntime.expertCachePolicy,
+            rdadvisePolicy: loadRuntime.rdadvisePolicy,
+            prefillChunkTokens: model.config.family == .qwen36
+                ? RuntimeConfiguration.qwenLongPrefillChunkTokens
+                : loadRuntime.prefillChunkTokens,
+            prefillAttentionPath: loadRuntime.prefillAttentionPath,
+            forceLogitsHead: !config.isPureGreedy)
         let runner = try RealForwardRunner(
             model: model,
             context: context,

@@ -29,6 +29,36 @@ import TurboFieldfareValidationSupport
         return (packed, scales, biases)
     }
 
+    private static func buildAffineTable(bits: Int)
+        -> (packed: [UInt8], scales: [UInt16], biases: [UInt16])
+    {
+        let rowBytes = d * bits / 8
+        let mask = UInt32((1 << bits) - 1)
+        var packed = [UInt8](repeating: 0, count: vocab * rowBytes)
+        for row in 0..<vocab {
+            for column in 0..<d {
+                let value = UInt32((row * 19 + column * 7 + 1) & Int(mask))
+                let bitOffset = column * bits
+                let byteOffset = row * rowBytes + bitOffset / 8
+                let shift = bitOffset % 8
+                var word = value << shift
+                var remaining = bits + shift
+                var index = byteOffset
+                while remaining > 0 {
+                    packed[index] |= UInt8(truncatingIfNeeded: word)
+                    word >>= 8
+                    remaining -= 8
+                    index += 1
+                }
+            }
+        }
+        let scales = [UInt16](repeating: Quantization.bf16Bits(0.125),
+                              count: vocab * groupsPerRow)
+        let biases = [UInt16](repeating: Quantization.bf16Bits(-0.25),
+                              count: vocab * groupsPerRow)
+        return (packed, scales, biases)
+    }
+
     @Test func embedBlockMatchesPerTokenEmbed() throws {
         let (packed, scales, biases) = Self.buildInt4Table(seed: 0x5101)
         let tokens: [UInt32] = [3, 11, 2, 9, 14]
@@ -80,6 +110,59 @@ import TurboFieldfareValidationSupport
         let scalarRows = Fp16Buffer.read(scalarOut, count: tokens.count * Self.d)
         let blockRows = Fp16Buffer.read(blockOut, count: tokens.count * Self.d)
         #expect(blockRows == scalarRows)
+    }
+
+    @Test(arguments: [6, 8])
+    func affineEmbedBlockMatchesPerTokenEmbed(bits: Int) throws {
+        let (packed, scales, biases) = Self.buildAffineTable(bits: bits)
+        let tokens: [UInt32] = [3, 11, 2, 9, 14]
+        let ctx = try MetalContext()
+        let scalar = try AffineQuantEmbeddingLookup(context: ctx, weightBits: bits)
+        let block = try PrefillEmbedLookupInt4(context: ctx, weightBits: bits)
+
+        guard let table = ctx.device.makeBuffer(bytes: packed, length: packed.count),
+              let scaleBuffer = ctx.device.makeBuffer(
+                bytes: scales,
+                length: scales.count * MemoryLayout<UInt16>.stride),
+              let biasBuffer = ctx.device.makeBuffer(
+                bytes: biases,
+                length: biases.count * MemoryLayout<UInt16>.stride),
+              let tokenBuffer = ctx.device.makeBuffer(
+                bytes: tokens,
+                length: tokens.count * MemoryLayout<UInt32>.stride),
+              let expected = Fp16Buffer.make(ctx.device, count: tokens.count * Self.d),
+              let actual = Fp16Buffer.make(ctx.device, count: tokens.count * Self.d),
+              let commandBuffer = ctx.queue.makeCommandBuffer() else {
+            Issue.record("allocation failed")
+            return
+        }
+
+        for (row, token) in tokens.enumerated() {
+            scalar.encode(commandBuffer: commandBuffer,
+                          table: table,
+                          scales: scaleBuffer,
+                          biases: biasBuffer,
+                          out: expected,
+                          outOffset: row * Self.d * MemoryLayout<Float16>.stride,
+                          tokenId: token,
+                          d: UInt32(Self.d),
+                          outScale: 1)
+        }
+        block.encode(commandBuffer: commandBuffer,
+                     table: table,
+                     scales: scaleBuffer,
+                     biases: biasBuffer,
+                     tokens: tokenBuffer,
+                     out: actual,
+                     t: UInt32(tokens.count),
+                     d: UInt32(Self.d),
+                     outScale: 1)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        if let error = commandBuffer.error { throw error }
+
+        #expect(Fp16Buffer.read(actual, count: tokens.count * Self.d)
+                == Fp16Buffer.read(expected, count: tokens.count * Self.d))
     }
 
     @Test func blockRMSNormMatchesScalarRows() throws {

@@ -18,6 +18,29 @@ constant constexpr float kPrefillGeluCubicCoeff = 0.044715f;
 constant uint FC_PREFILL_KV_RING_CAP [[function_constant(76)]];
 // Unset/false = gelu_pytorch_tanh (Gemma), true = silu (Qwen 3.6 SwiGLU).
 constant bool FC_PREFILL_ACT_SILU [[function_constant(77)]];
+// Packed affine weight width for chunked embedding, projections, and routed
+// experts. Leaving it unset preserves the original INT4 specialization.
+constant uint FC_PREFILL_AFFINE_BITS [[function_constant(78)]];
+
+static inline uint prefill_affine_bits() {
+    return is_function_constant_defined(FC_PREFILL_AFFINE_BITS)
+        ? FC_PREFILL_AFFINE_BITS : 4u;
+}
+
+static inline uint prefill_affine_value(
+    device const uint8_t* packed,
+    uint element,
+    uint bits
+) {
+    const uint bit_offset = element * bits;
+    const uint byte_offset = bit_offset >> 3;
+    const uint shift = bit_offset & 7u;
+    uint word = uint(packed[byte_offset]);
+    if (shift + bits > 8u) {
+        word |= uint(packed[byte_offset + 1u]) << 8u;
+    }
+    return (word >> shift) & ((1u << bits) - 1u);
+}
 
 static inline float prefill_gelu_pytorch_tanh(float x) {
     const float x3 = x * x * x;
@@ -33,7 +56,7 @@ static inline float prefill_hidden_activation(float x) {
     }
     return prefill_gelu_pytorch_tanh(x);
 }
-kernel void prefill_embed_lookup_int4_block(
+kernel void prefill_embed_lookup_affine_block(
     device const uint8_t* table     [[buffer(0)]],
     device const bfloat*  scales    [[buffer(1)]],
     device const bfloat*  biases    [[buffer(2)]],
@@ -50,12 +73,13 @@ kernel void prefill_embed_lookup_int4_block(
 
     const uint token = tokens[t];
     const uint groups_per_row = D / kPrefillGroupSize;
-    device const uint8_t* row_q = table  + token * (D / 2u);
+    const uint bits = prefill_affine_bits();
+    const uint row_bytes = D * bits / 8u;
+    device const uint8_t* row_q = table + token * row_bytes;
     device const bfloat*  row_s = scales + token * groups_per_row;
     device const bfloat*  row_b = biases + token * groups_per_row;
 
-    const uint8_t byte = row_q[d >> 1];
-    const uint q = (d & 1u) == 0u ? uint(byte & 0x0Fu) : uint(byte >> 4);
+    const uint q = prefill_affine_value(row_q, d, bits);
     const float s = float(row_s[d / kPrefillGroupSize]);
     const float b = float(row_b[d / kPrefillGroupSize]);
     out[t * D + d] = half((float(q) * s + b) * out_scale);
@@ -413,7 +437,7 @@ static inline uint prefill_streamed_local_expert_id(
     }
 }
 
-static inline float prefill_moe_int4_gemv_row_dev(
+static inline float prefill_moe_affine_gemv_row_dev(
     device const uint8_t* W,
     device const bfloat* S,
     device const bfloat* B,
@@ -422,7 +446,8 @@ static inline float prefill_moe_int4_gemv_row_dev(
     uint N
 ) {
     const uint groups = N / kPrefillGroupSize;
-    const uint row_bytes = N / 2u;
+    const uint bits = prefill_affine_bits();
+    const uint row_bytes = N * bits / 8u;
     device const uint8_t* W_row = W + row * row_bytes;
     device const bfloat* s_row = S + row * groups;
     device const bfloat* b_row = B + row * groups;
@@ -431,17 +456,27 @@ static inline float prefill_moe_int4_gemv_row_dev(
     for (uint g = 0; g < groups; ++g) {
         const float scale = float(s_row[g]);
         const float bias = float(b_row[g]);
-        device const uint8_t* Wg = W_row + g * (kPrefillGroupSize / 2u);
         device const half* xg = x + g * kPrefillGroupSize;
         float dot_qx = 0.0f;
         float sum_x = 0.0f;
-        for (uint k = 0; k < kPrefillGroupSize / 2u; ++k) {
-            const uint8_t packed = Wg[k];
-            const float x0 = float(xg[2u * k]);
-            const float x1 = float(xg[2u * k + 1u]);
-            dot_qx = fma(float(uint(packed & 0x0Fu)), x0, dot_qx);
-            dot_qx = fma(float(uint(packed >> 4)), x1, dot_qx);
-            sum_x += x0 + x1;
+        if (bits == 4u) {
+            device const uint8_t* Wg = W_row + g * (kPrefillGroupSize / 2u);
+            for (uint k = 0; k < kPrefillGroupSize / 2u; ++k) {
+                const uint8_t packed = Wg[k];
+                const float x0 = float(xg[2u * k]);
+                const float x1 = float(xg[2u * k + 1u]);
+                dot_qx = fma(float(uint(packed & 0x0Fu)), x0, dot_qx);
+                dot_qx = fma(float(uint(packed >> 4)), x1, dot_qx);
+                sum_x += x0 + x1;
+            }
+        } else {
+            const uint group_base = g * kPrefillGroupSize;
+            for (uint k = 0; k < kPrefillGroupSize; ++k) {
+                const float xv = float(xg[k]);
+                const uint q = prefill_affine_value(W_row, group_base + k, bits);
+                dot_qx = fma(float(q), xv, dot_qx);
+                sum_x += xv;
+            }
         }
         acc = fma(scale, dot_qx, acc);
         acc = fma(bias, sum_x, acc);
@@ -636,8 +671,8 @@ kernel void prefill_grouped_routed_moe_batched_phase1(
     device const bfloat* up_s = reinterpret_cast<device const bfloat*>(expert + p.up_s_off);
     device const bfloat* up_b = reinterpret_cast<device const bfloat*>(expert + p.up_b_off);
 
-    const float gate = prefill_moe_int4_gemv_row_dev(gate_W, gate_s, gate_b, x, f, p.D);
-    const float up = prefill_moe_int4_gemv_row_dev(up_W, up_s, up_b, x, f, p.D);
+    const float gate = prefill_moe_affine_gemv_row_dev(gate_W, gate_s, gate_b, x, f, p.D);
+    const float up = prefill_moe_affine_gemv_row_dev(up_W, up_s, up_b, x, f, p.D);
     const uint row_elements = p.pair_count * p.F;
     const uint index = pair_local * p.F + f;
     gate_up_act_scratch[index] = half(gate);
@@ -674,12 +709,12 @@ kernel void prefill_grouped_routed_moe_batched_down(
     device const bfloat* down_s = reinterpret_cast<device const bfloat*>(expert + p.down_s_off);
     device const bfloat* down_b = reinterpret_cast<device const bfloat*>(expert + p.down_b_off);
     device const half* act = gate_up_act_scratch + 2u * p.pair_count * p.F + pair_local * p.F;
-    const half value = half(prefill_moe_int4_gemv_row_dev(down_W, down_s, down_b, act, d, p.F));
+    const half value = half(prefill_moe_affine_gemv_row_dev(down_W, down_s, down_b, act, d, p.F));
     down_scratch[pair_local * p.D + d] = value;
     route_partials[(pair.token * p.top_k + pair.rank) * p.D + d] = value;
 }
 
-kernel void prefill_dequant_int4_qmm_f16_block(
+kernel void prefill_dequant_affine_qmm_f16_block(
     device const uint8_t* W      [[buffer(0)]],
     device const bfloat*  scales [[buffer(1)]],
     device const bfloat*  biases [[buffer(2)]],
@@ -696,7 +731,8 @@ kernel void prefill_dequant_int4_qmm_f16_block(
     if (t >= T || n >= N) return;
 
     const uint groups = K / kPrefillGroupSize;
-    const uint row_bytes = K / 2u;
+    const uint bits = prefill_affine_bits();
+    const uint row_bytes = K * bits / 8u;
     device const uint8_t* w_row = W + n * row_bytes;
     device const bfloat* s_row = scales + n * groups;
     device const bfloat* b_row = biases + n * groups;
@@ -709,8 +745,7 @@ kernel void prefill_dequant_int4_qmm_f16_block(
         const uint group_base = g * kPrefillGroupSize;
         for (uint kk = 0; kk < kPrefillGroupSize; ++kk) {
             const uint k = group_base + kk;
-            const uint8_t packed = w_row[k >> 1];
-            const uint q = (k & 1u) == 0u ? uint(packed & 0x0Fu) : uint(packed >> 4);
+            const uint q = prefill_affine_value(w_row, k, bits);
             const float w = fma(float(q), scale, bias);
             acc = fma(w, float(x_row[k]), acc);
         }

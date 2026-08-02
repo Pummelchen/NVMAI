@@ -5,6 +5,30 @@ import Metal
 import TurboFieldfareValidationSupport
 
 @Suite struct PrefillFinalRowHeadTests {
+    private static func packedAffine(bits: Int, rows: Int, columns: Int) -> [UInt8] {
+        let rowBytes = columns * bits / 8
+        let mask = UInt32((1 << bits) - 1)
+        var packed = [UInt8](repeating: 0, count: rows * rowBytes)
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let value = UInt32((row * 7 + column * 11 + 5) & Int(mask))
+                let bitOffset = column * bits
+                let byteOffset = row * rowBytes + bitOffset / 8
+                let shift = bitOffset % 8
+                var word = value << shift
+                var remaining = bits + shift
+                var index = byteOffset
+                while remaining > 0 {
+                    packed[index] |= UInt8(truncatingIfNeeded: word)
+                    word >>= 8
+                    remaining -= 8
+                    index += 1
+                }
+            }
+        }
+        return packed
+    }
+
     private static func packRows(_ rows: [Quantization.Int4AffineRow])
         -> (packed: [UInt8], scales: [UInt16], biases: [UInt16])
     {
@@ -110,5 +134,93 @@ import TurboFieldfareValidationSupport
         let rel = RelError.compute(actual: block, reference: scalar)
         #expect(maxAbs <= 1e-3, "maxAbs=\(maxAbs) rel=\(rel)")
         #expect(rel <= 1e-4, "rel=\(rel) maxAbs=\(maxAbs)")
+    }
+
+    @Test(arguments: [6, 8])
+    func affineFinalRowHeadMatchesScalarOffsetPath(bits: Int) throws {
+        let rows = 5
+        let selectedRow = 3
+        let d = 128
+        let rowStride = d + 17
+        let vocab = 96
+        let eps: Float = 1e-6
+        var hidden = [Float16](repeating: 0, count: rows * rowStride)
+        for row in 0..<rows {
+            for column in 0..<d {
+                hidden[row * rowStride + column] = Float16(
+                    Float((row * 13 + column * 3) % 29 - 14) / 32)
+            }
+        }
+        let normBits = (0..<d).map { index in
+            Quantization.bf16Bits(0.75 + Float(index % 5) * 0.05)
+        }
+        let packed = Self.packedAffine(bits: bits, rows: vocab, columns: d)
+        let groups = d / Quantization.groupSize
+        let scales = [UInt16](repeating: Quantization.bf16Bits(0.002),
+                              count: vocab * groups)
+        let biases = [UInt16](repeating: Quantization.bf16Bits(-0.01),
+                              count: vocab * groups)
+
+        let context = try MetalContext()
+        let scalarNorm = try RMSNorm(context: context)
+        let scalarHead = try AffineQuantGEMV(context: context, weightBits: bits)
+        let finalRowHead = try PrefillFinalRowHeadInt4(
+            context: context,
+            maxD: d,
+            weightBits: bits)
+        guard let hiddenBuffer = Fp16Buffer.make(context.device, halves: hidden),
+              let normBuffer = context.device.makeBuffer(
+                bytes: normBits,
+                length: normBits.count * MemoryLayout<UInt16>.stride),
+              let weights = context.device.makeBuffer(bytes: packed,
+                                                       length: packed.count),
+              let scaleBuffer = context.device.makeBuffer(
+                bytes: scales,
+                length: scales.count * MemoryLayout<UInt16>.stride),
+              let biasBuffer = context.device.makeBuffer(
+                bytes: biases,
+                length: biases.count * MemoryLayout<UInt16>.stride),
+              let normed = Fp16Buffer.make(context.device, count: d),
+              let expected = Fp16Buffer.make(context.device, count: vocab),
+              let actual = Fp16Buffer.make(context.device, count: vocab),
+              let commandBuffer = context.queue.makeCommandBuffer() else {
+            Issue.record("allocation failed")
+            return
+        }
+
+        scalarNorm.encodeBF16W(
+            commandBuffer: commandBuffer,
+            x: hiddenBuffer,
+            xOffset: selectedRow * rowStride * MemoryLayout<Float16>.stride,
+            weight: normBuffer,
+            out: normed,
+            d: UInt32(d),
+            eps: eps)
+        scalarHead.encode(commandBuffer: commandBuffer,
+                          weights: weights,
+                          scales: scaleBuffer,
+                          biases: biasBuffer,
+                          x: normed,
+                          y: expected,
+                          m: UInt32(vocab),
+                          n: UInt32(d))
+        finalRowHead.encodeLogits(commandBuffer: commandBuffer,
+                                  hiddenBlock: hiddenBuffer,
+                                  row: selectedRow,
+                                  rowStrideElements: rowStride,
+                                  normWeight: normBuffer,
+                                  weights: weights,
+                                  scales: scaleBuffer,
+                                  biases: biasBuffer,
+                                  logits: actual,
+                                  d: UInt32(d),
+                                  vocab: UInt32(vocab),
+                                  rmsEps: eps)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        if let error = commandBuffer.error { throw error }
+
+        #expect(Fp16Buffer.read(actual, count: vocab)
+                == Fp16Buffer.read(expected, count: vocab))
     }
 }

@@ -1,6 +1,6 @@
 # Local OpenAI-compatible server
 
-`TurboFieldfareServer` exposes a local Chat Completions API for one Gemma
+`TurboFieldfareServer` exposes a local Chat Completions API for one loaded
 model. It binds to `127.0.0.1` without authentication or TLS. Do not expose it
 through a proxy or tunnel.
 
@@ -18,7 +18,8 @@ If the command prints a match, do not start the server.
 ```bash
 swift build -c release --product TurboFieldfareServer
 .build/release/TurboFieldfareServer \
-  --model scratch/gemma4.gturbo \
+  --model scratch/qwen36-8bit.gturbo \
+  --model-id qwen3.6-35b-a3b \
   --port 8080 \
   --max-context 16384
 ```
@@ -35,7 +36,7 @@ curl --silent --show-error http://127.0.0.1:8080/v1/models
 curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gemma-4-26b-a4b-it",
+    "model": "qwen3.6-35b-a3b",
     "messages": [{"role": "user", "content": "Reply with exactly READY."}],
     "temperature": 0,
     "max_completion_tokens": 16
@@ -57,7 +58,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
 response = client.chat.completions.create(
-    model="gemma-4-26b-a4b-it",
+    model="qwen3.6-35b-a3b",
     messages=[{"role": "user", "content": "Say hello in one sentence."}],
 )
 print(response.choices[0].message.content)
@@ -77,8 +78,8 @@ OpenCode:
         "apiKey": "local"
       },
       "models": {
-        "gemma-4-26b-a4b-it": {
-          "name": "Gemma 4 26B-A4B IT"
+        "qwen3.6-35b-a3b": {
+          "name": "Qwen 3.6 35B-A3B"
         }
       }
     }
@@ -86,7 +87,9 @@ OpenCode:
 }
 ```
 
-Select `turbofieldfare/gemma-4-26b-a4b-it` in OpenCode.
+Select `turbofieldfare/qwen3.6-35b-a3b` in OpenCode. Qwen 3.6 server requests
+use a 1,024-token chunked-prefill ceiling automatically; the advertised model
+ID is unchanged, so existing client configuration continues to work.
 
 ## Prompt reuse
 

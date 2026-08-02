@@ -276,7 +276,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      maxContext: maxContext,
                                      fp16RingEnabled: useFP16Ring,
                                      slidingWindow: cfg.slidingWindow,
-                                     maxPrefillChunkTokens: PrefillRuntimeConfig.maxChunkTokens)
+                                     maxPrefillChunkTokens: runtimeConfiguration.prefillChunkTokens)
 
         let silu = cfg.hiddenActivation == "silu"
         self.embedInt4 = try EmbedLookupInt4(context: context)
@@ -307,10 +307,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.fusedQKVEpilogue = try FusedQKVEpilogue(context: context)
         self.fusedPostAttentionSetup = try FusedPostAttentionSetup(context: context)
         self.fusedTail = try FusedLayerTail(context: context)
-        self.prefillEmbed = try PrefillEmbedLookupInt4(context: context)
+        self.prefillEmbed = try PrefillEmbedLookupInt4(
+            context: context,
+            weightBits: model.embeddingWeightBits)
         self.prefillRMS = try PrefillRMSNorm(context: context)
-        self.prefillQMM = try PrefillInt4QMM(context: context)
-        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(context: context)
+        self.prefillQMM = try PrefillInt4QMM(
+            context: context,
+            weightBits: model.attentionWeightBits)
+        self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(
+            context: context,
+            weightBits: model.attentionWeightBits)
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
         self.prefillAttention = try PrefillAttention(context: context)
         self.prefillPostAttention = try PrefillPostAttentionSetup(context: context)
@@ -319,12 +325,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             context: context,
             weightBits: model.sharedExpertWeightBits,
             siluActivation: silu)
-        self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(context: context,
-                                                             siluActivation: silu)
+        self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(
+            context: context,
+            siluActivation: silu,
+            weightBits: model.routedExpertWeightBits)
         self.prefillMoE = try PrefillMoE(context: context)
         self.prefillLayerTail = try PrefillLayerTail(context: context)
-        self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(context: context,
-                                                               maxD: cfg.hiddenSize)
+        self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(
+            context: context,
+            maxD: cfg.hiddenSize,
+            weightBits: model.embeddingWeightBits)
 
         // Qwen 3.6 kernels, keyed off the data flags so architectures that
         // never dispatch them pay no PSO compile cost.
@@ -635,40 +645,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
         }
 
-        // The tiled prefill stack is deliberately optimized around INT4.
-        // Six- and eight-bit Qwen checkpoints replay decode for correctness;
-        // this preserves all recurrent/KV state semantics without interpreting
-        // their packed weights as INT4.
-        if model.attentionWeightBits != 4 {
-            for (offset, token) in tokens.enumerated() {
-                let isLast = offset == tokens.count - 1
-                try await produceToken(token: token,
-                                       position: startPosition + offset,
-                                       into: logits,
-                                       emitHead: isLast,
-                                       outputMode: isLast ? outputMode : .logits)
-                onProgress(offset + 1)
-            }
-            return PrefillResult(newPosition: startPosition + tokens.count,
-                                 seed: .logitsWritten)
-        }
-
         let scratch = try ensurePrefillScratch(config: config)
         let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
                                               startPosition: startPosition,
                                               config: config)
-        for (spanIndex, span) in spans.enumerated() {
-            let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
-            let upper = tokens.index(lower, offsetBy: span.tokenCount)
-            try await executePrefillChunk(
-                tokens: tokens[lower..<upper],
-                startPosition: span.startPosition,
-                outputMode: outputMode,
-                logits: logits,
-                scratch: scratch,
-                config: config,
-                writeFinalHead: spanIndex == spans.count - 1)
-            onProgress(span.completedCount)
+        do {
+            for (spanIndex, span) in spans.enumerated() {
+                try Task.checkCancellation()
+                let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
+                let upper = tokens.index(lower, offsetBy: span.tokenCount)
+                try await executePrefillChunk(
+                    tokens: tokens[lower..<upper],
+                    startPosition: span.startPosition,
+                    outputMode: outputMode,
+                    logits: logits,
+                    scratch: scratch,
+                    config: config,
+                    writeFinalHead: spanIndex == spans.count - 1)
+                try Task.checkCancellation()
+                onProgress(span.completedCount)
+            }
+        } catch let cancellation as CancellationError {
+            // Cancellation checks run only at chunk/layer boundaries, after
+            // prior command buffers have completed. Rewind partial KV and GDN
+            // state before this runner can serve another request.
+            reset()
+            throw cancellation
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
@@ -803,7 +805,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let t = tokens.count
         let emb = model.embedding
 
-        func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
+        func encodeAffineProjection(commandBuffer: MTLCommandBuffer,
                                   family: PrefillProjectionFamily,
                                   weights: TensorView,
                                   x: MTLBuffer,
@@ -850,19 +852,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 return
             }
             for row in 0..<tokenCount {
-                int4.encode(commandBuffer: commandBuffer,
-                            weights: weights.buffer,
-                            weightsOffset: Int(weights.offset),
-                            scales: weights.buffer,
-                            scalesOffset: Int(weights.scaleOffset),
-                            biases: weights.buffer,
-                            biasesOffset: Int(weights.biasOffset),
-                            x: x,
-                            xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
-                            y: y,
-                            yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
-                            m: UInt32(rows),
-                            n: UInt32(columns))
+                encodePrimaryGEMV(
+                    commandBuffer: commandBuffer,
+                    projection: weights,
+                    x: x,
+                    xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
+                    y: y,
+                    yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
+                    m: UInt32(rows),
+                    n: UInt32(columns))
             }
         }
 
@@ -948,6 +946,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             outScale: embedOutScale)
 
         for L in 0..<cfg.numLayers {
+            try Task.checkCancellation()
             model.beginOpeningRoutedExpertStreamer(layer: L)
             let views = layerViews[L]
             let isLinear = cfg.layerIsLinear(L)
@@ -974,7 +973,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     preconditionFailure("linear-attention layer without GDN kernels")
                 }
                 let la = cfg.linearAttention
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .q,
                                      weights: views.linQKV!,
                                      x: scratch.normed,
@@ -984,7 +983,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      tokenCount: t,
                                      xStrideElements: D,
                                      yStrideElements: la.qkvDim)
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linZ!,
                                      x: scratch.normed,
@@ -994,7 +993,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      tokenCount: t,
                                      xStrideElements: D,
                                      yStrideElements: la.valueDim)
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linA!,
                                      x: scratch.normed,
@@ -1004,7 +1003,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      tokenCount: t,
                                      xStrideElements: D,
                                      yStrideElements: la.numVHeads)
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.linB!,
                                      x: scratch.normed,
@@ -1051,7 +1050,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     weightOffset: Int(gatedNormW.offset),
                                     out: scratch.attentionOutput,
                                     rows: t)
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .o,
                                      weights: views.linOut!,
                                      x: scratch.attentionOutput,
@@ -1063,7 +1062,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      yStrideElements: D)
             } else {
                 let qProjRows = cfg.attnOutputGate ? 2 * qDim : qDim
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .q,
                                      weights: views.q!,
                                      x: scratch.normed,
@@ -1073,7 +1072,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      tokenCount: t,
                                      xStrideElements: D,
                                      yStrideElements: qProjRows)
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.k!,
                                      x: scratch.normed,
@@ -1083,7 +1082,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      tokenCount: t,
                                      xStrideElements: D,
                                      yStrideElements: kvDim)
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.v!,
                                      x: scratch.normed,
@@ -1202,7 +1201,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                       gate: scratch.attnGate,
                                                       count: t * qDim)
                 }
-                encodeInt4Projection(commandBuffer: cb,
+                encodeAffineProjection(commandBuffer: cb,
                                          family: .o,
                                          weights: views.o!,
                                          x: scratch.attentionOutput,

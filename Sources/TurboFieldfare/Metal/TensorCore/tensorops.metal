@@ -9,6 +9,22 @@ constant constexpr uint kW4A8GroupSize = 64;
 constant constexpr int kMPPAffineTileM = 64;
 constant constexpr int kMPPAffineTileN = 32;
 constant constexpr int kMPPAffineTileK = 64;
+constant uint FC_MPP_AFFINE_BITS [[function_constant(78)]];
+
+static inline uint mpp_affine_value(
+    device const uint8_t* packed,
+    uint element,
+    uint bits
+) {
+    const uint bit_offset = element * bits;
+    const uint byte_offset = bit_offset >> 3;
+    const uint shift = bit_offset & 7u;
+    uint word = uint(packed[byte_offset]);
+    if (shift + bits > 8u) {
+        word |= uint(packed[byte_offset + 1u]) << 8u;
+    }
+    return (word >> shift) & ((1u << bits) - 1u);
+}
 
 kernel void mpp_prefill_affine_threadgroup_f16(
     device const uint8_t* packedWeights [[buffer(0)]],
@@ -50,7 +66,9 @@ kernel void mpp_prefill_affine_threadgroup_f16(
         accumulator[element] = 0.0f;
     }
 
-    const uint rowBytes = K / 2u;
+    const uint bits = is_function_constant_defined(FC_MPP_AFFINE_BITS)
+        ? FC_MPP_AFFINE_BITS : 4u;
+    const uint rowBytes = K * bits / 8u;
     const uint groupsPerRow = K / kW4A8GroupSize;
     const uint lid = lid3.x;
     const uint threads = threads3.x;
@@ -66,10 +84,8 @@ kernel void mpp_prefill_affine_threadgroup_f16(
             const uint globalN = tgid.x * uint(kMPPAffineTileN) + localN;
             if (globalN < N) {
                 const uint globalK = group * uint(kMPPAffineTileK) + localK;
-                const uint8_t packed = packedWeights[globalN * rowBytes + (globalK >> 1)];
-                const uint q = (globalK & 1u) == 0u
-                    ? uint(packed & 0x0fu)
-                    : uint(packed >> 4);
+                device const uint8_t* rowWeights = packedWeights + globalN * rowBytes;
+                const uint q = mpp_affine_value(rowWeights, globalK, bits);
                 const float scale = float(scales[globalN * groupsPerRow + group]);
                 const float bias = float(biases[globalN * groupsPerRow + group]);
                 weightTile[linear] = half(fma(float(q), scale, bias));

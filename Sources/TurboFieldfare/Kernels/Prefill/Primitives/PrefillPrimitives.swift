@@ -4,8 +4,12 @@ import Metal
 final class PrefillEmbedLookupInt4 {
     private let pso: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_embed_lookup_int4_block")
+    init(context: MetalContext, weightBits: Int = 4) throws {
+        precondition([4, 6, 8].contains(weightBits))
+        self.pso = try context.pipeline(
+            "prefill_embed_lookup_affine_block",
+            constants: [MetalFunctionConstant(index: 78,
+                                               value: .uint32(UInt32(weightBits)))])
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -73,8 +77,12 @@ final class PrefillRMSNorm {
 final class PrefillInt4QMM {
     private let pso: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_dequant_int4_qmm_f16_block")
+    init(context: MetalContext, weightBits: Int = 4) throws {
+        precondition([4, 6, 8].contains(weightBits))
+        self.pso = try context.pipeline(
+            "prefill_dequant_affine_qmm_f16_block",
+            constants: [MetalFunctionConstant(index: 78,
+                                               value: .uint32(UInt32(weightBits)))])
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
