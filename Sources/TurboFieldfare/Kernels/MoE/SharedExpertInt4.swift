@@ -98,6 +98,7 @@ public final class SharedExpertInt4 {
 public final class SharedExpertRuntime {
     private enum Implementation {
         case int4(SharedExpertInt4)
+        case affine(SharedExpertAffineQuant)
         case int8(SharedExpertInt8)
     }
 
@@ -110,6 +111,9 @@ public final class SharedExpertRuntime {
         switch weightBits {
         case 4: self.implementation = .int4(try SharedExpertInt4(
             context: context, siluActivation: siluActivation))
+        case 6: self.implementation = .affine(try SharedExpertAffineQuant(
+            context: context, weightBits: weightBits,
+            siluActivation: siluActivation))
         case 8: self.implementation = .int8(try SharedExpertInt8(
             context: context, siluActivation: siluActivation))
         default: throw SharedExpertError.unsupportedWeightBits(weightBits)
@@ -135,6 +139,12 @@ public final class SharedExpertRuntime {
         case .int8(let runtime):
             try runtime.encode(commandBuffer: commandBuffer, x: x, xOffset: xOffset,
                                gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                               scratchAct: scratchAct, scratchActOffset: scratchActOffset)
+        case .affine(let runtime):
+            try runtime.encode(commandBuffer: commandBuffer, x: x, xOffset: xOffset,
+                               gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                               scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
+                               scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
                                scratchAct: scratchAct, scratchActOffset: scratchActOffset)
         }
     }

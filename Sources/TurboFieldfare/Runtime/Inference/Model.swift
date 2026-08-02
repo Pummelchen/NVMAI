@@ -33,7 +33,11 @@ public struct Model {
     public let integrityPolicy: ModelIntegrityPolicy
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
+    public var embeddingWeightBits: Int { manifest.quant?.embedding.weightBits ?? 4 }
+    public var attentionWeightBits: Int { manifest.quant?.attention.weightBits ?? 4 }
+    public var routerWeightBits: Int { manifest.quant?.router.weightBits ?? 8 }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
+    public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
 
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex
@@ -211,7 +215,7 @@ public struct Model {
     // MARK: - Gated-DeltaNet linear attention (Qwen 3.6)
     //
     // Layers whose mask value is 2 replace full/sliding attention with the
-    // gated delta rule. Projections are 4-bit affine; the depthwise conv
+    // gated delta rule. Projections are 4/6/8-bit affine; the depthwise conv
     // weight, A_log, dt_bias, and the gated output norm are BF16.
 
     public func linearInProjQKV(layer L: Int) throws -> TensorView {

@@ -235,7 +235,9 @@ enum SyntheticSnapshot {
     }
 
     static func buildQwen(at dir: String,
+                          weightBits: Int = 4,
                           seed: UInt64 = 0xC0FF_EE00_9A11_AB1E) throws -> Snapshot {
+        precondition([4, 6, 8].contains(weightBits))
         try? FileManager.default.removeItem(atPath: dir)
         try FileManager.default.createDirectory(atPath: dir,
                                                 withIntermediateDirectories: true)
@@ -249,11 +251,11 @@ enum SyntheticSnapshot {
         // -- Embedding + untied lm_head (4-bit, group=64)
         appendQuantizedWeight(name: "language_model.model.embed_tokens",
                               outerShape: [arch.vocab],
-                              innerLogical: arch.hidden, bits: 4,
+                              innerLogical: arch.hidden, bits: weightBits,
                               groupSize: arch.groupSize, into: &tensors, rng: &rng)
         appendQuantizedWeight(name: "language_model.lm_head",
                               outerShape: [arch.vocab],
-                              innerLogical: arch.hidden, bits: 4,
+                              innerLogical: arch.hidden, bits: weightBits,
                               groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
         for li in 0..<arch.numLayers {
@@ -262,19 +264,19 @@ enum SyntheticSnapshot {
                 // q_proj emits per-head [query ; gate] halves (attn_output_gate).
                 appendQuantizedWeight(name: prefix + ".self_attn.q_proj",
                                       outerShape: [2 * arch.numHeads * arch.headDim],
-                                      innerLogical: arch.hidden, bits: 4,
+                                      innerLogical: arch.hidden, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendQuantizedWeight(name: prefix + ".self_attn.k_proj",
                                       outerShape: [arch.numKVHeads * arch.headDim],
-                                      innerLogical: arch.hidden, bits: 4,
+                                      innerLogical: arch.hidden, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendQuantizedWeight(name: prefix + ".self_attn.v_proj",
                                       outerShape: [arch.numKVHeads * arch.headDim],
-                                      innerLogical: arch.hidden, bits: 4,
+                                      innerLogical: arch.hidden, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendQuantizedWeight(name: prefix + ".self_attn.o_proj",
                                       outerShape: [arch.hidden],
-                                      innerLogical: arch.numHeads * arch.headDim, bits: 4,
+                                      innerLogical: arch.numHeads * arch.headDim, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendUnquantizedBF16(name: prefix + ".self_attn.q_norm.weight",
                                       shape: [arch.headDim], into: &tensors, rng: &rng)
@@ -284,19 +286,19 @@ enum SyntheticSnapshot {
                 // Gated-DeltaNet linear attention bundle.
                 appendQuantizedWeight(name: prefix + ".linear_attn.in_proj_qkv",
                                       outerShape: [arch.qkvDim],
-                                      innerLogical: arch.hidden, bits: 4,
+                                      innerLogical: arch.hidden, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendQuantizedWeight(name: prefix + ".linear_attn.in_proj_z",
                                       outerShape: [arch.valueDim],
-                                      innerLogical: arch.hidden, bits: 4,
+                                      innerLogical: arch.hidden, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendQuantizedWeight(name: prefix + ".linear_attn.in_proj_a",
                                       outerShape: [arch.linearNumVHeads],
-                                      innerLogical: arch.hidden, bits: 4,
+                                      innerLogical: arch.hidden, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendQuantizedWeight(name: prefix + ".linear_attn.in_proj_b",
                                       outerShape: [arch.linearNumVHeads],
-                                      innerLogical: arch.hidden, bits: 4,
+                                      innerLogical: arch.hidden, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
                 appendUnquantizedBF16(name: prefix + ".linear_attn.conv1d.weight",
                                       shape: [arch.qkvDim, arch.linearConvKernelSize, 1],
@@ -309,7 +311,7 @@ enum SyntheticSnapshot {
                                       shape: [arch.linearValueHeadDim], into: &tensors, rng: &rng)
                 appendQuantizedWeight(name: prefix + ".linear_attn.out_proj",
                                       outerShape: [arch.hidden],
-                                      innerLogical: arch.valueDim, bits: 4,
+                                      innerLogical: arch.valueDim, bits: weightBits,
                                       groupSize: arch.groupSize, into: &tensors, rng: &rng)
             }
 
@@ -322,26 +324,26 @@ enum SyntheticSnapshot {
                                   bits: 8, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".mlp.shared_expert.gate_proj",
                                   outerShape: [arch.sharedIntermediate], innerLogical: arch.hidden,
-                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: weightBits, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".mlp.shared_expert.up_proj",
                                   outerShape: [arch.sharedIntermediate], innerLogical: arch.hidden,
-                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: weightBits, groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".mlp.shared_expert.down_proj",
                                   outerShape: [arch.hidden], innerLogical: arch.sharedIntermediate,
-                                  bits: 4, groupSize: arch.groupSize, into: &tensors, rng: &rng)
+                                  bits: weightBits, groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
             // Routed experts — stacked expert-major, 4-bit.
             appendQuantizedWeight(name: prefix + ".mlp.switch_mlp.gate_proj",
                                   outerShape: [arch.numExperts, arch.moeIntermediate],
-                                  innerLogical: arch.hidden, bits: 4,
+                                  innerLogical: arch.hidden, bits: weightBits,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".mlp.switch_mlp.up_proj",
                                   outerShape: [arch.numExperts, arch.moeIntermediate],
-                                  innerLogical: arch.hidden, bits: 4,
+                                  innerLogical: arch.hidden, bits: weightBits,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
             appendQuantizedWeight(name: prefix + ".mlp.switch_mlp.down_proj",
                                   outerShape: [arch.numExperts, arch.hidden],
-                                  innerLogical: arch.moeIntermediate, bits: 4,
+                                  innerLogical: arch.moeIntermediate, bits: weightBits,
                                   groupSize: arch.groupSize, into: &tensors, rng: &rng)
 
             // Plain pre-norm layer norms (no Gemma sandwich norms).
@@ -367,7 +369,7 @@ enum SyntheticSnapshot {
 
         // -- Write config.json with 8-bit overrides for the router + gate.
         var quant: [String: Any] = [
-            "bits": 4, "group_size": arch.groupSize, "mode": "affine"
+            "bits": weightBits, "group_size": arch.groupSize, "mode": "affine"
         ]
         for li in 0..<arch.numLayers {
             let prefix = "language_model.model.layers.\(li)"
@@ -435,9 +437,8 @@ enum SyntheticSnapshot {
                                               into tensors: inout [(String, String, [Int], [UInt8])],
                                               rng: inout SplitMix64) {
         precondition(innerLogical % groupSize == 0)
-        let factor = 32 / bits
-        precondition(innerLogical % factor == 0)
-        let innerSource = innerLogical / factor
+        precondition((innerLogical * bits).isMultiple(of: 32))
+        let innerSource = innerLogical * bits / 32
         let shape = outerShape + [innerSource]
         let elements = shape.reduce(1, *)
         var bytes = [UInt8](repeating: 0, count: elements * 4)

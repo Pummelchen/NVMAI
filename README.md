@@ -328,19 +328,19 @@ TurboFieldfare currently includes:
   OpenAI-compatible server, and native SwiftUI/AppKit Mac app with a one-shot
   local decode service
 
-Current scope is text-only inference from the pinned Gemma 4 26B-A4B
-instruction checkpoint on Apple Silicon Macs with at least 8 GB of RAM.
+Current scope is text-only inference from the pinned Gemma 4 26B-A4B and
+Qwen 3.6 35B-A3B MLX checkpoints on Apple Silicon Macs.
 
 ### Qwen 3.6 35B-A3B
 
 TurboFieldfare also runs
 [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) from the pinned
-`mlx-community/Qwen3.6-35B-A3B-4bit` checkpoint: a 40-layer hybrid of 30
+`mlx-community/Qwen3.6-35B-A3B-{4,6,8}bit` checkpoints: a 40-layer hybrid of 30
 gated-DeltaNet linear-attention layers and 10 gated full-attention layers,
 with 256 routed experts (top-8) plus a sigmoid-gated shared expert. Linear
 layers keep a fixed ~2 MiB recurrent state per layer instead of per-token KV,
 so only the 10 full-attention layers grow with context. The text-only install
-is about 19.5 GB; the vision tower is omitted.
+is about 19.5, 29.1, or 37.8 GB respectively; the vision tower is omitted.
 
 ```bash
 swift run -c release TurboFieldfareRepack \
@@ -352,7 +352,15 @@ swift run -c release TurboFieldfareCLI \
   --messages-file messages.json
 ```
 
-The Mac app selects Qwen with `TURBO_FIELDFARE_MODEL=qwen36` in the
+`qwen36` selects the tuned 4-bit path. Use `qwen36-6bit` or `qwen36-8bit`
+for the higher-precision variants and choose a matching output directory.
+Decode supports affine 4/6/8-bit weights throughout embedding, attention,
+DeltaNet, shared experts, routed experts, and the language-model head. The
+4-bit checkpoint uses tiled prefill; 6- and 8-bit prefill currently replays
+the decode kernels token by token for correctness.
+
+The Mac app selects Qwen with `TURBO_FIELDFARE_MODEL=qwen36`,
+`qwen36-6bit`, or `qwen36-8bit` in the
 environment; the server auto-detects the installed model and serves it as
 `qwen3.6-35b-a3b` with the ChatML template and Qwen tool-call format.
 

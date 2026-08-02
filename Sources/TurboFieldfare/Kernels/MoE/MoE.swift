@@ -56,21 +56,26 @@ final class MoE {
     /// FFN activation (false = gelu_pytorch_tanh, true = silu).
     init(context: MetalContext,
          siluActivation: Bool = false,
+         routedWeightBits: Int = 4,
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128) throws {
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
+        precondition([4, 6, 8].contains(routedWeightBits))
         let activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
             : []
+        let weightConstants = routedWeightBits == 4 ? [] : [
+            MetalFunctionConstant(index: 5, value: .uint32(UInt32(routedWeightBits)))
+        ]
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),
             MetalFunctionConstant(index: 2, value: .uint32(Self.realDecodeTopK)),
             MetalFunctionConstant(index: 3, value: .bool(true)),
-        ] + activationConstants
+        ] + activationConstants + weightConstants
         let routerConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 40, value: .uint32(specializedNumExperts)),
             MetalFunctionConstant(index: 41, value: .uint32(specializedD)),
@@ -90,26 +95,32 @@ final class MoE {
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8",
             constants: routerConstants)
+        let phase1Name = routedWeightBits == 4
+            ? "moe_phase1_gate_up_act_u16load" : "moe_affine_phase1_gate_up_act"
+        let phase1SubsetName = routedWeightBits == 4
+            ? "moe_phase1_gate_up_act_subset_u16load" : "moe_affine_phase1_gate_up_act_subset"
+        let phase2Name = routedWeightBits == 4
+            ? "moe_phase2_down_reduce_k8" : "moe_affine_phase2_down_reduce_k8"
         self.phase1U16PSO = try context.pipeline(
-            "moe_phase1_gate_up_act_u16load", constants: activationConstants)
+            phase1Name, constants: activationConstants + weightConstants)
         self.phase1U16SpecializedPSO = try context.pipeline(
-            "moe_phase1_gate_up_act_u16load",
+            phase1Name,
             constants: moeConstants)
         self.phase1SubsetU16PSO = try context.pipeline(
-            "moe_phase1_gate_up_act_subset_u16load", constants: activationConstants)
+            phase1SubsetName, constants: activationConstants + weightConstants)
         self.phase1SubsetU16SpecializedPSO = try context.pipeline(
-            "moe_phase1_gate_up_act_subset_u16load",
+            phase1SubsetName,
             constants: moeConstants)
-        self.phase2ReduceK8PSO = try context.pipeline("moe_phase2_down_reduce_k8")
+        self.phase2ReduceK8PSO = try context.pipeline(
+            phase2Name, constants: weightConstants)
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
-            "moe_phase2_down_reduce_k8",
+            phase2Name,
             constants: moeConstants)
 
         guard let logits = context.device.makeBuffer(
             length: 256 * MemoryLayout<Float>.stride,
             options: .storageModeShared),
-              let phase1Function = context.library.makeFunction(
-                name: "moe_phase1_gate_up_act_u16load") else {
+              let phase1Function = context.library.makeFunction(name: phase1Name) else {
             throw MetalError.noDevice
         }
         self.routerLogits = logits

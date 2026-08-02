@@ -287,7 +287,8 @@ enum RepackPlanner {
                         detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
                 }
                 let spec = IndexLoader.quantSpec(forTensor: name, meta: meta)
-                let logical = logicalShape(forPackedSource: weight.shape, bits: spec.bits)
+                let logical = logicalShape(forPackedSource: weight.shape,
+                                           scalesShape: scales.shape)
 
                 let wOff = fileCursor
                 let wSize = weight.sizeBytes
@@ -373,9 +374,10 @@ enum RepackPlanner {
 
             let spec = IndexLoader.quantSpec(forTensor: name, meta: meta)
             let perExpertSourceShape = Array(w.shape.dropFirst())
-            let logicalPerExpert = logicalShape(forPackedSource: perExpertSourceShape, bits: spec.bits)
             let scalesLogical = Array(s.shape.dropFirst())
             let biasesLogical = Array(b.shape.dropFirst())
+            let logicalPerExpert = logicalShape(forPackedSource: perExpertSourceShape,
+                                                scalesShape: scalesLogical)
 
             let wSlice = PerExpertTensorSlice(
                 role: role, component: "weights", dtype: 0,
@@ -428,12 +430,14 @@ enum RepackPlanner {
         return out
     }
 
-    /// Logical shape of a packed quantized tensor whose source is `[D0,..,Dn-1, Dn/factor]`.
-    private static func logicalShape(forPackedSource source: [UInt64], bits: Int) -> [UInt64] {
-        let factor = UInt64(32 / bits)
+    /// Logical shape of an MLX packed quantized tensor. The scale grid is
+    /// authoritative because six-bit values do not have an integral U32
+    /// packing factor.
+    private static func logicalShape(forPackedSource source: [UInt64],
+                                     scalesShape: [UInt64]) -> [UInt64] {
         guard !source.isEmpty else { return source }
         var out = source
-        out[out.count - 1] = source[source.count - 1] * factor
+        out[out.count - 1] = scalesShape.last! * 64
         return out
     }
 

@@ -10,7 +10,8 @@ import Foundation
 enum QwenToySynthetic {
 
     /// Build the toy directory in a temp dir and return its URL.
-    static func write() throws -> URL {
+    static func write(weightBits: Int = 4) throws -> URL {
+        precondition([4, 6, 8].contains(weightBits))
         let toy = ArchConfig.qwen36Toy()
         let la = toy.linearAttention
         let dir = FileManager.default.temporaryDirectory
@@ -30,13 +31,14 @@ enum QwenToySynthetic {
         let d = toy.hiddenSize
         let u16 = MemoryLayout<UInt16>.stride
 
-        func int4AffineSpec(_ name: String, rows: Int, cols: Int) -> ResidentSpec {
+        func affineSpec(_ name: String, rows: Int, cols: Int,
+                        bits: Int = weightBits) -> ResidentSpec {
             let groups = cols / Quantization.groupSize
             let auxBytes = UInt64(rows * groups * u16)
             return ResidentSpec(name: name,
                                 dtype: 0,
                                 shape: [UInt32(rows), UInt32(cols), 0, 0],
-                                weightBytes: UInt64(rows * cols / 2),
+                                weightBytes: UInt64(rows * cols * bits / 8),
                                 scaleBytes: auxBytes,
                                 biasBytes: auxBytes)
         }
@@ -63,9 +65,9 @@ enum QwenToySynthetic {
 
         // 1. Resident specs.
         var specs: [ResidentSpec] = [
-            int4AffineSpec("language_model.model.embed_tokens.weight",
+            affineSpec("language_model.model.embed_tokens.weight",
                            rows: toy.vocabSize, cols: d),
-            int4AffineSpec("language_model.lm_head.weight",
+            affineSpec("language_model.lm_head.weight",
                            rows: toy.vocabSize, cols: d),
             bf16Spec("language_model.model.norm.weight",
                      shape: [UInt32(d), 0, 0, 0], count: d),
@@ -80,22 +82,22 @@ enum QwenToySynthetic {
                                         rows: toy.numExperts, cols: d))
             specs.append(int8AffineSpec("\(prefix).mlp.shared_expert_gate.weight",
                                         rows: 1, cols: d))
-            specs.append(int8AffineSpec("\(prefix).mlp.shared_expert.gate_proj.weight",
+            specs.append(affineSpec("\(prefix).mlp.shared_expert.gate_proj.weight",
                                         rows: toy.intermediateSize, cols: d))
-            specs.append(int8AffineSpec("\(prefix).mlp.shared_expert.up_proj.weight",
+            specs.append(affineSpec("\(prefix).mlp.shared_expert.up_proj.weight",
                                         rows: toy.intermediateSize, cols: d))
-            specs.append(int8AffineSpec("\(prefix).mlp.shared_expert.down_proj.weight",
+            specs.append(affineSpec("\(prefix).mlp.shared_expert.down_proj.weight",
                                         rows: d, cols: toy.intermediateSize))
             if toy.layerIsLinear(L) {
-                specs.append(int4AffineSpec("\(prefix).linear_attn.in_proj_qkv.weight",
+                specs.append(affineSpec("\(prefix).linear_attn.in_proj_qkv.weight",
                                             rows: la.qkvDim, cols: d))
-                specs.append(int4AffineSpec("\(prefix).linear_attn.in_proj_z.weight",
+                specs.append(affineSpec("\(prefix).linear_attn.in_proj_z.weight",
                                             rows: la.valueDim, cols: d))
-                specs.append(int4AffineSpec("\(prefix).linear_attn.in_proj_a.weight",
+                specs.append(affineSpec("\(prefix).linear_attn.in_proj_a.weight",
                                             rows: la.numVHeads, cols: d))
-                specs.append(int4AffineSpec("\(prefix).linear_attn.in_proj_b.weight",
+                specs.append(affineSpec("\(prefix).linear_attn.in_proj_b.weight",
                                             rows: la.numVHeads, cols: d))
-                specs.append(int4AffineSpec("\(prefix).linear_attn.out_proj.weight",
+                specs.append(affineSpec("\(prefix).linear_attn.out_proj.weight",
                                             rows: d, cols: la.valueDim))
                 specs.append(bf16Spec("\(prefix).linear_attn.conv1d.weight",
                                       shape: [UInt32(la.qkvDim), UInt32(la.convKernelSize), 1, 0],
@@ -112,13 +114,13 @@ enum QwenToySynthetic {
             } else {
                 let qDim = toy.numHeads * toy.fullHeadDim
                 let kvDim = toy.numFullKVHeads * toy.fullHeadDim
-                specs.append(int4AffineSpec("\(prefix).self_attn.q_proj.weight",
+                specs.append(affineSpec("\(prefix).self_attn.q_proj.weight",
                                             rows: 2 * qDim, cols: d))
-                specs.append(int4AffineSpec("\(prefix).self_attn.k_proj.weight",
+                specs.append(affineSpec("\(prefix).self_attn.k_proj.weight",
                                             rows: kvDim, cols: d))
-                specs.append(int4AffineSpec("\(prefix).self_attn.v_proj.weight",
+                specs.append(affineSpec("\(prefix).self_attn.v_proj.weight",
                                             rows: kvDim, cols: d))
-                specs.append(int4AffineSpec("\(prefix).self_attn.o_proj.weight",
+                specs.append(affineSpec("\(prefix).self_attn.o_proj.weight",
                                             rows: d, cols: qDim))
                 specs.append(bf16Spec("\(prefix).self_attn.q_norm.weight",
                                       shape: [UInt32(toy.fullHeadDim), 0, 0, 0],
@@ -237,11 +239,16 @@ enum QwenToySynthetic {
                                                    expert: expert, role: role)
                 let quantized = projectionRows.map { Quantization.quantizeInt4Affine($0) }
                 let packedOffset = bytes.count
-                for row in quantized { bytes.append(contentsOf: row.packed) }
+                if weightBits == 4 {
+                    for row in quantized { bytes.append(contentsOf: row.packed) }
+                } else {
+                    bytes += [UInt8](repeating: 0x11,
+                                     count: rows * cols * weightBits / 8)
+                }
                 tensors[prefix] = [
                     "offset": packedOffset, "size": bytes.count - packedOffset,
                     "dtype": "U32", "shape": [rows, cols],
-                    "bits": 4,
+                    "bits": weightBits,
                 ]
                 let scalesOffset = bytes.count
                 for row in quantized { appendU16(row.scales, to: &bytes) }
@@ -263,7 +270,8 @@ enum QwenToySynthetic {
             return (bytes, tensors)
         }
 
-        let expertStride: UInt64 = 16384
+        let sampleExpertBytes = toyExpertBlob(expert: 0).bytes.count
+        let expertStride = UInt64(((sampleExpertBytes + 16_383) / 16_384) * 16_384)
         let layerBytes = Int(expertStride) * toy.numExperts
         for L in 0..<toy.numLayers {
             var payload = Data(count: layerBytes)
@@ -361,8 +369,15 @@ enum QwenToySynthetic {
             "versionMajor": 1,
             "versionMinor": 0,
             "flags": ["streamingPresent": true, "turboQuantKV": false, "aneSharedExpert": false],
-            "modelID": "qwen-toy",
+            "modelID": "qwen-toy-\(weightBits)bit",
             "arch": archDict,
+            "quant": [
+                "embedding": quantSlot(weightBits),
+                "attention": quantSlot(weightBits),
+                "router": quantSlot(8),
+                "sharedExpert": quantSlot(weightBits),
+                "routedExpert": quantSlot(weightBits),
+            ],
             "files": files,
             "expertsPerLayer": toy.numExperts,
             "numLayers": toy.numLayers,
@@ -372,6 +387,11 @@ enum QwenToySynthetic {
             options: [.sortedKeys, .withoutEscapingSlashes])
         try manifestData.write(to: dir.appendingPathComponent("manifest.json"))
         return dir
+    }
+
+    private static func quantSlot(_ bits: Int) -> [String: Any] {
+        ["weightBits": bits, "scheme": "affine", "scaleType": "bf16",
+         "biasType": "bf16", "groupSize": Quantization.groupSize]
     }
 }
 

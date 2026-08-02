@@ -149,8 +149,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     // Kernels
     private let embedInt4: EmbedLookupInt4
+    private let affineEmbed: AffineQuantEmbeddingLookup?
     private let rms: RMSNorm
     private let int4: DequantInt4GEMV
+    private let affine: AffineQuantGEMV?
     private let attention: Attention
     private let shared: SharedExpertRuntime
     private let moe: MoE
@@ -258,6 +260,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.cfg = model.config
         self.maxContext = maxContext
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
+            && model.embeddingWeightBits == 4
+            && model.attentionWeightBits == 4
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -276,16 +280,23 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         let silu = cfg.hiddenActivation == "silu"
         self.embedInt4 = try EmbedLookupInt4(context: context)
+        self.affineEmbed = model.embeddingWeightBits == 4 ? nil
+            : try AffineQuantEmbeddingLookup(context: context,
+                                             weightBits: model.embeddingWeightBits)
         self.rms       = try RMSNorm(context: context)
         self.int4      = try DequantInt4GEMV(
             context: context,
             additionalShapes: cfg.decodeInt4GEMVShapes)
+        self.affine = model.attentionWeightBits == 4 ? nil
+            : try AffineQuantGEMV(context: context,
+                                  weightBits: model.attentionWeightBits)
         self.attention = try Attention(context: context)
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
                                                   siluActivation: silu)
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
+                                 routedWeightBits: model.routedExpertWeightBits,
                                  specializedD: UInt32(cfg.hiddenSize),
                                  specializedF: UInt32(cfg.moeIntermediateSize),
                                  specializedNumExperts: UInt32(cfg.numExperts))
@@ -622,6 +633,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
+        }
+
+        // The tiled prefill stack is deliberately optimized around INT4.
+        // Six- and eight-bit Qwen checkpoints replay decode for correctness;
+        // this preserves all recurrent/KV state semantics without interpreting
+        // their packed weights as INT4.
+        if model.attentionWeightBits != 4 {
+            for (offset, token) in tokens.enumerated() {
+                let isLast = offset == tokens.count - 1
+                try await produceToken(token: token,
+                                       position: startPosition + offset,
+                                       into: logits,
+                                       emitHead: isLast,
+                                       outputMode: isLast ? outputMode : .logits)
+                onProgress(offset + 1)
+            }
+            return PrefillResult(newPosition: startPosition + tokens.count,
+                                 seed: .logitsWritten)
         }
 
         let scratch = try ensurePrefillScratch(config: config)
@@ -1675,7 +1704,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let emb = model.embedding
         do {
             runSync { cb in
-                embedInt4.encode(commandBuffer: cb,
+                if let affineEmbed {
+                    affineEmbed.encode(commandBuffer: cb,
+                                 table: emb.buffer, tableOffset: Int(emb.offset),
+                                 scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                                 biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                                 out: hidden, tokenId: UInt32(bitPattern: token),
+                                 d: D, outScale: embedOutScale)
+                } else {
+                    embedInt4.encode(commandBuffer: cb,
                                  table:  emb.buffer, tableOffset:  Int(emb.offset),
                                  scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
                                  biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
@@ -1683,6 +1720,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  tokenId: UInt32(bitPattern: token),
                                  d: D,
                                  outScale: embedOutScale)
+                }
             }
         }
 
@@ -2128,7 +2166,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  out: self.normed, d: D, eps: eps)
         }
         let gLmHead: (MTLCommandBuffer) -> Void = { cb in
-            self.int4.encode(commandBuffer: cb,
+            self.encodePrimaryGEMV(commandBuffer: cb,
                              weights: lm.buffer, weightsOffset: Int(lm.offset),
                              scales:  lm.buffer, scalesOffset:  Int(lm.scaleOffset),
                              biases:  lm.buffer, biasesOffset:  Int(lm.biasOffset),
@@ -2187,13 +2225,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         // One dispatch over the concatenated qkv/z/a/b row space instead of four
         // separate GEMVs (a and b were 4 threadgroups each).
-        gdn.encodeInputProjections(commandBuffer: cb,
+        if model.attentionWeightBits == 4 {
+            gdn.encodeInputProjections(commandBuffer: cb,
                                    x: normed,
                                    qkv: qkvW, qkvOut: gdnQKVRaw,
                                    z: zW, zOut: gdnZ,
                                    a: aW, aOut: gdnA,
                                    b: bW, bOut: gdnB,
                                    hiddenSize: cfg.hiddenSize)
+        } else {
+            encodePrimaryGEMV(commandBuffer: cb, projection: qkvW,
+                              x: normed, y: gdnQKVRaw,
+                              m: UInt32(la.qkvDim), n: D)
+            encodePrimaryGEMV(commandBuffer: cb, projection: zW,
+                              x: normed, y: gdnZ,
+                              m: UInt32(la.valueDim), n: D)
+            encodePrimaryGEMV(commandBuffer: cb, projection: aW,
+                              x: normed, y: gdnA,
+                              m: UInt32(la.numVHeads), n: D)
+            encodePrimaryGEMV(commandBuffer: cb, projection: bW,
+                              x: normed, y: gdnB,
+                              m: UInt32(la.numVHeads), n: D)
+        }
 
         gdn.encodeConvDecode(commandBuffer: cb,
                              tail: gdnState.convTailBuffer(layer: L),
@@ -2216,7 +2269,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             weight: gatedNormW.buffer,
                             weightOffset: Int(gatedNormW.offset),
                             out: gdnOut)
-        int4.encode(commandBuffer: cb,
+        encodePrimaryGEMV(commandBuffer: cb,
                     weights: outW.buffer, weightsOffset: Int(outW.offset),
                     scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),
                     biases: outW.buffer, biasesOffset: Int(outW.biasOffset),
@@ -2253,7 +2306,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let kNormW = try model.kNorm(layer: L)
         let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
 
-        fusedQKVGEMV.encode(commandBuffer: cb,
+        if model.attentionWeightBits == 4 {
+            fusedQKVGEMV.encode(commandBuffer: cb,
                             qWeights: q.buffer, qWeightsOffset: Int(q.offset),
                             qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
                             qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
@@ -2270,6 +2324,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             qRows: 2 * qDim,
                             kvRows: kvDim,
                             n: D)
+        } else {
+            encodePrimaryGEMV(commandBuffer: cb, projection: q,
+                              x: normed, y: qPackedScratch,
+                              m: 2 * qDim, n: D)
+            encodePrimaryGEMV(commandBuffer: cb, projection: k,
+                              x: normed, y: kSlot.buffer,
+                              yOffset: kSlot.offset, m: kvDim, n: D)
+            encodePrimaryGEMV(commandBuffer: cb, projection: v,
+                              x: normed, y: vSlot.buffer,
+                              yOffset: vSlot.offset, m: kvDim, n: D)
+        }
         elementwise.encodeSplitQGate(commandBuffer: cb,
                                      packed: qPackedScratch,
                                      q: qScratch,
@@ -2321,11 +2386,48 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          out: attnOut,
                                          gate: attnGateScratch,
                                          count: Int(qDim))
-        int4.encode(commandBuffer: cb,
+        encodePrimaryGEMV(commandBuffer: cb,
                     weights: o.buffer, weightsOffset: Int(o.offset),
                     scales: o.buffer, scalesOffset: Int(o.scaleOffset),
                     biases: o.buffer, biasesOffset: Int(o.biasOffset),
                     x: attnOut, y: oOut, m: D, n: qDim)
+    }
+
+    private func encodePrimaryGEMV(commandBuffer cb: MTLCommandBuffer,
+                                   projection p: TensorView,
+                                   x: MTLBuffer, xOffset: Int = 0,
+                                   y: MTLBuffer, yOffset: Int = 0,
+                                   m: UInt32, n: UInt32) {
+        encodePrimaryGEMV(commandBuffer: cb,
+                          weights: p.buffer, weightsOffset: Int(p.offset),
+                          scales: p.buffer, scalesOffset: Int(p.scaleOffset),
+                          biases: p.buffer, biasesOffset: Int(p.biasOffset),
+                          x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                          m: m, n: n)
+    }
+
+    private func encodePrimaryGEMV(commandBuffer cb: MTLCommandBuffer,
+                                   weights: MTLBuffer, weightsOffset: Int,
+                                   scales: MTLBuffer, scalesOffset: Int,
+                                   biases: MTLBuffer, biasesOffset: Int,
+                                   x: MTLBuffer, xOffset: Int = 0,
+                                   y: MTLBuffer, yOffset: Int = 0,
+                                   m: UInt32, n: UInt32) {
+        if let affine {
+            affine.encode(commandBuffer: cb,
+                          weights: weights, weightsOffset: weightsOffset,
+                          scales: scales, scalesOffset: scalesOffset,
+                          biases: biases, biasesOffset: biasesOffset,
+                          x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                          m: m, n: n)
+        } else {
+            int4.encode(commandBuffer: cb,
+                        weights: weights, weightsOffset: weightsOffset,
+                        scales: scales, scalesOffset: scalesOffset,
+                        biases: biases, biasesOffset: biasesOffset,
+                        x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                        m: m, n: n)
+        }
     }
 
     private func runSync(_ body: (MTLCommandBuffer) -> Void) {

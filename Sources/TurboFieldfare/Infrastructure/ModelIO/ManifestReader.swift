@@ -146,7 +146,7 @@ public enum ManifestReader {
         }
         try validateArch(m.arch, expected: expected)
         if let quant = m.quant {
-            try validateQuant(quant)
+            try validateQuant(quant, family: expected.family)
         } else if isProductionArch(expected) {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
         }
@@ -179,13 +179,25 @@ public enum ManifestReader {
         return false
     }
 
-    private static func validateQuant(_ quant: ManifestQuant) throws {
+    private static func validateQuant(_ quant: ManifestQuant,
+                                      family: ModelFamily) throws {
+        if family == .qwen36 {
+            let baseBits = quant.embedding.weightBits
+            guard [4, 6, 8].contains(baseBits),
+                  quant.attention.weightBits == baseBits,
+                  quant.sharedExpert.weightBits == baseBits,
+                  quant.routedExpert.weightBits == baseBits,
+                  quant.router.weightBits == 8 else {
+                throw ModelError.indexCorrupt(
+                    detail: "Qwen 3.6 requires consistent 4-, 6-, or 8-bit base weights and an 8-bit router")
+            }
+        }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, [4]),
-            ("attention", quant.attention, [4]),
+            ("embedding", quant.embedding, family == .qwen36 ? [4, 6, 8] : [4]),
+            ("attention", quant.attention, family == .qwen36 ? [4, 6, 8] : [4]),
             ("router", quant.router, [8]),
-            ("sharedExpert", quant.sharedExpert, [4, 8]),
-            ("routedExpert", quant.routedExpert, [4]),
+            ("sharedExpert", quant.sharedExpert, family == .qwen36 ? [4, 6, 8] : [4, 8]),
+            ("routedExpert", quant.routedExpert, family == .qwen36 ? [4, 6, 8] : [4]),
         ]
         for (name, slot, allowedBits) in slots {
             guard allowedBits.contains(slot.weightBits),

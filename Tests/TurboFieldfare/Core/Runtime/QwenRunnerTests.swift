@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import Metal
 @testable import TurboFieldfare
+import TurboFieldfareValidationSupport
 
 /// Qwen 3.6 runtime integration: runner construction against the qwen toy
 /// fixture (no Gemma sandwich tensors present — init must not touch them),
@@ -9,8 +10,8 @@ import Metal
 /// and the KV-cache + GDN-state reset interplay.
 @Suite struct QwenRunnerTests {
 
-    private func makeRunner() throws -> (URL, MetalContext, RealForwardRunner) {
-        let dir = try QwenToySynthetic.write()
+    private func makeRunner(weightBits: Int = 4) throws -> (URL, MetalContext, RealForwardRunner) {
+        let dir = try QwenToySynthetic.write(weightBits: weightBits)
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir,
                                    device: ctx.device,
@@ -19,6 +20,24 @@ import Metal
                                            context: ctx,
                                            maxContext: 64)
         return (dir, ctx, runner)
+    }
+
+    @Test(arguments: [6, 8])
+    func decodeAndScalarPrefillSupportHigherBitCheckpoints(bits: Int) async throws {
+        let (dir, ctx, runner) = try makeRunner(weightBits: bits)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(!runner.usesFusedGreedyHead)
+        let logits = try makeLogits(ctx, vocab: 1024)
+        let tokens: [Int32] = [1, 2]
+        let result = try await runner.prefillChunked(
+            tokens: tokens[...], startPosition: 0, outputMode: .logits,
+            config: .production(chunkTokens: 32), into: logits,
+            onProgress: { _ in })
+        #expect(result == PrefillResult(newPosition: 2, seed: .logitsWritten))
+        try await runner.produce(token: 3, position: 2, into: logits)
+        #expect(runner.continuationPosition == 3)
+        let values = Fp16Buffer.read(logits, count: 1024)
+        #expect(values.allSatisfy { $0.isFinite })
     }
 
     private func makeLogits(_ ctx: MetalContext, vocab: Int) throws -> MTLBuffer {

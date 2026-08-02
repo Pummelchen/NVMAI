@@ -31,7 +31,12 @@ public enum AppModelInstallationProbe {
             // Validate the checkpoint against the descriptor for the family the
             // manifest itself declares, so the probe does not depend on which
             // model the app happens to have selected.
-            guard let expected = descriptor
+            let sourceMatched = manifest.sourceSnapshotHash.flatMap { hash in
+                AppModelInstallDescriptor.all.first {
+                    hash == "sha256:" + $0.sourceIndexSHA256
+                }
+            }
+            guard let expected = descriptor ?? sourceMatched
                     ?? AppModelInstallDescriptor.descriptor(for: family) else {
                 return .partial("no descriptor for family \(family.rawValue)")
             }

@@ -87,6 +87,15 @@ import TurboFieldfareRepackCore
     #expect(descriptor.requiredFreeBytes == 15_432_772_572)
   }
 
+  @Test func qwenQuantDescriptorsArePinnedAndDistinct() {
+    #expect(AppModelInstallDescriptor.qwen36.installDirectoryName == "qwen36.gturbo")
+    #expect(AppModelInstallDescriptor.qwen36_6bit.installDirectoryName == "qwen36-6bit.gturbo")
+    #expect(AppModelInstallDescriptor.qwen36_8bit.installDirectoryName == "qwen36-8bit.gturbo")
+    #expect(Set(AppModelInstallDescriptor.all.map(\.sourceIndexSHA256)).count == 4)
+    #expect(AppModelInstallDescriptor.qwen36_6bit.repoID.hasSuffix("-6bit"))
+    #expect(AppModelInstallDescriptor.qwen36_8bit.repoID.hasSuffix("-8bit"))
+  }
+
   @MainActor
   @Test func insufficientSpaceDisablesInstallAndExposesShortfall() {
     let requirement = AppModelInstallRequirement(
