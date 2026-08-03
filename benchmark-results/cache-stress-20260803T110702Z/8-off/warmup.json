@@ -1,0 +1,17 @@
+{
+  "content": "actor, async, await, Task, TaskGroup",
+  "content_sha256": "d1e5a65e403a75e7b94312f613cfac778f05f2b474e24a56b39612cc42636d6f",
+  "finish_reason": "stop",
+  "prompt_tokens": 71,
+  "cached_tokens": 0,
+  "computed_prompt_tokens": 71,
+  "completion_tokens": 11,
+  "total_tokens": 82,
+  "wall_seconds": 18.68620950001059,
+  "ttft_seconds": 16.7488437910215,
+  "decode_window_seconds": 1.7622321249800734,
+  "server_finalize_seconds": 0.1751335840090178,
+  "decode_tokens_per_second": 5.674621327263044,
+  "end_to_end_output_tokens_per_second": 0.5886694142005507,
+  "approx_computed_prefill_tokens_per_second": 4.239098584110072
+}

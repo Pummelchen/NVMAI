@@ -1,0 +1,439 @@
+SKIP 6-off; 30 completed requests already recorded
+START 6-on warmup
+START 6-on measured
+6bit cache=on request=1/30 conversation=1 turn=0 prompt=94 cached=0 completion=113 wall=34.90s ttft=15.07s decode=5.74 tok/s
+6bit cache=on request=2/30 conversation=2 turn=0 prompt=88 cached=0 completion=77 wall=17.34s ttft=5.30s decode=6.53 tok/s
+6bit cache=on request=3/30 conversation=3 turn=0 prompt=91 cached=0 completion=67 wall=17.05s ttft=5.56s decode=5.92 tok/s
+6bit cache=on request=4/30 conversation=4 turn=0 prompt=91 cached=0 completion=128 wall=27.65s ttft=5.59s decode=5.80 tok/s
+6bit cache=on request=5/30 conversation=5 turn=0 prompt=89 cached=0 completion=63 wall=16.03s ttft=5.59s decode=6.15 tok/s
+6bit cache=on request=6/30 conversation=6 turn=0 prompt=92 cached=0 completion=61 wall=15.83s ttft=5.69s decode=6.15 tok/s
+6bit cache=on request=7/30 conversation=7 turn=0 prompt=89 cached=0 completion=35 wall=11.28s ttft=5.38s decode=6.10 tok/s
+6bit cache=on request=8/30 conversation=8 turn=0 prompt=91 cached=0 completion=64 wall=15.93s ttft=5.54s decode=6.26 tok/s
+6bit cache=on request=9/30 conversation=9 turn=0 prompt=90 cached=0 completion=70 wall=16.70s ttft=5.46s decode=6.39 tok/s
+6bit cache=on request=10/30 conversation=10 turn=0 prompt=88 cached=0 completion=77 wall=18.24s ttft=5.61s decode=6.21 tok/s
+6bit cache=on request=11/30 conversation=10 turn=1 prompt=199 cached=164 completion=128 wall=26.32s ttft=3.54s decode=5.61 tok/s
+6bit cache=on request=12/30 conversation=9 turn=1 prompt=189 cached=159 completion=78 wall=18.74s ttft=3.91s decode=5.34 tok/s
+6bit cache=on request=13/30 conversation=8 turn=1 prompt=188 cached=154 completion=52 wall=13.01s ttft=3.57s decode=5.60 tok/s
+6bit cache=on request=14/30 conversation=7 turn=1 prompt=155 cached=123 completion=49 wall=11.51s ttft=3.18s decode=6.04 tok/s
+6bit cache=on request=15/30 conversation=6 turn=1 prompt=184 cached=152 completion=54 wall=14.66s ttft=3.60s decode=4.97 tok/s
+6bit cache=on request=16/30 conversation=5 turn=1 prompt=185 cached=151 completion=67 wall=15.10s ttft=3.60s decode=5.95 tok/s
+6bit cache=on request=17/30 conversation=4 turn=1 prompt=248 cached=218 completion=128 wall=31.46s ttft=4.00s decode=4.65 tok/s
+6bit cache=on request=18/30 conversation=3 turn=1 prompt=194 cached=157 completion=65 wall=15.41s ttft=3.97s decode=5.77 tok/s
+6bit cache=on request=19/30 conversation=2 turn=1 prompt=197 cached=164 completion=102 wall=23.44s ttft=3.63s decode=5.20 tok/s
+6bit cache=on request=20/30 conversation=1 turn=1 prompt=239 cached=206 completion=57 wall=15.60s ttft=3.78s decode=4.88 tok/s
+6bit cache=on request=21/30 conversation=1 turn=2 prompt=327 cached=295 completion=117 wall=25.37s ttft=3.60s decode=5.43 tok/s
+6bit cache=on request=22/30 conversation=2 turn=2 prompt=331 cached=298 completion=44 wall=12.15s ttft=3.68s decode=5.27 tok/s
+6bit cache=on request=23/30 conversation=3 turn=2 prompt=290 cached=258 completion=69 wall=16.86s ttft=3.66s decode=5.34 tok/s
+6bit cache=on request=24/30 conversation=4 turn=2 prompt=409 cached=375 completion=75 wall=18.05s ttft=3.92s decode=5.51 tok/s
+6bit cache=on request=25/30 conversation=5 turn=2 prompt=284 cached=251 completion=64 wall=14.62s ttft=3.74s decode=5.99 tok/s
+6bit cache=on request=26/30 conversation=6 turn=2 prompt=268 cached=237 completion=64 wall=16.21s ttft=4.17s decode=5.46 tok/s
+6bit cache=on request=27/30 conversation=7 turn=2 prompt=235 cached=203 completion=60 wall=15.08s ttft=4.08s decode=5.64 tok/s
+6bit cache=on request=28/30 conversation=8 turn=2 prompt=270 cached=239 completion=39 wall=11.60s ttft=4.21s decode=5.41 tok/s
+6bit cache=on request=29/30 conversation=9 turn=2 prompt=295 cached=266 completion=94 wall=20.71s ttft=4.06s decode=5.74 tok/s
+6bit cache=on request=30/30 conversation=10 turn=2 prompt=358 cached=326 completion=56 wall=14.97s ttft=3.92s decode=5.21 tok/s
+DONE 6-on
+START 8-on warmup
+START 8-on measured
+8bit cache=on request=1/30 conversation=1 turn=0 prompt=94 cached=0 completion=117 wall=44.89s ttft=20.70s decode=4.86 tok/s
+8bit cache=on request=2/30 conversation=2 turn=0 prompt=88 cached=0 completion=111 wall=24.71s ttft=6.37s decode=6.12 tok/s
+8bit cache=on request=3/30 conversation=3 turn=0 prompt=91 cached=0 completion=69 wall=20.11s ttft=6.76s decode=5.25 tok/s
+8bit cache=on request=4/30 conversation=4 turn=0 prompt=91 cached=0 completion=128 wall=30.75s ttft=6.48s decode=5.25 tok/s
+8bit cache=on request=5/30 conversation=5 turn=0 prompt=89 cached=0 completion=70 wall=20.18s ttft=6.61s decode=5.23 tok/s
+8bit cache=on request=6/30 conversation=6 turn=0 prompt=92 cached=0 completion=63 wall=19.30s ttft=7.00s decode=5.14 tok/s
+8bit cache=on request=7/30 conversation=7 turn=0 prompt=89 cached=0 completion=86 wall=25.46s ttft=6.72s decode=4.64 tok/s
+8bit cache=on request=8/30 conversation=8 turn=0 prompt=91 cached=0 completion=63 wall=18.94s ttft=6.51s decode=5.17 tok/s
+8bit cache=on request=9/30 conversation=9 turn=0 prompt=90 cached=0 completion=124 wall=29.38s ttft=6.75s decode=5.54 tok/s
+8bit cache=on request=10/30 conversation=10 turn=0 prompt=88 cached=0 completion=77 wall=18.69s ttft=6.69s decode=6.54 tok/s
+8bit cache=on request=11/30 conversation=10 turn=1 prompt=199 cached=164 completion=128 wall=31.11s ttft=4.23s decode=4.75 tok/s
+8bit cache=on request=12/30 conversation=9 turn=1 prompt=243 cached=213 completion=106 wall=26.10s ttft=4.22s decode=4.89 tok/s
+8bit cache=on request=13/30 conversation=8 turn=1 prompt=187 cached=153 completion=61 wall=15.57s ttft=4.06s decode=5.35 tok/s
+8bit cache=on request=14/30 conversation=7 turn=1 prompt=206 cached=174 completion=71 wall=17.68s ttft=3.96s decode=5.25 tok/s
+8bit cache=on request=15/30 conversation=6 turn=1 prompt=186 cached=154 completion=57 wall=16.58s ttft=4.33s decode=4.75 tok/s
+8bit cache=on request=16/30 conversation=5 turn=1 prompt=192 cached=158 completion=70 wall=17.39s ttft=4.31s decode=5.46 tok/s
+8bit cache=on request=17/30 conversation=4 turn=1 prompt=248 cached=218 completion=128 wall=34.93s ttft=4.39s decode=4.18 tok/s
+8bit cache=on request=18/30 conversation=3 turn=1 prompt=196 cached=159 completion=76 wall=17.12s ttft=4.45s decode=6.11 tok/s
+8bit cache=on request=19/30 conversation=2 turn=1 prompt=231 cached=198 completion=81 wall=19.20s ttft=4.36s decode=5.54 tok/s
+8bit cache=on request=20/30 conversation=1 turn=1 prompt=243 cached=210 completion=69 wall=18.11s ttft=4.28s decode=5.05 tok/s
+8bit cache=on request=21/30 conversation=1 turn=2 prompt=343 cached=311 completion=128 wall=30.97s ttft=4.23s decode=4.77 tok/s
+8bit cache=on request=22/30 conversation=2 turn=2 prompt=344 cached=311 completion=49 wall=14.57s ttft=4.39s decode=4.86 tok/s
+8bit cache=on request=23/30 conversation=3 turn=2 prompt=303 cached=271 completion=57 wall=16.37s ttft=4.26s decode=4.83 tok/s
+8bit cache=on request=24/30 conversation=4 turn=2 prompt=409 cached=375 completion=77 wall=20.87s ttft=4.61s decode=4.76 tok/s
+8bit cache=on request=25/30 conversation=5 turn=2 prompt=294 cached=261 completion=81 wall=18.99s ttft=4.31s decode=5.67 tok/s
+8bit cache=on request=26/30 conversation=6 turn=2 prompt=273 cached=242 completion=56 wall=14.64s ttft=4.60s decode=5.74 tok/s
+8bit cache=on request=27/30 conversation=7 turn=2 prompt=308 cached=276 completion=90 wall=21.85s ttft=4.17s decode=5.19 tok/s
+8bit cache=on request=28/30 conversation=8 turn=2 prompt=278 cached=247 completion=69 wall=17.46s ttft=4.40s decode=5.43 tok/s
+8bit cache=on request=29/30 conversation=9 turn=2 prompt=377 cached=348 completion=72 wall=18.37s ttft=4.26s decode=5.19 tok/s
+8bit cache=on request=30/30 conversation=10 turn=2 prompt=358 cached=326 completion=57 wall=14.65s ttft=4.36s decode=5.65 tok/s
+DONE 8-on
+START 8-off warmup
+START 8-off measured
+8bit cache=off request=1/30 conversation=1 turn=0 prompt=94 cached=0 completion=117 wall=36.98s ttft=16.91s decode=5.84 tok/s
+8bit cache=off request=2/30 conversation=2 turn=0 prompt=88 cached=0 completion=111 wall=23.99s ttft=6.57s decode=6.39 tok/s
+8bit cache=off request=3/30 conversation=3 turn=0 prompt=91 cached=0 completion=69 wall=20.41s ttft=6.92s decode=5.15 tok/s
+8bit cache=off request=4/30 conversation=4 turn=0 prompt=91 cached=0 completion=128 wall=29.22s ttft=6.43s decode=5.57 tok/s
+8bit cache=off request=5/30 conversation=5 turn=0 prompt=89 cached=0 completion=70 wall=18.82s ttft=6.57s decode=5.71 tok/s
+8bit cache=off request=6/30 conversation=6 turn=0 prompt=92 cached=0 completion=63 wall=17.97s ttft=6.76s decode=5.60 tok/s
+8bit cache=off request=7/30 conversation=7 turn=0 prompt=89 cached=0 completion=86 wall=24.15s ttft=6.41s decode=4.86 tok/s
+8bit cache=off request=8/30 conversation=8 turn=0 prompt=91 cached=0 completion=63 wall=18.34s ttft=6.49s decode=5.38 tok/s
+8bit cache=off request=9/30 conversation=9 turn=0 prompt=90 cached=0 completion=124 wall=28.20s ttft=6.45s decode=5.73 tok/s
+8bit cache=off request=10/30 conversation=10 turn=0 prompt=88 cached=0 completion=77 wall=18.54s ttft=6.55s decode=6.47 tok/s
+8bit cache=off request=11/30 conversation=10 turn=1 prompt=195 cached=0 completion=128 wall=33.94s ttft=9.12s decode=5.12 tok/s
+8bit cache=off request=12/30 conversation=9 turn=1 prompt=239 cached=0 completion=124 wall=36.41s ttft=9.94s decode=4.70 tok/s
+8bit cache=off request=13/30 conversation=8 turn=1 prompt=183 cached=0 completion=69 wall=21.66s ttft=8.25s decode=5.22 tok/s
+8bit cache=off request=14/30 conversation=7 turn=1 prompt=202 cached=0 completion=59 wall=19.84s ttft=9.21s decode=5.55 tok/s
+8bit cache=off request=15/30 conversation=6 turn=1 prompt=182 cached=0 completion=77 wall=23.91s ttft=8.42s decode=5.01 tok/s
+8bit cache=off request=16/30 conversation=5 turn=1 prompt=188 cached=0 completion=53 wall=18.29s ttft=8.43s decode=5.47 tok/s
+8bit cache=off request=17/30 conversation=4 turn=1 prompt=244 cached=0 completion=128 wall=39.89s ttft=10.47s decode=4.32 tok/s
+8bit cache=off request=18/30 conversation=3 turn=1 prompt=192 cached=0 completion=69 wall=19.59s ttft=8.75s decode=6.43 tok/s
+8bit cache=off request=19/30 conversation=2 turn=1 prompt=227 cached=0 completion=81 wall=23.30s ttft=9.37s decode=5.85 tok/s
+8bit cache=off request=20/30 conversation=1 turn=1 prompt=239 cached=0 completion=75 wall=22.99s ttft=9.65s decode=5.63 tok/s
+8bit cache=off request=21/30 conversation=1 turn=2 prompt=341 cached=0 completion=57 wall=23.41s ttft=10.70s decode=4.53 tok/s
+8bit cache=off request=22/30 conversation=2 turn=2 prompt=336 cached=0 completion=60 wall=21.88s ttft=10.55s decode=5.26 tok/s
+8bit cache=off request=23/30 conversation=3 turn=2 prompt=288 cached=0 completion=56 wall=20.87s ttft=9.88s decode=5.19 tok/s
+8bit cache=off request=24/30 conversation=4 turn=2 prompt=401 cached=0 completion=63 wall=24.24s ttft=11.49s decode=4.98 tok/s
+8bit cache=off request=25/30 conversation=5 turn=2 prompt=269 cached=0 completion=89 wall=25.12s ttft=8.94s decode=5.57 tok/s
+8bit cache=off request=26/30 conversation=6 turn=2 prompt=285 cached=0 completion=70 wall=22.63s ttft=9.96s decode=5.60 tok/s
+8bit cache=off request=27/30 conversation=7 turn=2 prompt=288 cached=0 completion=55 wall=19.42s ttft=9.67s decode=5.62 tok/s
+8bit cache=off request=28/30 conversation=8 turn=2 prompt=278 cached=0 completion=71 wall=21.97s ttft=9.45s decode=5.75 tok/s
+8bit cache=off request=29/30 conversation=9 turn=2 prompt=387 cached=0 completion=126 wall=40.62s ttft=11.30s decode=4.30 tok/s
+8bit cache=off request=30/30 conversation=10 turn=2 prompt=350 cached=0 completion=56 wall=21.43s ttft=11.00s decode=5.45 tok/s
+DONE 8-off
+{
+  "configuration": {
+    "6-off": {
+      "requests": 30,
+      "prompt_tokens": 5882,
+      "cached_tokens": 0,
+      "computed_prompt_tokens": 5882,
+      "completion_tokens": 2198,
+      "total_wall_seconds": 535.3080863309442,
+      "total_server_finalize_seconds": 4.838269541040063,
+      "aggregate_decode_tokens_per_second": 6.992910379896596,
+      "aggregate_end_to_end_output_tokens_per_second": 4.106046697454758,
+      "mean_ttft_seconds": 7.348051117998936,
+      "median_ttft_seconds": 7.231835874990793,
+      "max_ttft_seconds": 13.040214042004663,
+      "mean_server_finalize_seconds": 0.1612756513680021,
+      "finish_reasons": {
+        "length": 3,
+        "stop": 27
+      }
+    },
+    "6-on": {
+      "requests": 30,
+      "prompt_tokens": 5948,
+      "cached_tokens": 4396,
+      "computed_prompt_tokens": 1552,
+      "completion_tokens": 2217,
+      "total_wall_seconds": 541.8139555389644,
+      "total_server_finalize_seconds": 11.273002829984762,
+      "aggregate_decode_tokens_per_second": 5.608709544269638,
+      "aggregate_end_to_end_output_tokens_per_second": 4.091810440346927,
+      "mean_ttft_seconds": 4.687056198696761,
+      "median_ttft_seconds": 3.986349791957764,
+      "max_ttft_seconds": 15.066979916999117,
+      "mean_server_finalize_seconds": 0.3757667609994921,
+      "finish_reasons": {
+        "length": 3,
+        "stop": 27
+      }
+    },
+    "8-on": {
+      "requests": 30,
+      "prompt_tokens": 6321,
+      "cached_tokens": 4769,
+      "computed_prompt_tokens": 1552,
+      "completion_tokens": 2491,
+      "total_wall_seconds": 654.9536258341395,
+      "total_server_finalize_seconds": 11.000426000158768,
+      "aggregate_decode_tokens_per_second": 5.157594142984067,
+      "aggregate_end_to_end_output_tokens_per_second": 3.803322711325551,
+      "mean_ttft_seconds": 5.559757954134451,
+      "median_ttft_seconds": 4.391536312497919,
+      "max_ttft_seconds": 20.7015315410099,
+      "mean_server_finalize_seconds": 0.3666808666719589,
+      "finish_reasons": {
+        "length": 4,
+        "stop": 26
+      }
+    },
+    "8-off": {
+      "requests": 30,
+      "prompt_tokens": 6217,
+      "cached_tokens": 0,
+      "computed_prompt_tokens": 6217,
+      "completion_tokens": 2474,
+      "total_wall_seconds": 738.0250781680224,
+      "total_server_finalize_seconds": 7.341830671124626,
+      "aggregate_decode_tokens_per_second": 5.312109334712237,
+      "aggregate_end_to_end_output_tokens_per_second": 3.352189611416913,
+      "mean_ttft_seconds": 9.020078523565704,
+      "median_ttft_seconds": 9.163277166488115,
+      "max_ttft_seconds": 16.91064787498908,
+      "mean_server_finalize_seconds": 0.24472768903748754,
+      "finish_reasons": {
+        "length": 3,
+        "stop": 27
+      }
+    }
+  },
+  "by_turn": {
+    "6-off": {
+      "0": {
+        "requests": 10,
+        "prompt_tokens": 903,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 903,
+        "completion_tokens": 755,
+        "total_wall_seconds": 163.47645704098977,
+        "total_server_finalize_seconds": 1.5446596659603529,
+        "aggregate_decode_tokens_per_second": 7.284757437108491,
+        "aggregate_end_to_end_output_tokens_per_second": 4.618402023544545,
+        "mean_ttft_seconds": 5.966346429300029,
+        "median_ttft_seconds": 5.24433349998435,
+        "max_ttft_seconds": 13.040214042004663,
+        "mean_server_finalize_seconds": 0.1544659665960353,
+        "finish_reasons": {
+          "length": 1,
+          "stop": 9
+        }
+      },
+      "1": {
+        "requests": 10,
+        "prompt_tokens": 1938,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 1938,
+        "completion_tokens": 834,
+        "total_wall_seconds": 196.49320428993087,
+        "total_server_finalize_seconds": 1.5957534150220454,
+        "aggregate_decode_tokens_per_second": 6.722866889896986,
+        "aggregate_end_to_end_output_tokens_per_second": 4.244421597244712,
+        "mean_ttft_seconds": 7.233069274999434,
+        "median_ttft_seconds": 7.13455468750908,
+        "max_ttft_seconds": 8.377885916968808,
+        "mean_server_finalize_seconds": 0.15957534150220454,
+        "finish_reasons": {
+          "length": 2,
+          "stop": 8
+        }
+      },
+      "2": {
+        "requests": 10,
+        "prompt_tokens": 3041,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 3041,
+        "completion_tokens": 609,
+        "total_wall_seconds": 175.33842500002356,
+        "total_server_finalize_seconds": 1.6978564600576647,
+        "aggregate_decode_tokens_per_second": 7.031078254442171,
+        "aggregate_end_to_end_output_tokens_per_second": 3.473283166538756,
+        "mean_ttft_seconds": 8.844737649697345,
+        "median_ttft_seconds": 8.784068312001182,
+        "max_ttft_seconds": 10.577604833000805,
+        "mean_server_finalize_seconds": 0.16978564600576646,
+        "finish_reasons": {
+          "stop": 10
+        }
+      }
+    },
+    "6-on": {
+      "0": {
+        "requests": 10,
+        "prompt_tokens": 903,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 903,
+        "completion_tokens": 755,
+        "total_wall_seconds": 190.941404456913,
+        "total_server_finalize_seconds": 3.4254317488521338,
+        "aggregate_decode_tokens_per_second": 6.070320897132227,
+        "aggregate_end_to_end_output_tokens_per_second": 3.9540926293457215,
+        "mean_ttft_seconds": 6.478769975103205,
+        "median_ttft_seconds": 5.57482431299286,
+        "max_ttft_seconds": 15.066979916999117,
+        "mean_server_finalize_seconds": 0.34254317488521335,
+        "finish_reasons": {
+          "length": 1,
+          "stop": 9
+        }
+      },
+      "1": {
+        "requests": 10,
+        "prompt_tokens": 1978,
+        "cached_tokens": 1648,
+        "computed_prompt_tokens": 330,
+        "completion_tokens": 780,
+        "total_wall_seconds": 185.25641483202344,
+        "total_server_finalize_seconds": 3.3051645810483024,
+        "aggregate_decode_tokens_per_second": 5.304126254742186,
+        "aggregate_end_to_end_output_tokens_per_second": 4.210380518845975,
+        "mean_ttft_seconds": 3.6781251834821886,
+        "median_ttft_seconds": 3.617676041496452,
+        "max_ttft_seconds": 3.9982899169554003,
+        "mean_server_finalize_seconds": 0.3305164581048302,
+        "finish_reasons": {
+          "length": 2,
+          "stop": 8
+        }
+      },
+      "2": {
+        "requests": 10,
+        "prompt_tokens": 3067,
+        "cached_tokens": 2748,
+        "computed_prompt_tokens": 319,
+        "completion_tokens": 682,
+        "total_wall_seconds": 165.61613625002792,
+        "total_server_finalize_seconds": 4.542406500084326,
+        "aggregate_decode_tokens_per_second": 5.506797661819694,
+        "aggregate_end_to_end_output_tokens_per_second": 4.117956229641754,
+        "mean_ttft_seconds": 3.9042734375048895,
+        "median_ttft_seconds": 3.919113666488556,
+        "max_ttft_seconds": 4.212848957977258,
+        "mean_server_finalize_seconds": 0.45424065000843256,
+        "finish_reasons": {
+          "stop": 10
+        }
+      }
+    },
+    "8-on": {
+      "0": {
+        "requests": 10,
+        "prompt_tokens": 903,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 903,
+        "completion_tokens": 908,
+        "total_wall_seconds": 252.42381612508325,
+        "total_server_finalize_seconds": 3.4371019161189906,
+        "aggregate_decode_tokens_per_second": 5.332551568862073,
+        "aggregate_end_to_end_output_tokens_per_second": 3.5971249224362407,
+        "mean_ttft_seconds": 8.058703004207928,
+        "median_ttft_seconds": 6.703266666998388,
+        "max_ttft_seconds": 20.7015315410099,
+        "mean_server_finalize_seconds": 0.3437101916118991,
+        "finish_reasons": {
+          "length": 1,
+          "stop": 9
+        }
+      },
+      "1": {
+        "requests": 10,
+        "prompt_tokens": 2131,
+        "cached_tokens": 1801,
+        "computed_prompt_tokens": 330,
+        "completion_tokens": 847,
+        "total_wall_seconds": 213.7875142490957,
+        "total_server_finalize_seconds": 3.4232338740257546,
+        "aggregate_decode_tokens_per_second": 4.989132407578669,
+        "aggregate_end_to_end_output_tokens_per_second": 3.961877769031513,
+        "mean_ttft_seconds": 4.25996408300125,
+        "median_ttft_seconds": 4.294642708031461,
+        "max_ttft_seconds": 4.453854958002921,
+        "mean_server_finalize_seconds": 0.34232338740257545,
+        "finish_reasons": {
+          "length": 2,
+          "stop": 8
+        }
+      },
+      "2": {
+        "requests": 10,
+        "prompt_tokens": 3287,
+        "cached_tokens": 2968,
+        "computed_prompt_tokens": 319,
+        "completion_tokens": 736,
+        "total_wall_seconds": 188.7422954599606,
+        "total_server_finalize_seconds": 4.140090210014023,
+        "aggregate_decode_tokens_per_second": 5.1490772221350625,
+        "aggregate_end_to_end_output_tokens_per_second": 3.899496920954496,
+        "mean_ttft_seconds": 4.3606067751941735,
+        "median_ttft_seconds": 4.3369601459708065,
+        "max_ttft_seconds": 4.608480207971297,
+        "mean_server_finalize_seconds": 0.4140090210014023,
+        "finish_reasons": {
+          "length": 1,
+          "stop": 9
+        }
+      }
+    },
+    "8-off": {
+      "0": {
+        "requests": 10,
+        "prompt_tokens": 903,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 903,
+        "completion_tokens": 908,
+        "total_wall_seconds": 236.62979233503575,
+        "total_server_finalize_seconds": 2.123827793111559,
+        "aggregate_decode_tokens_per_second": 5.667294226868151,
+        "aggregate_end_to_end_output_tokens_per_second": 3.8372175838044726,
+        "mean_ttft_seconds": 7.6052924334013365,
+        "median_ttft_seconds": 6.56156420847401,
+        "max_ttft_seconds": 16.91064787498908,
+        "mean_server_finalize_seconds": 0.2123827793111559,
+        "finish_reasons": {
+          "length": 1,
+          "stop": 9
+        }
+      },
+      "1": {
+        "requests": 10,
+        "prompt_tokens": 2091,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 2091,
+        "completion_tokens": 863,
+        "total_wall_seconds": 259.807637333055,
+        "total_server_finalize_seconds": 2.225808127084747,
+        "aggregate_decode_tokens_per_second": 5.139460213174918,
+        "aggregate_end_to_end_output_tokens_per_second": 3.321688341646766,
+        "mean_ttft_seconds": 9.161109208199196,
+        "median_ttft_seconds": 9.163277166488115,
+        "max_ttft_seconds": 10.473551458970178,
+        "mean_server_finalize_seconds": 0.22258081270847468,
+        "finish_reasons": {
+          "length": 2,
+          "stop": 8
+        }
+      },
+      "2": {
+        "requests": 10,
+        "prompt_tokens": 3223,
+        "cached_tokens": 0,
+        "computed_prompt_tokens": 3223,
+        "completion_tokens": 703,
+        "total_wall_seconds": 241.58764849993167,
+        "total_server_finalize_seconds": 2.99219475092832,
+        "aggregate_decode_tokens_per_second": 5.1084677922613775,
+        "aggregate_end_to_end_output_tokens_per_second": 2.909916977813536,
+        "mean_ttft_seconds": 10.293833929096582,
+        "median_ttft_seconds": 10.250519603985595,
+        "max_ttft_seconds": 11.492735832987819,
+        "mean_server_finalize_seconds": 0.299219475092832,
+        "finish_reasons": {
+          "stop": 10
+        }
+      }
+    }
+  },
+  "comparisons": {
+    "6-cache-on-vs-off": {
+      "decode_tokens_per_second_change_pct": -19.794345421704463,
+      "end_to_end_output_tokens_per_second_change_pct": -0.34671444717508937,
+      "total_time_reduction_pct": -1.215350444752672,
+      "mean_ttft_reduction_pct": 36.213614692800775
+    },
+    "8-cache-on-vs-off": {
+      "decode_tokens_per_second_change_pct": -2.9087351557032792,
+      "end_to_end_output_tokens_per_second_change_pct": 13.457863432669948,
+      "total_time_reduction_pct": 11.255911864145418,
+      "mean_ttft_reduction_pct": 38.362421794786805
+    },
+    "8-vs-6-cache-off": {
+      "decode_tokens_per_second_change_pct": -24.03578701675301,
+      "end_to_end_output_tokens_per_second_change_pct": -18.3596812599609,
+      "total_time_change_pct": 37.86921905598719
+    },
+    "8-vs-6-cache-on": {
+      "decode_tokens_per_second_change_pct": -8.043122891725984,
+      "end_to_end_output_tokens_per_second_change_pct": -7.050368858165291,
+      "total_time_change_pct": 20.881645653189306
+    }
+  }
+}

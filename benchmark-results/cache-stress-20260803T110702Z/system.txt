@@ -1,0 +1,46 @@
+protocol=custom OpenCode cache stress; deviations documented in final report
+2ddf68e48ea29ef60a082abba309b37ef6a64506
+ProductName:		macOS
+ProductVersion:		26.6
+BuildVersion:		25G72
+swift-driver version: 1.148.6 Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)
+Target: arm64-apple-macosx26.0
+2026-08-03 18:09:42.121 system_profiler[279:6371455] hw.cpufamily: 0xfa33415e
+      Model Name: MacBook Pro
+      Model Identifier: Mac15,3
+      Chip: Apple M3
+      Total Number of Cores: 8 (4 Performance and 4 Efficiency)
+      Memory: 24 GB
+Now drawing from 'AC Power'
+ -InternalBattery-0 (id=36307043)	100%; charged; 0:00 remaining present: true
+ lowpowermode         1
+ lowpowermode         0
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+The system has 25769803776 (1572864 pages with a page size of 16384).
+System-wide memory free percentage: 72%
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   926Gi   724Gi   173Gi    81%    2.6M  1.8G    0%   /System/Volumes/Data
+43bb85a4346d8a436dcf5611d041ebc7a2def54971ada5d71e1aab9a76fa925f  scratch/qwen36-6bit.gturbo/manifest.json
+c9fe84bb98417da559802a06b68b80ecd0810f60ed25486e463a995424a238de  scratch/qwen36-8bit.gturbo/manifest.json
+ea468841aaeeaabc1cab9df5ba932739883b159fb3d71c2459c5b8d0939133cf  /Users/andreborchert/Downloads/NVMAI-benchmark-results/cache-stress-20260803T110702Z/run_stress.py
+timing_revision=visible decode ends at last content event; finalization measured separately
+2a33f61501ff0fc1e87240a0ecee17590a4e2036a5254c0af3ae25d6eb3bad5a  /Users/andreborchert/Downloads/NVMAI-benchmark-results/cache-stress-20260803T110702Z/run_stress.py
+resumed_after_contention=true
+resumed_utc=2026-08-03T11:39:41Z
+Roblox closed with user authorization; XAI OS QEMU ended independently.
+System-wide memory free percentage: 74%
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+79918  26.6  1.0 /private/var/folders/gd/71hcflq91rj3skfxfh5ldccc0000gn/X/70D62FA5-32CF-56B7-96D8-0ADACB6734A0/d/Wrapper/Franwell.app/Franwell
+  614  17.8  0.3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+74486  17.4  1.7 /Applications/ChatGPT.app/Contents/Resources/codex
+23900  17.4  0.0 /usr/libexec/sysmond
+ 3740   4.2  0.2 /Library/SystemExtensions/E37B5018-AAF8-4E0F-9DAB-F534A9CFC29F/io.tailscale.ipn.macsys.network-extension.systemextension/Contents/MacOS/io.tailscale.ipn.macsys.network-extension
+79927   4.0  0.1 /System/Library/Frameworks/VideoToolbox.framework/Versions/A/XPCServices/VTDecoderXPCService.xpc/Contents/MacOS/VTDecoderXPCService
+75262   3.6  0.2 /Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host
+25933   3.5  0.1 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor
+cache_entries_revision=64 to retain 10 conversations plus branches
+a3f3f7f861a5adedca3dca572040d15fe63c67682a226cfccb0e8292f2319621  /Users/andreborchert/Downloads/NVMAI-benchmark-results/cache-stress-20260803T110702Z/run_stress.py
