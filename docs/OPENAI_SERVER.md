@@ -21,7 +21,7 @@ swift build -c release --product TurboFieldfareServer
   --model scratch/qwen36-8bit.gturbo \
   --model-id qwen3.6-35b-a3b \
   --port 8080 \
-  --max-context 16384
+  --max-context 131072
 ```
 
 The server loads the model before opening the port. Wait for
@@ -45,6 +45,8 @@ curl --silent --show-error http://127.0.0.1:8080/v1/chat/completions \
 
 By default, the server runs one generation and queues up to four requests. Use
 `--queue-limit` to change the queue size. Press Control-C to stop the server.
+The 128K setting allocates about 2.5 GB more Qwen FP16 KV capacity than 16K;
+check `memory_pressure -Q` before using it on a memory-constrained Mac.
 
 ## Connect a client
 

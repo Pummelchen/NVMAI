@@ -320,4 +320,18 @@ struct ServerArgumentTests {
             ])
         }
     }
+
+    @Test func accepts128KContextAndRejectsUnsupportedValues() throws {
+        let arguments = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--max-context", "131072",
+        ])
+        #expect(arguments.maxContext == 131_072)
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo",
+                "--max-context", "100000",
+            ])
+        }
+    }
 }
