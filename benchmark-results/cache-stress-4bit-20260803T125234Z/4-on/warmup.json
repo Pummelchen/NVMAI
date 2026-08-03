@@ -1,0 +1,17 @@
+{
+  "content": "actor, async, await, Task, or Actor",
+  "content_sha256": "931971370008d69a86520dc298d6b8319c9ae071f9bfc8c573f851d29b59a269",
+  "finish_reason": "stop",
+  "prompt_tokens": 71,
+  "cached_tokens": 0,
+  "computed_prompt_tokens": 71,
+  "completion_tokens": 11,
+  "total_tokens": 82,
+  "wall_seconds": 11.184510124963708,
+  "ttft_seconds": 9.675503458012827,
+  "decode_window_seconds": 1.3018240829696879,
+  "server_finalize_seconds": 0.2071825839811936,
+  "decode_tokens_per_second": 7.681529425380006,
+  "end_to_end_output_tokens_per_second": 0.983503066034883,
+  "approx_computed_prefill_tokens_per_second": 7.338119438239766
+}

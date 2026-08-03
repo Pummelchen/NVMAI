@@ -1,0 +1,81 @@
+TurboFieldfareServer ready at http://127.0.0.1:8080 model=qwen3.6-35b-a3b context=4096 prefill_chunk=1024 prompt_cache=multi-prefix prompt_cache_memory_mib=512 prompt_cache_disk=/Users/andreborchert/Downloads/NVMAI-benchmark-results/cache-stress-4bit-20260803T125234Z/4-on/measured-cache
+NVMAI OpenCode profile=coding-lean body_bytes=9390 prompt_tokens=1992->94 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=207 state_bytes=68628480 ram_bytes=68628480 disk_bytes=68628480 entry=c39b4f36-7860-464a-82fe-2ba4be4621e4
+NVMAI OpenCode profile=coding-lean body_bytes=9386 prompt_tokens=1986->88 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=162 state_bytes=67706880 ram_bytes=136335360 disk_bytes=136335360 entry=1ec2ba3b-76de-4374-a11c-9df45c427c52
+NVMAI OpenCode profile=coding-lean body_bytes=9362 prompt_tokens=1989->91 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=218 state_bytes=68853760 ram_bytes=205189120 disk_bytes=205189120 entry=57359d50-5958-4a6e-b1f1-b28d80ebf944
+NVMAI OpenCode profile=coding-lean body_bytes=9370 prompt_tokens=1989->91 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=218 state_bytes=68853760 ram_bytes=274042880 disk_bytes=274042880 entry=962bb16b-560c-4844-88c2-205e8a2c0614
+NVMAI OpenCode profile=coding-lean body_bytes=9369 prompt_tokens=1987->89 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=148 state_bytes=67420160 ram_bytes=341463040 disk_bytes=341463040 entry=32a96394-0781-4b41-a68d-210f1e81ef87
+NVMAI OpenCode profile=coding-lean body_bytes=9389 prompt_tokens=1990->92 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=163 state_bytes=67727360 ram_bytes=409190400 disk_bytes=409190400 entry=6b352772-f244-48af-9843-97e2cd133827
+NVMAI OpenCode profile=coding-lean body_bytes=9392 prompt_tokens=1987->89 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=146 state_bytes=67379200 ram_bytes=476569600 disk_bytes=476569600 entry=2ea8e39d-bf08-4511-b2f0-7ab75b8ce07d
+NVMAI OpenCode profile=coding-lean body_bytes=9386 prompt_tokens=1989->91 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=134 state_bytes=67133440 ram_bytes=475074560 disk_bytes=543703040 entry=38db331c-a0c7-4a87-8bb5-156231d341a5
+NVMAI OpenCode profile=coding-lean body_bytes=9382 prompt_tokens=1988->90 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=207 state_bytes=68628480 ram_bytes=475996160 disk_bytes=612331520 entry=988791fc-3ead-4bca-add7-8e278985b0b2
+NVMAI OpenCode profile=coding-lean body_bytes=9378 prompt_tokens=1986->88 messages=2->2 tools=0->0
+NVMAI prompt_cache stored tokens=215 state_bytes=68792320 ram_bytes=475934720 disk_bytes=681123840 entry=2a60eac8-4541-4366-bbdd-ed992701ce7c
+NVMAI OpenCode profile=coding-lean body_bytes=10061 prompt_tokens=2145->247 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=live cached_tokens=215 entry=2a60eac8-4541-4366-bbdd-ed992701ce7c
+NVMAI prompt_cache stored tokens=378 state_bytes=72130560 ram_bytes=479211520 disk_bytes=753254400 entry=bf67ebdc-41ed-4b07-99ba-bde77aefa579
+NVMAI OpenCode profile=coding-lean body_bytes=9959 prompt_tokens=2131->233 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ram cached_tokens=207 entry=988791fc-3ead-4bca-add7-8e278985b0b2
+NVMAI prompt_cache stored tokens=354 state_bytes=71639040 ram_bytes=483430400 disk_bytes=824893440 entry=2bea9f31-627d-419b-a2dc-db2d559ef286
+NVMAI OpenCode profile=coding-lean body_bytes=9755 prompt_tokens=2062->164 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ram cached_tokens=134 entry=38db331c-a0c7-4a87-8bb5-156231d341a5
+NVMAI prompt_cache stored tokens=220 state_bytes=68894720 ram_bytes=484597760 disk_bytes=893788160 entry=d036de65-b3f4-4ca6-a8e8-c8f4b7e8b665
+NVMAI OpenCode profile=coding-lean body_bytes=9746 prompt_tokens=2072->174 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ram cached_tokens=146 entry=2ea8e39d-bf08-4511-b2f0-7ab75b8ce07d
+NVMAI prompt_cache stored tokens=245 state_bytes=69406720 ram_bytes=485212160 disk_bytes=963194880 entry=c976abf6-6166-4908-be57-756e90e24676
+NVMAI OpenCode profile=coding-lean body_bytes=9872 prompt_tokens=2089->191 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=163 entry=6b352772-f244-48af-9843-97e2cd133827
+NVMAI prompt_cache stored tokens=233 state_bytes=69160960 ram_bytes=481341440 disk_bytes=1032355840 entry=c3b034fd-da8b-4563-b7a8-5f442e5bbfbe
+NVMAI OpenCode profile=coding-lean body_bytes=9734 prompt_tokens=2076->178 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=148 entry=32a96394-0781-4b41-a68d-210f1e81ef87
+NVMAI prompt_cache stored tokens=243 state_bytes=69365760 ram_bytes=479354880 disk_bytes=1101721600 entry=5accccb0-11e0-4baa-8e26-9b9b1d754182
+NVMAI OpenCode profile=coding-lean body_bytes=9915 prompt_tokens=2142->244 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=218 entry=962bb16b-560c-4844-88c2-205e8a2c0614
+NVMAI prompt_cache stored tokens=375 state_bytes=72069120 ram_bytes=484003840 disk_bytes=1173790720 entry=ed366f88-d602-4a7a-bc7e-1f582eed9003
+NVMAI OpenCode profile=coding-lean body_bytes=9982 prompt_tokens=2150->252 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=218 entry=57359d50-5958-4a6e-b1f1-b28d80ebf944
+NVMAI prompt_cache stored tokens=383 state_bytes=72232960 ram_bytes=487956480 disk_bytes=1246023680 entry=d81b638c-22d1-48ed-a10f-dc520f4535ae
+NVMAI OpenCode profile=coding-lean body_bytes=9808 prompt_tokens=2089->191 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=162 entry=1ec2ba3b-76de-4374-a11c-9df45c427c52
+NVMAI prompt_cache stored tokens=284 state_bytes=70205440 ram_bytes=489287680 disk_bytes=1316229120 entry=0d102872-cc2c-4e7a-90ca-bd484f9a732f
+NVMAI OpenCode profile=coding-lean body_bytes=10003 prompt_tokens=2134->236 messages=4->4 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=207 entry=c39b4f36-7860-464a-82fe-2ba4be4621e4
+NVMAI prompt_cache stored tokens=294 state_bytes=70410240 ram_bytes=490106880 disk_bytes=1386639360 entry=e8b1ef5d-3666-4b13-9967-0a83f38fb050
+NVMAI OpenCode profile=coding-lean body_bytes=10381 prompt_tokens=2216->318 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=live cached_tokens=294 entry=e8b1ef5d-3666-4b13-9967-0a83f38fb050
+NVMAI prompt_cache stored tokens=453 state_bytes=73666560 ram_bytes=491704320 disk_bytes=1460305920 entry=fab36998-5d4d-443b-93cf-9fa41279cfdb
+NVMAI OpenCode profile=coding-lean body_bytes=10278 prompt_tokens=2207->309 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ram cached_tokens=284 entry=0d102872-cc2c-4e7a-90ca-bd484f9a732f
+NVMAI prompt_cache stored tokens=388 state_bytes=72335360 ram_bytes=495185920 disk_bytes=1532641280 entry=04068501-7c67-45b3-9253-ed690ae91ae0
+NVMAI OpenCode profile=coding-lean body_bytes=10594 prompt_tokens=2304->406 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ram cached_tokens=383 entry=d81b638c-22d1-48ed-a10f-dc520f4535ae
+NVMAI prompt_cache stored tokens=458 state_bytes=73768960 ram_bytes=501248000 disk_bytes=1606410240 entry=05d586d8-cab1-47d3-be52-03f481279a2b
+NVMAI OpenCode profile=coding-lean body_bytes=10467 prompt_tokens=2299->401 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=375 entry=ed366f88-d602-4a7a-bc7e-1f582eed9003
+NVMAI prompt_cache stored tokens=522 state_bytes=75079680 ram_bytes=509358080 disk_bytes=1681489920 entry=c8b4b98e-93ec-4005-b564-5e7e1c2acd01
+NVMAI OpenCode profile=coding-lean body_bytes=10168 prompt_tokens=2166->268 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=243 entry=5accccb0-11e0-4baa-8e26-9b9b1d754182
+NVMAI prompt_cache stored tokens=335 state_bytes=71249920 ram_bytes=506101760 disk_bytes=1752739840 entry=22f94fa9-078b-4a26-9c16-ebecacbf44df
+NVMAI OpenCode profile=coding-lean body_bytes=10201 prompt_tokens=2154->256 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=233 entry=c3b034fd-da8b-4563-b7a8-5f442e5bbfbe
+NVMAI prompt_cache stored tokens=300 state_bytes=70533120 ram_bytes=501227520 disk_bytes=1823272960 entry=9cb6f1fe-045c-47d4-8eb8-aebc62034e15
+NVMAI OpenCode profile=coding-lean body_bytes=10126 prompt_tokens=2167->269 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=245 entry=c976abf6-6166-4908-be57-756e90e24676
+NVMAI prompt_cache stored tokens=338 state_bytes=71311360 ram_bytes=496107520 disk_bytes=1894584320 entry=eb3e6ed4-ac2d-4169-9fcd-fb3bad1d2ac1
+NVMAI OpenCode profile=coding-lean body_bytes=10134 prompt_tokens=2141->243 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=220 entry=d036de65-b3f4-4ca6-a8e8-c8f4b7e8b665
+NVMAI prompt_cache stored tokens=295 state_bytes=70430720 ram_bytes=490987520 disk_bytes=1965015040 entry=7a5a6672-768c-40b2-b32f-a2ff9927e239
+NVMAI OpenCode profile=coding-lean body_bytes=10542 prompt_tokens=2273->375 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=354 entry=2bea9f31-627d-419b-a2dc-db2d559ef286
+NVMAI prompt_cache stored tokens=510 state_bytes=74833920 ram_bytes=497049600 disk_bytes=2039848960 entry=9ee801ac-c929-4f05-8972-d9c2a7061060
+NVMAI OpenCode profile=coding-lean body_bytes=10731 prompt_tokens=2300->402 messages=6->6 tools=0->0
+NVMAI prompt_cache hit tier=ssd cached_tokens=378 entry=bf67ebdc-41ed-4b07-99ba-bde77aefa579
+NVMAI prompt_cache stored tokens=447 state_bytes=73543680 ram_bytes=502784000 disk_bytes=2113392640 entry=26db2bd9-a3c5-4b3f-962b-fb14038d7d3b
