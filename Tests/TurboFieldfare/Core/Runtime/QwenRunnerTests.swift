@@ -189,6 +189,60 @@ import TurboFieldfareValidationSupport
         #expect(runner.lastGreedyToken == reference)
     }
 
+    @Test(arguments: [4, 6, 8])
+    func inferenceStateSnapshotRestoresKVAndGDNExactly(bits: Int) async throws {
+        let (dir, ctx, runner) = try makeRunner(weightBits: bits)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+
+        try await runner.produce(token: 11, position: 0, into: logits)
+        try await runner.produce(token: 7, position: 1, into: logits)
+        let snapshot = try runner.captureInferenceState()
+        #expect(snapshot.descriptor.position == 2)
+        #expect(!snapshot.descriptor.kvSegmentLengths.isEmpty)
+        #expect(!snapshot.descriptor.gdnSegmentLengths.isEmpty)
+        #expect(snapshot.payload.count == snapshot.descriptor.payloadBytes)
+
+        try await runner.produce(token: 5, position: 2, into: logits)
+        let reference = Fp16Buffer.read(logits, count: 1024)
+
+        runner.reset()
+        try runner.restoreInferenceState(snapshot)
+        #expect(runner.continuationPosition == 2)
+        try await runner.produce(token: 5, position: 2, into: logits)
+        let restored = Fp16Buffer.read(logits, count: 1024)
+
+        #expect(restored == reference)
+    }
+
+    @Test func inferenceStateSnapshotHonorsSizeLimitWithoutMutatingRunner() async throws {
+        let (dir, ctx, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+        try await runner.produce(token: 1, position: 0, into: logits)
+
+        #expect(throws: InferenceStateSnapshotError.self) {
+            try runner.captureInferenceState(maximumBytes: 1)
+        }
+        #expect(runner.continuationPosition == 1)
+    }
+
+    @Test func corruptInferenceStateSnapshotFailsClosedAndResets() async throws {
+        let (dir, ctx, runner) = try makeRunner()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+        try await runner.produce(token: 1, position: 0, into: logits)
+        let snapshot = try runner.captureInferenceState()
+        let corrupt = InferenceStateSnapshot(
+            descriptor: snapshot.descriptor,
+            payload: snapshot.payload.dropLast())
+
+        #expect(throws: InferenceStateSnapshotError.self) {
+            try runner.restoreInferenceState(corrupt)
+        }
+        #expect(runner.continuationPosition == 0)
+    }
+
     /// (b) KV manager + GDN state manager interplay under the qwen mask:
     /// linear layers carry no per-token KV storage, full layers are linear
     /// append-only, and reset() returns both to the empty-context state.

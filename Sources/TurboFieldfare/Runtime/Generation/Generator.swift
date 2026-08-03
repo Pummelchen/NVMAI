@@ -1,6 +1,6 @@
 import Foundation
 
-public enum StopReason: Sendable, Equatable {
+public enum StopReason: String, Codable, Sendable, Equatable {
     case eos
     case endOfTurn
     case maxTokens

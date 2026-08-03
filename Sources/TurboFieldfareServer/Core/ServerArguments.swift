@@ -11,6 +11,10 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    public let promptCacheMaximumEntries: Int
+    public let promptCacheMemoryMiB: Int
+    public let promptCacheDiskDirectory: String?
+    public let promptCacheDiskMiB: Int
     public let prefillChunkTokens: Int?
 
     public static let usage = """
@@ -24,8 +28,16 @@ public struct ServerArguments: Equatable, Sendable {
       --max-context <tokens> 4096, 8192, 16384, 32768, 65536, or 131072
                              (default 16384).
       --queue-limit <count>  Maximum queued requests (default 4).
-      --prompt-cache-mode <off|single-prefix>
-                             Prompt KV reuse mode (default single-prefix).
+      --prompt-cache-mode <off|single-prefix|multi-prefix>
+                             Prompt KV reuse mode (default multi-prefix).
+      --prompt-cache-entries <count>
+                             Maximum retained prefixes, 1...64 (default 4).
+      --prompt-cache-memory-mib <MiB>
+                             RAM snapshot budget, 0...4096 (default 256).
+      --prompt-cache-disk <dir>
+                             Optional persistent SSD cache directory.
+      --prompt-cache-disk-mib <MiB>
+                             SSD snapshot budget, 0...65536 (default 8192).
       --prefill-chunk <tokens>
                              Prefill chunk size: 32, 64, 128, 256, 512,
                              1024, 2048, or 4096 (default 1024 for Qwen).
@@ -38,7 +50,11 @@ public struct ServerArguments: Equatable, Sendable {
         var modelIDOverride: String?
         var maxContext = 16_384
         var queueLimit = 4
-        var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var promptCacheMode: ServerPromptCacheMode = .multiPrefix
+        var promptCacheMaximumEntries = 4
+        var promptCacheMemoryMiB = 256
+        var promptCacheDiskDirectory: String?
+        var promptCacheDiskMiB = 8_192
         var prefillChunkTokens: Int?
         var index = 0
         while index < input.count {
@@ -76,9 +92,33 @@ public struct ServerArguments: Equatable, Sendable {
             case "--prompt-cache-mode":
                 guard let parsed = ServerPromptCacheMode(rawValue: value) else {
                     throw ServerArgumentError.invalid(
-                        "--prompt-cache-mode must be off or single-prefix")
+                        "--prompt-cache-mode must be off, single-prefix, or multi-prefix")
                 }
                 promptCacheMode = parsed
+            case "--prompt-cache-entries":
+                guard let parsed = Int(value), (1...64).contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--prompt-cache-entries must be between 1 and 64")
+                }
+                promptCacheMaximumEntries = parsed
+            case "--prompt-cache-memory-mib":
+                guard let parsed = Int(value), (0...4_096).contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--prompt-cache-memory-mib must be between 0 and 4096")
+                }
+                promptCacheMemoryMiB = parsed
+            case "--prompt-cache-disk":
+                guard !value.isEmpty else {
+                    throw ServerArgumentError.invalid(
+                        "--prompt-cache-disk must not be empty")
+                }
+                promptCacheDiskDirectory = value
+            case "--prompt-cache-disk-mib":
+                guard let parsed = Int(value), (0...65_536).contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--prompt-cache-disk-mib must be between 0 and 65536")
+                }
+                promptCacheDiskMiB = parsed
             case "--prefill-chunk":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) else {
@@ -96,6 +136,10 @@ public struct ServerArguments: Equatable, Sendable {
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
+                               promptCacheMaximumEntries: promptCacheMaximumEntries,
+                               promptCacheMemoryMiB: promptCacheMemoryMiB,
+                               promptCacheDiskDirectory: promptCacheDiskDirectory,
+                               promptCacheDiskMiB: promptCacheDiskMiB,
                                prefillChunkTokens: prefillChunkTokens)
     }
 }

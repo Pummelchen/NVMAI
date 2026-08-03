@@ -299,7 +299,11 @@ struct ServerArgumentTests {
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
-        #expect(arguments.promptCacheMode == .singlePrefix)
+        #expect(arguments.promptCacheMode == .multiPrefix)
+        #expect(arguments.promptCacheMaximumEntries == 4)
+        #expect(arguments.promptCacheMemoryMiB == 256)
+        #expect(arguments.promptCacheDiskDirectory == nil)
+        #expect(arguments.promptCacheDiskMiB == 8_192)
         #expect(arguments.prefillChunkTokens == nil)
     }
 
@@ -323,6 +327,19 @@ struct ServerArgumentTests {
             "--prompt-cache-mode", "single-prefix",
         ])
         #expect(arguments.promptCacheMode == .singlePrefix)
+        let multi = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--prompt-cache-mode", "multi-prefix",
+            "--prompt-cache-entries", "8",
+            "--prompt-cache-memory-mib", "512",
+            "--prompt-cache-disk", "/tmp/nvmai-cache",
+            "--prompt-cache-disk-mib", "16384",
+        ])
+        #expect(multi.promptCacheMode == .multiPrefix)
+        #expect(multi.promptCacheMaximumEntries == 8)
+        #expect(multi.promptCacheMemoryMiB == 512)
+        #expect(multi.promptCacheDiskDirectory == "/tmp/nvmai-cache")
+        #expect(multi.promptCacheDiskMiB == 16_384)
         let rollback = try ServerArguments.parse([
             "--model", "model.gturbo",
             "--prompt-cache-mode", "off",
@@ -332,6 +349,18 @@ struct ServerArgumentTests {
             try ServerArguments.parse([
                 "--model", "model.gturbo",
                 "--prompt-cache-mode", "many",
+            ])
+        }
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo",
+                "--prompt-cache-entries", "0",
+            ])
+        }
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo",
+                "--prompt-cache-memory-mib", "4097",
             ])
         }
     }

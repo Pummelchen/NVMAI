@@ -253,6 +253,84 @@ public final class KVCacheManager {
         }
     }
 
+    func snapshotSegmentLengths(at snapshotPosition: Int) throws -> [Int] {
+        guard snapshotPosition > 0, snapshotPosition <= maxContext else {
+            throw InferenceStateSnapshotError.invalidPosition(snapshotPosition)
+        }
+        var lengths: [Int] = []
+        lengths.reserveCapacity(config.numLayers * 2)
+        for layer in 0..<config.numLayers where kinds[layer] != .linear {
+            let storedTokens = min(snapshotPosition, capacityTokens[layer])
+            let (length, overflow) = storedTokens.multipliedReportingOverflow(
+                by: strides[layer])
+            guard !overflow else { throw InferenceStateSnapshotError.integerOverflow }
+            lengths.append(length)
+            lengths.append(length)
+        }
+        return lengths
+    }
+
+    func appendSnapshotPayload(to payload: inout Data,
+                               segmentLengths: [Int]) throws {
+        let expected = try snapshotSegmentLengths(at: position)
+        guard segmentLengths == expected else {
+            throw InferenceStateSnapshotError.invalidLayout
+        }
+        var segment = 0
+        for layer in 0..<config.numLayers where kinds[layer] != .linear {
+            let kLength = segmentLengths[segment]
+            payload.append(kBuffers[layer].contents().assumingMemoryBound(to: UInt8.self),
+                           count: kLength)
+            segment += 1
+            let vLength = segmentLengths[segment]
+            payload.append(vBuffers[layer].contents().assumingMemoryBound(to: UInt8.self),
+                           count: vLength)
+            segment += 1
+        }
+    }
+
+    func restoreSnapshot(position snapshotPosition: Int,
+                         segmentLengths: [Int],
+                         bytes: UnsafeRawBufferPointer,
+                         offset: inout Int) throws {
+        let expected = try snapshotSegmentLengths(at: snapshotPosition)
+        guard segmentLengths == expected else {
+            throw InferenceStateSnapshotError.invalidLayout
+        }
+        reset()
+        var segment = 0
+        for layer in 0..<config.numLayers where kinds[layer] != .linear {
+            let kLength = segmentLengths[segment]
+            try copySnapshotSegment(bytes: bytes,
+                                    offset: &offset,
+                                    length: kLength,
+                                    destination: kBuffers[layer])
+            segment += 1
+            let vLength = segmentLengths[segment]
+            try copySnapshotSegment(bytes: bytes,
+                                    offset: &offset,
+                                    length: vLength,
+                                    destination: vBuffers[layer])
+            segment += 1
+        }
+        position = snapshotPosition
+    }
+
+    private func copySnapshotSegment(bytes: UnsafeRawBufferPointer,
+                                     offset: inout Int,
+                                     length: Int,
+                                     destination: MTLBuffer) throws {
+        guard length <= destination.length,
+              offset >= 0,
+              length >= 0,
+              offset <= bytes.count - length,
+              let source = bytes.baseAddress?.advanced(by: offset) else {
+            throw InferenceStateSnapshotError.invalidLayout
+        }
+        memcpy(destination.contents(), source, length)
+        offset += length
+    }
+
     private func validateRange(start: Int, count: Int) {
         precondition(count >= 0, "count must be non-negative")
         precondition(start >= 0, "start must be non-negative")

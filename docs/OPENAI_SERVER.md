@@ -28,6 +28,20 @@ The server loads the model before opening the port. Wait for
 `TurboFieldfareServer ready`, then keep the process running while clients use
 it.
 
+Multi-prefix RAM caching is enabled by default with four entries and a 256 MiB
+snapshot budget. To retain compatible prefixes across server restarts, opt in
+to the SSD tier explicitly:
+
+```bash
+.build/release/TurboFieldfareServer \
+  --model scratch/qwen36-6bit.gturbo \
+  --model-id qwen3.6-35b-a3b \
+  --port 8080 \
+  --max-context 131072 \
+  --prompt-cache-disk "$HOME/Library/Caches/NVMAI/prompt-cache" \
+  --prompt-cache-disk-mib 8192
+```
+
 Check the server from another terminal:
 
 ```bash
@@ -125,16 +139,50 @@ message counts, and tool counts. It never logs prompt or tool-result content.
 
 ## Prompt reuse
 
-Single-prefix KV reuse is on by default. Send the complete message history with
-every request. When a request continues the retained conversation exactly, the
-server reuses the verified KV prefix and reports the number of reused tokens in:
+Multi-prefix reuse is on by default. Send the complete message history with
+every request. When a request continues a retained conversation exactly, the
+server restores the longest compatible prefix and reports the reused tokens in:
 
 ```text
 usage.prompt_tokens_details.cached_tokens
 ```
 
-The server retains one prefix. A different or incompatible history replaces
-it. Use `--prompt-cache-mode off` to disable reuse.
+Unlike a response cache, this stores the model's computed inference state. For
+Qwen 3.6 that state includes both full-attention K/V rows and every
+gated-DeltaNet recurrent matrix and convolution tail. Restoring only K/V would
+silently produce incorrect output, so snapshots are accepted only when their
+complete layout, model source, runtime profile, context size, KV format, and
+chat-template digest match the loaded server.
+
+The default `multi-prefix` mode keeps up to four exact prefixes in a 256 MiB
+RAM LRU. A live continuation avoids a copy; another retained branch restores
+its state from RAM. Configure the bounds with:
+
+- `--prompt-cache-entries 1...64`
+- `--prompt-cache-memory-mib 0...4096`
+
+Qwen's snapshot size is approximately 61.4 MiB of fixed recurrent state plus
+20 KiB per cached token. A state larger than every configured tier remains
+usable as the live prefix but is not copied into the multi-prefix store.
+
+`--prompt-cache-disk <dir>` enables the optional persistent SSD tier;
+`--prompt-cache-disk-mib` bounds it. Each entry is written atomically with
+owner-only permissions, checked against its declared size and SHA-256 before
+restore, and removed on corruption. SSD hits are slower than RAM hits but avoid
+recomputing a long prefix and survive a clean server restart. Disk eviction is
+least-recently-used.
+
+The SSD metadata contains the filtered conversation and tool-result lineage
+needed for exact continuation matching. It can therefore contain source code
+or other prompt content. Use a private local directory, never synchronize or
+share it, and omit `--prompt-cache-disk` when persistence is not wanted.
+
+Cache activity is logged without prompt content as `tier=live`, `tier=ram`, or
+`tier=ssd`, together with cached-token and state-byte counts. Use
+`--prompt-cache-mode single-prefix` for the former one-prefix/live-buffer
+behavior or `--prompt-cache-mode off` to disable reuse entirely. Prefix reuse
+reduces prefill and time to first token; it does not increase steady-state
+decode tokens per second.
 
 ## Tool calls
 

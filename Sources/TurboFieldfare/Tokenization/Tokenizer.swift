@@ -275,8 +275,10 @@ public struct GFTokenizer: @unchecked Sendable {
 
     // MARK: - Chat template
 
-    public enum Role: String, Sendable { case system, developer, user, assistant, tool }
-    public struct HistoricalToolCall: Sendable, Equatable {
+    public enum Role: String, Codable, Sendable {
+        case system, developer, user, assistant, tool
+    }
+    public struct HistoricalToolCall: Codable, Sendable, Equatable {
         public let id: String
         public let name: String
         public let arguments: JSONValue
@@ -288,7 +290,7 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
-    public struct FunctionDefinition: Sendable, Equatable {
+    public struct FunctionDefinition: Codable, Sendable, Equatable {
         public let name: String
         public let description: String
         public let parameters: JSONValue
@@ -300,7 +302,7 @@ public struct GFTokenizer: @unchecked Sendable {
         }
     }
 
-    public struct Message: Sendable, Equatable {
+    public struct Message: Codable, Sendable, Equatable {
         public let role: Role
         public let content: String?
         public let toolCalls: [HistoricalToolCall]

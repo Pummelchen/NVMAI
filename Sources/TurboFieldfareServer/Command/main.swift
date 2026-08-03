@@ -20,6 +20,12 @@ do {
         modelDirectory: modelURL,
         maxContext: arguments.maxContext,
         promptCacheMode: arguments.promptCacheMode,
+        promptCacheMaximumEntries: arguments.promptCacheMaximumEntries,
+        promptCacheMemoryLimitBytes: arguments.promptCacheMemoryMiB * 1_048_576,
+        promptCacheDiskDirectory: arguments.promptCacheDiskDirectory.map {
+            URL(fileURLWithPath: $0).standardizedFileURL
+        },
+        promptCacheDiskLimitBytes: arguments.promptCacheDiskMiB * 1_048_576,
         prefillChunkTokens: arguments.prefillChunkTokens)
     let modelID = arguments.modelIDOverride ?? backend.defaultModelID
     let server = TurboFieldfareHTTPServer(
@@ -28,7 +34,8 @@ do {
         backend: backend,
         chatDialect: backend.chatDialect)
     _ = try await server.start(port: arguments.port)
-    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prefill_chunk=\(backend.prefillChunkTokens) prompt_cache=\(arguments.promptCacheMode.rawValue)")
+    let diskCache = arguments.promptCacheDiskDirectory ?? "off"
+    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prefill_chunk=\(backend.prefillChunkTokens) prompt_cache=\(arguments.promptCacheMode.rawValue) prompt_cache_memory_mib=\(arguments.promptCacheMemoryMiB) prompt_cache_disk=\(diskCache)")
 
     _ = await signals.wait()
     try await server.shutdown()

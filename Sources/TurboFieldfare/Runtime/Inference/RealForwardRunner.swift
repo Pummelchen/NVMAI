@@ -530,6 +530,85 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         resetTransientState()
     }
 
+    public func captureInferenceState(
+        maximumBytes: Int? = nil
+    ) throws -> InferenceStateSnapshot {
+        guard let kv, kv.position > 0 else {
+            throw InferenceStateSnapshotError.invalidPosition(kv?.position ?? 0)
+        }
+        let kvLengths = try kv.snapshotSegmentLengths(at: kv.position)
+        let gdnLengths = gdnState?.snapshotSegmentLengths() ?? []
+        var payloadBytes = 0
+        for length in kvLengths + gdnLengths {
+            let (next, overflow) = payloadBytes.addingReportingOverflow(length)
+            guard !overflow else { throw InferenceStateSnapshotError.integerOverflow }
+            payloadBytes = next
+        }
+        if let maximumBytes, payloadBytes > maximumBytes {
+            throw InferenceStateSnapshotError.exceedsLimit(
+                bytes: payloadBytes,
+                limit: maximumBytes)
+        }
+        var payload = Data()
+        payload.reserveCapacity(payloadBytes)
+        try kv.appendSnapshotPayload(to: &payload, segmentLengths: kvLengths)
+        try gdnState?.appendSnapshotPayload(to: &payload, segmentLengths: gdnLengths)
+        guard payload.count == payloadBytes else {
+            throw InferenceStateSnapshotError.invalidPayloadSize(
+                expected: payloadBytes,
+                actual: payload.count)
+        }
+        return InferenceStateSnapshot(
+            descriptor: InferenceStateSnapshotDescriptor(
+                position: kv.position,
+                kvSegmentLengths: kvLengths,
+                gdnSegmentLengths: gdnLengths,
+                payloadBytes: payloadBytes),
+            payload: payload)
+    }
+
+    public func restoreInferenceState(_ snapshot: InferenceStateSnapshot) throws {
+        do {
+            let descriptor = snapshot.descriptor
+            guard descriptor.version == InferenceStateSnapshotDescriptor.currentVersion else {
+                throw InferenceStateSnapshotError.unsupportedVersion(descriptor.version)
+            }
+            guard descriptor.position > 0, descriptor.position <= maxContext else {
+                throw InferenceStateSnapshotError.invalidPosition(descriptor.position)
+            }
+            let expectedBytes = try descriptor.validatedPayloadBytes()
+            guard snapshot.payload.count == expectedBytes else {
+                throw InferenceStateSnapshotError.invalidPayloadSize(
+                    expected: expectedBytes,
+                    actual: snapshot.payload.count)
+            }
+            guard let kv else { throw InferenceStateSnapshotError.invalidLayout }
+            try snapshot.payload.withUnsafeBytes { bytes in
+                var offset = 0
+                try kv.restoreSnapshot(
+                    position: descriptor.position,
+                    segmentLengths: descriptor.kvSegmentLengths,
+                    bytes: bytes,
+                    offset: &offset)
+                if let gdnState {
+                    try gdnState.restoreSnapshot(
+                        segmentLengths: descriptor.gdnSegmentLengths,
+                        bytes: bytes,
+                        offset: &offset)
+                } else if !descriptor.gdnSegmentLengths.isEmpty {
+                    throw InferenceStateSnapshotError.invalidLayout
+                }
+                guard offset == bytes.count else {
+                    throw InferenceStateSnapshotError.invalidLayout
+                }
+            }
+            resetTransientState()
+        } catch {
+            reset()
+            throw error
+        }
+    }
+
     private func resetTransientState() {
         prefillChunkState.reset()
         rdadviseSkipUntilPosition = -1

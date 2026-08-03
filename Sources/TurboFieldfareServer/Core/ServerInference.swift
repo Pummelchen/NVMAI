@@ -125,11 +125,17 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let maxContext: Int
     private let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
-    private var promptCache = ServerPromptCache()
+    private var promptCache: ServerPromptCache
+    private let promptStateStore: ServerPromptStateStore?
+    private var activePromptCacheEntryID: UUID?
 
     public static func load(modelDirectory: URL,
                             maxContext: Int,
-                            promptCacheMode: ServerPromptCacheMode = .singlePrefix,
+                            promptCacheMode: ServerPromptCacheMode = .multiPrefix,
+                            promptCacheMaximumEntries: Int = 4,
+                            promptCacheMemoryLimitBytes: Int = 256 * 1_048_576,
+                            promptCacheDiskDirectory: URL? = nil,
+                            promptCacheDiskLimitBytes: Int = 8_192 * 1_048_576,
                             prefillChunkTokens requestedPrefillChunkTokens: Int? = nil) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
@@ -186,6 +192,28 @@ public actor ServerModelSession: ServerInferenceBackend {
             kvStorage: PrefillKVStorageMode.fp16.rawValue,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
+        let promptStateStore: ServerPromptStateStore?
+        let promptCache: ServerPromptCache
+        if promptCacheMode == .multiPrefix {
+            let store = try ServerPromptStateStore(
+                configuration: ServerPromptCacheStorageConfiguration(
+                    memoryLimitBytes: promptCacheMemoryLimitBytes,
+                    diskDirectory: promptCacheDiskDirectory,
+                    diskLimitBytes: promptCacheDiskLimitBytes))
+            let persisted = store.loadEntries(domain: promptCacheDomain)
+            if persisted.count > promptCacheMaximumEntries {
+                store.remove(entryIDs: persisted
+                    .dropLast(promptCacheMaximumEntries)
+                    .map(\.id))
+            }
+            promptStateStore = store
+            promptCache = ServerPromptCache(
+                maximumEntries: promptCacheMaximumEntries,
+                entries: persisted)
+        } else {
+            promptStateStore = nil
+            promptCache = ServerPromptCache(maximumEntries: 1)
+        }
         return ServerModelSession(context: context,
                                   model: model,
                                   tokenizer: tokenizer,
@@ -194,7 +222,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   prefillConfig: runtime.prefillConfig,
                                   maxContext: maxContext,
                                   promptCacheMode: promptCacheMode,
-                                  promptCacheDomain: promptCacheDomain)
+                                  promptCacheDomain: promptCacheDomain,
+                                  promptCache: promptCache,
+                                  promptStateStore: promptStateStore)
     }
 
     private init(context: MetalContext,
@@ -205,7 +235,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                  prefillConfig: PrefillRuntimeConfig,
                  maxContext: Int,
                  promptCacheMode: ServerPromptCacheMode,
-                 promptCacheDomain: ServerPromptCacheDomain) {
+                 promptCacheDomain: ServerPromptCacheDomain,
+                 promptCache: ServerPromptCache,
+                 promptStateStore: ServerPromptStateStore?) {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
@@ -218,6 +250,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode
         self.promptCacheDomain = promptCacheDomain
+        self.promptCache = promptCache
+        self.promptStateStore = promptStateStore
     }
 
     public func generate(
@@ -227,7 +261,10 @@ public actor ServerModelSession: ServerInferenceBackend {
         var completed = false
         defer {
             if !completed {
-                promptCache.invalidate()
+                if promptCacheMode == .singlePrefix {
+                    promptCache.invalidate()
+                }
+                activePromptCacheEntryID = nil
                 runner.reset()
             }
         }
@@ -271,12 +308,55 @@ public actor ServerModelSession: ServerInferenceBackend {
                 promptCache.invalidate()
                 effectivePromptIDs = promptIDs
                 completionStart = .reset
-            case .hit(let effective, let cached):
+            case .hit(_, let effective, let cached):
+                effectivePromptIDs = effective
+                completionStart = .resume(cachedPromptTokens: cached)
+            }
+        } else if promptCacheMode == .multiPrefix {
+            switch promptCache.match(
+                domain: promptCacheDomain,
+                request: request,
+                renderedPromptIDs: promptIDs,
+                tokenizer: tokenizer) {
+            case .miss:
+                activePromptCacheEntryID = nil
+                effectivePromptIDs = promptIDs
+                completionStart = .reset
+            case .hit(let entryID, let effective, let cached):
+                if entryID != activePromptCacheEntryID {
+                    do {
+                        guard let promptStateStore else {
+                            throw ServerPromptStateStoreError.missing(entryID)
+                        }
+                        let tier = try promptStateStore.restore(
+                            entryID: entryID,
+                            into: runner)
+                        print(
+                            "NVMAI prompt_cache hit tier=\(tier) "
+                                + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
+                    } catch {
+                        print(
+                            "NVMAI prompt_cache restore_failed "
+                                + "entry=\(entryID.uuidString.lowercased()) error=\(error)")
+                        promptStateStore?.remove(entryIDs: [entryID])
+                        promptCache.remove(entryIDs: [entryID])
+                        activePromptCacheEntryID = nil
+                        effectivePromptIDs = promptIDs
+                        completionStart = .reset
+                        break
+                    }
+                } else {
+                    print(
+                        "NVMAI prompt_cache hit tier=live "
+                            + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
+                }
+                activePromptCacheEntryID = entryID
                 effectivePromptIDs = effective
                 completionStart = .resume(cachedPromptTokens: cached)
             }
         } else {
             promptCache.invalidate()
+            activePromptCacheEntryID = nil
             effectivePromptIDs = promptIDs
             completionStart = .reset
         }
@@ -370,13 +450,64 @@ public actor ServerModelSession: ServerInferenceBackend {
             reason = "stop"
         }
         if promptCacheMode == .singlePrefix {
-            promptCache.publish(
+            let publication = promptCache.publish(
                 domain: promptCacheDomain,
                 request: request,
                 content: content,
                 calls: calls,
                 result: result,
                 stopStringFiltered: stopMatcher.isStopped)
+            if publication == nil { promptCache.invalidate() }
+        } else if promptCacheMode == .multiPrefix {
+            let previousActive = activePromptCacheEntryID
+            if let publication = promptCache.publish(
+                domain: promptCacheDomain,
+                request: request,
+                content: content,
+                calls: calls,
+                result: result,
+                stopStringFiltered: stopMatcher.isStopped) {
+                promptStateStore?.remove(entryIDs: publication.evictedEntryIDs)
+                do {
+                    guard let promptStateStore else {
+                        throw ServerPromptStateStoreError.missing(
+                            publication.entry.id)
+                    }
+                    let snapshot = try runner.captureInferenceState(
+                        maximumBytes: promptStateStore.maximumSnapshotBytes)
+                    guard snapshot.descriptor.position == publication.entry.kvPosition else {
+                        throw InferenceStateSnapshotError.invalidPosition(
+                            snapshot.descriptor.position)
+                    }
+                    let saved = promptStateStore.save(
+                        entry: publication.entry,
+                        snapshot: snapshot)
+                    let invalidated = saved.unbackedEntryIDs.filter {
+                        $0 != publication.entry.id
+                    }
+                    promptCache.remove(entryIDs: invalidated)
+                    if let diskError = saved.diskError {
+                        print("NVMAI prompt_cache disk_write_failed error=\(diskError)")
+                    }
+                    print(
+                        "NVMAI prompt_cache stored "
+                            + "tokens=\(publication.entry.kvPosition) "
+                            + "state_bytes=\(snapshot.payload.count) "
+                            + "ram_bytes=\(saved.memoryBytes) "
+                            + "disk_bytes=\(saved.diskBytes) "
+                            + "entry=\(publication.entry.id.uuidString.lowercased())")
+                } catch {
+                    print("NVMAI prompt_cache snapshot_failed error=\(error)")
+                }
+                if let previousActive,
+                   previousActive != publication.entry.id,
+                   promptStateStore?.contains(previousActive) != true {
+                    promptCache.remove(entryIDs: [previousActive])
+                }
+                activePromptCacheEntryID = publication.entry.id
+            } else {
+                activePromptCacheEntryID = nil
+            }
         }
         completed = true
         return ServerCompletion(

@@ -458,9 +458,12 @@ fine-tuning, server batching, remote serving, and general model support are
 outside the current scope. The runtime supports the two architectures above by
 explicit enumeration — each with its own pinned checkpoint, compile-time
 baseline, and manifest contract — rather than by discovering arbitrary
-checkpoints. The optional HTTP server is loopback-only, owns one
-warm model, serializes generation, and retains one verified conversational KV
-prefix by default. It retains only that prefix. See the
+checkpoints. The optional HTTP server is loopback-only, owns one warm model,
+serializes generation, and retains a bounded LRU of verified conversational
+inference states by default. Qwen snapshots include both full-attention K/V
+and its gated-DeltaNet recurrence. An optional SHA-256-verified SSD tier
+persists exact compatible prefixes across restarts; the legacy single-prefix
+and cache-off modes remain available. See the
 [local server guide](OPENAI_SERVER.md).
 
 TurboFieldfare is a research system. The Mac app exposes a small set of typed

@@ -50,7 +50,7 @@ struct ServerPromptCacheTests {
             renderedPromptIDs: rendered,
             tokenizer: tokenizer)
 
-        guard case .hit(let effective, let cached) = match else {
+        guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected text continuation hit")
             return
         }
@@ -103,7 +103,7 @@ struct ServerPromptCacheTests {
             renderedPromptIDs: rendered,
             tokenizer: tokenizer)
 
-        guard case .hit(let effective, let cached) = match else {
+        guard case .hit(_, let effective, let cached) = match else {
             Issue.record("expected captured OpenCode tool-result hit")
             return
         }
@@ -193,6 +193,60 @@ struct ServerPromptCacheTests {
                 reason: .endOfTurn),
             stopStringFiltered: matcher.isStopped)
         #expect(cache.entry == nil)
+    }
+
+    @Test func multiPrefixChoosesLongestExactPrefixAndUsesLRUEviction() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        var cache = ServerPromptCache(maximumEntries: 2)
+        let shortPublication = cache.publish(
+            domain: domain,
+            request: initial,
+            content: "short",
+            calls: [],
+            result: rawResult(
+                prompt: [1, 2],
+                kvBacked: [1, 2],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+        let short = try #require(shortPublication)
+        let longPublication = cache.publish(
+            domain: domain,
+            request: initial,
+            content: "long",
+            calls: [],
+            result: rawResult(
+                prompt: [1, 2, 3],
+                kvBacked: [1, 2, 3],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+        let long = try #require(longPublication)
+
+        let match = cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: [1, 2, 3, 4],
+            tokenizer: tokenizer)
+        #expect(match == .hit(
+            entryID: long.entry.id,
+            effectivePromptIDs: [1, 2, 3, 4],
+            cachedPromptTokens: 3))
+
+        let newestPublication = cache.publish(
+            domain: domain,
+            request: initial,
+            content: "newest",
+            calls: [],
+            result: rawResult(
+                prompt: [9],
+                kvBacked: [9],
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+        let newest = try #require(newestPublication)
+        #expect(newest.evictedEntryIDs == [short.entry.id])
+        #expect(cache.entries.map(\.id) == [long.entry.id, newest.entry.id])
     }
 
     private func request(

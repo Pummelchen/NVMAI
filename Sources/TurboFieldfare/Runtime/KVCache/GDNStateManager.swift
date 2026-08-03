@@ -89,6 +89,75 @@ public final class GDNStateManager {
         zeroAll()
     }
 
+    func snapshotSegmentLengths() -> [Int] {
+        var lengths: [Int] = []
+        lengths.reserveCapacity(config.numLayers * 2)
+        for layer in 0..<config.numLayers where stateBuffers[layer] != nil {
+            lengths.append(stateBytesPerLayer)
+            lengths.append(convTailBytesPerLayer)
+        }
+        return lengths
+    }
+
+    func appendSnapshotPayload(to payload: inout Data,
+                               segmentLengths: [Int]) throws {
+        guard segmentLengths == snapshotSegmentLengths() else {
+            throw InferenceStateSnapshotError.invalidLayout
+        }
+        var segment = 0
+        for layer in 0..<config.numLayers {
+            guard let state = stateBuffers[layer],
+                  let tail = convTailBuffers[layer] else { continue }
+            let stateLength = segmentLengths[segment]
+            payload.append(state.contents().assumingMemoryBound(to: UInt8.self),
+                           count: stateLength)
+            segment += 1
+            let tailLength = segmentLengths[segment]
+            payload.append(tail.contents().assumingMemoryBound(to: UInt8.self),
+                           count: tailLength)
+            segment += 1
+        }
+    }
+
+    func restoreSnapshot(segmentLengths: [Int],
+                         bytes: UnsafeRawBufferPointer,
+                         offset: inout Int) throws {
+        guard segmentLengths == snapshotSegmentLengths() else {
+            throw InferenceStateSnapshotError.invalidLayout
+        }
+        reset()
+        var segment = 0
+        for layer in 0..<config.numLayers {
+            guard let state = stateBuffers[layer],
+                  let tail = convTailBuffers[layer] else { continue }
+            try copySnapshotSegment(bytes: bytes,
+                                    offset: &offset,
+                                    length: segmentLengths[segment],
+                                    destination: state)
+            segment += 1
+            try copySnapshotSegment(bytes: bytes,
+                                    offset: &offset,
+                                    length: segmentLengths[segment],
+                                    destination: tail)
+            segment += 1
+        }
+    }
+
+    private func copySnapshotSegment(bytes: UnsafeRawBufferPointer,
+                                     offset: inout Int,
+                                     length: Int,
+                                     destination: MTLBuffer) throws {
+        guard length <= destination.length,
+              offset >= 0,
+              length >= 0,
+              offset <= bytes.count - length,
+              let source = bytes.baseAddress?.advanced(by: offset) else {
+            throw InferenceStateSnapshotError.invalidLayout
+        }
+        memcpy(destination.contents(), source, length)
+        offset += length
+    }
+
     private func zeroAll() {
         for buffer in stateBuffers {
             if let buffer { memset(buffer.contents(), 0, buffer.length) }
