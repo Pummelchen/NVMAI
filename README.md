@@ -56,40 +56,44 @@ listed below.
 
 ## M3 24 GB test results
 
-The 6-bit and 8-bit measurements were recorded at commit `2ddf68e`; the 4-bit
-measurements were recorded at `cae9375`, whose intervening changes were limited
-to README and benchmark evidence. All runs used a MacBook Pro `Mac15,3` with a
-base 8-core Apple M3 (4 performance + 4 efficiency cores), 24 GB unified
-memory, macOS 26.6, and Apple Swift 6.3.3.
+The table retains the faster complete 30-request run for each configuration
+from two benchmark passes at source-equivalent commits `2ddf68e`, `cae9375`,
+and `c74f11f`. Selection uses whole-run end-to-end output tok/s; metrics are
+never mixed between runs. The rerun won for 4-bit cache-on and 6-bit cache-on,
+while the prior run remained faster for the other four rows. All runs used a
+MacBook Pro `Mac15,3` with a base 8-core Apple M3 (4 performance + 4 efficiency
+cores), 24 GB unified memory, macOS 26.6, and Apple Swift 6.3.3.
 
 The workload used 10 coding conversations with an initial request and two
-follow-ups: 30 requests per configuration and 180 successful requests in
-total. It used the OpenCode `coding-lean` profile, 4,096-token context,
-temperature `0.2`, Top-K `64`, Top-P `0.95`, and at most 128 generated tokens.
+follow-ups: 30 requests per configuration per pass and 360 successful requests
+across both passes. It used the OpenCode `coding-lean` profile, 4,096-token
+context, temperature `0.2`, Top-K `64`, Top-P `0.95`, and at most 128 generated
+tokens.
 Cache-on used 64 entries, 512 MiB RAM, and a 4 GiB SSD tier.
 
 | Quant | Cache | Requests | Prompt tokens | Cached tokens | Generated tokens | Decode tok/s | End-to-end output tok/s | Mean TTFT | Total wall |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | 4-bit | Off | 30 | 6,337 | 0 | 2,669 | 12.41 | 7.57 | 4.59 s | 352.4 s |
-| 4-bit | On | 30 | 6,382 | 4,827 | 2,521 | 9.84 | 7.40 | 2.72 s | 340.9 s |
+| 4-bit | On | 30 | 6,382 | 4,827 | 2,521 | 9.89 | 7.44 | 2.71 s | 339.1 s |
 | 6-bit | Off | 30 | 5,882 | 0 | 2,198 | 6.99 | 4.11 | 7.35 s | 535.3 s |
-| 6-bit | On | 30 | 5,948 | 4,396 | 2,217 | 5.61 | 4.09 | 4.69 s | 541.8 s |
+| 6-bit | On | 30 | 5,948 | 4,396 | 2,217 | 5.66 | 4.15 | 4.60 s | 534.0 s |
 | 8-bit | Off | 30 | 6,217 | 0 | 2,474 | 5.31 | 3.35 | 9.02 s | 738.0 s |
 | 8-bit | On | 30 | 6,321 | 4,769 | 2,491 | 5.16 | 3.80 | 5.56 s | 655.0 s |
 
 On the 20 follow-up requests per quantization, cache reuse reduced computed
 prefill by 88.0% for 4-bit, 87.0% for 6-bit, and 87.8% for 8-bit. It cut mean
-time to first token by 57.5%, 52.8%, and 55.7%, respectively. Follow-up wall
-time improved by 12.3%, 5.6%, and 19.7%; caching reduces repeated prefill but
+time to first token by 57.9%, 55.3%, and 55.7%, respectively. Follow-up wall
+time improved by 12.8%, 9.4%, and 19.7%; caching reduces repeated prefill but
 does not increase steady-state decode speed.
 
 `Decode tok/s` is measured between the first and last visible streamed content
 token. `End-to-end output tok/s` includes prefill, generation, and cache
 publication. These are workload measurements, not performance ceilings. See
-the complete reports and raw evidence for
+the [rerun and best-of-two report](benchmark-results/cache-stress-all6-20260803T150721Z/RESULTS.md)
+and the prior raw evidence for
 [4-bit](benchmark-results/cache-stress-4bit-20260803T125234Z/RESULTS.md) and
 [6-bit/8-bit](benchmark-results/cache-stress-20260803T110702Z/RESULTS.md) for
-the protocol, follow-up-only tables, validation, and caveats.
+the protocol, validation, and caveats.
 
 ## Documentation
 

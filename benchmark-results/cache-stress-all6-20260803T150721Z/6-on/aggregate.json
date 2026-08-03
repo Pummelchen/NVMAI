@@ -1,0 +1,19 @@
+{
+  "requests": 30,
+  "prompt_tokens": 5948,
+  "cached_tokens": 4396,
+  "computed_prompt_tokens": 1552,
+  "completion_tokens": 2217,
+  "total_wall_seconds": 533.9784129978507,
+  "total_server_finalize_seconds": 9.372613083687611,
+  "aggregate_decode_tokens_per_second": 5.659091856481726,
+  "aggregate_end_to_end_output_tokens_per_second": 4.151853232330805,
+  "mean_ttft_seconds": 4.604934442864033,
+  "median_ttft_seconds": 3.839836311992258,
+  "max_ttft_seconds": 13.95570912497351,
+  "mean_server_finalize_seconds": 0.31242043612292036,
+  "finish_reasons": {
+    "length": 3,
+    "stop": 27
+  }
+}

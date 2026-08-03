@@ -1,0 +1,17 @@
+{
+  "content": "Actors provide data isolation.",
+  "content_sha256": "fdc153d4eeaad5a46c372ded99a5a9be0221eecc0bf8de9efb9da3f0f40df9f3",
+  "finish_reason": "stop",
+  "prompt_tokens": 71,
+  "cached_tokens": 0,
+  "computed_prompt_tokens": 71,
+  "completion_tokens": 7,
+  "total_tokens": 78,
+  "wall_seconds": 16.109487666981295,
+  "ttft_seconds": 14.437915582966525,
+  "decode_window_seconds": 1.34223829198163,
+  "server_finalize_seconds": 0.3293337920331396,
+  "decode_tokens_per_second": 4.470145156670971,
+  "end_to_end_output_tokens_per_second": 0.43452654390415557,
+  "approx_computed_prefill_tokens_per_second": 4.9176073645813485
+}

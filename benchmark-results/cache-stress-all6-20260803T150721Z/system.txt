@@ -1,0 +1,29 @@
+protocol=custom OpenCode cache stress; exact workload and settings inherited from cache-stress-4bit-20260803T125234Z
+commit=c74f11ffa6c6d72ad5b106f700d95bb6ed0fd622
+ProductName: macOS
+ProductVersion: 26.6
+BuildVersion: 25G72
+swift-driver version: 1.148.6 Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)
+Target: arm64-apple-macosx26.0
+Model Name: MacBook Pro
+Model Identifier: Mac15,3
+Chip: Apple M3
+Total Number of Cores: 8 (4 Performance and 4 Efficiency)
+Memory: 24 GB
+Power: AC Power; battery 100% charged; AC low-power mode off
+System memory: 25769803776 bytes; 69% free before build
+Data volume: 926 GiB total; 751 GiB used; 146 GiB available; 84% capacity
+model_4bit=scratch/qwen36.gturbo; 47 verified files; 19551394758 bytes; revision=38740b847e4cb78f352aba30aa41c76e08e6eb46; manifest_sha256=bfaa17cbca7755969c9a1e02216b5bb28f55701529c0f07dafbc07080517badd
+model_6bit=scratch/qwen36-6bit.gturbo; 47 verified files; 28210994878 bytes; revision=cb7e092ef8efe540bc3672c8929c4adbe5f4f759; manifest_sha256=43bb85a4346d8a436dcf5611d041ebc7a2def54971ada5d71e1aab9a76fa925f
+model_8bit=scratch/qwen36-8bit.gturbo; 47 verified files; 36870656118 bytes; revision=e06a74e6236a60c8367e1a3214e83d8b61b637b0; manifest_sha256=c9fe84bb98417da559802a06b68b80ecd0810f60ed25486e463a995424a238de
+server_build=swift build -c release --product TurboFieldfareServer; exit 0
+model_process_check=no matching model, test, MLX, or QEMU process before benchmark
+run_order=4-off,4-on,6-off,6-on,8-on,8-off
+harness_sha256=e71be9949229eb1296d848c4f08b7e1517bc85c52523e12798bf175a668e5f77
+selection_policy=compare prior and rerun by aggregate end-to-end output tokens per second; retain the winning complete run per configuration; never mix metrics across runs
+post_benchmark_validation=180/180 requests; no empty responses or invalid finish reasons; each cache-on configuration hit 20/20 follow-ups and 0/10 initial turns
+cache_hit_tiers_per_cache_on_configuration=2 live; 5 RAM; 13 SSD; no restore, snapshot, or disk-write failures
+post_benchmark_process_check=no matching model, test, MLX, or QEMU process
+post_benchmark_memory=64% free
+selected_prior=4-off,6-off,8-off,8-on
+selected_rerun=4-on,6-on
