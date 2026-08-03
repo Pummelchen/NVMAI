@@ -52,7 +52,7 @@ public struct StreamLayout: Sendable {
         self.expertOffsets = expertOffsets
     }
 
-    @inline(__always)
+    @inline(always)
     public func expertOffset(layer: Int, expert: Int) -> UInt64 {
         if layer == 0, let expertOffsets, expert >= 0, expert < expertOffsets.count {
             return expertOffsets[expert]

@@ -13,7 +13,7 @@ public enum Quantization {
     // are bounded and finite, and the .gturbo importer copies BF16 bytes
     // through unchanged so we never call the encoder on weight data.
 
-    @inline(__always)
+    @inline(always)
     public static func bf16Bits(_ x: Float) -> UInt16 {
         let bits = x.bitPattern
         let lsb  = (bits >> 16) & 1
@@ -22,7 +22,7 @@ public enum Quantization {
         return UInt16(truncatingIfNeeded: rounded)
     }
 
-    @inline(__always)
+    @inline(always)
     public static func bf16ToFloat(_ bits: UInt16) -> Float {
         Float(bitPattern: UInt32(bits) << 16)
     }

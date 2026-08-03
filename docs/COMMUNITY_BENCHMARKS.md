@@ -16,6 +16,9 @@ Runs use the app sampling defaults with fixed seeds: temperature `0.2`, Top-K
 
 ## Prepare the Mac
 
+Use Apple Swift 6.3.3. The package manifest requires SwiftPM 6.3 and compiles
+all targets in Swift 6 language mode.
+
 Install the model with the [original README instructions](https://github.com/drumih/turbo-fieldfare#command-line-interface),
 connect a laptop to power, turn off Low Power Mode, quit other demanding apps,
 and build the release CLI:

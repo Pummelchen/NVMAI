@@ -42,7 +42,7 @@ enum GTurboBinary {
         precondition(off == indexEntryBytes)
     }
 
-    @inline(__always)
+    @inline(always)
     private static func writeU64LE(_ buf: UnsafeMutableRawPointer, _ off: inout Int, _ v: UInt64) {
         let p = buf.advanced(by: off).assumingMemoryBound(to: UInt8.self)
         var x = v.littleEndian
@@ -52,7 +52,7 @@ enum GTurboBinary {
         off += 8
     }
 
-    @inline(__always)
+    @inline(always)
     private static func writeU32LE(_ buf: UnsafeMutableRawPointer, _ off: inout Int, _ v: UInt32) {
         let p = buf.advanced(by: off).assumingMemoryBound(to: UInt8.self)
         var x = v.littleEndian
@@ -62,7 +62,7 @@ enum GTurboBinary {
         off += 4
     }
 
-    @inline(__always)
+    @inline(always)
     private static func writeU16LE(_ buf: UnsafeMutableRawPointer, _ off: inout Int, _ v: UInt16) {
         let p = buf.advanced(by: off).assumingMemoryBound(to: UInt8.self)
         var x = v.littleEndian
@@ -72,7 +72,7 @@ enum GTurboBinary {
         off += 2
     }
 
-    @inline(__always)
+    @inline(always)
     private static func writeU8(_ buf: UnsafeMutableRawPointer, _ off: inout Int, _ v: UInt8) {
         buf.advanced(by: off).assumingMemoryBound(to: UInt8.self)[0] = v
         off += 1

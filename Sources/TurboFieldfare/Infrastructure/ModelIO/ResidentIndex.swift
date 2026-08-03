@@ -143,7 +143,7 @@ enum ResidentIndexReader {
 
     // MARK: - little-endian primitives
 
-    @inline(__always)
+    @inline(always)
     static func decodeU64LE(_ base: UnsafeRawPointer, _ off: Int) -> UInt64 {
         let p = base.advanced(by: off).assumingMemoryBound(to: UInt8.self)
         var v: UInt64 = 0
@@ -151,7 +151,7 @@ enum ResidentIndexReader {
         return v
     }
 
-    @inline(__always)
+    @inline(always)
     static func decodeU32LE(_ base: UnsafeRawPointer, _ off: Int) -> UInt32 {
         let p = base.advanced(by: off).assumingMemoryBound(to: UInt8.self)
         var v: UInt32 = 0
@@ -159,13 +159,13 @@ enum ResidentIndexReader {
         return v
     }
 
-    @inline(__always)
+    @inline(always)
     static func decodeU16LE(_ base: UnsafeRawPointer, _ off: Int) -> UInt16 {
         let p = base.advanced(by: off).assumingMemoryBound(to: UInt8.self)
         return UInt16(p[0]) | (UInt16(p[1]) << 8)
     }
 
-    @inline(__always)
+    @inline(always)
     static func decodeU8(_ base: UnsafeRawPointer, _ off: Int) -> UInt8 {
         base.advanced(by: off).assumingMemoryBound(to: UInt8.self)[0]
     }
