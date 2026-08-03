@@ -249,6 +249,23 @@ public struct ValidatedChatRequest: Sendable {
     public let includeUsage: Bool
     public let generationConfig: GenerationConfig
     public let maximumCompletionTokens: Int
+    public let filterAudit: OpenCodeFilterAudit?
+
+    public init(messages: [GFTokenizer.Message],
+                tools: [GFTokenizer.FunctionDefinition],
+                stream: Bool,
+                includeUsage: Bool,
+                generationConfig: GenerationConfig,
+                maximumCompletionTokens: Int,
+                filterAudit: OpenCodeFilterAudit? = nil) {
+        self.messages = messages
+        self.tools = tools
+        self.stream = stream
+        self.includeUsage = includeUsage
+        self.generationConfig = generationConfig
+        self.maximumCompletionTokens = maximumCompletionTokens
+        self.filterAudit = filterAudit
+    }
 }
 
 public enum OpenAIRequestValidator {

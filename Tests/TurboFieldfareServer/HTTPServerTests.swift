@@ -123,8 +123,128 @@ private actor CancellableServerBackend: ServerInferenceBackend {
     }
 }
 
+private actor CapturingServerBackend: ServerInferenceBackend {
+    private(set) var request: ValidatedChatRequest?
+
+    func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        self.request = request
+        onEvent(.content("captured"))
+        return ServerCompletion(
+            content: "captured",
+            toolCalls: [],
+            finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2))
+    }
+}
+
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
+    @Test func explicitPromptOnlyHeadersFilterAtHTTPBoundary() async throws {
+        let backend = CapturingServerBackend()
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: backend)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("opencode", forHTTPHeaderField: OpenCodeRequestFilter.clientHeader)
+        request.setValue("prompt-only", forHTTPHeaderField: OpenCodeRequestFilter.profileHeader)
+        request.httpBody = Data(#"""
+        {
+          "model":"test-model",
+          "messages":[
+            {"role":"system","content":"discard"},
+            {"role":"user","content":"old"},
+            {"role":"assistant","content":"answer"},
+            {"role":"user","content":"real prompt"}
+          ],
+          "tools":[
+            {"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{}}}}
+          ]
+        }
+        """#.utf8)
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let captured = try #require(await backend.request)
+        #expect(captured.messages == [
+            GFTokenizer.Message(role: .user, content: "real prompt"),
+        ])
+        #expect(captured.tools.isEmpty)
+        #expect(captured.filterAudit?.profile == .promptOnly)
+
+        try await server.shutdown()
+    }
+
+    @Test func userAgentAloneNeverEnablesLeanFiltering() async throws {
+        let backend = CapturingServerBackend()
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: backend)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("OpenCode/1.18.5", forHTTPHeaderField: "user-agent")
+        request.httpBody = Data(#"""
+        {
+          "model":"test-model",
+          "messages":[
+            {"role":"system","content":"preserve"},
+            {"role":"user","content":"real prompt"}
+          ],
+          "tools":[
+            {"type":"function","function":{"name":"webfetch","parameters":{"type":"object","properties":{}}}}
+          ]
+        }
+        """#.utf8)
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let captured = try #require(await backend.request)
+        #expect(captured.messages.map(\.role) == [.system, .user])
+        #expect(captured.tools.map(\.name) == ["webfetch"])
+        #expect(captured.filterAudit == nil)
+
+        try await server.shutdown()
+    }
+
+    @Test func profileHeaderWithoutOpenCodeClientIsRejected() async throws {
+        let server = TurboFieldfareHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("coding-lean", forHTTPHeaderField: OpenCodeRequestFilter.profileHeader)
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}]}
+        """#.utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        #expect(String(decoding: data, as: UTF8.self).contains("invalid_lean_profile"))
+
+        try await server.shutdown()
+    }
+
     @Test func healthModelsAndNonStreamingCompletion() async throws {
         let server = TurboFieldfareHTTPServer(
             modelID: "test-model",

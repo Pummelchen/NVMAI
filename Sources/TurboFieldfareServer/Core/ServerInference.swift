@@ -231,16 +231,26 @@ public actor ServerModelSession: ServerInferenceBackend {
                 runner.reset()
             }
         }
-        let needsToolTemplate = !request.tools.isEmpty
-            || request.messages.contains {
-                $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
-            }
-        let promptIDs: [Int32]
-        if needsToolTemplate {
-            promptIDs = try tokenizer.encodeToolChat(messages: request.messages, tools: request.tools)
-        } else {
-            let rendered = try tokenizer.applyChatTemplate(request.messages)
-            promptIDs = tokenizer.encode(rendered, addBOS: false)
+        let needsToolTemplate = usesToolTemplate(
+            messages: request.messages,
+            tools: request.tools)
+        let promptIDs = try encodePrompt(
+            messages: request.messages,
+            tools: request.tools,
+            usesToolTemplate: needsToolTemplate)
+        if let audit = request.filterAudit {
+            let originalPromptIDs = try encodePrompt(
+                messages: audit.originalMessages,
+                tools: audit.originalTools,
+                usesToolTemplate: usesToolTemplate(
+                    messages: audit.originalMessages,
+                    tools: audit.originalTools))
+            print(
+                "NVMAI OpenCode profile=\(audit.profile.rawValue) "
+                    + "body_bytes=\(audit.originalBodyBytes) "
+                    + "prompt_tokens=\(originalPromptIDs.count)->\(promptIDs.count) "
+                    + "messages=\(audit.originalMessages.count)->\(request.messages.count) "
+                    + "tools=\(audit.originalTools.count)->\(request.tools.count)")
         }
         guard promptIDs.count < maxContext else {
             throw ServerRequestError.invalid(
@@ -377,5 +387,26 @@ public actor ServerModelSession: ServerInferenceBackend {
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
                                cachedTokens: result.cachedPromptTokens))
+    }
+
+    private func usesToolTemplate(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) -> Bool {
+        !tools.isEmpty || messages.contains {
+            $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
+        }
+    }
+
+    private func encodePrompt(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        usesToolTemplate: Bool
+    ) throws -> [Int32] {
+        if usesToolTemplate {
+            return try tokenizer.encodeToolChat(messages: messages, tools: tools)
+        }
+        let rendered = try tokenizer.applyChatTemplate(messages)
+        return tokenizer.encode(rendered, addBOS: false)
     }
 }

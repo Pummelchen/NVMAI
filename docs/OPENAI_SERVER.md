@@ -77,7 +77,11 @@ OpenCode:
       "name": "TurboFieldfare",
       "options": {
         "baseURL": "http://127.0.0.1:8080/v1",
-        "apiKey": "local"
+        "apiKey": "local",
+        "headers": {
+          "X-NVMAI-Client": "opencode",
+          "X-NVMAI-Profile": "coding-lean"
+        }
       },
       "models": {
         "qwen3.6-35b-a3b": {
@@ -94,6 +98,30 @@ use a 1,024-token chunked-prefill ceiling by default. `--prefill-chunk` accepts
 32 through 4,096 in powers of two; larger chunks reduce repeated expert-file
 sweeps for long prompts while using more temporary GPU memory. The advertised
 model ID is unchanged, so existing client configuration continues to work.
+
+### OpenCode lean profiles
+
+Lean filtering is opt-in and never uses `User-Agent` detection. The server
+requires `X-NVMAI-Client: opencode` together with one of these profile headers:
+
+- `X-NVMAI-Profile: coding-lean` replaces OpenCode's client guidance with a
+  compact coding instruction, keeps the complete conversation and tool-result
+  lineage, and exposes only `read`, `grep`, `glob`, `list`, `bash`, `edit`,
+  `write`, and `apply_patch`. Tool descriptions and JSON Schema annotations are
+  compacted without changing argument structure.
+- `X-NVMAI-Profile: prompt-only` sends only the latest user text to the model.
+  It removes all system/developer guidance, earlier conversation, tools, calls,
+  and results. Use it for ordinary questions, not agentic coding work.
+
+Create a second OpenCode provider with the same base URL and model ID but the
+`prompt-only` header when both modes are wanted in the model picker. Requests
+without `X-NVMAI-Profile` retain the standard OpenAI-compatible behavior.
+Supplying a profile without the explicit OpenCode client header, or supplying
+an unknown profile, returns `400 invalid_lean_profile`.
+
+For each filtered request, the server logs only non-sensitive measurements:
+the profile, request-body bytes, original and filtered prompt-token counts,
+message counts, and tool counts. It never logs prompt or tool-result content.
 
 ## Prompt reuse
 
