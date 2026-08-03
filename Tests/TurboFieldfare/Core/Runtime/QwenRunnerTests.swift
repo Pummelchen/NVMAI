@@ -42,6 +42,54 @@ import TurboFieldfareValidationSupport
         #expect(values.allSatisfy { $0.isFinite })
     }
 
+    @Test(arguments: [6, 8])
+    func higherBitPrefillThenDecodeMatchesPureDecode(bits: Int) async throws {
+        let (dir, ctx, runner) = try makeRunner(weightBits: bits)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+
+        try await runner.produce(token: 11, position: 0, into: logits)
+        try await runner.produce(token: 7, position: 1, into: logits)
+        let reference = Fp16Buffer.read(logits, count: 1024)
+
+        runner.reset()
+        let tokens: [Int32] = [11]
+        _ = try await runner.prefillChunked(
+            tokens: tokens[...], startPosition: 0, outputMode: .logits,
+            config: .production(chunkTokens: 32), into: logits,
+            onProgress: { _ in })
+        try await runner.produce(token: 7, position: 1, into: logits)
+        let actual = Fp16Buffer.read(logits, count: 1024)
+
+        for (lhs, rhs) in zip(actual, reference) {
+            #expect(abs(Float(lhs) - Float(rhs)) < 0.05)
+        }
+    }
+
+    @Test(arguments: [6, 8])
+    func higherBitMultiTokenPrefillMatchesPureDecode(bits: Int) async throws {
+        let (dir, ctx, runner) = try makeRunner(weightBits: bits)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let logits = try makeLogits(ctx, vocab: 1024)
+        let tokens: [Int32] = [11, 7, 5, 3, 9]
+
+        for (position, token) in tokens.enumerated() {
+            try await runner.produce(token: token, position: position, into: logits)
+        }
+        let reference = Fp16Buffer.read(logits, count: 1024)
+
+        runner.reset()
+        _ = try await runner.prefillChunked(
+            tokens: tokens[...], startPosition: 0, outputMode: .logits,
+            config: .production(chunkTokens: 32), into: logits,
+            onProgress: { _ in })
+        let actual = Fp16Buffer.read(logits, count: 1024)
+
+        for (lhs, rhs) in zip(actual, reference) {
+            #expect(abs(Float(lhs) - Float(rhs)) < 0.05)
+        }
+    }
+
     private func makeLogits(_ ctx: MetalContext, vocab: Int) throws -> MTLBuffer {
         guard let buf = ctx.device.makeBuffer(
             length: vocab * MemoryLayout<Float16>.stride,

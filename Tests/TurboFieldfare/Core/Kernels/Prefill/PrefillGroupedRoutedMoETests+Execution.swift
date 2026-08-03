@@ -29,7 +29,7 @@ extension PrefillGroupedRoutedMoETests {
                                             f: f,
                                             weightBits: weightBits)
     let hidden = (0..<(rows * d)).map { i in
-      Float16(Float((i % 17) - 8) * 0.01)
+      Float16(Float((i % 17) - 8))
     }
     let expected = Self.cpuSyntheticRoutePartials(
       routes: routes,
@@ -103,7 +103,7 @@ extension PrefillGroupedRoutedMoETests {
       max($0, abs(Float($1.0) - Float($1.1)))
     }
     #expect(microbatches == 2)
-    #expect(maxAbsoluteError <= 0.0015,
+    #expect(maxAbsoluteError <= 0.0001,
             "weightBits=\(weightBits) maxAbsoluteError=\(maxAbsoluteError)")
     #expect(binding.views.allSatisfy { $0.offset > 0 })
   }
