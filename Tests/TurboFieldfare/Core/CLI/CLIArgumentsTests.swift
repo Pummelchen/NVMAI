@@ -16,6 +16,25 @@ import Testing
         #expect(arguments.seed == nil)
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
+        #expect(arguments.prefillChunk == nil)
+    }
+
+    @Test func prefillChunkParsesFixedAndAutoValues() throws {
+        let fixed = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "4096",
+        ])
+        #expect(fixed.prefillChunk == .fixed(4_096))
+
+        let automatic = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "auto",
+        ])
+        #expect(automatic.prefillChunk == .auto)
+
+        #expect(throws: ArgsError.invalidValue(flag: "--prefill-chunk", value: "8192")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi", "--prefill-chunk", "8192",
+            ])
+        }
     }
 
     @Test func generationOptionsParseAndStopsRepeat() throws {
@@ -65,7 +84,7 @@ import Testing
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
-            "--rdadvise", "--expert-cache-slots",
+            "--rdadvise", "--expert-cache-slots", "--prefill-chunk",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

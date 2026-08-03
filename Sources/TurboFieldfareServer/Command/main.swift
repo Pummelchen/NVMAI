@@ -19,7 +19,8 @@ do {
     let backend = try await ServerModelSession.load(
         modelDirectory: modelURL,
         maxContext: arguments.maxContext,
-        promptCacheMode: arguments.promptCacheMode)
+        promptCacheMode: arguments.promptCacheMode,
+        prefillChunkTokens: arguments.prefillChunkTokens)
     let modelID = arguments.modelIDOverride ?? backend.defaultModelID
     let server = TurboFieldfareHTTPServer(
         modelID: modelID,
@@ -27,7 +28,7 @@ do {
         backend: backend,
         chatDialect: backend.chatDialect)
     _ = try await server.start(port: arguments.port)
-    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue)")
+    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(modelID) context=\(arguments.maxContext) prefill_chunk=\(backend.prefillChunkTokens) prompt_cache=\(arguments.promptCacheMode.rawValue)")
 
     _ = await signals.wait()
     try await server.shutdown()

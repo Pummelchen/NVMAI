@@ -300,6 +300,21 @@ struct ServerArgumentTests {
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
         #expect(arguments.promptCacheMode == .singlePrefix)
+        #expect(arguments.prefillChunkTokens == nil)
+    }
+
+    @Test func acceptsPublicPrefillChunksAndRejectsUnsupportedValues() throws {
+        let arguments = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--prefill-chunk", "4096",
+        ])
+        #expect(arguments.prefillChunkTokens == 4_096)
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo",
+                "--prefill-chunk", "8192",
+            ])
+        }
     }
 
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {

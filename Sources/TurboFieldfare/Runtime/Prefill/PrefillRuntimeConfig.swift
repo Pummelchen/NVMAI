@@ -168,7 +168,11 @@ public struct PrefillRuntimeConfig: Sendable, Equatable {
         case chunked
     }
 
-    public static let maxChunkTokens = 1_024
+    /// Larger chunks reduce the number of routed-expert file sweeps during
+    /// long prompt prefill. Scratch and KV-ring allocations are sized from the
+    /// configured chunk, so the larger ceiling does not change memory use for
+    /// callers that retain a smaller setting.
+    public static let maxChunkTokens = 4_096
 
     public let mode: Mode
     public let chunkTokens: Int

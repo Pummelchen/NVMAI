@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfare
 
 public struct ServerArguments: Equatable, Sendable {
     public let model: String
@@ -10,6 +11,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
+    public let prefillChunkTokens: Int?
 
     public static let usage = """
     usage: TurboFieldfareServer --model <completed .gturbo directory> [options]
@@ -24,6 +26,9 @@ public struct ServerArguments: Equatable, Sendable {
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
                              Prompt KV reuse mode (default single-prefix).
+      --prefill-chunk <tokens>
+                             Prefill chunk size: 32, 64, 128, 256, 512,
+                             1024, 2048, or 4096 (default 1024 for Qwen).
       --help                 Show this help.
     """
 
@@ -34,6 +39,7 @@ public struct ServerArguments: Equatable, Sendable {
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
+        var prefillChunkTokens: Int?
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -73,6 +79,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--prompt-cache-mode must be off or single-prefix")
                 }
                 promptCacheMode = parsed
+            case "--prefill-chunk":
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedPrefillChunkTokens.contains(parsed) else {
+                    throw ServerArgumentError.invalid("--prefill-chunk is not supported")
+                }
+                prefillChunkTokens = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -83,7 +95,8 @@ public struct ServerArguments: Equatable, Sendable {
                                modelIDOverride: modelIDOverride,
                                maxContext: maxContext,
                                queueLimit: queueLimit,
-                               promptCacheMode: promptCacheMode)
+                               promptCacheMode: promptCacheMode,
+                               prefillChunkTokens: prefillChunkTokens)
     }
 }
 

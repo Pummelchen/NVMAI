@@ -277,6 +277,9 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         func attach(scrollView: NSScrollView, textView: NSTextView) {
             self.scrollView = scrollView
             self.textView = textView
+        }
+
+        private func startDrainTimerIfNeeded() {
             guard timer == nil else { return }
             let timer = Timer(timeInterval: 0.1, target: self,
                               selector: #selector(drainMailbox),
@@ -297,6 +300,12 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             self.prompt = prompt
             self.isTerminal = isTerminal
             self.showsPrefillPlaceholder = showsPrefillPlaceholder
+            if isTerminal {
+                timer?.invalidate()
+                timer = nil
+            } else {
+                startDrainTimerIfNeeded()
+            }
             let response = mailbox?.drain().completeText ?? output
             apply(
                 prompt: prompt,

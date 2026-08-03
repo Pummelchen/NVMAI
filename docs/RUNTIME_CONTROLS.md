@@ -11,7 +11,7 @@ The Mac app and CLI expose these generation controls:
 | Control | Mac values | CLI flag | Default | Effect |
 | --- | --- | --- | --- | --- |
 | Maximum response | Automatic | `--max-new` | App: remaining context; CLI: 1,024 tokens | The app can use the context space left after formatting the prompt. The CLI uses its explicit or default `--max-new` limit. |
-| Maximum context | 4K, 8K, 16K, 32K, 64K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the FP16 KV-memory delta. |
+| Maximum context | 4K, 8K, 16K, 32K, 64K, 128K | `--max-context` | 4K | Sets prompt plus response capacity. The app shows the Qwen FP16 KV-memory delta. |
 | Temperature | 0...2 in 0.05 steps | `--temperature` | 0.2 | `0` is greedy; positive values sample. |
 | Top-K | Off or 1...256 | `--top-k` | 64 | Keeps at most K candidates. CLI `0` turns it off. |
 | Top-P | Off or 0.01...1 | `--top-p` | 0.95 | Applies nucleus truncation before Top-K and is effective only while Top-K is enabled. |
@@ -28,6 +28,7 @@ benchmark protocol.
 | --- | --- | --- | --- | --- |
 | Expert-cache slots | 8, 16, 24, 32 | `--expert-cache-slots` | 16 | More slots can retain more routed experts and reduce later reads, but values above 16 use more RAM. |
 | Prompt prefill | On, off | — | On | On processes known prompt tokens through the chunked prefill path. Off disables that path. |
+| Prefill chunk | 32, 64, 128, 256, 512, 1024, 2048, 4096 | `--prefill-chunk` | App: 1024; CLI: model default | Larger chunks can reduce repeated routed-expert file sweeps for long prompts at the cost of temporary GPU memory. The CLI also accepts `auto`, which chooses the smallest supported chunk covering the prompt. |
 | RDADVISE | Off, Default, Bounded, Adaptive | `--rdadvise` | Off | Applies experimental read advice. Its effect depends on the workload; it may help a short decode and slow a long one. |
 
 The CLI applies these settings when it loads the model, so each run uses the
@@ -39,7 +40,8 @@ behavior.
 Changing context length, expert-cache slots, or RDADVISE requires a reload.
 Some sampling changes also require a reload because greedy and sampled
 generation use different output-head paths. Prompt-prefill settings apply to
-each request and do not require a reload.
+each request and do not require a reload. Use larger prefill chunks only after
+checking memory pressure on the target Mac.
 
 ## Run an experiment
 
@@ -54,6 +56,23 @@ each request and do not require a reload.
 Use the [community benchmark protocol](COMMUNITY_BENCHMARKS.md) for a standard
 production result. A run with changed runtime controls is experimental and must
 name the changed setting.
+
+### M3 prefill tuning
+
+An exploratory 8-bit Qwen run on the base 8-core M3 with 24 GB RAM used the
+frozen 2,940-token long-synthesis prompt and generated one token to isolate
+prefill. The 1,024-token production default was fastest and used the least
+memory in this single-run comparison:
+
+| Chunk | Prefill | Peak footprint |
+| ---: | ---: | ---: |
+| 1,024 | 92.69 s | 2.82 GB |
+| 2,048 | 127.18 s | 3.10 GB |
+| 4,096 | 98.52 s | 3.49 GB |
+
+These are exploratory measurements, not performance ceilings. Keep 1,024 on a
+base M3 unless a repeatable workload-specific benchmark shows otherwise; do
+not infer the same optimum for a different Apple GPU or storage system.
 
 ## Read the results
 

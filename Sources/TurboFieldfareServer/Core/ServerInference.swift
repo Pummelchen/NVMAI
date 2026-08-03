@@ -121,6 +121,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let runner: RealForwardRunner
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
+    public nonisolated let prefillChunkTokens: Int
     private let maxContext: Int
     private let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
@@ -128,7 +129,8 @@ public actor ServerModelSession: ServerInferenceBackend {
 
     public static func load(modelDirectory: URL,
                             maxContext: Int,
-                            promptCacheMode: ServerPromptCacheMode = .singlePrefix) async throws -> ServerModelSession {
+                            promptCacheMode: ServerPromptCacheMode = .singlePrefix,
+                            prefillChunkTokens requestedPrefillChunkTokens: Int? = nil) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw GFTokenizerError.missingToolTemplate
@@ -150,9 +152,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             expertCacheSlots: loadRuntime.expertCacheSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
             rdadvisePolicy: loadRuntime.rdadvisePolicy,
-            prefillChunkTokens: model.config.family == .qwen36
-                ? RuntimeConfiguration.qwenLongPrefillChunkTokens
-                : loadRuntime.prefillChunkTokens,
+            prefillChunkTokens: requestedPrefillChunkTokens
+                ?? (model.config.family == .qwen36
+                    ? RuntimeConfiguration.qwenLongPrefillChunkTokens
+                    : loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: true)
         let runner = try RealForwardRunner(model: model,
@@ -211,6 +214,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.runner = runner
         self.scratch = scratch
         self.prefillConfig = prefillConfig
+        self.prefillChunkTokens = prefillConfig.chunkTokens
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode
         self.promptCacheDomain = promptCacheDomain

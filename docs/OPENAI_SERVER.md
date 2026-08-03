@@ -90,8 +90,10 @@ OpenCode:
 ```
 
 Select `turbofieldfare/qwen3.6-35b-a3b` in OpenCode. Qwen 3.6 server requests
-use a 1,024-token chunked-prefill ceiling automatically; the advertised model
-ID is unchanged, so existing client configuration continues to work.
+use a 1,024-token chunked-prefill ceiling by default. `--prefill-chunk` accepts
+32 through 4,096 in powers of two; larger chunks reduce repeated expert-file
+sweeps for long prompts while using more temporary GPU memory. The advertised
+model ID is unchanged, so existing client configuration continues to work.
 
 ## Prompt reuse
 
@@ -145,6 +147,6 @@ The server supports one model and one choice. It does not support the Responses
 API, legacy Completions, embeddings, multimodal input, structured output,
 batching, log probabilities, or remote model switching.
 
-Context length can be 4K, 8K, 16K, 32K, or 64K. The default is 16K. Larger FP16
-KV contexts use more memory. On an 8 GB Mac, run one model process at a time and
-watch memory pressure.
+Context length can be 4K, 8K, 16K, 32K, 64K, or 128K. The default is 16K.
+Larger FP16 KV contexts use more memory. On an 8 GB Mac, run one model process
+at a time and watch memory pressure.

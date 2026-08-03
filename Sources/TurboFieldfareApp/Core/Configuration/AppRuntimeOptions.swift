@@ -51,9 +51,8 @@ public enum AppModelVerification: String, CaseIterable, Sendable, Identifiable {
 
 public struct AppRuntimeOptions: Equatable, Sendable {
     public static let allowedSlotCounts = RuntimeConfiguration.allowedExpertCacheSlots
-    // Keep the interactive app on its established memory envelope. The larger
-    // Qwen server/CLI chunks are selected internally for long tool prompts.
-    public static let allowedPrefillChunkTokens = [32, 64, 128]
+    public static let allowedPrefillChunkTokens =
+        RuntimeConfiguration.allowedPrefillChunkTokens
 
     public var expertCacheSlots: Int
     public var expertCachePolicy: AppExpertCachePolicy
@@ -65,7 +64,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
-                prefillChunkTokens: Int = 128,
+                prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
                 rdadvisePolicy: AppRDAdvicePolicy = .off,
                 modelVerification: AppModelVerification = .fullSha256) {
         self.expertCacheSlots = expertCacheSlots

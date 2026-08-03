@@ -68,13 +68,24 @@ public func run(args: Args,
             streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
+        let prefillChunkTokens: Int
+        switch args.prefillChunk {
+        case .fixed(let tokens):
+            prefillChunkTokens = tokens
+        case .auto:
+            prefillChunkTokens = RuntimeConfiguration.allowedPrefillChunkTokens
+                .first(where: { $0 >= promptIds.count })
+                ?? PrefillRuntimeConfig.maxChunkTokens
+        case nil:
+            prefillChunkTokens = model.config.family == .qwen36
+                ? RuntimeConfiguration.qwenLongPrefillChunkTokens
+                : loadRuntime.prefillChunkTokens
+        }
         let runtime = RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
             rdadvisePolicy: loadRuntime.rdadvisePolicy,
-            prefillChunkTokens: model.config.family == .qwen36
-                ? RuntimeConfiguration.qwenLongPrefillChunkTokens
-                : loadRuntime.prefillChunkTokens,
+            prefillChunkTokens: prefillChunkTokens,
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: !config.isPureGreedy)
         let runner = try RealForwardRunner(

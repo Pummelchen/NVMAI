@@ -9,14 +9,18 @@ import TurboFieldfare
         #expect(options.expertCacheSlots == 16)
         #expect(options.expertCachePolicy == .lfu)
         #expect(options.prefillEnabled)
-        #expect(options.prefillChunkTokens == 128)
+        #expect(options.prefillChunkTokens == 1_024)
         #expect(options.rdadvisePolicy == .off)
         #expect(options.modelVerification == .fullSha256)
 
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
-        #expect(runtime == .production)
+        #expect(runtime.expertCacheSlots == RuntimeConfiguration.production.expertCacheSlots)
+        #expect(runtime.expertCachePolicy == RuntimeConfiguration.production.expertCachePolicy)
+        #expect(runtime.prefillConfig.chunkTokens == 1_024)
+        #expect(runtime.rdadvisePolicy == RuntimeConfiguration.production.rdadvisePolicy)
+        #expect(runtime.headPath == RuntimeConfiguration.production.headPath)
         #expect(options.resultSummary ==
-            "Cache 16 LFU, prefill 128, FP16 KV, RDADVISE off, full SHA-256")
+            "Cache 16 LFU, prefill 1024, FP16 KV, RDADVISE off, full SHA-256")
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {
