@@ -14,6 +14,7 @@ final class GDN {
     private let convDecodePSO: MTLComputePipelineState
     private let convPrefillPSO: MTLComputePipelineState
     private let convTailUpdatePSO: MTLComputePipelineState
+    private let convTailCheckpointPSO: MTLComputePipelineState
     private let qkNormPSO: MTLComputePipelineState
     private let deltaDecodePSO: MTLComputePipelineState
     private let deltaPrefillPSO: MTLComputePipelineState
@@ -41,6 +42,7 @@ final class GDN {
         self.convDecodePSO = try context.pipeline("gdn_conv_mix_decode")
         self.convPrefillPSO = try context.pipeline("gdn_conv_mix_prefill")
         self.convTailUpdatePSO = try context.pipeline("gdn_conv_tail_update")
+        self.convTailCheckpointPSO = try context.pipeline("gdn_conv_tail_checkpoint")
         self.qkNormPSO = try context.pipeline("gdn_qk_norm")
         self.deltaDecodePSO = try context.pipeline("gdn_delta_step_decode")
         self.deltaPrefillPSO = try context.pipeline("gdn_delta_step_prefill")
@@ -175,6 +177,26 @@ final class GDN {
         encoder.endEncoding()
     }
 
+    /// Capture the conv tail after the first (confirmed) row while the normal
+    /// two-row update continues to the speculative final state.
+    func encodeConvTailCheckpoint(commandBuffer: MTLCommandBuffer,
+                                  tail: MTLBuffer,
+                                  qkvRows: MTLBuffer,
+                                  checkpoint: MTLBuffer) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(convTailCheckpointPSO)
+        encoder.setBuffer(tail, offset: 0, index: 0)
+        encoder.setBuffer(qkvRows, offset: 0, index: 1)
+        encoder.setBuffer(checkpoint, offset: 0, index: 2)
+        var channels = UInt32(config.qkvDim)
+        var taps = UInt32(config.convKernelSize)
+        encoder.setBytes(&channels, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&taps, length: MemoryLayout<UInt32>.size, index: 4)
+        dispatch1D(encoder, pipeline: convTailCheckpointPSO,
+                   threads: (config.convKernelSize - 1) * config.qkvDim)
+        encoder.endEncoding()
+    }
+
     /// Per-head no-weight RMS norm over the q and k slices of `convOut`,
     /// in place, with the delta-rule scales folded in. `rows` > 1 for prefill.
     func encodeQKNorm(commandBuffer: MTLCommandBuffer,
@@ -232,6 +254,7 @@ final class GDN {
                                 aLog: MTLBuffer, aLogOffset: Int,
                                 dtBias: MTLBuffer, dtBiasOffset: Int,
                                 state: MTLBuffer,
+                                checkpointState: MTLBuffer? = nil,
                                 y: MTLBuffer, yOffset: Int = 0,
                                 rows: Int) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -248,6 +271,9 @@ final class GDN {
         var rowStride = UInt32(config.qkvDim)
         encoder.setBytes(&rowCount, length: MemoryLayout<UInt32>.size, index: 11)
         encoder.setBytes(&rowStride, length: MemoryLayout<UInt32>.size, index: 12)
+        encoder.setBuffer(checkpointState ?? state, offset: 0, index: 13)
+        var checkpointEnabled = checkpointState != nil
+        encoder.setBytes(&checkpointEnabled, length: MemoryLayout<Bool>.size, index: 14)
         encoder.dispatchThreadgroups(
             MTLSize(width: config.numVHeads,
                     height: config.valueHeadDim / 4,

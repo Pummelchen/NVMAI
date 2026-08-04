@@ -6,6 +6,7 @@ import Foundation
 enum RepackModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case qwen36MTP = "qwen36_mtp"
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
@@ -60,6 +61,9 @@ struct ArchInfo: Sendable, Equatable {
         }
         guard let tc = root["text_config"] as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
+        }
+        if (root["model_type"] as? String) == "qwen3_5_mtp" {
+            return try loadQwen36MTP(configPath: configPath, tc: tc)
         }
         if (root["model_type"] as? String) == "qwen3_5_moe" {
             return try loadQwen36(configPath: configPath, tc: tc)
@@ -211,6 +215,63 @@ struct ArchInfo: Sendable, Equatable {
             linearConvKernelSize: try i("linear_conv_kernel_dim"))
         try crossCheckProductionQwen36(arch, configPath: configPath)
         return arch
+    }
+
+    /// Qwen3.6 MTP is a single full-attention decoder layer. It intentionally
+    /// carries neither an embedding table nor an LM head: both are shared from
+    /// the verified target model at runtime. Treating it as a distinct family
+    /// keeps a draft sidecar from ever being accepted as a standalone target.
+    private static func loadQwen36MTP(configPath: String,
+                                      tc: [String: Any]) throws -> ArchInfo {
+        var base = try loadQwen36(configPath: configPath, tc: tc)
+        guard let count = (tc["mtp_num_hidden_layers"] as? Int)
+            ?? (tc["mtp_num_hidden_layers"] as? NSNumber)?.intValue,
+              count == 1 else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "Qwen3.6 MTP requires mtp_num_hidden_layers == 1")
+        }
+        guard (tc["mtp_use_dedicated_embeddings"] as? Bool) == false else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "Qwen3.6 MTP must reuse the target embedding and head")
+        }
+        base = ArchInfo(
+            hiddenSize: base.hiddenSize,
+            intermediateSize: base.intermediateSize,
+            moeIntermediateSize: base.moeIntermediateSize,
+            numHeads: base.numHeads,
+            numKVHeads: base.numKVHeads,
+            numFullKVHeads: base.numFullKVHeads,
+            headDim: base.headDim,
+            fullHeadDim: base.fullHeadDim,
+            vocabSize: base.vocabSize,
+            slidingWindow: 65_536,
+            finalLogitSoftcap: base.finalLogitSoftcap,
+            ropeTheta: base.ropeTheta,
+            fullRopeTheta: base.fullRopeTheta,
+            partialRotaryFactor: base.partialRotaryFactor,
+            numLayers: 1,
+            numExperts: base.numExperts,
+            topKExperts: base.topKExperts,
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [1],
+            hiddenActivation: base.hiddenActivation,
+            family: .qwen36MTP,
+            attnOutputGate: base.attnOutputGate,
+            attentionScale: base.attentionScale,
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: true,
+            ropeNeoxSubdim: true,
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0)
+        return base
     }
 
     /// Production Qwen3.6-35B-A3B baseline (mirrors the runtime's

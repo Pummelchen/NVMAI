@@ -111,6 +111,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         switch modelFamily {
         case .gemma4: return "gemma-4-26b-a4b-it"
         case .qwen36: return "qwen3.6-35b-a3b"
+        case .qwen36MTP: return "qwen3.6-35b-a3b-mtp"
         }
     }
     private nonisolated let modelFamily: ModelFamily
@@ -119,15 +120,26 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let model: Model
     private let tokenizer: GFTokenizer
     private let runner: RealForwardRunner
+    private let mtpDecoder: StreamingMTPDecoder?
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
     public nonisolated let prefillChunkTokens: Int
     private let maxContext: Int
-    private let promptCacheMode: ServerPromptCacheMode
+    public nonisolated let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
     private var promptCache: ServerPromptCache
     private let promptStateStore: ServerPromptStateStore?
     private var activePromptCacheEntryID: UUID?
+
+    static func effectivePromptCacheMode(
+        requested: ServerPromptCacheMode,
+        mtpEnabled: Bool
+    ) -> ServerPromptCacheMode {
+        // A target-only snapshot cannot restore the draft stream. Keeping a
+        // cache allocated while MTP is active would spend memory on entries
+        // that must never be consumed or published.
+        mtpEnabled ? .off : requested
+    }
 
     public static func load(modelDirectory: URL,
                             maxContext: Int,
@@ -136,7 +148,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                             promptCacheMemoryLimitBytes: Int = 256 * 1_048_576,
                             promptCacheDiskDirectory: URL? = nil,
                             promptCacheDiskLimitBytes: Int = 8_192 * 1_048_576,
-                            prefillChunkTokens requestedPrefillChunkTokens: Int? = nil) async throws -> ServerModelSession {
+                            prefillChunkTokens requestedPrefillChunkTokens: Int? = nil,
+                            mtpModelDirectory: URL? = nil,
+                            mtpMemoryMiB: Int = StreamingMTPMemoryPlan.defaultBudgetMiB) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw GFTokenizerError.missingToolTemplate
@@ -164,10 +178,32 @@ public actor ServerModelSession: ServerInferenceBackend {
                     : loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: true)
-        let runner = try RealForwardRunner(model: model,
+        let mtpDecoder: StreamingMTPDecoder?
+        let runner: RealForwardRunner
+        if let mtpModelDirectory {
+            let sidecar = try Model.load(
+                directoryURL: mtpModelDirectory,
+                device: context.device,
+                expecting: .qwen36MTP,
+                streamingMode: .pread(slotCount: StreamingMTPMemoryPlan.expertSlots),
+                expertCachePolicy: runtime.modelExpertCachePolicy,
+                integrityPolicy: .fullSha256)
+            let decoder = try StreamingMTPDecoder(
+                targetModel: model,
+                mtpSidecar: sidecar,
+                context: context,
+                maxContext: maxContext,
+                memoryBudgetMiB: mtpMemoryMiB,
+                runtimeConfiguration: runtime)
+            mtpDecoder = decoder
+            runner = decoder.target
+        } else {
+            mtpDecoder = nil
+            runner = try RealForwardRunner(model: model,
                                            context: context,
                                            maxContext: maxContext,
                                            runtimeConfiguration: runtime)
+        }
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize,
                                                logitSoftcap: Float(model.config.finalLogitSoftcap))
         let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
@@ -192,9 +228,12 @@ public actor ServerModelSession: ServerInferenceBackend {
             kvStorage: PrefillKVStorageMode.fp16.rawValue,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
+        let effectivePromptCacheMode = Self.effectivePromptCacheMode(
+            requested: promptCacheMode,
+            mtpEnabled: mtpDecoder != nil)
         let promptStateStore: ServerPromptStateStore?
         let promptCache: ServerPromptCache
-        if promptCacheMode == .multiPrefix {
+        if effectivePromptCacheMode == .multiPrefix {
             let store = try ServerPromptStateStore(
                 configuration: ServerPromptCacheStorageConfiguration(
                     memoryLimitBytes: promptCacheMemoryLimitBytes,
@@ -218,10 +257,11 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   model: model,
                                   tokenizer: tokenizer,
                                   runner: runner,
+                                  mtpDecoder: mtpDecoder,
                                   scratch: scratch,
                                   prefillConfig: runtime.prefillConfig,
                                   maxContext: maxContext,
-                                  promptCacheMode: promptCacheMode,
+                                  promptCacheMode: effectivePromptCacheMode,
                                   promptCacheDomain: promptCacheDomain,
                                   promptCache: promptCache,
                                   promptStateStore: promptStateStore)
@@ -231,6 +271,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                  model: Model,
                  tokenizer: GFTokenizer,
                  runner: RealForwardRunner,
+                 mtpDecoder: StreamingMTPDecoder?,
                  scratch: RawCompletionScratch,
                  prefillConfig: PrefillRuntimeConfig,
                  maxContext: Int,
@@ -244,6 +285,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.chatDialect = tokenizer.dialect
         self.modelFamily = model.config.family
         self.runner = runner
+        self.mtpDecoder = mtpDecoder
         self.scratch = scratch
         self.prefillConfig = prefillConfig
         self.prefillChunkTokens = prefillConfig.chunkTokens
@@ -266,6 +308,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 }
                 activePromptCacheEntryID = nil
                 runner.reset()
+                mtpDecoder?.reset()
             }
         }
         let needsToolTemplate = usesToolTemplate(
@@ -384,15 +427,27 @@ public actor ServerModelSession: ServerInferenceBackend {
         var decodingError: Error?
         var shouldStop = false
 
+        let activeProducer: any LogitProducer = if config.isPureGreedy,
+                                                   let mtpDecoder,
+                                                   promptIDs.count + config.maxNewTokens
+                                                    <= mtpDecoder.draftMaxContext {
+            mtpDecoder
+        } else {
+            runner
+        }
+        let activeStart: RawCompletionStart = activeProducer is StreamingMTPDecoder
+            ? .reset : completionStart
+        let activePromptIDs = activeProducer is StreamingMTPDecoder
+            ? promptIDs : effectivePromptIDs
         let result = try await runRawCompletion(
-            producer: runner,
+            producer: activeProducer,
             tokenizer: tokenizer,
-            promptIds: effectivePromptIDs,
+            promptIds: activePromptIDs,
             config: config,
             context: context,
             scratch: scratch,
             prefillConfig: prefillConfig,
-            start: completionStart,
+            start: activeStart,
             shouldStop: { shouldStop }) { progress in
                 guard decodingError == nil else { return }
                 do {
@@ -431,6 +486,34 @@ public actor ServerModelSession: ServerInferenceBackend {
                     shouldStop = true
                 }
         }
+        if let activeMTP = activeProducer as? StreamingMTPDecoder {
+            let stats = activeMTP.statistics
+            let decodeRate = result.decodeSeconds > 0
+                ? Double(result.newTokens) / result.decodeSeconds : 0
+            print(String(format:
+                "NVMAI mtp drafted=%d accepted=%d acceptance=%.1f%% "
+                    + "target_passes=%d emitted_per_pass=%.3f "
+                    + "prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f "
+                    + "memory_required_mib=%.1f memory_budget_mib=%.1f",
+                stats.draftedTokens,
+                stats.acceptedTokens,
+                stats.acceptanceRate * 100,
+                stats.targetBackbonePasses,
+                stats.emittedTokensPerTargetPass,
+                result.prefillSeconds,
+                result.decodeSeconds,
+                decodeRate,
+                Double(activeMTP.memoryPlan.requiredBytes) / 1_048_576,
+                Double(activeMTP.memoryPlan.budgetBytes) / 1_048_576))
+        } else {
+            let decodeRate = result.decodeSeconds > 0
+                ? Double(result.newTokens) / result.decodeSeconds : 0
+            print(String(format:
+                "NVMAI generation prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f",
+                result.prefillSeconds,
+                result.decodeSeconds,
+                decodeRate))
+        }
         if let decodingError { throw decodingError }
         try decoder?.finish()
         if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
@@ -449,7 +532,12 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             reason = "stop"
         }
-        if promptCacheMode == .singlePrefix {
+        if mtpDecoder != nil {
+            // Native MTP keeps a second KV stream. Until both states are
+            // persisted atomically, do not publish target-only cache entries.
+            promptCache.invalidate()
+            activePromptCacheEntryID = nil
+        } else if promptCacheMode == .singlePrefix {
             let publication = promptCache.publish(
                 domain: promptCacheDomain,
                 request: request,

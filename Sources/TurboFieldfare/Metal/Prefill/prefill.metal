@@ -21,6 +21,7 @@ constant bool FC_PREFILL_ACT_SILU [[function_constant(77)]];
 // Packed affine weight width for chunked embedding, projections, and routed
 // experts. Leaving it unset preserves the original INT4 specialization.
 constant uint FC_PREFILL_AFFINE_BITS [[function_constant(78)]];
+constant uint FC_PREFILL_ROUTER_BITS [[function_constant(79)]];
 
 static inline uint prefill_affine_bits() {
     return is_function_constant_defined(FC_PREFILL_AFFINE_BITS)
@@ -546,7 +547,10 @@ kernel void prefill_router_gemma4_block(
 
     for (uint e = tid; e < NE; e += tg_size) {
         const uint n_groups = D / kPrefillGroupSize;
-        device const uint8_t* W_row = W + e * D;
+        const uint bits = is_function_constant_defined(FC_PREFILL_ROUTER_BITS)
+            ? FC_PREFILL_ROUTER_BITS : 8u;
+        const uint row_bytes = D * bits / 8u;
+        device const uint8_t* W_row = W + e * row_bytes;
         device const bfloat* s_row = scales + e * n_groups;
         device const bfloat* b_row = biases + e * n_groups;
 
@@ -554,13 +558,13 @@ kernel void prefill_router_gemma4_block(
         for (uint g = 0; g < n_groups; ++g) {
             float s = float(s_row[g]);
             float b = float(b_row[g]);
-            device const uint8_t* Wg = W_row + g * kPrefillGroupSize;
             device const half* xg = row_hidden + g * kPrefillGroupSize;
             device const bfloat* eg = effective_scale + g * kPrefillGroupSize;
             float dot_qx = 0.0f;
             float sum_x = 0.0f;
             for (uint k = 0; k < kPrefillGroupSize; ++k) {
-                float q = float(uint(Wg[k]));
+                float q = float(prefill_affine_value(
+                    W_row, g * kPrefillGroupSize + k, bits));
                 float xv = float(xg[k]) * float(eg[k]);
                 dot_qx = fma(q, xv, dot_qx);
                 sum_x += xv;

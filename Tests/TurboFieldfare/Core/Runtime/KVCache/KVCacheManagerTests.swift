@@ -160,4 +160,18 @@ import Metal
         #expect(kv.position == 1)
     }
 
+    @Test func speculativeRewindMovesOnlyTheLogicalCursor() throws {
+        let (_, kv) = try makeManager(maxContext: 128)
+        kv.advance(by: 17)
+        let slotBefore = kv.kSlot(layer: 5, position: 12)
+        try kv.rewind(to: 12)
+        #expect(kv.position == 12)
+        let slotAfter = kv.kSlot(layer: 5, position: 12)
+        #expect(slotBefore.buffer === slotAfter.buffer)
+        #expect(slotBefore.offset == slotAfter.offset)
+        #expect(throws: InferenceStateSnapshotError.self) {
+            try kv.rewind(to: 13)
+        }
+    }
+
 }

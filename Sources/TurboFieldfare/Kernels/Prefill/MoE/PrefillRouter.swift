@@ -30,8 +30,12 @@ public struct PrefillTokenExpertPair: Equatable, Sendable {
 final class PrefillRouter {
     private let pso: MTLComputePipelineState
 
-    init(context: MetalContext) throws {
-        self.pso = try context.pipeline("prefill_router_gemma4_block")
+    init(context: MetalContext, weightBits: Int = 8) throws {
+        precondition([4, 8].contains(weightBits))
+        self.pso = try context.pipeline(
+            "prefill_router_gemma4_block",
+            constants: [MetalFunctionConstant(index: 79,
+                                              value: .uint32(UInt32(weightBits)))])
     }
 
     func encodeGemma4Block(commandBuffer: MTLCommandBuffer,

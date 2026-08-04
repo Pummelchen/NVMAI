@@ -102,6 +102,23 @@ struct RoutedBlobs {
     device const uint8_t* blob[kMaxStreamedExperts];
 };
 
+constant uint FC_ROUTER_BITS [[function_constant(44)]];
+
+static inline uint router_affine_bits() {
+    return is_function_constant_defined(FC_ROUTER_BITS) ? FC_ROUTER_BITS : 8u;
+}
+
+static inline uint router_affine_value(device const uint8_t* packed,
+                                       uint element,
+                                       uint bits) {
+    const uint bit_offset = element * bits;
+    const uint byte_offset = bit_offset >> 3;
+    const uint shift = bit_offset & 7u;
+    uint word = uint(packed[byte_offset]);
+    if (shift + bits > 8u) word |= uint(packed[byte_offset + 1u]) << 8u;
+    return (word >> shift) & ((1u << bits) - 1u);
+}
+
 static inline void router_gemv_gemma4_body(
     device const uint8_t* W,
     device const bfloat* scales,
@@ -121,8 +138,10 @@ static inline void router_gemv_gemma4_body(
     const uint e = tg_idx * rows_per_tg + sg_idx;
     if (e >= NE) return;
 
+    const uint bits = router_affine_bits();
     const uint n_groups = DD / kMoEGroupSize;
-    device const uint8_t* W_row = W + uint(e) * DD;
+    const uint row_bytes = DD * bits / 8u;
+    device const uint8_t* W_row = W + uint(e) * row_bytes;
     device const bfloat* s_row = scales + uint(e) * n_groups;
     device const bfloat* b_row = biases + uint(e) * n_groups;
 
@@ -131,8 +150,8 @@ static inline void router_gemv_gemma4_body(
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);
         const uint idx = g * kMoEGroupSize + lane * 2u;
-        const float q0 = float(uint(W_row[idx]));
-        const float q1 = float(uint(W_row[idx + 1u]));
+        const float q0 = float(router_affine_value(W_row, idx, bits));
+        const float q1 = float(router_affine_value(W_row, idx + 1u, bits));
         const float x0 = float(hidden[idx]) * float(effective_scale[idx]);
         const float x1 = float(hidden[idx + 1u]) * float(effective_scale[idx + 1u]);
         acc = fma(s, q0 * x0 + q1 * x1, acc);

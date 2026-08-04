@@ -379,6 +379,96 @@ import TurboFieldfareValidationSupport
         #expect(maxErr <= 5e-2, "state divergence \(maxErr)")
     }
 
+    @Test func speculativeCheckpointMatchesFirstConfirmedRow() throws {
+        let cfg = Self.cfg
+        let fixture = Fixture(rows: 2, seed: 0xC11E)
+        let ctx = try MetalContext()
+        let gdn = try GDN(context: ctx, config: cfg)
+        let tailBytes = (cfg.convKernelSize - 1) * cfg.qkvDim * 2
+        let stateCount = cfg.numVHeads * cfg.valueHeadDim * cfg.keyHeadDim
+        let qkvFlat = fixture.qkvRows.flatMap { $0.map { Float16($0) } }
+        let aFlat = fixture.aRows.flatMap { $0.map { Float16($0) } }
+        let bFlat = fixture.bRows.flatMap { $0.map { Float16($0) } }
+
+        guard let tail = ctx.device.makeBuffer(length: tailBytes,
+                                               options: .storageModeShared),
+              let state = ctx.device.makeBuffer(length: stateCount * 4,
+                                                options: .storageModeShared),
+              let checkpointTail = ctx.device.makeBuffer(length: tailBytes,
+                                                         options: .storageModeShared),
+              let checkpointState = ctx.device.makeBuffer(length: stateCount * 4,
+                                                          options: .storageModeShared),
+              let referenceTail = ctx.device.makeBuffer(length: tailBytes,
+                                                        options: .storageModeShared),
+              let referenceState = ctx.device.makeBuffer(length: stateCount * 4,
+                                                         options: .storageModeShared),
+              let qkvRows = Fp16Buffer.make(ctx.device, halves: qkvFlat),
+              let aRows = Fp16Buffer.make(ctx.device, halves: aFlat),
+              let bRows = Fp16Buffer.make(ctx.device, halves: bFlat),
+              let convW = Self.makeBF16Buffer(ctx.device, values: fixture.convW),
+              let aLog = Self.makeBF16Buffer(ctx.device, values: fixture.aLog),
+              let dtBias = Self.makeBF16Buffer(ctx.device, values: fixture.dtBias),
+              let normW = Self.makeBF16Buffer(ctx.device, values: fixture.normW),
+              let convOut = Fp16Buffer.make(ctx.device, count: 2 * cfg.qkvDim),
+              let y = Fp16Buffer.make(ctx.device, count: 2 * cfg.valueDim),
+              let referenceConvOut = Fp16Buffer.make(ctx.device, count: cfg.qkvDim),
+              let referenceY = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let referenceOut = Fp16Buffer.make(ctx.device, count: cfg.valueDim),
+              let cb = ctx.queue.makeCommandBuffer() else {
+            Issue.record("Failed to allocate speculative checkpoint fixture")
+            return
+        }
+        for buffer in [tail, state, checkpointTail, checkpointState,
+                       referenceTail, referenceState] {
+            memset(buffer.contents(), 0, buffer.length)
+        }
+
+        gdn.encodeConvPrefill(commandBuffer: cb, tail: tail, qkvRows: qkvRows,
+                              convWeight: convW, convWeightOffset: 0,
+                              out: convOut, rows: 2)
+        gdn.encodeConvTailCheckpoint(commandBuffer: cb, tail: tail,
+                                     qkvRows: qkvRows, checkpoint: checkpointTail)
+        gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tail,
+                                 qkvRows: qkvRows, rows: 2)
+        gdn.encodeQKNorm(commandBuffer: cb, convOut: convOut, rows: 2)
+        gdn.encodeDeltaStepPrefill(commandBuffer: cb, convOut: convOut,
+                                   aProj: aRows, bProj: bRows,
+                                   aLog: aLog, aLogOffset: 0,
+                                   dtBias: dtBias, dtBiasOffset: 0,
+                                   state: state, checkpointState: checkpointState,
+                                   y: y, rows: 2)
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let error = cb.error {
+            Issue.record("Speculative checkpoint command failed: \(error)")
+            return
+        }
+
+        _ = try Self.gpuDecodeStep(
+            ctx: ctx, gdn: gdn, fixture: fixture, row: 0,
+            tail: referenceTail, state: referenceState, convW: convW,
+            aLog: aLog, dtBias: dtBias, normW: normW,
+            convOut: referenceConvOut, yBuf: referenceY, outBuf: referenceOut)
+
+        let gotTail = Self.readHalves(checkpointTail,
+                                      count: tailBytes / MemoryLayout<Float16>.stride)
+        let expectedTail = Self.readHalves(referenceTail,
+                                           count: tailBytes / MemoryLayout<Float16>.stride)
+        #expect(gotTail == expectedTail)
+
+        let gotState = checkpointState.contents()
+            .bindMemory(to: Float.self, capacity: stateCount)
+        let expectedState = referenceState.contents()
+            .bindMemory(to: Float.self, capacity: stateCount)
+        var maxStateError: Float = 0
+        for index in 0..<stateCount {
+            maxStateError = max(maxStateError,
+                                abs(gotState[index] - expectedState[index]))
+        }
+        #expect(maxStateError <= 1e-6,
+                "checkpoint state divergence \(maxStateError)")
+    }
+
     // MARK: - Fused input projection
 
     /// One INT4 projection packed as a single resident-style buffer holding

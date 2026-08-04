@@ -40,6 +40,18 @@ struct PrefillRoutedTileSchedulerConfig: Sendable, Equatable {
         guard slotCount > 0, reservedHits >= 0 else { return false }
         return (maxPendingDepth + 1) * tileExperts + reservedHits <= slotCount
     }
+
+    /// Shrinks the I/O tile when a deliberately small streamed-expert cache
+    /// cannot hold the default tile plus its one-tile lookahead. This keeps
+    /// bounded-cache runtimes streaming instead of requiring more resident
+    /// expert slots merely to enter the batched prefill path.
+    func fitting(slotCount: Int, reservedHits: Int = 0) -> Self? {
+        guard slotCount > reservedHits, reservedHits >= 0 else { return nil }
+        let availablePerTile = (slotCount - reservedHits) / (maxPendingDepth + 1)
+        guard availablePerTile > 0 else { return nil }
+        return Self(maxPendingDepth: maxPendingDepth,
+                    tileExperts: min(tileExperts, availablePerTile))
+    }
 }
 
 struct PrefillRoutedTileScheduler: Sendable, Equatable {

@@ -438,6 +438,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func handleAsyncError(_ error: Error,
                                   context: ChannelHandlerContext,
                                   stream: Bool) {
+        if !(error is CancellationError) {
+            FileHandle.standardError.write(
+                Data("NVMAI generation_failed error=\(String(reflecting: error))\n".utf8))
+        }
         if stream {
             let contextBox = SendableContext(context)
             context.eventLoop.execute {

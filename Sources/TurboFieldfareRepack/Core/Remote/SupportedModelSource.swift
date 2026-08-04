@@ -85,11 +85,26 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 37_800_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// One-layer native Qwen3.6 MTP draft. It contains no embedding or LM
+    /// head; the runtime reuses those tensors from whichever 4/6/8-bit target
+    /// is loaded. The routed experts remain SSD-streamed in `.gturbo` form.
+    public static let qwen36MTP = SupportedModelSource(
+        name: "qwen36-mtp",
+        displayName: "Qwen3.6 35B-A3B native MTP draft 4-bit",
+        repoID: "mlx-community/Qwen3.6-35B-A3B-MTP-4bit",
+        revision: "0295b81421bf4d0fccca9a7c0fcfb1418dda3516",
+        sourceIndexSHA256:
+            "00e220ddb21ceeb6290a3a1161f97339c553f3d27fc4319900a96edb5cfae74c",
+        modelID: "qwen3.6-35b-a3b-mtp-4bit",
+        approximateDownloadBytes: 475_130_833,
+        installedBytes: 475_300_000,
+        reserveBytes: 536_870_912)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = gemma4
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, qwen36_6bit, qwen36_8bit,
+        gemma4, qwen36, qwen36_6bit, qwen36_8bit, qwen36MTP,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

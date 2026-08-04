@@ -190,6 +190,83 @@ kernel void dequant_int4_gemv_simd(
                                 rows_per_tg, tg_idx, sg_idx, lane);
 }
 
+// Two-row variant for native-MTP verification. A SIMD dequantizes each output
+// weight row once and accumulates both activation rows before writing [2, M].
+kernel void dequant_int4_gemv2_simd(
+    device const uint8_t* W      [[buffer(0)]],
+    device const bfloat*  scales [[buffer(1)]],
+    device const bfloat*  biases [[buffer(2)]],
+    device const half*    x      [[buffer(3)]],
+    device half*          y      [[buffer(4)]],
+    constant uint&        M      [[buffer(5)]],
+    constant uint&        N      [[buffer(6)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint MM = int4_fc_m(M);
+    const uint NN = int4_fc_n(N);
+    const uint row = tg_idx * rows_per_tg + sg_idx;
+    if (row >= MM) return;
+    const uint n_groups = NN / kGroupSize;
+    const uint row_bytes = NN / 2u;
+    device const uint8_t* W_row = W + row * row_bytes;
+    device const bfloat* s_row = scales + row * n_groups;
+    device const bfloat* b_row = biases + row * n_groups;
+    device const half* x1 = x + NN;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    const uint full_blocks = n_groups / 4u;
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        device const ushort* wp = (device const ushort*)(W_row + byte_base);
+        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
+        const uint g = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 2u;
+        const half4 a0 = *((device const half4*)(x + elem));
+        const half4 b0 = *((device const half4*)(x + elem + 4u));
+        const half4 a1 = *((device const half4*)(x1 + elem));
+        const half4 b1 = *((device const half4*)(x1 + elem + 4u));
+        const uint q0 = w4 & 0xFFu, q1 = (w4 >> 8) & 0xFFu;
+        const uint q2 = (w4 >> 16) & 0xFFu, q3 = (w4 >> 24) & 0xFFu;
+        const float v0[8] = {float(a0.x), float(a0.y), float(a0.z), float(a0.w),
+                             float(b0.x), float(b0.y), float(b0.z), float(b0.w)};
+        const float v1[8] = {float(a1.x), float(a1.y), float(a1.z), float(a1.w),
+                             float(b1.x), float(b1.y), float(b1.z), float(b1.w)};
+        const uint qs[8] = {q0 & 0xFu, q0 >> 4, q1 & 0xFu, q1 >> 4,
+                            q2 & 0xFu, q2 >> 4, q3 & 0xFu, q3 >> 4};
+        float dot0 = 0.0f, dot1 = 0.0f, sum0 = 0.0f, sum1 = 0.0f;
+        for (uint i = 0; i < 8u; ++i) {
+            dot0 = fma(float(qs[i]), v0[i], dot0);
+            dot1 = fma(float(qs[i]), v1[i], dot1);
+            sum0 += v0[i];
+            sum1 += v1[i];
+        }
+        acc0 = fma(s, dot0, fma(b, sum0, acc0));
+        acc1 = fma(s, dot1, fma(b, sum1, acc1));
+    }
+    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint8_t byte = W_row[g * (kGroupSize / 2u) + lane];
+        const uint elem = g * kGroupSize + lane * 2u;
+        const float x00 = float(x[elem]), x01 = float(x[elem + 1u]);
+        const float x10 = float(x1[elem]), x11 = float(x1[elem + 1u]);
+        const float lo = float(uint(byte & 0xFu)), hi = float(uint(byte >> 4));
+        acc0 = fma(s, fma(lo, x00, hi * x01), fma(b, x00 + x01, acc0));
+        acc1 = fma(s, fma(lo, x10, hi * x11), fma(b, x10 + x11, acc1));
+    }
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    if (lane == 0u) {
+        y[row] = half(acc0);
+        y[MM + row] = half(acc1);
+    }
+}
+
 
 kernel void dequant_int4_qkv_gemv_simd(
     device const uint8_t* qW      [[buffer(0)]],

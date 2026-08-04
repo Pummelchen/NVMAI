@@ -181,23 +181,30 @@ public enum ManifestReader {
 
     private static func validateQuant(_ quant: ManifestQuant,
                                       family: ModelFamily) throws {
-        if family == .qwen36 {
+        if family == .qwen36 || family == .qwen36MTP {
             let baseBits = quant.embedding.weightBits
             guard [4, 6, 8].contains(baseBits),
                   quant.attention.weightBits == baseBits,
                   quant.sharedExpert.weightBits == baseBits,
                   quant.routedExpert.weightBits == baseBits,
-                  quant.router.weightBits == 8 else {
+                  (family == .qwen36MTP
+                    ? [4, 8].contains(quant.router.weightBits)
+                    : quant.router.weightBits == 8) else {
+                let router = family == .qwen36MTP ? "a 4- or 8-bit router" : "an 8-bit router"
                 throw ModelError.indexCorrupt(
-                    detail: "Qwen 3.6 requires consistent 4-, 6-, or 8-bit base weights and an 8-bit router")
+                    detail: "Qwen 3.6 requires consistent 4-, 6-, or 8-bit base weights and \(router)")
             }
         }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, family == .qwen36 ? [4, 6, 8] : [4]),
-            ("attention", quant.attention, family == .qwen36 ? [4, 6, 8] : [4]),
-            ("router", quant.router, [8]),
-            ("sharedExpert", quant.sharedExpert, family == .qwen36 ? [4, 6, 8] : [4, 8]),
-            ("routedExpert", quant.routedExpert, family == .qwen36 ? [4, 6, 8] : [4]),
+            ("embedding", quant.embedding,
+             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4]),
+            ("attention", quant.attention,
+             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4]),
+            ("router", quant.router, family == .qwen36MTP ? [4, 8] : [8]),
+            ("sharedExpert", quant.sharedExpert,
+             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4, 8]),
+            ("routedExpert", quant.routedExpert,
+             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4]),
         ]
         for (name, slot, allowedBits) in slots {
             guard allowedBits.contains(slot.weightBits),

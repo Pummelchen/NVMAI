@@ -296,6 +296,8 @@ struct StreamingStopMatcherTests {
 struct ServerArgumentTests {
     @Test func defaults() throws {
         let arguments = try ServerArguments.parse(["--model", "model.gturbo"])
+        #expect(arguments.mtpModel == nil)
+        #expect(arguments.mtpMemoryMiB == 384)
         #expect(arguments.port == 8080)
         #expect(arguments.maxContext == 16_384)
         #expect(arguments.queueLimit == 4)
@@ -319,6 +321,31 @@ struct ServerArgumentTests {
                 "--prefill-chunk", "8192",
             ])
         }
+    }
+
+    @Test func parsesBoundedMTPOptions() throws {
+        let arguments = try ServerArguments.parse([
+            "--model", "qwen.gturbo",
+            "--mtp-model", "qwen-mtp.gturbo",
+            "--mtp-memory-mib", "512",
+        ])
+        #expect(arguments.mtpModel == "qwen-mtp.gturbo")
+        #expect(arguments.mtpMemoryMiB == 512)
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "qwen.gturbo",
+                "--mtp-memory-mib", "1024",
+            ])
+        }
+    }
+
+    @Test func mtpForcesPromptCacheOff() {
+        #expect(ServerModelSession.effectivePromptCacheMode(
+            requested: .multiPrefix,
+            mtpEnabled: true) == .off)
+        #expect(ServerModelSession.effectivePromptCacheMode(
+            requested: .multiPrefix,
+            mtpEnabled: false) == .multiPrefix)
     }
 
     @Test func parsesSinglePrefixModeAndRejectsUnknownMode() throws {

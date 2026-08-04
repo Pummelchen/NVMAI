@@ -8,6 +8,7 @@ import Metal
 public enum ModelFamily: String, Sendable, Equatable {
     case gemma4 = "gemma4"
     case qwen36 = "qwen36"
+    case qwen36MTP = "qwen36_mtp"
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -237,6 +238,40 @@ public struct ArchConfig: Sendable, Equatable {
             convKernelSize: 4)
     )
 
+    /// Native one-layer Qwen3.6 MTP draft. The 65,536-token FP16 ring keeps
+    /// its KV at 128 MiB; truncating draft context can only lower acceptance
+    /// because every emitted token is still verified by the full target.
+    public static let qwen36MTP = ArchConfig(
+        hiddenSize: 2048,
+        intermediateSize: 512,
+        moeIntermediateSize: 512,
+        numHeads: 16,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 65_536,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 1,
+        numExperts: 256,
+        topKExperts: 8,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: [1],
+        hiddenActivation: "silu",
+        family: .qwen36MTP,
+        attnOutputGate: true,
+        attentionScale: 0.0625,
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: true,
+        ropeNeoxSubdim: true)
+
     private static func qwen36LayerMask() -> [UInt8] {
         // Layer kinds: 2 = gated-DeltaNet linear, 1 = full attention on every
         // 4th layer ((i + 1) % 4 == 0).
@@ -249,6 +284,7 @@ public struct ArchConfig: Sendable, Equatable {
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
+        .qwen36MTP: .qwen36MTP,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for

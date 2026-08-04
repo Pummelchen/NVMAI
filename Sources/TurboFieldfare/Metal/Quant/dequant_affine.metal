@@ -60,6 +60,51 @@ kernel void affine_quant_gemv_simd(
     if (lane == 0u) y[row] = half(accumulator);
 }
 
+kernel void affine_quant_gemv2_simd(
+    device const uint*   weights [[buffer(0)]],
+    device const bfloat* scales  [[buffer(1)]],
+    device const bfloat* biases  [[buffer(2)]],
+    device const half*   x       [[buffer(3)]],
+    device half*         y       [[buffer(4)]],
+    constant uint&       rows    [[buffer(5)]],
+    constant uint&       columns [[buffer(6)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_threadgroup = 8;
+    const uint row = tg_idx * rows_per_threadgroup + sg_idx;
+    if (row >= rows) return;
+    const uint bits = affine_quant_bits();
+    const uint groups_per_row = columns / kAffineGroupSize;
+    const uint words_per_row = (columns * bits) / 32u;
+    device const uint* row_weights = weights + row * words_per_row;
+    device const bfloat* row_scales = scales + row * groups_per_row;
+    device const bfloat* row_biases = biases + row * groups_per_row;
+    device const half* x1 = x + columns;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    for (uint group = 0; group < groups_per_row; ++group) {
+        const uint first = group * kAffineGroupSize + lane * 2u;
+        const float q0 = float(affine_quant_value(row_weights, first, bits));
+        const float q1 = float(affine_quant_value(row_weights, first + 1u, bits));
+        const float x00 = float(x[first]), x01 = float(x[first + 1u]);
+        const float x10 = float(x1[first]), x11 = float(x1[first + 1u]);
+        const float scale = float(row_scales[group]);
+        const float bias = float(row_biases[group]);
+        acc0 = fma(scale, q0 * x00 + q1 * x01,
+                   fma(bias, x00 + x01, acc0));
+        acc1 = fma(scale, q0 * x10 + q1 * x11,
+                   fma(bias, x10 + x11, acc1));
+    }
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    if (lane == 0u) {
+        y[row] = half(acc0);
+        y[rows + row] = half(acc1);
+    }
+}
+
 kernel void affine_quant_embedding_lookup(
     device const uint*   table     [[buffer(0)]],
     device const bfloat* scales    [[buffer(1)]],

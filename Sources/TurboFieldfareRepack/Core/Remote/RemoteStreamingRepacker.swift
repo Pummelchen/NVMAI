@@ -331,10 +331,16 @@ public final class RemoteStreamingRepacker {
                              progress: progress)
 
         try Task.checkCancellation()
-        try await copyRemoteMetadataSidecars(snapshot: snapshot,
-                                             remote: remote,
-                                             partialDir: paths.partialDirectory,
-                                             progress: progress)
+        // The MTP sidecar deliberately contains only tensors needed by the
+        // draft layer. It shares tokenization, embedding and lm_head with the
+        // target bundle, so copying tokenizer/config sidecars would be both
+        // redundant and a misleading standalone-model contract.
+        if plan.arch.family != .qwen36MTP {
+            try await copyRemoteMetadataSidecars(snapshot: snapshot,
+                                                 remote: remote,
+                                                 partialDir: paths.partialDirectory,
+                                                 progress: progress)
+        }
         try? FileManager.default.removeItem(atPath: paths.rangeTemporaryFile)
         try? FileManager.default.removeItem(atPath: paths.metadataDirectory)
         progress(.finalizing)

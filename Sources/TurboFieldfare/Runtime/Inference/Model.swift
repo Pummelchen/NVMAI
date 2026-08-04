@@ -26,6 +26,12 @@ public enum ExpertStreamingMode: Sendable {
 /// `MTLBuffer`; routed expert weights live behind per-layer streaming
 /// backends opened lazily on first touch.
 public struct Model {
+    struct SharedTargetWeights: @unchecked Sendable {
+        let embedding: TensorView
+        let lmHead: TensorView
+        let embeddingBits: Int
+        let lmHeadBits: Int
+    }
     public let device: MTLDevice
     public let config: ArchConfig
     public let streamingMode: ExpertStreamingMode
@@ -33,17 +39,25 @@ public struct Model {
     public let integrityPolicy: ModelIntegrityPolicy
     public var modelID: String { manifest.modelID }
     public var sourceSnapshotHash: String? { manifest.sourceSnapshotHash }
-    public var embeddingWeightBits: Int { manifest.quant?.embedding.weightBits ?? 4 }
+    public var embeddingWeightBits: Int {
+        sharedTargetWeights?.embeddingBits ?? manifest.quant?.embedding.weightBits ?? 4
+    }
+    public var lmHeadWeightBits: Int {
+        sharedTargetWeights?.lmHeadBits ?? manifest.quant?.embedding.weightBits ?? 4
+    }
     public var attentionWeightBits: Int { manifest.quant?.attention.weightBits ?? 4 }
     public var routerWeightBits: Int { manifest.quant?.router.weightBits ?? 8 }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
     public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
+    var mtpResidentTensorBytes: Int { residentBuffer.buffer.length }
+    var mtpExpertStrideBytes: Int { Int(packedExpertsLayout.expertStride) }
 
     let residentBuffer: ResidentBuffer
     let residentIndex: ResidentIndex
     let packedExpertsLayout: PackedExpertsLayout
     let manifest: Manifest
     let directoryURL: URL
+    let sharedTargetWeights: SharedTargetWeights?
 
     /// Lazy state. Held inside a reference box so `Model` can stay a struct
     /// while still letting accessors mutate layer state via a serial queue.
@@ -68,7 +82,8 @@ public struct Model {
          residentIndex: ResidentIndex,
          packedExpertsLayout: PackedExpertsLayout,
          manifest: Manifest,
-         directoryURL: URL) {
+         directoryURL: URL,
+         sharedTargetWeights: SharedTargetWeights? = nil) {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
@@ -79,6 +94,7 @@ public struct Model {
         self.packedExpertsLayout = packedExpertsLayout
         self.manifest = manifest
         self.directoryURL = directoryURL
+        self.sharedTargetWeights = sharedTargetWeights
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "turbo-fieldfare.expert-streamers")
     }
@@ -86,13 +102,15 @@ public struct Model {
     // MARK: - Resident accessors
 
     public var embedding: TensorView {
-        try! resident(name: "language_model.model.embed_tokens.weight")
+        if let sharedTargetWeights { return sharedTargetWeights.embedding }
+        return try! resident(name: "language_model.model.embed_tokens.weight")
     }
 
     /// Gemma 4 ties lm_head to the embedding; Qwen 3.6 carries a separate
     /// `lm_head` tensor. The transpose for the lm_head GEMV path is the
     /// kernel's job, not the loader's.
     public var lmHead: TensorView {
+        if let sharedTargetWeights { return sharedTargetWeights.lmHead }
         if config.tieWordEmbeddings { return embedding }
         return try! resident(name: "language_model.lm_head.weight")
     }
@@ -115,7 +133,7 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
-        case .qwen36:
+        case .qwen36, .qwen36MTP:
             return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
         }
     }
@@ -135,7 +153,7 @@ public struct Model {
         switch config.family {
         case .gemma4:
             return "language_model.model.layers.\(L).mlp.\(proj).weight"
-        case .qwen36:
+        case .qwen36, .qwen36MTP:
             return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
         }
     }
@@ -152,6 +170,46 @@ public struct Model {
     }
     public var finalNorm: TensorView {
         try! resident(name: "language_model.model.norm.weight")
+    }
+
+    /// MTP projection over the normalized next-token embedding followed by the
+    /// normalized target hidden state: `[embedding, hidden]`, `[2D] -> [D]`.
+    public var mtpProjection: TensorView {
+        try! resident(name: "fc.weight")
+    }
+    public var mtpEmbeddingNorm: TensorView {
+        try! resident(name: "pre_fc_norm_embedding.weight")
+    }
+    public var mtpHiddenNorm: TensorView {
+        try! resident(name: "pre_fc_norm_hidden.weight")
+    }
+
+    /// Attach a native MTP sidecar to a target without copying either large
+    /// tensor. The returned model retains the target's Metal buffers and uses
+    /// its actual 4/6/8-bit head kernels.
+    public func sharingTargetWeights(from target: Model) throws -> Model {
+        guard config.family == .qwen36MTP,
+              target.config.family == .qwen36,
+              config.hiddenSize == target.config.hiddenSize,
+              config.vocabSize == target.config.vocabSize else {
+            throw ModelError.indexCorrupt(
+                detail: "MTP sidecar is incompatible with the target model")
+        }
+        return Model(device: device,
+                     config: config,
+                     streamingMode: streamingMode,
+                     expertCachePolicy: expertCachePolicy,
+                     integrityPolicy: integrityPolicy,
+                     residentBuffer: residentBuffer,
+                     residentIndex: residentIndex,
+                     packedExpertsLayout: packedExpertsLayout,
+                     manifest: manifest,
+                     directoryURL: directoryURL,
+                     sharedTargetWeights: SharedTargetWeights(
+                        embedding: target.embedding,
+                        lmHead: target.lmHead,
+                        embeddingBits: target.embeddingWeightBits,
+                        lmHeadBits: target.lmHeadWeightBits))
     }
 
     // MARK: - Per-head attention norms (Q/K only)

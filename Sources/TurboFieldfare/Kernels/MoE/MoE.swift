@@ -57,6 +57,7 @@ final class MoE {
     init(context: MetalContext,
          siluActivation: Bool = false,
          routedWeightBits: Int = 4,
+         routerWeightBits: Int = 8,
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128) throws {
@@ -64,6 +65,7 @@ final class MoE {
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
         precondition([4, 6, 8].contains(routedWeightBits))
+        precondition([4, 8].contains(routerWeightBits))
         let activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
             : []
@@ -81,11 +83,13 @@ final class MoE {
             MetalFunctionConstant(index: 41, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 42, value: .uint32(Self.realDecodeTopK)),
             MetalFunctionConstant(index: 43, value: .bool(true)),
+            MetalFunctionConstant(index: 44, value: .uint32(UInt32(routerWeightBits))),
         ]
         let routerName = "router_gemv_gemma4_r4"
         self.routerGemvPSO = try context.pipeline(
             routerName,
-            constants: [],
+            constants: [MetalFunctionConstant(index: 44,
+                                              value: .uint32(UInt32(routerWeightBits)))],
             maxTotalThreadsPerThreadgroup: 512)
         self.routerGemvSpecializedPSO = try context.pipeline(
             routerName,

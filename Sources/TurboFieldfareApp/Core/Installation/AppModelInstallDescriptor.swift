@@ -83,6 +83,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         switch family {
         case .gemma4: return .default
         case .qwen36: return .qwen36
+        case .qwen36MTP: return nil
         }
     }
 

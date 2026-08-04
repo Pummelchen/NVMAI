@@ -19,7 +19,9 @@ final class DequantInt4GEMV {
     ]
 
     private let pipeline: MTLComputePipelineState
+    private let twoRowPipeline: MTLComputePipelineState
     private let specializedPipelines: [Shape: MTLComputePipelineState]
+    private let specializedTwoRowPipelines: [Shape: MTLComputePipelineState]
 
     /// `additionalShapes` compiles extra constant-folded variants for a
     /// non-Gemma model's decode shapes. Measured: an unspecialized
@@ -30,10 +32,15 @@ final class DequantInt4GEMV {
             "dequant_int4_gemv_simd",
             constants: [],
             maxTotalThreadsPerThreadgroup: 512)
+        self.twoRowPipeline = try context.pipeline(
+            "dequant_int4_gemv2_simd",
+            constants: [],
+            maxTotalThreadsPerThreadgroup: 512)
 
         let shapes = Self.realDecodeShapes
             + additionalShapes.map { Shape(m: UInt32($0.m), n: UInt32($0.n)) }
         var specializedPipelines: [Shape: MTLComputePipelineState] = [:]
+        var specializedTwoRowPipelines: [Shape: MTLComputePipelineState] = [:]
         for shape in shapes {
             specializedPipelines[shape] = try context.pipeline(
                 "dequant_int4_gemv_simd",
@@ -43,8 +50,17 @@ final class DequantInt4GEMV {
                     MetalFunctionConstant(index: 22, value: .bool(true)),
                 ],
                 maxTotalThreadsPerThreadgroup: 512)
+            specializedTwoRowPipelines[shape] = try context.pipeline(
+                "dequant_int4_gemv2_simd",
+                constants: [
+                    MetalFunctionConstant(index: 20, value: .uint32(shape.m)),
+                    MetalFunctionConstant(index: 21, value: .uint32(shape.n)),
+                    MetalFunctionConstant(index: 22, value: .bool(true)),
+                ],
+                maxTotalThreadsPerThreadgroup: 512)
         }
         self.specializedPipelines = specializedPipelines
+        self.specializedTwoRowPipelines = specializedTwoRowPipelines
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
@@ -89,6 +105,35 @@ final class DequantInt4GEMV {
             depth: 1)
         encoder.dispatchThreadgroups(threadgroupCount,
                                      threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+    }
+
+    func encodeTwoRows(commandBuffer: MTLCommandBuffer,
+                       weights: MTLBuffer, weightsOffset: Int = 0,
+                       scales: MTLBuffer, scalesOffset: Int = 0,
+                       biases: MTLBuffer, biasesOffset: Int = 0,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       y: MTLBuffer, yOffset: Int = 0,
+                       m: UInt32, n: UInt32) {
+        precondition(n % UInt32(Quantization.groupSize) == 0)
+        precondition(weightsOffset % 2 == 0)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(
+            specializedTwoRowPipelines[Shape(m: m, n: n)] ?? twoRowPipeline)
+        encoder.setBuffer(weights, offset: weightsOffset, index: 0)
+        encoder.setBuffer(scales, offset: scalesOffset, index: 1)
+        encoder.setBuffer(biases, offset: biasesOffset, index: 2)
+        encoder.setBuffer(x, offset: xOffset, index: 3)
+        encoder.setBuffer(y, offset: yOffset, index: 4)
+        var mValue = m
+        var nValue = n
+        encoder.setBytes(&mValue, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&nValue, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(m) + Self.rowsPerThreadgroup - 1)
+                / Self.rowsPerThreadgroup, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(
+                width: 32 * Self.rowsPerThreadgroup, height: 1, depth: 1))
         encoder.endEncoding()
     }
 }

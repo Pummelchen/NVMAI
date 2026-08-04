@@ -95,6 +95,27 @@ struct QwenRepackPlannerTests {
         #expect(SourceFingerprint.modelID(forIndexSha256:
             "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
             == "mlx-community/gemma-4-26b-a4b-it-4bit")
+        #expect(SourceFingerprint.modelID(forIndexSha256:
+            "00e220ddb21ceeb6290a3a1161f97339c553f3d27fc4319900a96edb5cfae74c")
+            == "qwen3.6-35b-a3b-mtp-4bit")
+    }
+
+    @Test func mtpClassificationKeepsOnlyAdapterAndOneDecoderLayer() {
+        let family = RepackModelFamily.qwen36MTP
+        #expect(RepackPlanner.classify("fc.weight", numLayers: 1,
+                                      family: family) == .lmResident)
+        #expect(RepackPlanner.classify("pre_fc_norm_hidden.weight", numLayers: 1,
+                                      family: family) == .lmResident)
+        #expect(RepackPlanner.classify("norm.weight", numLayers: 1,
+                                      family: family) == .lmResident)
+        #expect(RepackPlanner.classify(
+            "layers.0.mlp.switch_mlp.gate_proj.weight",
+            numLayers: 1, family: family)
+            == .routedExpert(role: "gate", layer: 0))
+        #expect(RepackPlanner.classify("embed_tokens.weight", numLayers: 1,
+                                      family: family) == .unknown)
+        #expect(RepackPlanner.classify("lm_head.weight", numLayers: 1,
+                                      family: family) == .unknown)
     }
 
     @Test func qwenClassificationBucketsNames() {

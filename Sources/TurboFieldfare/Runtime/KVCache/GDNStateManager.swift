@@ -20,6 +20,8 @@ public final class GDNStateManager {
     /// Non-nil only at indices whose layer mask is 2.
     private let stateBuffers: [MTLBuffer?]
     private let convTailBuffers: [MTLBuffer?]
+    private let speculativeStateBuffers: [MTLBuffer?]
+    private let speculativeConvTailBuffers: [MTLBuffer?]
 
     public let stateBytesPerLayer: Int
     public let convTailBytesPerLayer: Int
@@ -27,7 +29,8 @@ public final class GDNStateManager {
     private static let fp32Size = 4
     private static let fp16Size = 2
 
-    public init(device: MTLDevice, config: ArchConfig) throws {
+    public init(device: MTLDevice, config: ArchConfig,
+                enableSpeculativeCheckpoint: Bool = false) throws {
         self.config = config
         let la = config.linearAttention
         let stateBytes = la.numVHeads * la.valueHeadDim * la.keyHeadDim * Self.fp32Size
@@ -37,13 +40,19 @@ public final class GDNStateManager {
 
         var states: [MTLBuffer?] = []
         var tails: [MTLBuffer?] = []
+        var speculativeStates: [MTLBuffer?] = []
+        var speculativeTails: [MTLBuffer?] = []
         states.reserveCapacity(config.numLayers)
         tails.reserveCapacity(config.numLayers)
+        speculativeStates.reserveCapacity(config.numLayers)
+        speculativeTails.reserveCapacity(config.numLayers)
 
         for layer in 0..<config.numLayers {
             guard config.layerIsLinear(layer) else {
                 states.append(nil)
                 tails.append(nil)
+                speculativeStates.append(nil)
+                speculativeTails.append(nil)
                 continue
             }
             precondition(stateBytes > 0 && convTailBytes > 0,
@@ -60,9 +69,28 @@ public final class GDNStateManager {
             tail.label = "gdn.convtail.layer\(layer)"
             states.append(state)
             tails.append(tail)
+            if enableSpeculativeCheckpoint {
+                guard let speculativeState = device.makeBuffer(
+                    length: stateBytes,
+                    options: .storageModeShared),
+                      let speculativeTail = device.makeBuffer(
+                    length: convTailBytes,
+                    options: .storageModeShared) else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                speculativeState.label = "gdn.speculative-state.layer\(layer)"
+                speculativeTail.label = "gdn.speculative-convtail.layer\(layer)"
+                speculativeStates.append(speculativeState)
+                speculativeTails.append(speculativeTail)
+            } else {
+                speculativeStates.append(nil)
+                speculativeTails.append(nil)
+            }
         }
         self.stateBuffers = states
         self.convTailBuffers = tails
+        self.speculativeStateBuffers = speculativeStates
+        self.speculativeConvTailBuffers = speculativeTails
         zeroAll()
     }
 
@@ -77,6 +105,20 @@ public final class GDNStateManager {
     /// Rolling window of the last `convKernelSize - 1` mixed_qkv rows.
     public func convTailBuffer(layer: Int) -> MTLBuffer {
         guard let buffer = convTailBuffers[layer] else {
+            preconditionFailure("layer \(layer) is not a linear-attention layer")
+        }
+        return buffer
+    }
+
+    func speculativeStateBuffer(layer: Int) -> MTLBuffer {
+        guard let buffer = speculativeStateBuffers[layer] else {
+            preconditionFailure("layer \(layer) is not a linear-attention layer")
+        }
+        return buffer
+    }
+
+    func speculativeConvTailBuffer(layer: Int) -> MTLBuffer {
+        guard let buffer = speculativeConvTailBuffers[layer] else {
             preconditionFailure("layer \(layer) is not a linear-attention layer")
         }
         return buffer
@@ -117,6 +159,38 @@ public final class GDNStateManager {
                            count: tailLength)
             segment += 1
         }
+    }
+
+    /// Restore the on-GPU state captured immediately after the confirmed row
+    /// of a two-token target verification batch.
+    func encodeSpeculativeRestore(commandBuffer: MTLCommandBuffer) throws {
+        for layer in 0..<config.numLayers where stateBuffers[layer] != nil {
+            guard speculativeStateBuffers[layer] != nil,
+                  speculativeConvTailBuffers[layer] != nil else {
+                throw InferenceStateSnapshotError.invalidLayout
+            }
+        }
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        for layer in 0..<config.numLayers {
+            guard let state = stateBuffers[layer],
+                  let tail = convTailBuffers[layer],
+                  let speculativeState = speculativeStateBuffers[layer],
+                  let speculativeTail = speculativeConvTailBuffers[layer] else { continue }
+            blit.copy(from: speculativeState, sourceOffset: 0,
+                      to: state, destinationOffset: 0,
+                      size: stateBytesPerLayer)
+            blit.copy(from: speculativeTail, sourceOffset: 0,
+                      to: tail, destinationOffset: 0,
+                      size: convTailBytesPerLayer)
+        }
+        blit.endEncoding()
+    }
+
+    var speculativePayloadBytes: Int {
+        speculativeStateBuffers.contains { $0 != nil }
+            ? snapshotSegmentLengths().reduce(0, +) : 0
     }
 
     func restoreSnapshot(segmentLengths: [Int],

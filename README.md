@@ -39,6 +39,11 @@ listed below.
 - Exact multi-prefix inference-state reuse with bounded live/RAM caching and an
   optional persistent SSD tier. Qwen snapshots include both full-attention KV
   and gated-DeltaNet recurrent state.
+- Native streaming-aware Qwen MTP speculative decode with target-verified
+  greedy output:
+  a reusable 4-bit one-layer sidecar shares the target embedding/head, streams
+  only top-8 draft experts, verifies two tokens through batched target prefill,
+  and defaults to a strict 384 MiB incremental memory budget.
 - Apple Silicon prefill controls up to 4,096 tokens per chunk, with a 1,024-token
   Qwen default selected from measurements on the base M3.
 - Apple M1-M5 target compatibility; the benchmark below was performed on M3.
@@ -54,7 +59,49 @@ listed below.
 | Swift | Moved the package to Swift tools 6.3 and Swift 6 language mode; the current validated toolchain is Apple Swift 6.3.3. |
 | OpenCode | Added explicit `coding-lean` and `prompt-only` profiles to reduce unnecessary client guidance and tool-schema overhead without unsafe heuristic detection. |
 | Prompt reuse | Added exact multi-prefix live/RAM/SSD inference-state caching with compatibility checks, atomic persistence, bounded LRU eviction, integrity validation, and cache-usage reporting. |
+| Native MTP | Added a pinned tensor-only MTP sidecar repacker, shared 4/6/8-bit target embedding/head binding, 4-bit router support, 32-row streaming draft prefill, two-token target verification, bounded draft KV, acceptance metrics, and KV/Gated-DeltaNet rollback. |
 | Validation | Added higher-bit kernel/runtime tests, OpenCode boundary tests, state-snapshot tests, persistent-cache tests, and the reproducible coding-agent stress benchmark. |
+
+## Streaming-aware MTP
+
+Install the one-layer draft once; the same sidecar works with all three target
+quantizations:
+
+```bash
+swift run -c release TurboFieldfareRepack \
+  --model qwen36-mtp \
+  --output scratch/qwen36-mtp.gturbo
+```
+
+Enable it on the OpenAI-compatible server while keeping the existing API model
+name:
+
+```bash
+.build/release/TurboFieldfareServer \
+  --model scratch/qwen36-8bit.gturbo \
+  --mtp-model scratch/qwen36-mtp.gturbo \
+  --mtp-memory-mib 384 \
+  --model-id qwen3.6-35b-a3b \
+  --max-context 65536
+```
+
+MTP is used only for pure greedy requests (`temperature: 0` and repetition
+penalty `1`). Other sampling configurations automatically use the normal target
+decode path, preserving their distribution. Every draft token is verified by
+the full target, so no draft-only token can reach the client. The initial draft
+context is capped at 65,536 tokens to keep MTP KV at 128 MiB; the server
+automatically uses the normal target path for longer requests, retaining the
+262,144-token ceiling. MTP prompt caching is forced off until target and draft
+snapshots can be committed atomically.
+
+MTP is opt-in. The 1.25-1.6x roadmap goal remains a benchmark target, not a
+published result. The pinned compact sidecar quantizes its adapter projection
+and router to 4-bit; the
+[MLX reference discussion](https://github.com/ml-explore/mlx-lm/issues/872)
+reports its best acceptance after leaving those tensors unquantized. Clean
+paired measurements must show a net win before MTP becomes a default. The
+server logs acceptance, target passes, decode tokens per second, and planned
+incremental memory for every MTP request.
 
 ## M3 24 GB test results
 

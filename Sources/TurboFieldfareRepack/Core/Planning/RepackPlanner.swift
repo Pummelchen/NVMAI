@@ -106,6 +106,21 @@ enum RepackPlanner {
 
     static func classify(_ name: String, numLayers: Int,
                          family: RepackModelFamily) -> Bucket {
+        if family == .qwen36MTP {
+            if name.hasPrefix("layers.") {
+                if let role = routedExpertRole(in: name, family: family),
+                   let layer = layerIndex(in: name),
+                   layer >= 0 && layer < numLayers {
+                    return .routedExpert(role: role, layer: layer)
+                }
+                return .lmResident
+            }
+            if name == "norm.weight" || name.hasPrefix("fc.")
+                || name.hasPrefix("pre_fc_norm_") {
+                return .lmResident
+            }
+            return .unknown
+        }
         if name.hasPrefix("language_model.") {
             // Routed expert?
             if let role = routedExpertRole(in: name, family: family),
@@ -126,7 +141,7 @@ enum RepackPlanner {
         let routedContainer: String
         switch family {
         case .gemma4: routedContainer = ".experts.switch_glu."
-        case .qwen36: routedContainer = ".mlp.switch_mlp."
+        case .qwen36, .qwen36MTP: routedContainer = ".mlp.switch_mlp."
         }
         guard name.contains(routedContainer) else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
@@ -137,7 +152,8 @@ enum RepackPlanner {
 
     private static func layerIndex(in name: String) -> Int? {
         // matches "...layers.<N>...."
-        guard let r = name.range(of: ".layers.") else { return nil }
+        let marker = name.hasPrefix("layers.") ? "layers." : ".layers."
+        guard let r = name.range(of: marker) else { return nil }
         let tail = name[r.upperBound...]
         guard let dot = tail.firstIndex(of: ".") else { return nil }
         return Int(tail[tail.startIndex..<dot])
@@ -193,6 +209,7 @@ enum RepackPlanner {
         let residentPath = (outputDir as NSString).appendingPathComponent("model_weights.bin")
         let resident = try planResidentFile(path: residentPath,
                                             baseNames: lmResidentBases,
+                                            family: arch.family,
                                             registry: registry, meta: meta)
 
         let layersDir = (outputDir as NSString).appendingPathComponent("packed_experts")
@@ -243,6 +260,7 @@ enum RepackPlanner {
 
     private static func planResidentFile(path: String,
                                          baseNames: [String],
+                                         family: RepackModelFamily,
                                          registry: [String: SourceTensor],
                                          meta: IndexLoader.SourceMetadata) throws
                                         -> ResidentFilePlan {
@@ -251,7 +269,8 @@ enum RepackPlanner {
         var stringTable: [UInt8] = []
         var offsets: [UInt32] = []
         offsets.reserveCapacity(entryCount)
-        for n in baseNames {
+        let destinationNames = baseNames.map { residentDestinationName($0, family: family) }
+        for n in destinationNames {
             offsets.append(UInt32(stringTable.count))
             stringTable.append(contentsOf: n.utf8)
         }
@@ -267,15 +286,15 @@ enum RepackPlanner {
         var entries: [ResidentEntry] = []
         entries.reserveCapacity(entryCount)
 
-        for name in baseNames {
-            guard let weight = registry[name] else {
-                throw RepackError.missingTensor(name: name)
+        for (sourceName, name) in zip(baseNames, destinationNames) {
+            guard let weight = registry[sourceName] else {
+                throw RepackError.missingTensor(name: sourceName)
             }
             let dtype = ietnyDtype(weight.dtype)
-            let isQuantizedPacked = (weight.dtype == .u32) && name.hasSuffix(".weight")
+            let isQuantizedPacked = (weight.dtype == .u32) && sourceName.hasSuffix(".weight")
 
             if isQuantizedPacked {
-                let base = String(name.dropLast(".weight".count))
+                let base = String(sourceName.dropLast(".weight".count))
                 guard let scales = registry[base + ".scales"] else {
                     throw RepackError.missingScalesCompanion(name: name)
                 }
@@ -286,7 +305,7 @@ enum RepackPlanner {
                     throw RepackError.dtypeMismatch(name: name,
                         detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
                 }
-                let spec = IndexLoader.quantSpec(forTensor: name, meta: meta)
+                let spec = IndexLoader.quantSpec(forTensor: sourceName, meta: meta)
                 let logical = logicalShape(forPackedSource: weight.shape,
                                            scalesShape: scales.shape)
 
@@ -455,7 +474,7 @@ enum RepackPlanner {
                 let slot: Int
                 switch family {
                 case .gemma4: slot = slotRank(in: n)
-                case .qwen36: slot = qwenSlotRank(in: n)
+                case .qwen36, .qwen36MTP: slot = qwenSlotRank(in: n)
                 }
                 return (1, li, slot, n)
             }
@@ -523,5 +542,19 @@ enum RepackPlanner {
         if n.hasSuffix(".post_feedforward_layernorm_2.weight") { return 18 }
         if n.hasSuffix(".layer_scalar")           { return 19 }
         return 100
+    }
+
+    /// Normalize the sidecar's single decoder layer to the target tensor-name
+    /// contract. MTP-only adapter tensors retain their upstream names.
+    private static func residentDestinationName(_ source: String,
+                                                family: RepackModelFamily) -> String {
+        guard family == .qwen36MTP else { return source }
+        if source.hasPrefix("layers.") {
+            return "language_model.model." + source
+        }
+        if source == "norm.weight" {
+            return "language_model.model.norm.weight"
+        }
+        return source
     }
 }

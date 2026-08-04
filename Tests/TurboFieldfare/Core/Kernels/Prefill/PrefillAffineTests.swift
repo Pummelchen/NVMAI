@@ -217,6 +217,97 @@ import TurboFieldfareValidationSupport
         }
     }
 
+    @Test func int4TwoRowProjectionMatchesRepeatedGEMV() throws {
+        let t = 2, n = 129, k = 128
+        var rng = SeedTree(0x6201).key("mtp-int4-two-row")
+        let rows = (0..<n).map { _ in
+            Quantization.quantizeInt4Affine(
+                (0..<k).map { _ in rng.uniform(-0.5, 0.5) })
+        }
+        let (packed, scales, biases) = Self.packWeights(rows)
+        let x = (0..<(t * k)).map { _ in Float16(rng.uniform(-1, 1)) }
+        let ctx = try MetalContext()
+        let gemv = try DequantInt4GEMV(context: ctx)
+        guard let weights = ctx.device.makeBuffer(bytes: packed, length: packed.count),
+              let scaleBuffer = ctx.device.makeBuffer(
+                bytes: scales, length: scales.count * MemoryLayout<UInt16>.stride),
+              let biasBuffer = ctx.device.makeBuffer(
+                bytes: biases, length: biases.count * MemoryLayout<UInt16>.stride),
+              let input = Fp16Buffer.make(ctx.device, halves: x),
+              let expected = Fp16Buffer.make(ctx.device, count: t * n),
+              let actual = Fp16Buffer.make(ctx.device, count: t * n),
+              let cb = ctx.queue.makeCommandBuffer() else {
+            Issue.record("allocation failed")
+            return
+        }
+        for row in 0..<t {
+            gemv.encode(commandBuffer: cb, weights: weights,
+                        scales: scaleBuffer, biases: biasBuffer,
+                        x: input, xOffset: row * k * MemoryLayout<Float16>.stride,
+                        y: expected, yOffset: row * n * MemoryLayout<Float16>.stride,
+                        m: UInt32(n), n: UInt32(k))
+        }
+        gemv.encodeTwoRows(commandBuffer: cb, weights: weights,
+                           scales: scaleBuffer, biases: biasBuffer,
+                           x: input, y: actual,
+                           m: UInt32(n), n: UInt32(k))
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let error = cb.error { throw error }
+        let reference = Fp16Buffer.read(expected, count: t * n)
+        let result = Fp16Buffer.read(actual, count: t * n)
+        #expect(RelError.maxAbsDiff(result, reference) <= 0.002)
+        #expect(RelError.compute(actual: result, reference: reference) <= 0.0005)
+    }
+
+    @Test(arguments: [6, 8])
+    func affineTwoRowProjectionMatchesRepeatedGEMV(bits: Int) throws {
+        let t = 2, n = 65, k = 128
+        let groups = k / Quantization.groupSize
+        let packed = Self.packAffineValues(bits: bits, rows: n, columns: k)
+        let scales = [UInt16](repeating: Quantization.bf16Bits(0.002),
+                              count: n * groups)
+        let biases = [UInt16](repeating: Quantization.bf16Bits(-0.01),
+                              count: n * groups)
+        let x = (0..<(t * k)).map { index in
+            Float16(Float((index * 13) % 31 - 15) / 64)
+        }
+        let ctx = try MetalContext()
+        let gemv = try AffineQuantGEMV(context: ctx, weightBits: bits)
+        guard let weights = ctx.device.makeBuffer(bytes: packed, length: packed.count),
+              let scaleBuffer = ctx.device.makeBuffer(
+                bytes: scales, length: scales.count * MemoryLayout<UInt16>.stride),
+              let biasBuffer = ctx.device.makeBuffer(
+                bytes: biases, length: biases.count * MemoryLayout<UInt16>.stride),
+              let input = Fp16Buffer.make(ctx.device, halves: x),
+              let expected = Fp16Buffer.make(ctx.device, count: t * n),
+              let actual = Fp16Buffer.make(ctx.device, count: t * n),
+              let cb = ctx.queue.makeCommandBuffer() else {
+            Issue.record("allocation failed")
+            return
+        }
+        for row in 0..<t {
+            gemv.encode(commandBuffer: cb, weights: weights,
+                        scales: scaleBuffer, biases: biasBuffer,
+                        x: input, xOffset: row * k * MemoryLayout<Float16>.stride,
+                        y: expected, yOffset: row * n * MemoryLayout<Float16>.stride,
+                        m: UInt32(n), n: UInt32(k))
+        }
+        gemv.encodeTwoRows(commandBuffer: cb, weights: weights,
+                           scales: scaleBuffer, biases: biasBuffer,
+                           x: input, y: actual,
+                           m: UInt32(n), n: UInt32(k))
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let error = cb.error { throw error }
+        let reference = Fp16Buffer.read(expected, count: t * n)
+        let result = Fp16Buffer.read(actual, count: t * n)
+        #expect(RelError.maxAbsDiff(result, reference) <= 0.002,
+                "bits=\(bits)")
+        #expect(RelError.compute(actual: result, reference: reference) <= 0.0005,
+                "bits=\(bits)")
+    }
+
     @Test(arguments: [6, 8])
     func affineQMMMatchesRepeatedGEMV(bits: Int) throws {
         let t = 7

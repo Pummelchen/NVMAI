@@ -267,6 +267,25 @@ kernel void gdn_conv_tail_update(
     }
 }
 
+// Snapshot tail after the first row: [old tail | qkv[0]]'s last K-1 rows.
+kernel void gdn_conv_tail_checkpoint(
+    device const half* tail       [[buffer(0)]],
+    device const half* qkv        [[buffer(1)]],
+    device half*       checkpoint [[buffer(2)]],
+    constant uint&     channels   [[buffer(3)]],
+    constant uint&     taps       [[buffer(4)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    const uint history = taps - 1u;
+    const uint total = history * channels;
+    if (tid >= total) return;
+    const uint row = tid / channels;
+    const uint ch = tid - row * channels;
+    checkpoint[tid] = (row + 1u < history)
+        ? tail[(row + 1u) * channels + ch]
+        : qkv[ch];
+}
+
 // ----------------------------------------------------------------------------
 // Per-head no-weight RMS norm over q and k slices of conv_out, with the
 // delta-rule scales folded in: q *= 1/Dk (inv_scale^2), k *= 1/sqrt(Dk).
@@ -400,6 +419,8 @@ kernel void gdn_delta_step_prefill(
     constant uint&       valueDim [[buffer(10)]],
     constant uint&       rows     [[buffer(11)]],
     constant uint&       rowStride [[buffer(12)]], // C, conv_out elements/row
+    device float*        checkpointState [[buffer(13)]],
+    constant bool&       checkpointEnabled [[buffer(14)]],
     uint2 tg [[threadgroup_position_in_grid]],
     uint2 tpos [[thread_position_in_threadgroup]]
 ) {
@@ -452,6 +473,12 @@ kernel void gdn_delta_step_prefill(
         }
         out = simd_sum(out);
         if (lane == 0) y[t * Hv * Dv + h * Dv + dv] = half(out);
+        if (checkpointEnabled && t == 0u) {
+            for (uint i = 0; i < nPerLane; ++i) {
+                checkpointState[(uint(h) * Dv + dv) * Dk
+                    + lane * nPerLane + i] = s[i];
+            }
+        }
     }
 
     for (uint i = 0; i < nPerLane; ++i) {

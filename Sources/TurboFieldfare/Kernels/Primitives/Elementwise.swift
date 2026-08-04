@@ -9,12 +9,14 @@ final class Elementwise {
     private let sigmoidScalarMulPSO: MTLComputePipelineState
     private let residualAddPSO: MTLComputePipelineState
     private let splitQGatePSO: MTLComputePipelineState
+    private let concatRowsPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
         self.sigmoidScalarMulPSO = try context.pipeline("sigmoid_scalar_mul_fp16")
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
+        self.concatRowsPSO = try context.pipeline("concat_rows_fp16")
     }
 
     /// packed [H, 2D] per-head [query ; gate] → q [H, D], gate [H, D].
@@ -83,6 +85,25 @@ final class Elementwise {
         var elementCount = UInt32(count)
         encoder.setBytes(&elementCount, length: MemoryLayout<UInt32>.size, index: 2)
         dispatch(encoder, pipeline: residualAddPSO, threads: count)
+        encoder.endEncoding()
+    }
+
+    func encodeConcatRows(commandBuffer: MTLCommandBuffer,
+                          lhs: MTLBuffer,
+                          rhs: MTLBuffer,
+                          out: MTLBuffer,
+                          rows: Int,
+                          dim: Int) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.setComputePipelineState(concatRowsPSO)
+        encoder.setBuffer(lhs, offset: 0, index: 0)
+        encoder.setBuffer(rhs, offset: 0, index: 1)
+        encoder.setBuffer(out, offset: 0, index: 2)
+        var rowCount = UInt32(rows)
+        var dimension = UInt32(dim)
+        encoder.setBytes(&rowCount, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.size, index: 4)
+        dispatch(encoder, pipeline: concatRowsPSO, threads: rows * dim)
         encoder.endEncoding()
     }
 

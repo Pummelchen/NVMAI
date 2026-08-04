@@ -238,6 +238,18 @@ public final class KVCacheManager {
         position += count
     }
 
+    /// Rewind the logical cursor without copying KV. Speculative rows are
+    /// append-only and become unreachable immediately; a later pass
+    /// overwrites them.
+    /// Ring-backed draft KV is safe because MTP verification never rewinds by
+    /// more than its two-token proposal depth.
+    func rewind(to newPosition: Int) throws {
+        guard newPosition >= 0, newPosition <= position else {
+            throw InferenceStateSnapshotError.invalidPosition(newPosition)
+        }
+        position = newPosition
+    }
+
     /// Drop all cached positions and return physical pages to the OS.
     ///
     /// No buffer zeroing — the attention kernels read only `[0, validTokenCount]`,

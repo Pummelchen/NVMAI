@@ -3,6 +3,8 @@ import TurboFieldfare
 
 public struct ServerArguments: Equatable, Sendable {
     public let model: String
+    public let mtpModel: String?
+    public let mtpMemoryMiB: Int
     public let port: Int
     /// Explicit --model-id value; nil defers to the loaded model's family
     /// default (gemma-4-26b-a4b-it or qwen3.6-35b-a3b).
@@ -21,6 +23,9 @@ public struct ServerArguments: Equatable, Sendable {
     usage: TurboFieldfareServer --model <completed .gturbo directory> [options]
 
       --model <dir>          Required model directory.
+      --mtp-model <dir>      Optional native Qwen3.6 MTP sidecar directory.
+      --mtp-memory-mib <MiB> Strict incremental MTP budget, 256...512
+                             (default 384).
       --port <1...65535>     Loopback port (default 8080).
       --model-id <id>        API model identifier (default derived from the
                              installed model: gemma-4-26b-a4b-it or
@@ -46,6 +51,8 @@ public struct ServerArguments: Equatable, Sendable {
 
     public static func parse(_ input: [String]) throws -> ServerArguments {
         var model: String?
+        var mtpModel: String?
+        var mtpMemoryMiB = StreamingMTPMemoryPlan.defaultBudgetMiB
         var port = 8080
         var modelIDOverride: String?
         var maxContext = 16_384
@@ -68,6 +75,18 @@ public struct ServerArguments: Equatable, Sendable {
             switch flag {
             case "--model":
                 model = value
+            case "--mtp-model":
+                guard !value.isEmpty else {
+                    throw ServerArgumentError.invalid("--mtp-model must not be empty")
+                }
+                mtpModel = value
+            case "--mtp-memory-mib":
+                guard let parsed = Int(value),
+                      StreamingMTPMemoryPlan.allowedBudgetMiB.contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--mtp-memory-mib must be between 256 and 512")
+                }
+                mtpMemoryMiB = parsed
             case "--port":
                 guard let parsed = Int(value), (1...65_535).contains(parsed) else {
                     throw ServerArgumentError.invalid("--port must be between 1 and 65535")
@@ -131,6 +150,8 @@ public struct ServerArguments: Equatable, Sendable {
         }
         guard let model else { throw ServerArgumentError.invalid("--model is required") }
         return ServerArguments(model: model,
+                               mtpModel: mtpModel,
+                               mtpMemoryMiB: mtpMemoryMiB,
                                port: port,
                                modelIDOverride: modelIDOverride,
                                maxContext: maxContext,

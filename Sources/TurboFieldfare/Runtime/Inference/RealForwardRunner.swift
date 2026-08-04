@@ -209,6 +209,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
     private let moeMissActiveSlots: MTLBuffer // [topK] UInt32
     private let greedyTokenBuf: MTLBuffer // 4 B UInt32 fused-head output
+    private let verificationHidden: MTLBuffer // [2, D] FP16 shared readback
+    private let verificationLogits: MTLBuffer // [2, vocab] FP16 shared readback
     // Qwen 3.6 decode scratch (nil on architectures that never use it).
     private let qPackedScratch: MTLBuffer?   // [2 * N_HEADS * head_dim] packed [q ; gate]
     private let attnGateScratch: MTLBuffer?  // [N_HEADS * head_dim]
@@ -225,6 +227,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let onesPerExpertScale: MTLBuffer?
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
+    private static let mtpChunkCapacity = 32
+    private let mtpTokenBlock: MTLBuffer?
+    private let mtpEmbeddingBlock: MTLBuffer?
+    private let mtpNormalizedEmbeddingBlock: MTLBuffer?
+    private let mtpNormalizedHiddenBlock: MTLBuffer?
+    private let mtpConcatBlock: MTLBuffer?
+    private let mtpProjectedBlock: MTLBuffer?
+    private let mtpTargetHiddenBlock: MTLBuffer?
+    private var mtpPrefillReadback: MTLBuffer?
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -254,13 +265,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var rdadviseAdaptivePosition: Int = -1
     private var rdadviseAdaptivePositionBytes: UInt64 = 0
     public init(model: Model, context: MetalContext, maxContext: Int,
-                runtimeConfiguration: RuntimeConfiguration = .production) throws {
+                runtimeConfiguration: RuntimeConfiguration = .production,
+                enableSpeculativeGDN: Bool = false) throws {
         self.model = model
         self.ctx = context
         self.cfg = model.config
         self.maxContext = maxContext
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
-            && model.embeddingWeightBits == 4
+            && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
@@ -297,6 +309,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
                                  routedWeightBits: model.routedExpertWeightBits,
+                                 routerWeightBits: model.routerWeightBits,
                                  specializedD: UInt32(cfg.hiddenSize),
                                  specializedF: UInt32(cfg.moeIntermediateSize),
                                  specializedNumExperts: UInt32(cfg.numExperts))
@@ -320,7 +333,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
         self.prefillAttention = try PrefillAttention(context: context)
         self.prefillPostAttention = try PrefillPostAttentionSetup(context: context)
-        self.prefillRouter = try PrefillRouter(context: context)
+        self.prefillRouter = try PrefillRouter(context: context,
+                                               weightBits: model.routerWeightBits)
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
             weightBits: model.sharedExpertWeightBits,
@@ -334,7 +348,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefillFinalRowHead = try PrefillFinalRowHeadInt4(
             context: context,
             maxD: cfg.hiddenSize,
-            weightBits: model.embeddingWeightBits)
+            weightBits: model.lmHeadWeightBits)
 
         // Qwen 3.6 kernels, keyed off the data flags so architectures that
         // never dispatch them pay no PSO compile cost.
@@ -346,7 +360,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
                                specializedHiddenSize: cfg.hiddenSize)
-            self.gdnState = try GDNStateManager(device: context.device, config: cfg)
+            self.gdnState = try GDNStateManager(
+                device: context.device,
+                config: cfg,
+                enableSpeculativeCheckpoint: enableSpeculativeGDN)
         } else {
             self.gdn = nil
             self.gdnState = nil
@@ -401,6 +418,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw ModelError.residentBufferWrapFailed
         }
         self.greedyTokenBuf = tok
+        self.verificationHidden = try buf(2 * D)
+        self.verificationLogits = try buf(2 * cfg.vocabSize)
 
         // Qwen 3.6 decode scratch — allocated once here, never in the hot path.
         if cfg.attnOutputGate {
@@ -429,6 +448,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gdnOut = nil
         }
         self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1) : nil
+        if cfg.family == .qwen36MTP {
+            guard let tokenBlock = ctx.device.makeBuffer(
+                length: Self.mtpChunkCapacity * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            self.mtpTokenBlock = tokenBlock
+            self.mtpEmbeddingBlock = try buf(Self.mtpChunkCapacity * D)
+            self.mtpNormalizedEmbeddingBlock = try buf(Self.mtpChunkCapacity * D)
+            self.mtpNormalizedHiddenBlock = try buf(Self.mtpChunkCapacity * D)
+            self.mtpConcatBlock = try buf(Self.mtpChunkCapacity * 2 * D)
+            self.mtpProjectedBlock = try buf(Self.mtpChunkCapacity * D)
+            self.mtpTargetHiddenBlock = try buf(Self.mtpChunkCapacity * D)
+        } else {
+            self.mtpTokenBlock = nil
+            self.mtpEmbeddingBlock = nil
+            self.mtpNormalizedEmbeddingBlock = nil
+            self.mtpNormalizedHiddenBlock = nil
+            self.mtpConcatBlock = nil
+            self.mtpProjectedBlock = nil
+            self.mtpTargetHiddenBlock = nil
+        }
+        self.mtpPrefillReadback = nil
 
         func sharedProj(_ view: TensorView, rows: UInt32, cols: UInt32) -> SharedExpertProjection {
             SharedExpertProjection(weights: view.buffer,
@@ -565,6 +607,263 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 gdnSegmentLengths: gdnLengths,
                 payloadBytes: payloadBytes),
             payload: payload)
+    }
+
+    func captureSpeculativeCheckpoint(maximumBytes: Int) throws
+        -> SpeculativeInferenceCheckpoint {
+        guard let kv else { throw InferenceStateSnapshotError.invalidLayout }
+        let required = gdnState?.speculativePayloadBytes ?? 0
+        guard required <= maximumBytes else {
+            throw InferenceStateSnapshotError.exceedsLimit(
+                bytes: required,
+                limit: maximumBytes)
+        }
+        return SpeculativeInferenceCheckpoint(position: kv.position)
+    }
+
+    func rollbackSpeculativeCheckpoint(_ checkpoint: SpeculativeInferenceCheckpoint) throws {
+        guard let kv else { throw InferenceStateSnapshotError.invalidLayout }
+        if let gdnState {
+            guard let cb = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            try gdnState.encodeSpeculativeRestore(commandBuffer: cb)
+            cb.commit()
+            waitForCompletion(cb)
+            if let error = cb.error { throw error }
+        }
+        // Row zero was confirmed and is present in the on-GPU checkpoint.
+        try kv.rewind(to: checkpoint.position + 1)
+        resetTransientState()
+    }
+
+    /// Discard an unaccepted native-MTP cache row. The draft contains only
+    /// trimmable full-attention KV, so its logical cursor can move back without
+    /// copying payload bytes; the next draft pass overwrites the stale row.
+    func rewindMTP(to position: Int) throws {
+        guard cfg.family == .qwen36MTP, let kv else {
+            throw InferenceStateSnapshotError.invalidLayout
+        }
+        try kv.rewind(to: position)
+        resetTransientState()
+    }
+
+    var speculativeRollbackBytes: Int {
+        gdnState?.speculativePayloadBytes ?? 0
+    }
+
+    /// Verify `[confirmed, draft]` in the existing batched prefill path. The
+    /// two target logits and target hidden rows are produced from one 40-layer
+    /// backbone traversal, which is the source of MTP's decode speedup.
+    func verifyGreedyPair(_ tokens: [Int32],
+                          startPosition: Int) async throws -> TargetPairVerification {
+        guard tokens.count == 2 else {
+            throw PrefillError.chunkedUnsupported("MTP verification requires exactly two tokens")
+        }
+        let config = PrefillRuntimeConfig.production(chunkTokens: 32)
+        let scratch = try ensurePrefillScratch(config: config)
+        try await executePrefillChunk(tokens: tokens[...],
+                                      startPosition: startPosition,
+                                      outputMode: .logits,
+                                      logits: verificationLogits,
+                                      scratch: scratch,
+                                      config: config,
+                                      writeFinalHead: false,
+                                      snapshotGDNAfterFirstToken: true,
+                                      useTwoRowProjection: true)
+
+        let finalNorm = model.finalNorm
+        let lm = model.lmHead
+        guard let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        blit.copy(from: scratch.hidden,
+                  sourceOffset: 0,
+                  to: verificationHidden,
+                  destinationOffset: 0,
+                  size: 2 * cfg.hiddenSize * MemoryLayout<Float16>.stride)
+        blit.endEncoding()
+        let logitsStride = cfg.vocabSize * MemoryLayout<Float16>.stride
+        for row in 0..<2 {
+            prefillFinalRowHead.encodeLogits(
+                commandBuffer: cb,
+                hiddenBlock: scratch.hidden,
+                row: row,
+                rowStrideElements: cfg.hiddenSize,
+                normWeight: finalNorm.buffer,
+                normWeightOffset: Int(finalNorm.offset),
+                weights: lm.buffer,
+                weightsOffset: Int(lm.offset),
+                scales: lm.buffer,
+                scalesOffset: Int(lm.scaleOffset),
+                biases: lm.buffer,
+                biasesOffset: Int(lm.biasOffset),
+                logits: verificationLogits,
+                logitsOffset: row * logitsStride,
+                d: UInt32(cfg.hiddenSize),
+                vocab: UInt32(cfg.vocabSize),
+                rmsEps: 1e-6)
+        }
+        cb.commit()
+        waitForCompletion(cb)
+        if let error = cb.error { throw error }
+
+        let logits = verificationLogits.contents()
+            .assumingMemoryBound(to: Float16.self)
+        func argmax(row: Int) -> Int32 {
+            let base = row * cfg.vocabSize
+            var best = 0
+            var bestValue = Float(logits[base])
+            for index in 1..<cfg.vocabSize {
+                let value = Float(logits[base + index])
+                if value > bestValue {
+                    bestValue = value
+                    best = index
+                }
+            }
+            return Int32(best)
+        }
+        return TargetPairVerification(
+            predictionAfterFirst: argmax(row: 0),
+            predictionAfterSecond: argmax(row: 1),
+            hiddenRows: Data(bytes: verificationHidden.contents(),
+                             count: 2 * cfg.hiddenSize * MemoryLayout<Float16>.stride))
+    }
+
+    /// Advance the one-layer MTP sidecar with aligned `(target hidden,
+    /// next-token)` pairs. At most 32 rows are admitted so adapter scratch is
+    /// fixed and the routed expert cache remains exactly top-k sized.
+    func advanceMTP(tokens: ArraySlice<Int32>,
+                    targetHiddenRows: Data,
+                    startPosition: Int,
+                    predictNext: Bool) async throws -> Int32? {
+        guard cfg.family == .qwen36MTP else {
+            throw StreamingMTPError.sidecarMustBeQwen36MTP
+        }
+        guard !tokens.isEmpty, tokens.count <= Self.mtpChunkCapacity else {
+            throw PrefillError.chunkedUnsupported(
+                "MTP adapter accepts 1...\(Self.mtpChunkCapacity) aligned rows")
+        }
+        let D = cfg.hiddenSize
+        let expectedBytes = tokens.count * D * MemoryLayout<Float16>.stride
+        guard targetHiddenRows.count == expectedBytes else {
+            throw PrefillError.chunkedUnsupported(
+                "MTP target hidden payload has \(targetHiddenRows.count) bytes; expected \(expectedBytes)")
+        }
+        guard let tokenBuffer = mtpTokenBlock,
+              let embeddingBlock = mtpEmbeddingBlock,
+              let normalizedEmbedding = mtpNormalizedEmbeddingBlock,
+              let normalizedHidden = mtpNormalizedHiddenBlock,
+              let concat = mtpConcatBlock,
+              let projected = mtpProjectedBlock,
+              let targetHidden = mtpTargetHiddenBlock,
+              let elementwise else {
+            throw StreamingMTPError.sidecarMustBeQwen36MTP
+        }
+        targetHiddenRows.copyBytes(to: targetHidden.contents()
+            .assumingMemoryBound(to: UInt8.self), count: expectedBytes)
+        let ids = tokens.map { UInt32(bitPattern: $0) }
+        ids.withUnsafeBytes { bytes in
+            tokenBuffer.contents().copyMemory(from: bytes.baseAddress!,
+                                              byteCount: bytes.count)
+        }
+        guard let cb = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let emb = model.embedding
+        prefillEmbed.encode(commandBuffer: cb,
+                            table: emb.buffer,
+                            tableOffset: Int(emb.offset),
+                            scales: emb.buffer,
+                            scalesOffset: Int(emb.scaleOffset),
+                            biases: emb.buffer,
+                            biasesOffset: Int(emb.biasOffset),
+                            tokens: tokenBuffer,
+                            out: embeddingBlock,
+                            t: UInt32(tokens.count),
+                            d: UInt32(D),
+                            outScale: 1)
+        let embeddingNorm = model.mtpEmbeddingNorm
+        let hiddenNorm = model.mtpHiddenNorm
+        prefillRMS.encodeBF16W(commandBuffer: cb,
+                               x: embeddingBlock,
+                               weight: embeddingNorm.buffer,
+                               weightOffset: Int(embeddingNorm.offset),
+                               out: normalizedEmbedding,
+                               t: UInt32(tokens.count),
+                               d: UInt32(D), eps: 1e-6)
+        prefillRMS.encodeBF16W(commandBuffer: cb,
+                               x: targetHidden,
+                               weight: hiddenNorm.buffer,
+                               weightOffset: Int(hiddenNorm.offset),
+                               out: normalizedHidden,
+                               t: UInt32(tokens.count),
+                               d: UInt32(D), eps: 1e-6)
+        elementwise.encodeConcatRows(commandBuffer: cb,
+                                     lhs: normalizedEmbedding,
+                                     rhs: normalizedHidden,
+                                     out: concat,
+                                     rows: tokens.count,
+                                     dim: D)
+        let projection = model.mtpProjection
+        prefillQMM.encode(commandBuffer: cb,
+                          weights: projection.buffer,
+                          weightsOffset: Int(projection.offset),
+                          scales: projection.buffer,
+                          scalesOffset: Int(projection.scaleOffset),
+                          biases: projection.buffer,
+                          biasesOffset: Int(projection.biasOffset),
+                          x: concat,
+                          y: projected,
+                          t: tokens.count,
+                          n: D,
+                          k: 2 * D)
+        cb.commit()
+        waitForCompletion(cb)
+        if let error = cb.error { throw error }
+
+        let runtime = PrefillRuntimeConfig.production(chunkTokens: 32)
+        let scratch = try ensurePrefillScratch(config: runtime)
+        let mode: PrefillOutputMode = useFusedGreedyHead ? .greedyIfAvailable : .logits
+        try await executePrefillChunk(tokens: tokens,
+                                      startPosition: startPosition,
+                                      outputMode: mode,
+                                      logits: verificationLogits,
+                                      scratch: scratch,
+                                      config: runtime,
+                                      writeFinalHead: predictNext,
+                                      preparedHidden: projected)
+        guard predictNext else { return nil }
+        if useFusedGreedyHead {
+            return Int32(bitPattern: lastGreedyToken)
+        }
+        let values = verificationLogits.contents()
+            .assumingMemoryBound(to: Float16.self)
+        var best = 0
+        var bestValue = Float(values[0])
+        for index in 1..<cfg.vocabSize {
+            let value = Float(values[index])
+            if value > bestValue {
+                best = index
+                bestValue = value
+            }
+        }
+        return Int32(best)
+    }
+
+    private func ensureMTPPrefillReadback(rows: Int) throws -> MTLBuffer {
+        let bytes = rows * cfg.hiddenSize * MemoryLayout<Float16>.stride
+        if let existing = mtpPrefillReadback, existing.length >= bytes {
+            return existing
+        }
+        guard let buffer = ctx.device.makeBuffer(length: bytes,
+                                                 options: .storageModeShared) else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        buffer.label = "mtp.target-hidden-readback"
+        mtpPrefillReadback = buffer
+        return buffer
     }
 
     public func restoreInferenceState(_ snapshot: InferenceStateSnapshot) throws {
@@ -759,6 +1058,99 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                              seed: .logitsWritten)
     }
 
+    /// Target prefill with a bounded hidden-state tap that simultaneously
+    /// aligns the streaming MTP sidecar. Only one target chunk is exposed at a
+    /// time; no prompt-sized hidden-state tensor is retained.
+    func prefillChunkedWithMTP(tokens: ArraySlice<Int32>,
+                               config: PrefillRuntimeConfig,
+                               into logits: MTLBuffer,
+                               mtp: RealForwardRunner,
+                               onProgress: (Int) -> Void) async throws -> MTPPrefillResult {
+        guard cfg.family == .qwen36 else {
+            throw StreamingMTPError.targetMustBeQwen36
+        }
+        guard mtp.cfg.family == .qwen36MTP else {
+            throw StreamingMTPError.sidecarMustBeQwen36MTP
+        }
+        guard !tokens.isEmpty, tokens.count <= mtp.maxContext else {
+            throw PrefillError.chunkedUnsupported(
+                "MTP prompt must fit its bounded \(mtp.maxContext)-token draft context")
+        }
+        reset()
+        mtp.reset()
+        let scratch = try ensurePrefillScratch(config: config)
+        let spans = PrefillChunkPlanner.spans(tokenCount: tokens.count,
+                                              startPosition: 0,
+                                              config: config)
+        var carry: Data?
+        for (spanIndex, span) in spans.enumerated() {
+            let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
+            let upper = tokens.index(lower, offsetBy: span.tokenCount)
+            let chunk = tokens[lower..<upper]
+            try await executePrefillChunk(tokens: chunk,
+                                          startPosition: span.startPosition,
+                                          outputMode: useFusedGreedyHead
+                                            ? .greedyIfAvailable : .logits,
+                                          logits: logits,
+                                          scratch: scratch,
+                                          config: config,
+                                          writeFinalHead: spanIndex == spans.count - 1)
+
+            let readback = try ensureMTPPrefillReadback(rows: span.tokenCount)
+            guard let cb = ctx.queue.makeCommandBuffer(),
+                  let blit = cb.makeBlitCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            let rowBytes = cfg.hiddenSize * MemoryLayout<Float16>.stride
+            blit.copy(from: scratch.hidden, sourceOffset: 0,
+                      to: readback, destinationOffset: 0,
+                      size: span.tokenCount * rowBytes)
+            blit.endEncoding()
+            cb.commit()
+            waitForCompletion(cb)
+            if let error = cb.error { throw error }
+            let chunkHidden = Data(bytes: readback.contents(),
+                                   count: span.tokenCount * rowBytes)
+
+            var pairTokens: [Int32] = []
+            var pairHidden = Data()
+            if let carry {
+                pairTokens.reserveCapacity(span.tokenCount)
+                pairTokens.append(contentsOf: chunk)
+                pairHidden.reserveCapacity(span.tokenCount * rowBytes)
+                pairHidden.append(carry)
+                if span.tokenCount > 1 {
+                    pairHidden.append(chunkHidden.prefix((span.tokenCount - 1) * rowBytes))
+                }
+            } else if span.tokenCount > 1 {
+                pairTokens.append(contentsOf: chunk.dropFirst())
+                pairHidden.append(chunkHidden.prefix((span.tokenCount - 1) * rowBytes))
+            }
+            var pairOffset = 0
+            while pairOffset < pairTokens.count {
+                let count = min(Self.mtpChunkCapacity, pairTokens.count - pairOffset)
+                let hiddenStart = pairOffset * rowBytes
+                let hiddenEnd = hiddenStart + count * rowBytes
+                _ = try await mtp.advanceMTP(
+                    tokens: pairTokens[pairOffset..<(pairOffset + count)],
+                    targetHiddenRows: pairHidden.subdata(in: hiddenStart..<hiddenEnd),
+                    startPosition: mtp.continuationPosition,
+                    predictNext: false)
+                pairOffset += count
+            }
+            carry = Data(chunkHidden.suffix(rowBytes))
+            onProgress(span.completedCount)
+        }
+        guard let lastTargetHidden = carry else {
+            throw StreamingMTPError.draftNotReady
+        }
+        let seed: PrefillSeed = useFusedGreedyHead
+            ? .greedyToken(lastGreedyToken) : .logitsWritten
+        return MTPPrefillResult(
+            target: PrefillResult(newPosition: tokens.count, seed: seed),
+            lastTargetHidden: lastTargetHidden)
+    }
+
     @discardableResult
     private func ensurePrefillScratch(config: PrefillRuntimeConfig) throws -> PrefillChunkScratchBuffers {
         let layout = PrefillChunkScratchLayout(config: cfg, runtime: config)
@@ -776,7 +1168,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      logits: MTLBuffer,
                                      scratch: PrefillChunkScratchBuffers,
                                      config: PrefillRuntimeConfig,
-                                     writeFinalHead: Bool) async throws {
+                                     writeFinalHead: Bool,
+                                     preparedHidden: MTLBuffer? = nil,
+                                     snapshotGDNAfterFirstToken: Bool = false,
+                                     useTwoRowProjection: Bool = false) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
@@ -793,6 +1188,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard tokens.count <= scratch.layout.chunkTokens else {
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill token count \(tokens.count) exceeds scratch chunk size \(scratch.layout.chunkTokens)")
+        }
+        guard !snapshotGDNAfterFirstToken || tokens.count == 2 else {
+            throw PrefillError.chunkedUnsupported(
+                "Gated-DeltaNet speculative checkpoint requires two rows")
         }
         if let kv, kv.fp16RingEnabled, let ringLayer = (0..<cfg.numLayers).first(where: {
             kv.ringCapacity(layer: $0) > 0
@@ -914,8 +1313,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     return
                 }
             }
-            if PrefillProjectionDispatchPolicy.selectedDispatch(for: family,
-                                                                chunkTokens: tokenCount) == .qmm {
+            if useTwoRowProjection && tokenCount == 2
+                && xStrideElements == columns && yStrideElements == rows {
+                if model.attentionWeightBits == 4 {
+                    int4.encodeTwoRows(
+                        commandBuffer: commandBuffer,
+                        weights: weights.buffer,
+                        weightsOffset: Int(weights.offset),
+                        scales: weights.buffer,
+                        scalesOffset: Int(weights.scaleOffset),
+                        biases: weights.buffer,
+                        biasesOffset: Int(weights.biasOffset),
+                        x: x,
+                        y: y,
+                        m: UInt32(rows),
+                        n: UInt32(columns))
+                } else {
+                    affine!.encodeTwoRows(
+                        commandBuffer: commandBuffer,
+                        weights: weights.buffer,
+                        weightsOffset: Int(weights.offset),
+                        scales: weights.buffer,
+                        scalesOffset: Int(weights.scaleOffset),
+                        biases: weights.buffer,
+                        biasesOffset: Int(weights.biasOffset),
+                        x: x,
+                        y: y,
+                        m: UInt32(rows),
+                        n: UInt32(columns))
+                }
+                return
+            }
+            if PrefillProjectionDispatchPolicy.selectedDispatch(
+                    for: family,
+                    chunkTokens: tokenCount) == .qmm {
                 prefillQMM.encode(commandBuffer: commandBuffer,
                                   weights: weights.buffer,
                                   weightsOffset: Int(weights.offset),
@@ -1011,18 +1442,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard var cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
-        prefillEmbed.encode(commandBuffer: cb,
-                            table: emb.buffer,
-                            tableOffset: Int(emb.offset),
-                            scales: emb.buffer,
-                            scalesOffset: Int(emb.scaleOffset),
-                            biases: emb.buffer,
-                            biasesOffset: Int(emb.biasOffset),
-                            tokens: tokenBuffer,
-                            out: scratch.hidden,
-                            t: UInt32(t),
-                            d: UInt32(D),
-                            outScale: embedOutScale)
+        if let preparedHidden {
+            guard let blit = cb.makeBlitCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            blit.copy(from: preparedHidden,
+                      sourceOffset: 0,
+                      to: scratch.hidden,
+                      destinationOffset: 0,
+                      size: t * D * MemoryLayout<Float16>.stride)
+            blit.endEncoding()
+        } else {
+            prefillEmbed.encode(commandBuffer: cb,
+                                table: emb.buffer,
+                                tableOffset: Int(emb.offset),
+                                scales: emb.buffer,
+                                scalesOffset: Int(emb.scaleOffset),
+                                biases: emb.buffer,
+                                biasesOffset: Int(emb.biasOffset),
+                                tokens: tokenBuffer,
+                                out: scratch.hidden,
+                                t: UInt32(t),
+                                d: UInt32(D),
+                                outScale: embedOutScale)
+        }
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
@@ -1101,6 +1544,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       convWeightOffset: Int(convW.offset),
                                       out: scratch.gdnConvOut,
                                       rows: t)
+                if snapshotGDNAfterFirstToken {
+                    gdn.encodeConvTailCheckpoint(
+                        commandBuffer: cb,
+                        tail: tail,
+                        qkvRows: scratch.q,
+                        checkpoint: gdnState.speculativeConvTailBuffer(layer: L))
+                }
                 gdn.encodeConvTailUpdate(commandBuffer: cb,
                                          tail: tail,
                                          qkvRows: scratch.q,
@@ -1119,6 +1569,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                            dtBias: dtBias.buffer,
                                            dtBiasOffset: Int(dtBias.offset),
                                            state: gdnState.stateBuffer(layer: L),
+                                           checkpointState: snapshotGDNAfterFirstToken
+                                            ? gdnState.speculativeStateBuffer(layer: L) : nil,
                                            y: scratch.gdnY,
                                            rows: t)
                 let gatedNormW = views.linNorm!
@@ -1379,15 +1831,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                                    weights: routeWeights,
                                                                    queryCount: t,
                                                                    topK: cfg.topKExperts)
-                    let schedulerConfig = Self.prefillRoutedTileSchedulerConfig
+                    let schedulerConfig: PrefillRoutedTileSchedulerConfig
                     let routeTileExpertCount: Int
                     if let slotCount = model.routedExpertCacheSlotCount(layer: L) {
-                        guard schedulerConfig.fitsSlotBudget(slotCount: slotCount) else {
+                        guard let fitted = Self.prefillRoutedTileSchedulerConfig.fitting(
+                            slotCount: slotCount) else {
                             throw PrefillError.chunkedUnsupported(
-                                "prefill routed tile depth \(schedulerConfig.maxPendingDepth) with \(schedulerConfig.tileExperts) experts/tile needs \((schedulerConfig.maxPendingDepth + 1) * schedulerConfig.tileExperts) slots, has \(slotCount)")
+                                "prefill routed tiles cannot fit the \(slotCount)-slot expert cache")
                         }
-                        routeTileExpertCount = min(schedulerConfig.tileExperts, slotCount)
+                        schedulerConfig = fitted
+                        routeTileExpertCount = fitted.tileExperts
                     } else {
+                        schedulerConfig = Self.prefillRoutedTileSchedulerConfig
                         routeTileExpertCount = schedulerConfig.tileExperts
                     }
                     let routes = try PrefillMoEGrouping.groupTokenExpertPairs(

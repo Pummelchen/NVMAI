@@ -89,6 +89,18 @@ public func runRawCompletion(producer: any LogitProducer,
                              start: RawCompletionStart = .reset,
                              shouldStop: () -> Bool = { false },
                              onProgress: (RawDecodeProgress) -> Void) async throws -> RawDecodeResult {
+    if let mtp = producer as? StreamingMTPDecoder {
+        return try await runStreamingMTPCompletion(
+            decoder: mtp,
+            tokenizer: tokenizer,
+            promptIds: promptIds,
+            config: config,
+            scratch: scratch,
+            prefillConfig: prefillConfig,
+            start: start,
+            shouldStop: shouldStop,
+            onProgress: onProgress)
+    }
     try config.validate()
     guard !promptIds.isEmpty else {
         throw GeneratorError.emptyPrompt
@@ -243,6 +255,97 @@ public func runRawCompletion(producer: any LogitProducer,
                            kvPosition: position,
                            kvBackedTokenIDs: history,
                            uncommittedBoundaryTokenIDs: uncommittedBoundaryTokenIDs)
+}
+
+private func runStreamingMTPCompletion(
+    decoder: StreamingMTPDecoder,
+    tokenizer: GFTokenizer,
+    promptIds: [Int32],
+    config: GenerationConfig,
+    scratch: RawCompletionScratch,
+    prefillConfig: PrefillRuntimeConfig,
+    start: RawCompletionStart,
+    shouldStop: () -> Bool,
+    onProgress: (RawDecodeProgress) -> Void
+) async throws -> RawDecodeResult {
+    try config.validate()
+    guard config.isPureGreedy else { throw StreamingMTPError.greedyOnly }
+    guard case .reset = start else {
+        throw GeneratorError.invalidContinuation(
+            "MTP continuation snapshots are not yet persisted; start a fresh request")
+    }
+    guard !promptIds.isEmpty else { throw GeneratorError.emptyPrompt }
+
+    let prefillStart = Date()
+    var boundary = try await decoder.prepare(
+        promptIds: promptIds,
+        config: config,
+        prefillConfig: prefillConfig,
+        logits: scratch.logits) { done in
+            onProgress(.prefill(done: done, total: promptIds.count))
+        }
+    let decodeStart = Date()
+    let prefillSeconds = decodeStart.timeIntervalSince(prefillStart)
+
+    var detok = GFDetokenizer(tokenizer: tokenizer)
+    var stopMatcher = StreamingStopMatcher(stops: config.stopStrings)
+    var generated = 0
+    var reason: StopReason = .maxTokens
+    var backedHistory = promptIds
+    var uncommitted: [Int32] = []
+    var pending: [(token: Int32, backed: Bool)] = [(boundary, false)]
+
+    decodeLoop: while true {
+        while !pending.isEmpty {
+            try Task.checkCancellation()
+            let item = pending.removeFirst()
+            boundary = item.token
+            generated += 1
+            uncommitted = item.backed ? [] : [item.token]
+
+            if tokenizer.stopTokenIDs.contains(item.token)
+                || config.extraStopTokens.contains(item.token) {
+                if item.token == tokenizer.endOfTurnID { reason = .endOfTurn }
+                else if item.token == tokenizer.toolResponseID { reason = .toolCalls }
+                else { reason = .eos }
+                let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
+                if !tail.isEmpty { onProgress(.tail(tail)) }
+                break decodeLoop
+            }
+            let visible = stopMatcher.push(detok.push(item.token))
+            onProgress(.token(index: generated - 1, id: item.token, delta: visible))
+            let hitStop = stopMatcher.isStopped || shouldStop()
+            let hitMax = generated >= config.maxNewTokens
+            if hitStop || hitMax {
+                let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
+                if !tail.isEmpty { onProgress(.tail(tail)) }
+                reason = hitStop ? .stopString : .maxTokens
+                break decodeLoop
+            }
+        }
+
+        // The uncommitted boundary becomes target-KV-backed inside advance.
+        backedHistory.append(boundary)
+        let batch = try await decoder.advance(boundaryToken: boundary)
+        pending = batch.tokenIDs.enumerated().map { index, token in
+            (token, index < batch.backedPrefixCount)
+        }
+        if batch.backedPrefixCount > 0 {
+            backedHistory.append(contentsOf: batch.tokenIDs.prefix(batch.backedPrefixCount))
+        }
+    }
+
+    return RawDecodeResult(
+        prefillTokens: promptIds.count,
+        cachedPromptTokens: 0,
+        computedPrefillTokens: promptIds.count,
+        prefillSeconds: prefillSeconds,
+        newTokens: generated,
+        decodeSeconds: Date().timeIntervalSince(decodeStart),
+        reason: reason,
+        kvPosition: decoder.targetPosition,
+        kvBackedTokenIDs: backedHistory,
+        uncommittedBoundaryTokenIDs: uncommitted)
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
