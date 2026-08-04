@@ -34,6 +34,8 @@ listed below.
   diagnostics, and 4K through 256K context settings using FP16 KV state.
 - Explicit OpenCode `coding-lean` and `prompt-only` request profiles. Filtering
   is opt-in through headers and never inferred from `User-Agent`.
+- Ready-to-use project `opencode.jsonc` with the `NVMAI` provider, the existing
+  `qwen3.6-35b-a3b` model ID, and the full 262,144-token context limit.
 - Exact multi-prefix inference-state reuse with bounded live/RAM caching and an
   optional persistent SSD tier. Qwen snapshots include both full-attention KV
   and gated-DeltaNet recurrent state.

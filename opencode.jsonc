@@ -1,0 +1,27 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "nvmai/qwen3.6-35b-a3b",
+  "small_model": "nvmai/qwen3.6-35b-a3b",
+  "provider": {
+    "nvmai": {
+      "name": "NVMAI",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "headers": {
+          "X-NVMAI-Client": "opencode",
+          "X-NVMAI-Profile": "coding-lean"
+        }
+      },
+      "models": {
+        "qwen3.6-35b-a3b": {
+          "name": "qwen3.6-35b-a3b",
+          "limit": {
+            "context": 262144,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}
