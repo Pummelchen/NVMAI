@@ -85,12 +85,12 @@ conversations. The MTP sidecar was the pinned 4-bit version from MLX Community
 
 ### 8-bit MTP comparison
 
-| Configuration | Decode tok/s | Total wall (3 req × 3 prompts) |
-| --- | ---: | ---: |
-| 8-bit, cache off, MTP off | 4.42 | 347 s |
-| 8-bit, cache on, MTP off | 4.42 | 347 s |
-| 8-bit, cache off, MTP on | 4.44 | 346 s |
-| 8-bit, cache on, MTP on | 4.39 | 350 s |
+| Condition | Cache | MTP | Decode tok/s | E2E tok/s | Total wall |
+| --- | --- | --- | ---: | ---: | ---: |
+| Baseline | Off | Off | 4.42 | 4.43 | 347 s |
+| Cache only | On | Off | 4.42 | 4.42 | 347 s |
+| MTP only | Off | On | 4.44 | 4.45 | 346 s |
+| Cache + MTP | On | On | 4.39 | 4.39 | 350 s |
 
 ### Takeaways
 
