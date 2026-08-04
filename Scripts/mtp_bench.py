@@ -9,14 +9,15 @@ from pathlib import Path
 
 ROOT = Path("/Users/andreborchert/Downloads/NVMAI")
 COND = int(os.environ.get("COND", "0"))
-MODEL = str(ROOT / "scratch/qwen36-8bit.gturbo")
-MODEL_ID = "qwen3.6-35b-a3b-8bit"
+CONFIG = os.environ.get("CONFIG", "8bit")
+MODEL = str(ROOT / f"scratch/qwen36-{CONFIG}.gturbo")
+MODEL_ID = f"qwen3.6-35b-a3b-{CONFIG}"
 CACHE_MODE = "multi-prefix" if COND in (1, 3) else "off"
 MTP_ON = COND in (2, 3)
-TEMP = 0.0 if COND in (2, 3) else 0.2
-LABELS = {0: "q8_cacheoff_mtpoff", 1: "q8_cacheon_mtpoff",
-          2: "q8_cacheoff_mtp_on", 3: "q8_cacheon_mtp_on"}
-LABEL = LABELS[COND]
+TEMP = 0.0 if COND in (2, 3) else 0.6
+LABELS = {0: "cacheoff_mtpoff", 1: "cacheon_mtpoff",
+          2: "cacheoff_mtp_on", 3: "cacheon_mtp_on"}
+LABEL = f"{CONFIG}_{LABELS[COND]}"
 OUTDIR = ROOT / f"benchmark-results/mtp-bench-{LABEL}-{time.strftime('%Y%m%dT%H%M%S')}"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
@@ -118,15 +119,16 @@ def send_request(messages, seed):
         "model": MODEL_ID,
         "messages": messages,
         "temperature": TEMP,
-        "top_k": 64,
         "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "repetition_penalty": 1.0,
         "seed": seed,
         "max_completion_tokens": 128,
         "stream": True,
         "stream_options": {"include_usage": True}
     }
-    if TEMP == 0.0:
-        payload["repetition_penalty"] = 1.0
     
     start = time.time()
     data = json.dumps(payload, separators=(",", ":")).encode()
