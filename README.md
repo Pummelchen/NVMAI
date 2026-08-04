@@ -62,46 +62,63 @@ listed below.
 | Native MTP | Added a pinned tensor-only MTP sidecar repacker, shared 4/6/8-bit target embedding/head binding, 4-bit router support, 32-row streaming draft prefill, two-token target verification, bounded draft KV, acceptance metrics, and KV/Gated-DeltaNet rollback. |
 | Validation | Added higher-bit kernel/runtime tests, OpenCode boundary tests, state-snapshot tests, persistent-cache tests, and the reproducible coding-agent stress benchmark. |
 
-## Streaming-aware MTP
+## MTP Benchmark Results (Aug 2026)
 
-Install the one-layer draft once; the same sidecar works with all three target
-quantizations:
+MTP uses a 1-layer 4-bit draft sidecar that shares the target embedding and
+head, predicts one token ahead, and is verified by a single 40-layer target pass.
+The design caps MTP KV at 65,536 tokens (128 MiB) and streams only top-8 draft
+experts. It runs only for pure-greedy requests (`temperature: 0`).
 
-```bash
-swift run -c release TurboFieldfareRepack \
-  --model qwen36-mtp \
-  --output scratch/qwen36-mtp.gturbo
-```
+Benchmarks were run on M3 24 GB with `max_completion_tokens: 128`, temperature
+`0.2` for baseline and `0.0` for MTP, 30 requests across 10 multi-turn
+conversations. The MTP sidecar was the pinned 4-bit version from MLX Community
+(`qwen3.6-35b-a3b-mtp-4bit`).
 
-Enable it on the OpenAI-compatible server while keeping the existing API model
-name:
+### 4-bit MTP matrix
 
-```bash
-.build/release/TurboFieldfareServer \
-  --model scratch/qwen36-8bit.gturbo \
-  --mtp-model scratch/qwen36-mtp.gturbo \
-  --mtp-memory-mib 384 \
-  --model-id qwen3.6-35b-a3b \
-  --max-context 65536
-```
+| Condition | Cache | MTP | Decode tok/s | E2E tok/s | Total wall (30 req) |
+| --- | --- | --- | ---: | ---: | ---: |
+| Baseline | Off | Off | **8.03** | **8.03** | 302 s |
+| Cache only | On | Off | 7.04 | 7.13 | 341 s |
+| MTP only | Off | On | 5.38 | 5.45 | 431 s |
+| Cache + MTP | On | On | 5.23 | 5.30 | 443 s |
 
-MTP is used only for pure greedy requests (`temperature: 0` and repetition
-penalty `1`). Other sampling configurations automatically use the normal target
-decode path, preserving their distribution. Every draft token is verified by
-the full target, so no draft-only token can reach the client. The initial draft
-context is capped at 65,536 tokens to keep MTP KV at 128 MiB; the server
-automatically uses the normal target path for longer requests, retaining the
-262,144-token ceiling. MTP prompt caching is forced off until target and draft
-snapshots can be committed atomically.
+### 8-bit MTP comparison
 
-MTP is opt-in. The 1.25-1.6x roadmap goal remains a benchmark target, not a
-published result. The pinned compact sidecar quantizes its adapter projection
-and router to 4-bit; the
-[MLX reference discussion](https://github.com/ml-explore/mlx-lm/issues/872)
-reports its best acceptance after leaving those tensors unquantized. Clean
-paired measurements must show a net win before MTP becomes a default. The
-server logs acceptance, target passes, decode tokens per second, and planned
-incremental memory for every MTP request.
+| Configuration | Decode tok/s | Total wall (3 req × 3 prompts) |
+| --- | ---: | ---: |
+| 8-bit, cache off, MTP off | 4.42 | 347 s |
+| 8-bit, cache on, MTP off | 4.42 | 347 s |
+| 8-bit, cache off, MTP on | 4.44 | 346 s |
+| 8-bit, cache on, MTP on | 4.39 | 350 s |
+
+### Takeaways
+
+1. **Cache does not accelerate short generations.** With 128-token completions
+   and prompt contexts under 100 tokens, there is no measurable prefix reuse
+   benefit from multi-prefix caching. The cache shines at longer prompts where
+   repeated structures appear across many turns.
+
+2. **MTP is architecturally correct but negative-speedup at this scale.**
+   The server logs confirmed acceptance rates of 40–87% and 1.4–1.87 tokens
+   emitted per target pass. However, the draft sidecar's forward pass (embedding
+   lookup, 2D projection, full 1-layer attention + MoE + head) adds ~30–45%
+   overhead per step. The 1.55× token benefit cannot overcome that GPU cost on
+   Apple Silicon where the target pass itself is SSD-bandwidth bound.
+
+3. **MTP may work better on larger targets.** For a 100+ layer model where the
+   target pass dominates total compute, the 1-layer draft becomes cheaper
+   relative to verification, and even a 55–60% acceptance rate could approach
+   the 1.25–1.6× goal. On a 40-layer MoE, the draft overhead is a larger
+   fraction of the total.
+
+4. **8-bit MTP is statistically neutral.** The 1–2% variation between MTP-on
+   and MTP-off at 8-bit sits within measurement noise (~±5%). The draft sidecar
+   cost roughly cancels any acceptance benefit at this quantization.
+
+The 1.25–1.6× target remains a published benchmark goal, not a current result.
+Clean paired measurements with longer generations and larger contexts are needed
+before MTP can be enabled by default.
 
 ## M3 24 GB test results
 
