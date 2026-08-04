@@ -2,6 +2,13 @@ import Testing
 @testable import TurboFieldfare
 
 @Suite struct RuntimeConfigurationTests {
+    @Test func publicContextChoicesReachQwenMaximum() {
+        #expect(RuntimeConfiguration.supportedContextTokens
+            == [4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144])
+        #expect(RuntimeConfiguration.supportedContextTokens.last
+            == RuntimeConfiguration.maximumContextTokens)
+    }
+
     @Test func productionDefaultsAreStable() {
         let runtime = RuntimeConfiguration.production
         #expect(runtime.fp16RingEnabled)

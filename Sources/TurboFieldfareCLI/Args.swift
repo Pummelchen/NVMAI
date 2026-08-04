@@ -90,7 +90,7 @@ extension Args {
 
     options:
       --max-new <int>           Generated-token limit (default 1024).
-      --max-context <int>       Context limit in tokens (default 4096).
+      --max-context <int>       Context limit, 1...262144 tokens (default 4096).
       --temperature <float>     Sampling temperature (default 0.2; 0 = greedy).
       --top-k <int>             Top-k truncation, 1...256 (default 64; 0 = off).
       --top-p <float>           Nucleus truncation (default 0.95).
@@ -151,7 +151,8 @@ extension Args {
                 maxNew = parsed
             case "--max-context":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value), parsed > 0 else {
+                guard let parsed = Int(value),
+                      (1...RuntimeConfiguration.maximumContextTokens).contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 maxContext = parsed

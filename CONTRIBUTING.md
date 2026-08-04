@@ -1,15 +1,15 @@
 # Contributing
 
-TurboFieldfare welcomes focused fixes, documentation improvements, and
+NVMAI welcomes focused fixes, documentation improvements, and
 benchmark reports from Apple Silicon Macs.
 
 ## Before opening a change
 
-- Keep the package compatible with macOS 26, Swift 6.2, and Metal 4.
+- Keep the package compatible with macOS 26, Swift 6.3, and Metal 4.
 - Preserve the bounded-memory model path. Never load a complete checkpoint,
   shard, or large model tensor into Swift heap memory.
 - Keep public runtime controls limited to those documented in
-  [Runtime controls](docs/RUNTIME_CONTROLS.md).
+  [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls).
 - Add or update a focused test for behavior changes.
 
 Run the release build, serial tests, and Markdown link check:
@@ -26,7 +26,7 @@ memory, macOS version, Swift version, and any protocol change.
 
 ## Benchmark reports
 
-Follow the [community benchmark protocol](docs/COMMUNITY_BENCHMARKS.md). Review
+Follow the [community benchmark protocol](https://github.com/Pummelchen/NVMAI/wiki/Benchmarking-Guide). Review
 all captured files before sharing them, and remove personal paths or unrelated
 process details.
 

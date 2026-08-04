@@ -20,6 +20,10 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 }
 
 public struct RuntimeConfiguration: Sendable, Equatable {
+    public static let supportedContextTokens = [
+        4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144,
+    ]
+    public static let maximumContextTokens = 262_144
     public static let allowedExpertCacheSlots = [8, 16, 24, 32]
     public static let allowedPrefillChunkTokens = [
         32, 64, 128, 256, 512, 1_024, 2_048, 4_096,

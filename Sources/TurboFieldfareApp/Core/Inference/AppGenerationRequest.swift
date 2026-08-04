@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfare
 
 public struct AppGenerationRequest: Equatable, Sendable {
     public var modelDirectory: URL
@@ -43,8 +44,9 @@ public struct AppGenerationRequest: Equatable, Sendable {
         guard maxNewTokens > 0 else {
             throw AppInferenceError.invalidRequest("Max response length must be greater than zero.")
         }
-        guard maxContextTokens > 0 else {
-            throw AppInferenceError.invalidRequest("Max context must be greater than zero.")
+        guard (1...RuntimeConfiguration.maximumContextTokens).contains(maxContextTokens) else {
+            throw AppInferenceError.invalidRequest(
+                "Max context must be between 1 and 262144 tokens.")
         }
         guard temperature >= 0 else {
             throw AppInferenceError.invalidRequest("Temperature cannot be negative.")

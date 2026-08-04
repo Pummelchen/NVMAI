@@ -39,6 +39,22 @@ import Testing
         }
     }
 
+    @Test func contextAcceptsQwenMaximumAndRejectsLargerValues() throws {
+        let maximum = AppGenerationRequest(
+            modelDirectory: existingDirectory,
+            prompt: "hello",
+            maxContextTokens: 262_144)
+        try maximum.validate()
+
+        let tooLarge = AppGenerationRequest(
+            modelDirectory: existingDirectory,
+            prompt: "hello",
+            maxContextTokens: 262_145)
+        #expect(throws: AppInferenceError.self) {
+            try tooLarge.validate()
+        }
+    }
+
     @Test func invalidSlotCountRejected() {
         var options = AppRuntimeOptions()
         options.expertCacheSlots = 7

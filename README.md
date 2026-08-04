@@ -31,7 +31,7 @@ listed below.
 - Native Mac app, command-line interface, installer/verifier, and an
   OpenAI-compatible loopback server with JSON and SSE streaming.
 - ChatML conversations, function-tool calls, sampling controls, runtime
-  diagnostics, and 4K through 128K context settings using FP16 KV state.
+  diagnostics, and 4K through 256K context settings using FP16 KV state.
 - Explicit OpenCode `coding-lean` and `prompt-only` request profiles. Filtering
   is opt-in through headers and never inferred from `User-Agent`.
 - Exact multi-prefix inference-state reuse with bounded live/RAM caching and an
@@ -47,7 +47,7 @@ listed below.
 | --- | --- |
 | Quantization | Extended Qwen from the original 4-bit path to complete 4-bit, 6-bit, and 8-bit repacking, loading, decode, shared/routed expert, output-head, and chunked-prefill support. |
 | Higher-bit prefill | Added affine 6-bit/8-bit Metal kernels, final-row output support, routed-expert fixes, and regression tests covering prefill-to-decode continuity. |
-| Context | Raised the server and app choices to 128K while retaining 4K, 8K, 16K, 32K, and 64K options. |
+| Context | Raised the server, CLI, and app ceiling to Qwen's full 262,144-token window while retaining 4K through 128K options. |
 | Apple Silicon tuning | Added larger Qwen prefill chunks, M3 measurements and defaults, runtime controls, and memory/phase diagnostics while retaining the M1-M5 target. |
 | Swift | Moved the package to Swift tools 6.3 and Swift 6 language mode; the current validated toolchain is Apple Swift 6.3.3. |
 | OpenCode | Added explicit `coding-lean` and `prompt-only` profiles to reduce unnecessary client guidance and tool-schema overhead without unsafe heuristic detection. |
@@ -97,11 +97,12 @@ the protocol, validation, and caveats.
 
 ## Documentation
 
-- [OpenAI-compatible server and OpenCode setup](docs/OPENAI_SERVER.md)
-- [Runtime controls](docs/RUNTIME_CONTROLS.md)
-- [System design](docs/SYSTEM_DESIGN.md)
-- [Benchmark protocol](docs/COMMUNITY_BENCHMARKS.md)
-- [Qwen performance notes](docs/QWEN36_PERFORMANCE.md)
+- [Wiki home](https://github.com/Pummelchen/NVMAI/wiki)
+- [Getting started](https://github.com/Pummelchen/NVMAI/wiki/Getting-Started)
+- [OpenAI-compatible server and OpenCode setup](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server)
+- [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls)
+- [System design](https://github.com/Pummelchen/NVMAI/wiki/System-Design)
+- [Benchmarks and protocol](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
 
 NVMAI remains text-only. The server binds to `127.0.0.1` without authentication
 or TLS and must not be exposed through a proxy or tunnel.

@@ -56,6 +56,20 @@ import Testing
         #expect(arguments.quiet)
     }
 
+    @Test func contextAcceptsQwenMaximumAndRejectsLargerValues() throws {
+        let maximum = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--max-context", "262144",
+        ])
+        #expect(maximum.maxContext == 262_144)
+        #expect(throws: ArgsError.invalidValue(flag: "--max-context", value: "262145")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--max-context", "262145",
+            ])
+        }
+    }
+
     @Test func topKZeroRequiresTopPToBeDisabled() throws {
         let disabled = try Args.parse([
             "--model", "m.gturbo", "--prompt", "hi",

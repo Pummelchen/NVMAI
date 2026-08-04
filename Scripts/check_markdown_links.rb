@@ -10,8 +10,9 @@ def markdown_files(arguments)
   return arguments.map { |path| ROOT.join(path).cleanpath } unless arguments.empty?
 
   root_files = Dir[ROOT.join("*.md").to_s].map { |path| Pathname.new(path) }
-  docs_files = Dir[ROOT.join("docs/**/*.md").to_s].map { |path| Pathname.new(path) }
-  (root_files + docs_files).select(&:file?).uniq.sort
+  result_files = Dir[ROOT.join("benchmark-results/**/*.md").to_s]
+    .map { |path| Pathname.new(path) }
+  (root_files + result_files).select(&:file?).uniq.sort
 end
 
 def without_inline_code(line)
