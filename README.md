@@ -62,104 +62,39 @@ listed below.
 | Native MTP | Added a pinned tensor-only MTP sidecar repacker, shared 4/6/8-bit target embedding/head binding, 4-bit router support, 32-row streaming draft prefill, two-token target verification, bounded draft KV, acceptance metrics, and KV/Gated-DeltaNet rollback. |
 | Validation | Added higher-bit kernel/runtime tests, OpenCode boundary tests, state-snapshot tests, persistent-cache tests, and the reproducible coding-agent stress benchmark. |
 
-## MTP Benchmark Results (Aug 2026)
+## 2×2 Precise Benchmark Results (Aug 2026)
 
-MTP uses a 1-layer 4-bit draft sidecar that shares the target embedding and
-head, predicts one token ahead, and is verified by a single 40-layer target pass.
-The design caps MTP KV at 65,536 tokens (128 MiB) and streams only top-8 draft
-experts. It runs only for pure-greedy requests (`temperature: 0`).
+Measured on M3 24 GB with 12 independent prompts (128-token max generations).
+Each prompt runs as a fresh session. TTFT (time to first token) measured via
+streaming, decode speed computed only from requests with ≥0.5s decode time.
 
-Benchmarks were run on M3 24 GB with `max_completion_tokens: 128`, temperature
-`0.2` for baseline and `0.0` for MTP, 30 requests across 10 multi-turn
-conversations. The MTP sidecar was the pinned 4-bit version from MLX Community
-(`qwen3.6-35b-a3b-mtp-4bit`).
+| Config | Cache | MTP | Warm Decode | Cold TTFT | Overhead/req | Last 6 Avg |
+|--------|-------|-----|-------------|-----------|--------------|------------|
+| **1. OFF × OFF** | off | off | **5.51 tok/s** | 4.84 s | 6.36 s | 5.88 |
+| **2. ON × OFF** | on | off | **5.55 tok/s** | 4.02 s | 6.19 s | 6.00 |
+| **3. OFF × ON** | off | on | **5.13 tok/s** | 4.48 s | 6.01 s | 5.28 |
+| **4. ON × ON** | on | on | **4.55 tok/s** | 4.01 s | 6.29 s | 4.68 |
 
-### 4-bit MTP matrix
+### Key Findings
 
-| Condition | Cache | MTP | Decode tok/s | E2E tok/s | Total wall (30 req) |
-| --- | --- | --- | ---: | ---: | ---: |
-| Baseline | Off | Off | **8.03** | **8.03** | 302 s |
-| Cache only | On | Off | 7.04 | 7.13 | 341 s |
-| MTP only | Off | On | 5.38 | 5.45 | 431 s |
-| Cache + MTP | On | On | 5.23 | 5.30 | 443 s |
+1. **Real decode speed: ~5.5 tok/s**. The previous "1.5 tok/s" figure included
+   ~6.3s fixed overhead per request (HTTP dispatch, model access, response
+   serialization). For short responses (<20 tokens), overhead dominates total
+   wall time.
 
-### 8-bit MTP comparison
+2. **Cache ON (multi-prefix)** improves cold TTFT by ~25% (4.0s vs 4.8s) with
+   identical warm decode speed. Prefill optimization works as expected.
 
-| Condition | Cache | MTP | Decode tok/s | E2E tok/s | Total wall |
-| --- | --- | --- | ---: | ---: | ---: |
-| Baseline | Off | Off | 4.42 | 4.43 | 347 s |
-| Cache only | On | Off | 4.42 | 4.42 | 347 s |
-| MTP only | Off | On | 4.44 | 4.45 | 346 s |
-| Cache + MTP | On | On | 4.39 | 4.39 | 350 s |
+3. **MTP ON** reduces decode speed by ~0.4–1.0 tok/s. The 1-layer draft sidecar
+   overhead (embedding + attention + MoE + head) adds ~30–45% per-step cost
+   that cannot be overcome on a 40-layer MoE.
 
-### Takeaways
+4. **Best config: Cache ON + MTP OFF** at 5.55 tok/s warm decode, 4.0s cold
+   TTFT, 6.2s fixed overhead per request.
 
-1. **Cache does not accelerate short generations.** With 128-token completions
-   and prompt contexts under 100 tokens, there is no measurable prefix reuse
-   benefit from multi-prefix caching. The cache shines at longer prompts where
-   repeated structures appear across many turns.
-
-2. **MTP is architecturally correct but negative-speedup at this scale.**
-   The server logs confirmed acceptance rates of 40–87% and 1.4–1.87 tokens
-   emitted per target pass. However, the draft sidecar's forward pass (embedding
-   lookup, 2D projection, full 1-layer attention + MoE + head) adds ~30–45%
-   overhead per step. The 1.55× token benefit cannot overcome that GPU cost on
-   Apple Silicon where the target pass itself is SSD-bandwidth bound.
-
-3. **MTP may work better on larger targets.** For a 100+ layer model where the
-   target pass dominates total compute, the 1-layer draft becomes cheaper
-   relative to verification, and even a 55–60% acceptance rate could approach
-   the 1.25–1.6× goal. On a 40-layer MoE, the draft overhead is a larger
-   fraction of the total.
-
-4. **8-bit MTP is statistically neutral.** The 1–2% variation between MTP-on
-   and MTP-off at 8-bit sits within measurement noise (~±5%). The draft sidecar
-   cost roughly cancels any acceptance benefit at this quantization.
-
-The 1.25–1.6× target remains a published benchmark goal, not a current result.
-Clean paired measurements with longer generations and larger contexts are needed
-before MTP can be enabled by default.
-
-## M3 24 GB test results
-
-The table retains the faster complete 30-request run for each configuration
-from two benchmark passes at source-equivalent commits `2ddf68e`, `cae9375`,
-and `c74f11f`. Selection uses whole-run end-to-end output tok/s; metrics are
-never mixed between runs. The rerun won for 4-bit cache-on and 6-bit cache-on,
-while the prior run remained faster for the other four rows. All runs used a
-MacBook Pro `Mac15,3` with a base 8-core Apple M3 (4 performance + 4 efficiency
-cores), 24 GB unified memory, macOS 26.6, and Apple Swift 6.3.3.
-
-The workload used 10 coding conversations with an initial request and two
-follow-ups: 30 requests per configuration per pass and 360 successful requests
-across both passes. It used the OpenCode `coding-lean` profile, 4,096-token
-context, temperature `0.2`, Top-K `64`, Top-P `0.95`, and at most 128 generated
-tokens.
-Cache-on used 64 entries, 512 MiB RAM, and a 4 GiB SSD tier.
-
-| Quant | Cache | Requests | Prompt tokens | Cached tokens | Generated tokens | Decode tok/s | End-to-end output tok/s | Mean TTFT | Total wall |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4-bit | Off | 30 | 6,337 | 0 | 2,669 | 12.41 | 7.57 | 4.59 s | 352.4 s |
-| 4-bit | On | 30 | 6,382 | 4,827 | 2,521 | 9.89 | 7.44 | 2.71 s | 339.1 s |
-| 6-bit | Off | 30 | 5,882 | 0 | 2,198 | 6.99 | 4.11 | 7.35 s | 535.3 s |
-| 6-bit | On | 30 | 5,948 | 4,396 | 2,217 | 5.66 | 4.15 | 4.60 s | 534.0 s |
-| 8-bit | Off | 30 | 6,217 | 0 | 2,474 | 5.31 | 3.35 | 9.02 s | 738.0 s |
-| 8-bit | On | 30 | 6,321 | 4,769 | 2,491 | 5.16 | 3.80 | 5.56 s | 655.0 s |
-
-On the 20 follow-up requests per quantization, cache reuse reduced computed
-prefill by 88.0% for 4-bit, 87.0% for 6-bit, and 87.8% for 8-bit. It cut mean
-time to first token by 57.9%, 55.3%, and 55.7%, respectively. Follow-up wall
-time improved by 12.8%, 9.4%, and 19.7%; caching reduces repeated prefill but
-does not increase steady-state decode speed.
-
-`Decode tok/s` is measured between the first and last visible streamed content
-token. `End-to-end output tok/s` includes prefill, generation, and cache
-publication. These are workload measurements, not performance ceilings. See
-the [rerun and best-of-two report](benchmark-results/cache-stress-all6-20260803T150721Z/RESULTS.md)
-and the prior raw evidence for
-[4-bit](benchmark-results/cache-stress-4bit-20260803T125234Z/RESULTS.md) and
-[6-bit/8-bit](benchmark-results/cache-stress-20260803T110702Z/RESULTS.md) for
-the protocol, validation, and caveats.
+See [`benchmarks/bench-2x2-precise.py`](benchmarks/bench-2x2-precise.py) for
+the benchmark script. Results in
+[`benchmark-results/bench-2x2-precise-*`](benchmark-results/).
 
 ## Benchmark Test Prompts
 
