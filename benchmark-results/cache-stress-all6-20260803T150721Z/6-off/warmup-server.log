@@ -1,2 +1,0 @@
-TurboFieldfareServer ready at http://127.0.0.1:8080 model=qwen3.6-35b-a3b context=4096 prefill_chunk=1024 prompt_cache=off prompt_cache_memory_mib=256 prompt_cache_disk=off
-NVMAI OpenCode profile=coding-lean body_bytes=9297 prompt_tokens=1969->71 messages=2->2 tools=0->0

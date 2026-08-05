@@ -1,3 +1,0 @@
-TurboFieldfareServer ready at http://127.0.0.1:8080 model=qwen3.6-35b-a3b context=4096 prefill_chunk=1024 prompt_cache=multi-prefix prompt_cache_memory_mib=512 prompt_cache_disk=/Users/andreborchert/Downloads/NVMAI-benchmark-results/cache-stress-20260803T110702Z/6-on/warmup-cache
-NVMAI OpenCode profile=coding-lean body_bytes=9297 prompt_tokens=1969->71 messages=2->2 tools=0->0
-NVMAI prompt_cache stored tokens=77 state_bytes=65966080 ram_bytes=65966080 disk_bytes=65966080 entry=c50cff08-0c7c-4047-ad3c-b8a7e24ae397

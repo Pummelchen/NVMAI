@@ -1,0 +1,157 @@
+{
+  "config": "cache_off_mtp_off",
+  "cache_mode": "off",
+  "mtp_config": "off",
+  "max_completion_tokens": 128,
+  "results": [
+    {
+      "capability": "Basic fact",
+      "wall": 4.84,
+      "ttft": 4.84,
+      "decode_time": 0.0,
+      "prompt_tokens": 25,
+      "completion_tokens": 2,
+      "cached_tokens": 0,
+      "decode_rate": 32263.88,
+      "response": "Paris"
+    },
+    {
+      "capability": "Arithmetic",
+      "wall": 5.42,
+      "ttft": 5.42,
+      "decode_time": 0.0,
+      "prompt_tokens": 27,
+      "completion_tokens": 4,
+      "cached_tokens": 0,
+      "decode_rate": 10149.56,
+      "response": "408"
+    },
+    {
+      "capability": "Instruction following",
+      "wall": 5.1,
+      "ttft": 5.1,
+      "decode_time": 0.0,
+      "prompt_tokens": 20,
+      "completion_tokens": 2,
+      "cached_tokens": 0,
+      "decode_rate": 17848.1,
+      "response": "BLUE"
+    },
+    {
+      "capability": "Classification",
+      "wall": 22.3,
+      "ttft": 6.26,
+      "decode_time": 16.04,
+      "prompt_tokens": 29,
+      "completion_tokens": 53,
+      "cached_tokens": 0,
+      "decode_rate": 3.31,
+      "response": "The statement..."
+    },
+    {
+      "capability": "Extraction",
+      "wall": 7.45,
+      "ttft": 5.3,
+      "decode_time": 2.14,
+      "prompt_tokens": 25,
+      "completion_tokens": 11,
+      "cached_tokens": 0,
+      "decode_rate": 5.13,
+      "response": "ana@example.com"
+    },
+    {
+      "capability": "Structured output",
+      "wall": 14.85,
+      "ttft": 6.13,
+      "decode_time": 8.73,
+      "prompt_tokens": 31,
+      "completion_tokens": 26,
+      "cached_tokens": 0,
+      "decode_rate": 2.98,
+      "response": "{name: Maya, age: 31}"
+    },
+    {
+      "capability": "Logic",
+      "wall": 5.64,
+      "ttft": 5.64,
+      "decode_time": 0.0,
+      "prompt_tokens": 43,
+      "completion_tokens": 2,
+      "cached_tokens": 0,
+      "decode_rate": 15978.3,
+      "response": "No"
+    },
+    {
+      "capability": "Context use",
+      "wall": 7.38,
+      "ttft": 7.1,
+      "decode_time": 0.28,
+      "prompt_tokens": 36,
+      "completion_tokens": 5,
+      "cached_tokens": 0,
+      "decode_rate": 17.68,
+      "response": "7391"
+    },
+    {
+      "capability": "Refusal/honesty",
+      "wall": 8.33,
+      "ttft": 6.7,
+      "decode_time": 1.62,
+      "prompt_tokens": 26,
+      "completion_tokens": 10,
+      "cached_tokens": 0,
+      "decode_rate": 6.16,
+      "response": "Not provided"
+    },
+    {
+      "capability": "Summarization",
+      "wall": 6.65,
+      "ttft": 5.77,
+      "decode_time": 0.88,
+      "prompt_tokens": 28,
+      "completion_tokens": 7,
+      "cached_tokens": 0,
+      "decode_rate": 7.96,
+      "response": "Server failed disk full."
+    },
+    {
+      "capability": "Transformation",
+      "wall": 5.79,
+      "ttft": 4.68,
+      "decode_time": 1.1,
+      "prompt_tokens": 23,
+      "completion_tokens": 8,
+      "cached_tokens": 0,
+      "decode_rate": 7.25,
+      "response": "hello world 123!"
+    },
+    {
+      "capability": "Simple coding",
+      "wall": 7.83,
+      "ttft": 6.27,
+      "decode_time": 1.55,
+      "prompt_tokens": 24,
+      "completion_tokens": 9,
+      "cached_tokens": 0,
+      "decode_rate": 5.79,
+      "response": "max(nums)"
+    }
+  ],
+  "summary": {
+    "total_requests": 12,
+    "total_wall_s": 101.6,
+    "total_completion_tokens": 139,
+    "avg_wall_s": 8.47,
+    "avg_decode_tok_s": 5.51,
+    "warm_rates": [
+      3.31,
+      5.13,
+      2.98,
+      6.16,
+      7.96,
+      7.25,
+      5.79
+    ],
+    "last6_avg": 5.88
+  }
+}

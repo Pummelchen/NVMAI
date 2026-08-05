@@ -40,9 +40,16 @@ Model/
 
 # Logs / scratch
 *.log
-benchmark-results/
+benchmark-results/cache-stress-*/
+benchmark-results/bench-4bit-*/
+benchmark-results/bench-2x2-full-*/
+benchmark-results/bench-2x2-*/
+benchmark-results/aggregate.json
 scratch/
 tmp/
+
+# Keep precise benchmark results
+!benchmark-results/bench-2x2-precise-*/
 
 # Python
 __pycache__/
