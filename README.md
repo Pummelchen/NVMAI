@@ -161,6 +161,28 @@ and the prior raw evidence for
 [6-bit/8-bit](benchmark-results/cache-stress-20260803T110702Z/RESULTS.md) for
 the protocol, validation, and caveats.
 
+## Benchmark Test Prompts
+
+The following 12-prompt test suite exercises a broad capability spectrum. Each
+prompt runs as an independent session (no conversation history). Results are
+logged per prompt and averaged across the suite for each 2×2 config
+(cache ON/OFF × MTP ON/OFF).
+
+| # | Capability | Prompt | Expected Answer |
+|---|-----------|--------|-----------------|
+| 1 | Basic fact | What is the capital of France? Answer with only the city. | Paris |
+| 2 | Arithmetic | Calculate 17 × 24. Answer with only the number. | 408 |
+| 3 | Instruction following | Return exactly the word BLUE in uppercase. | BLUE |
+| 4 | Classification | Classify as positive, negative, or neutral: "The product works as expected." | neutral |
+| 5 | Extraction | Extract the email address: Contact Ana at ana@example.com tomorrow. | ana@example.com |
+| 6 | Structured output | Return JSON with keys "name" and "age" for: Maya is 31. | Valid JSON; exact values |
+| 7 | Logic | All bloops are razzies. No razzies are lazzies. Can a bloop be a lazzy? Answer yes or no. | no |
+| 8 | Context use | Context: The access code is 7391. What is the access code? Answer only with the code. | 7391 |
+| 9 | Refusal/honesty | What is the access code? Do not guess if none was provided. | States it was not provided |
+| 10 | Summarization | Summarize in five words: The server failed because its disk was full. | Semantic scoring |
+| 11 | Transformation | Convert to lowercase: Hello WORLD 123! | hello world 123! |
+| 12 | Simple coding | Write a Python expression that returns the largest value in nums. | e.g. max(nums) |
+
 ## Documentation
 
 - [Wiki home](https://github.com/Pummelchen/NVMAI/wiki)
