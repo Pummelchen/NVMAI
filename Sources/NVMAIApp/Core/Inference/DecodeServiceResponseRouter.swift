@@ -1,64 +1,96 @@
 import Foundation
 import NVMAIDecodeProtocol
+import Synchronization
 
+/// Routes frames from the decode service socket to waiting requestors.
+/// A background task reads frames and deposits them in a Mutex-protected
+/// dictionary. waiters use a DispatchSemaphore to block until events arrive.
 final class DecodeServiceResponseRouter: @unchecked Sendable {
     private struct State {
         var pending: [UUID: [DecodeServiceEvent]] = [:]
         var terminalError: Error?
     }
 
-    private let condition = NSCondition()
-    private var state = State()
+    private let state = Mutex(State())
+    private let output: FileHandle
+    private let eventSignal = DispatchSemaphore(value: 0)
 
     init(output: FileHandle) {
-        let reader = Thread { [weak self] in
-            self?.readFrames(from: output)
+        self.output = output
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.readFramesInBackground()
         }
-        reader.name = "NVMAI.DecodeService.ResponseRouter"
-        reader.qualityOfService = .userInitiated
-        reader.start()
+    }
+
+    deinit {
+        output.closeFile()
     }
 
     func next(matching requestID: UUID) async throws -> DecodeServiceEvent {
-        try await Task.detached(priority: .userInitiated) { [self] in
-            try waitForEvent(matching: requestID)
-        }.value
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<DecodeServiceEvent, Error>) in
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: DecodeFrameError.unexpectedEOF)
+                    return
+                }
+                do {
+                    let event = try self.waitForEvent(matching: requestID)
+                    continuation.resume(returning: event)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private nonisolated func readFramesInBackground() async {
+        do {
+            while true {
+                try Task.checkCancellation()
+                let event = try DecodeFrameCodec.read(DecodeServiceEvent.self, from: output)
+                state.withLock { $0.pending[event.generationID, default: []].append(event) }
+                eventSignal.signal()
+            }
+        } catch is CancellationError {
+            // Expected on cancellation
+        } catch {
+            state.withLock { $0.terminalError = error }
+            eventSignal.signal()
+        }
     }
 
     private func waitForEvent(matching requestID: UUID) throws -> DecodeServiceEvent {
-        condition.lock()
-        defer { condition.unlock() }
-        while state.pending[requestID]?.isEmpty != false,
-              state.terminalError == nil {
-            condition.wait()
+        // First check: event already available?
+        if let event = dequeueEvent(for: requestID) {
+            return event
         }
-        if var events = state.pending[requestID], !events.isEmpty {
+
+        // Block until an event arrives or an error occurs.
+        // The loop continues while pending[requestID] is empty AND no error exists.
+        while state.withLock({ $0.pending[requestID]?.isEmpty != false }),
+              state.withLock({ $0.terminalError == nil }) {
+            _ = eventSignal.wait(timeout: .distantFuture)
+        }
+
+        // Try dequeue again after signal
+        if let event = dequeueEvent(for: requestID) {
+            return event
+        }
+
+        // No event — throw terminal error or unexpectedEOF
+        throw state.withLock({ $0.terminalError }) ?? DecodeFrameError.unexpectedEOF
+    }
+
+    private func dequeueEvent(for requestID: UUID) -> DecodeServiceEvent? {
+        if var events = state.withLock({ $0.pending[requestID] }), !events.isEmpty {
             let event = events.removeFirst()
             if events.isEmpty {
-                state.pending.removeValue(forKey: requestID)
+                _ = state.withLock { $0.pending.removeValue(forKey: requestID); true }
             } else {
-                state.pending[requestID] = events
+                _ = state.withLock { $0.pending[requestID] = events; true }
             }
             return event
         }
-        throw state.terminalError ?? DecodeFrameError.unexpectedEOF
-    }
-
-    private func readFrames(from output: FileHandle) {
-        do {
-            while true {
-                let event = try DecodeFrameCodec.read(
-                    DecodeServiceEvent.self, from: output)
-                condition.lock()
-                state.pending[event.generationID, default: []].append(event)
-                condition.broadcast()
-                condition.unlock()
-            }
-        } catch {
-            condition.lock()
-            state.terminalError = error
-            condition.broadcast()
-            condition.unlock()
-        }
+        return nil
     }
 }

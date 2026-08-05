@@ -64,6 +64,13 @@ public final class MetalContext: @unchecked Sendable {
         self.library = try Self.compileShaderLibrary(device: dev)
     }
 
+    deinit {
+        // NOTE: Metal MTLCommandQueue does not provide deinit-safe cleanup.
+        // All pending command buffers should be completed via waitForCompletion()
+        // before the app quits. The Metal device/queue will be released when the
+        // process terminates.
+    }
+
     /// Production shader modules compiled into the shared runtime library.
     private static let shaderModules: [String] = [
         "dequant_int4",

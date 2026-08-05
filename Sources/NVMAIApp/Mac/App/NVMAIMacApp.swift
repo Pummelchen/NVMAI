@@ -29,8 +29,14 @@ struct NVMAIMacApp: App {
     @State private var model: AppModel
 
     init() {
+        let client: DecodeServiceInferenceClient
+        do {
+            client = try DecodeServiceInferenceClient()
+        } catch {
+            fatalError("Cannot create decode service client: \(error)")
+        }
         _model = State(initialValue: AppModel(
-            client: DecodeServiceInferenceClient(),
+            client: client,
             settingsPersistenceEnabled: true))
     }
 

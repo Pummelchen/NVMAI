@@ -201,13 +201,13 @@ public func runRawCompletion(producer: any LogitProducer,
             case .greedyToken(let token):
                 tokenID = Int32(bitPattern: token)
             case .logitsWritten:
-                tokenID = sampleOnce(scratch: scratch, context: context,
+                tokenID = try sampleOnce(scratch: scratch, context: context,
                                      history: history, config: config, position: generated)
             }
         } else if fusedGreedy {
             tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
         } else {
-            tokenID = sampleOnce(scratch: scratch, context: context,
+            tokenID = try sampleOnce(scratch: scratch, context: context,
                                  history: history, config: config, position: generated)
         }
         generated += 1
@@ -349,8 +349,10 @@ private func runStreamingMTPCompletion(
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
-                        history: [Int32], config: GenerationConfig, position: Int) -> Int32 {
-    let cb = context.queue.makeCommandBuffer()!
+                        history: [Int32], config: GenerationConfig, position: Int) throws -> Int32 {
+    guard let cb = context.queue.makeCommandBuffer() else {
+        throw ModelError.residentBufferWrapFailed
+    }
     scratch.sampler.sample(commandBuffer: cb, logits: scratch.logits, probs: scratch.probs,
                            history: history, config: config, position: position,
                            outToken: scratch.outToken)

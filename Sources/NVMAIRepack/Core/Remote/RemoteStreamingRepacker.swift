@@ -405,14 +405,14 @@ public final class RemoteStreamingRepacker {
         let resident = try ResidentWriter.createAndWriteIndex(
             plan: plan.resident,
             audit: audit)
+        defer { close(resident) }
         try Posix.fsync(resident, path: plan.resident.path)
-        close(resident)
         for layer in plan.layers where layer.expertsPerLayer > 0 {
             try Task.checkCancellation()
             let descriptor = try Posix.openCreateRW(layer.path)
+            defer { close(descriptor) }
             try Posix.ftruncate(descriptor, path: layer.path, size: layer.fileSize)
             try Posix.fsync(descriptor, path: layer.path)
-            close(descriptor)
         }
         try Posix.fsyncDirectory(paths.partialDirectory)
     }
@@ -570,6 +570,7 @@ public final class RemoteStreamingRepacker {
                                metadata: IndexLoader.SourceMetadata,
                                expertStride: UInt64,
                                resolvedCommit: String) throws {
+        // Determine quantization bits from actual tensor data, not hardcoded
         var bits = GTurboJSON.QuantBitWidths(
             embedding: 4,
             attention: 4,
@@ -577,23 +578,34 @@ public final class RemoteStreamingRepacker {
             sharedExpert: 8,
             routedExpert: 4)
         for e in plan.resident.entries {
-            if e.name == "language_model.model.embed_tokens.weight", let s = e.quantSpec {
-                bits.embedding = s.bits
+            guard let quantSpec = e.quantSpec else { continue }
+            if e.name.hasSuffix(".embed_tokens.weight")
+                || e.name.hasSuffix(".embed_tokens.weight") {
+                bits.embedding = quantSpec.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight")
-                || e.name.hasSuffix(".linear_attn.in_proj_qkv.weight"),
-               let s = e.quantSpec {
-                bits.attention = s.bits
+                || e.name.hasSuffix(".self_attn.k_proj.weight")
+                || e.name.hasSuffix(".self_attn.v_proj.weight")
+                || e.name.hasSuffix(".self_attn.o_proj.weight")
+                || e.name.hasSuffix(".linear_attn.in_proj_qkv.weight")
+                || e.name.hasSuffix(".linear_attn.in_proj_z.weight")
+                || e.name.hasSuffix(".linear_attn.in_proj_a.weight")
+                || e.name.hasSuffix(".linear_attn.in_proj_b.weight")
+                || e.name.hasSuffix(".linear_attn.out_proj.weight") {
+                bits.attention = quantSpec.bits
             }
             if e.name.hasSuffix(".router.proj.weight")
-                || e.name.hasSuffix(".mlp.gate.weight"),
-               let s = e.quantSpec {
-                bits.router = s.bits
+                || e.name.hasSuffix(".mlp.gate.weight")
+                || e.name.hasSuffix(".mlp.gate_proj.weight") {
+                bits.router = quantSpec.bits
             }
-            if e.name.hasSuffix(".mlp.gate_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight"),
-               let s = e.quantSpec {
-                bits.sharedExpert = s.bits
+            if e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
+                || e.name.hasSuffix(".mlp.shared_expert.up_proj.weight")
+                || e.name.hasSuffix(".mlp.shared_expert.down_proj.weight")
+                || e.name.hasSuffix(".mlp.gate_proj.weight")
+                || e.name.hasSuffix(".mlp.up_proj.weight")
+                || e.name.hasSuffix(".mlp.down_proj.weight") {
+                bits.sharedExpert = quantSpec.bits
             }
         }
         if let layer = plan.layers.first(where: { !$0.subTensors.isEmpty }),
@@ -626,6 +638,8 @@ public final class RemoteStreamingRepacker {
             files: audit.outputFiles)
         let receiptPath = (partialDir as NSString)
             .appendingPathComponent(VerifiedInstallReceiptWriter.fileName)
-        try writeSmall(path: receiptPath, data: receipt)
+        let tmpReceiptPath = receiptPath + ".tmp"
+        try writeSmall(path: tmpReceiptPath, data: receipt)
+        try Posix.rename(from: tmpReceiptPath, to: receiptPath)
     }
 }

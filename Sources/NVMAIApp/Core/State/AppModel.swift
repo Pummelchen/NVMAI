@@ -454,6 +454,7 @@ public final class AppModel {
 
     public var hasPartialModelDownload: Bool {
         guard let paths = try? RemoteInstallPaths(outputDirectory: modelPathText) else {
+            // Note: error silently ignored — user will see validation error on install attempt
             return false
         }
         return FileManager.default.fileExists(atPath: paths.partialDirectory)
@@ -646,6 +647,7 @@ public final class AppModel {
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+        // NOTE: silent failure on settings save — user settings may be stale on next launch
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: modelDirectory)
@@ -656,6 +658,7 @@ public final class AppModel {
         installTask = nil
         resetInstallETA()
         let hasSavedDownload = hasPartialModelDownload
+        // Set initial state based on partial download, then refine if disk space error
         installState = hasSavedDownload ? .recoverable("\(error)") : .failed("\(error)")
         if let repackError = error as? RepackError,
            case .diskSpaceInsufficient(let path, let required, let available) = repackError {
@@ -665,9 +668,7 @@ public final class AppModel {
             installReadiness = .insufficientSpace(requirement)
         } else {
             refreshInstallReadiness()
-            if hasSavedDownload {
-                installState = .recoverable("\(error)")
-            }
+            // No override needed — state already set correctly above
         }
     }
 

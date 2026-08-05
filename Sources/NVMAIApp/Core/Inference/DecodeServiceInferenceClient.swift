@@ -23,8 +23,15 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         inferenceMemory.withLock { $0 }
     }
 
-    public init(serviceURL: URL? = nil) {
-        self.serviceURL = serviceURL ?? Self.defaultServiceURL()
+    public init(serviceURL: URL? = nil) throws {
+        if let serviceURL {
+            self.serviceURL = serviceURL
+        } else if let fallback = Self.resolvedServiceURL() {
+            self.serviceURL = fallback
+        } else {
+            throw DecodeServiceInferenceClientError.serviceURLUnavailable(
+                "Neither serviceURL provided nor Bundle.main.executableURL available")
+        }
     }
 
     public func ensureLoaded(modelDirectory: URL, maxContextTokens: Int,
@@ -59,12 +66,13 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     public func unload() async {
         guard let handles = currentHandles() else { return }
         let requestID = UUID()
-        try? handles.input.write(contentsOf: DecodeFrameCodec.encode(
-            DecodeServiceCommand.unload(requestID)))
-        guard let event = try? await handles.responses.next(matching: requestID),
-              event.kind == .unloaded else { return }
+        // Clear state regardless of response — avoid stale state on failure
         connection.withLock { $0.loadedDirectory = nil }
         inferenceMemory.withLock { $0 = nil }
+        try? handles.input.write(contentsOf: DecodeFrameCodec.encode(
+            DecodeServiceCommand.unload(requestID)))
+        // Best-effort: wait for response but don't block on success
+        _ = try? await handles.responses.next(matching: requestID)
     }
 
     public func generate(_ request: AppGenerationRequest)
@@ -332,9 +340,21 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         process.waitUntilExit()
     }
 
-    private static func defaultServiceURL() -> URL {
-        return Bundle.main.executableURL!
+    private static func resolvedServiceURL() -> URL? {
+        guard let executableURL = Bundle.main.executableURL else { return nil }
+        return executableURL
             .deletingLastPathComponent()
             .appendingPathComponent("NVMAIDecodeService")
+    }
+}
+
+public enum DecodeServiceInferenceClientError: Error, LocalizedError {
+    case serviceURLUnavailable(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .serviceURLUnavailable(let reason):
+            return "Decode service URL unavailable: \(reason)"
+        }
     }
 }

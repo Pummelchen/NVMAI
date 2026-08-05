@@ -159,6 +159,10 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
         guard mtpSidecar.config.family == .qwen36MTP else {
             throw StreamingMTPError.sidecarMustBeQwen36MTP
         }
+        // Validate MTP tensors exist before attempting weight sharing
+        _ = try? mtpSidecar.mtpProjection()
+        _ = try? mtpSidecar.mtpEmbeddingNorm()
+        _ = try? mtpSidecar.mtpHiddenNorm()
         let boundDraft = try mtpSidecar.sharingTargetWeights(from: targetModel)
         let targetRunner = try RealForwardRunner(model: targetModel,
                                                  context: context,

@@ -76,7 +76,11 @@ struct GFDetokenizer {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(ids.count)
         for id in ids {
-            guard let tok = tokenizer.convertIdToToken(id) else { continue }
+            guard let tok = tokenizer.convertIdToToken(id) else {
+                // NOTE: nil token in byte-fallback path means a token ID has no
+                // corresponding vocabulary entry — output may be silently truncated.
+                continue
+            }
             guard Self.isByteFallback(tok),
                   let byte = UInt8(tok.dropFirst(3).dropLast(), radix: 16)
             else { continue }

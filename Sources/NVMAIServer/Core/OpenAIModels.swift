@@ -315,6 +315,13 @@ public enum OpenAIRequestValidator {
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
                           "invalid_value")
         }
+        let upperBound = RuntimeConfiguration.supportedContextTokens.max() ?? 262_144
+        let cappedMaximum = min(maximum, upperBound)
+        guard cappedMaximum == maximum else {
+            throw invalid("maximum completion tokens exceeds model context window (\(upperBound))",
+                          request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
+                          "value_too_large")
+        }
 
         let includeTools: Bool
         switch request.toolChoice {
@@ -355,8 +362,8 @@ public enum OpenAIRequestValidator {
             throw invalid("only function tools are supported", "tools", "unsupported_tool")
         }
         let name = tool.function.name
-        guard name.range(of: #"^[A-Za-z0-9_]{1,64}$"#, options: .regularExpression) != nil else {
-            throw invalid("tool name must match [A-Za-z0-9_]{1,64}",
+        guard name.range(of: #"^[A-Za-z0-9_-]{1,64}$"#, options: .regularExpression) != nil else {
+            throw invalid("tool name must match [A-Za-z0-9_-]{1,64}",
                           "tools", "invalid_tool_name")
         }
         guard tool.function.parameters.objectValue != nil else {
@@ -413,6 +420,10 @@ public enum OpenAIRequestValidator {
         guard !input.isEmpty else {
             throw invalid("messages must not be empty", "messages", "invalid_message")
         }
+        guard input.count <= 1000 else {
+            throw invalid("message count exceeds maximum of 1000",
+                          "messages", "value_too_large")
+        }
         var knownCalls: [String: (name: String, resolved: Bool)] = [:]
         var result: [GFTokenizer.Message] = []
         var sawConversationMessage = false
@@ -434,7 +445,7 @@ public enum OpenAIRequestValidator {
                 guard role == .assistant, call.type == "function",
                       !call.id.isEmpty, knownCalls[call.id] == nil,
                       call.function.name.range(
-                        of: #"^[A-Za-z0-9_]{1,64}$"#,
+                        of: #"^[A-Za-z0-9_-]{1,64}$"#,
                         options: .regularExpression) != nil else {
                     throw invalid("invalid or duplicate historical tool call",
                                   "messages", "invalid_tool_call")

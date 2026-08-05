@@ -469,13 +469,39 @@ actor RealInferenceSession {
 /// Mutable per-generation state shared between the progress callback and the
 /// surrounding actor method. Single-threaded: the callback runs synchronously
 /// inside `runRawCompletion` on the session actor's task.
-private final class ProgressState: @unchecked Sendable {
-    var generated = 0
-    var promptTokenCount: Int?
-    var prefillStart: Date?
-    var decodeStart: Date?
-    var firstTokenDate: Date?
-    var countersAtDecodeStart: RunnerCounterSnapshot?
+private final class ProgressState {
+    private let lock = NSLock()
+    private var _generated = 0
+    private var _promptTokenCount: Int?
+    private var _prefillStart: Date?
+    private var _decodeStart: Date?
+    private var _firstTokenDate: Date?
+    private var _countersAtDecodeStart: RunnerCounterSnapshot?
+
+    var generated: Int {
+        get { lock.withLock { _generated } }
+        set { lock.withLock { _generated = newValue } }
+    }
+    var promptTokenCount: Int? {
+        get { lock.withLock { _promptTokenCount } }
+        set { lock.withLock { _promptTokenCount = newValue } }
+    }
+    var prefillStart: Date? {
+        get { lock.withLock { _prefillStart } }
+        set { lock.withLock { _prefillStart = newValue } }
+    }
+    var decodeStart: Date? {
+        get { lock.withLock { _decodeStart } }
+        set { lock.withLock { _decodeStart = newValue } }
+    }
+    var firstTokenDate: Date? {
+        get { lock.withLock { _firstTokenDate } }
+        set { lock.withLock { _firstTokenDate = newValue } }
+    }
+    var countersAtDecodeStart: RunnerCounterSnapshot? {
+        get { lock.withLock { _countersAtDecodeStart } }
+        set { lock.withLock { _countersAtDecodeStart = newValue } }
+    }
 
     var elapsedDecodeSeconds: Double {
         guard let decodeStart else { return 0 }

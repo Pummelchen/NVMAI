@@ -672,8 +672,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       snapshotGDNAfterFirstToken: true,
                                       useTwoRowProjection: true)
 
-        let finalNorm = model.finalNorm
-        let lm = model.lmHead
+        let finalNorm = try model.finalNorm()
+        let lm = try model.lmHead()
         guard let cb = ctx.queue.makeCommandBuffer(),
               let blit = cb.makeBlitCommandEncoder() else {
             throw ModelError.residentBufferWrapFailed
@@ -771,7 +771,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard let cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
-        let emb = model.embedding
+        let emb = try model.embedding()
         prefillEmbed.encode(commandBuffer: cb,
                             table: emb.buffer,
                             tableOffset: Int(emb.offset),
@@ -784,8 +784,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             t: UInt32(tokens.count),
                             d: UInt32(D),
                             outScale: 1)
-        let embeddingNorm = model.mtpEmbeddingNorm
-        let hiddenNorm = model.mtpHiddenNorm
+        let embeddingNorm = try model.mtpEmbeddingNorm()
+        let hiddenNorm = try model.mtpHiddenNorm()
         prefillRMS.encodeBF16W(commandBuffer: cb,
                                x: embeddingBlock,
                                weight: embeddingNorm.buffer,
@@ -806,7 +806,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      out: concat,
                                      rows: tokens.count,
                                      dim: D)
-        let projection = model.mtpProjection
+        let projection = try model.mtpProjection()
         prefillQMM.encode(commandBuffer: cb,
                           weights: projection.buffer,
                           weightsOffset: Int(projection.offset),
@@ -1281,7 +1281,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? Float(D).squareRoot()
             : 1.0
         let t = tokens.count
-        let emb = model.embedding
+        let emb = try model.embedding()
 
         func encodeAffineProjection(commandBuffer: MTLCommandBuffer,
                                   family: PrefillProjectionFamily,
@@ -2118,8 +2118,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if writeFinalHead {
-            let finalNorm = model.finalNorm
-            let lm = model.lmHead
+            let finalNorm = try model.finalNorm()
+            let lm = try model.lmHead()
             guard let finalCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
@@ -2234,27 +2234,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         // Embed lookup + sqrt(H) fused.
-        let emb = model.embedding
-        do {
-            runSync { cb in
-                if let affineEmbed {
-                    affineEmbed.encode(commandBuffer: cb,
-                                 table: emb.buffer, tableOffset: Int(emb.offset),
-                                 scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                                 biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                                 out: hidden, tokenId: UInt32(bitPattern: token),
-                                 d: D, outScale: embedOutScale)
-                } else {
-                    embedInt4.encode(commandBuffer: cb,
-                                 table:  emb.buffer, tableOffset:  Int(emb.offset),
-                                 scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
-                                 biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
-                                 out: hidden,
-                                 tokenId: UInt32(bitPattern: token),
-                                 d: D,
-                                 outScale: embedOutScale)
-                }
+        let emb = try model.embedding()
+        let embedCB = runSync { cb in
+            if let affineEmbed {
+                affineEmbed.encode(commandBuffer: cb,
+                             table: emb.buffer, tableOffset: Int(emb.offset),
+                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                             out: hidden, tokenId: UInt32(bitPattern: token),
+                             d: D, outScale: embedOutScale)
+            } else {
+                embedInt4.encode(commandBuffer: cb,
+                             table:  emb.buffer, tableOffset:  Int(emb.offset),
+                             scales: emb.buffer, scalesOffset: Int(emb.scaleOffset),
+                             biases: emb.buffer, biasesOffset: Int(emb.biasOffset),
+                             out: hidden,
+                             tokenId: UInt32(bitPattern: token),
+                             d: D,
+                             outScale: embedOutScale)
             }
+        }
+        guard embedCB != nil else {
+            throw ModelError.residentBufferWrapFailed
         }
 
         for L in 0..<cfg.numLayers {
@@ -2282,7 +2283,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // Everything up to and including the router runs in a single CB:
             // the only reason to break is the CPU readback of router indices
             // needed to issue I/O for the routed-expert blobs.
-            let cb = ctx.queue.makeCommandBuffer()!
+            guard let cb = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
             rms.encodeBF16W(commandBuffer: cb,
                             x: hidden,
                             weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
@@ -2519,7 +2522,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     topK: topK)
                 if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
                     writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
-                    let cb = ctx.queue.makeCommandBuffer()!
+                    guard let cb = ctx.queue.makeCommandBuffer() else {
+                        throw ModelError.residentBufferWrapFailed
+                    }
                     encodeRoutedPhase1Subset(
                         cb,
                         argBuf: argBuf,
@@ -2535,7 +2540,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // the routed experts. Commit it without waiting so its GPU work
             // overlaps the routed-expert pread. The routed CB follows it on
             // the same queue, so the combine sees h1Buf.
-            let sharedCB = ctx.queue.makeCommandBuffer()!
+            guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
             try! shared.encode(commandBuffer: sharedCB,
                                x: cfg.ffnSandwichNorms ? denseX : routedX,
                                gate: sharedProj.gate,
@@ -2641,7 +2648,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                    count: cfg.hiddenSize)
                 }
             }
-            let routedCB = ctx.queue.makeCommandBuffer()!
+            guard let routedCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
             let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
                 ? phase1HitSplitArgBuf
                 : nil
@@ -2691,8 +2700,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         // The fused head skips the vocab buffer and leaves a greedy token in
         // greedyTokenBuf; the logits path writes the complete vector.
-        let fNorm = model.finalNorm
-        let lm    = model.lmHead
+        let fNorm = try model.finalNorm()
+        let lm    = try model.lmHead()
         let gFinalNorm: (MTLCommandBuffer) -> Void = { cb in
             self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
                                  weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
@@ -2721,13 +2730,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
-                runSync(gFusionHead)
+                _ = runSync(gFusionHead)
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                runSync { cb in
+                guard runSync({ cb in
                     gFinalNorm(cb)
                     gLmHead(cb)
+                }) != nil else {
+                    throw ModelError.residentBufferWrapFailed
                 }
                 totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
             }
@@ -2963,14 +2974,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
-    private func runSync(_ body: (MTLCommandBuffer) -> Void) {
-        let cb = ctx.queue.makeCommandBuffer()!
+    private func runSync(_ body: (MTLCommandBuffer) -> Void) -> MTLCommandBuffer? {
+        guard let cb = ctx.queue.makeCommandBuffer() else { return nil }
         body(cb)
         cb.commit()
         cb.waitUntilCompleted()
         if let err = cb.error {
             print("CB error: \(err)")
         }
+        return cb
     }
 
     private nonisolated func waitForCompletion(_ cb: MTLCommandBuffer) {

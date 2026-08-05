@@ -416,7 +416,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     private func writeStreamChunk(_ context: ChannelHandlerContext,
                                   _ object: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: object, options: [])
+        } catch {
+            writeError(context, status: .internalServerError,
+                       OpenAIErrorEnvelope(message: "serialization error", code: "internal_error"))
+            return
+        }
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
             var buffer = contextBox.value.channel.allocator.buffer(capacity: data.count + 8)
@@ -462,7 +469,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func writeCodable<T: Encodable>(_ context: ChannelHandlerContext,
                                             status: HTTPResponseStatus,
                                             _ value: T) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(value)
+        } catch {
+            writeError(context, status: .internalServerError,
+                       OpenAIErrorEnvelope(message: "serialization error", code: "internal_error"))
+            return
+        }
         writeData(context, status: status, data: data)
     }
 
@@ -475,7 +489,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func writeJSON(_ context: ChannelHandlerContext,
                            status: HTTPResponseStatus,
                            object: Any) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: object, options: [])
+        } catch {
+            writeError(context, status: .internalServerError,
+                       OpenAIErrorEnvelope(message: "serialization error", code: "internal_error"))
+            return
+        }
         writeData(context, status: status, data: data)
     }
 

@@ -101,18 +101,18 @@ public struct Model {
 
     // MARK: - Resident accessors
 
-    public var embedding: TensorView {
+    public func embedding() throws -> TensorView {
         if let sharedTargetWeights { return sharedTargetWeights.embedding }
-        return try! resident(name: "language_model.model.embed_tokens.weight")
+        return try resident(name: "language_model.model.embed_tokens.weight")
     }
 
     /// Gemma 4 ties lm_head to the embedding; Qwen 3.6 carries a separate
     /// `lm_head` tensor. The transpose for the lm_head GEMV path is the
     /// kernel's job, not the loader's.
-    public var lmHead: TensorView {
+    public func lmHead() throws -> TensorView {
         if let sharedTargetWeights { return sharedTargetWeights.lmHead }
-        if config.tieWordEmbeddings { return embedding }
-        return try! resident(name: "language_model.lm_head.weight")
+        if config.tieWordEmbeddings { return try embedding() }
+        return try resident(name: "language_model.lm_head.weight")
     }
 
     public func qProj(layer L: Int) throws -> TensorView {
@@ -168,20 +168,20 @@ public struct Model {
     public func postAttnNorm(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).post_attention_layernorm.weight")
     }
-    public var finalNorm: TensorView {
-        try! resident(name: "language_model.model.norm.weight")
+    public func finalNorm() throws -> TensorView {
+        return try resident(name: "language_model.model.norm.weight")
     }
 
     /// MTP projection over the normalized next-token embedding followed by the
     /// normalized target hidden state: `[embedding, hidden]`, `[2D] -> [D]`.
-    public var mtpProjection: TensorView {
-        try! resident(name: "fc.weight")
+    public func mtpProjection() throws -> TensorView {
+        return try resident(name: "fc.weight")
     }
-    public var mtpEmbeddingNorm: TensorView {
-        try! resident(name: "pre_fc_norm_embedding.weight")
+    public func mtpEmbeddingNorm() throws -> TensorView {
+        return try resident(name: "pre_fc_norm_embedding.weight")
     }
-    public var mtpHiddenNorm: TensorView {
-        try! resident(name: "pre_fc_norm_hidden.weight")
+    public func mtpHiddenNorm() throws -> TensorView {
+        return try resident(name: "pre_fc_norm_hidden.weight")
     }
 
     /// Attach a native MTP sidecar to a target without copying either large
@@ -206,8 +206,8 @@ public struct Model {
                      manifest: manifest,
                      directoryURL: directoryURL,
                      sharedTargetWeights: SharedTargetWeights(
-                        embedding: target.embedding,
-                        lmHead: target.lmHead,
+                        embedding: try target.embedding(),
+                        lmHead: try target.lmHead(),
                         embeddingBits: target.embeddingWeightBits,
                         lmHeadBits: target.lmHeadWeightBits))
     }

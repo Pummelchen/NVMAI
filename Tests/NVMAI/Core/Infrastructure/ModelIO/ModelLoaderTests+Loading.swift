@@ -12,14 +12,15 @@ extension ModelLoaderTests {
     let model = try Model.load(
       directoryURL: dir, device: device,
       expecting: .gemma4Toy())
-    let embed = model.embedding
+    let embed = try model.embedding()
     #expect(embed.length == UInt64(1024 * 64))
     #expect(embed.shape.0 == 1024 && embed.shape.1 == 64)
-    let norm = model.finalNorm
+    let norm = try model.finalNorm()
     #expect(norm.length == UInt64(64 * 2))
     // Tied lm_head returns the same view as embedding.
-    #expect(model.lmHead.offset == model.embedding.offset)
-    #expect(model.lmHead.length == model.embedding.length)
+    let lmHead = try model.lmHead()
+    #expect(lmHead.offset == embed.offset)
+    #expect(lmHead.length == embed.length)
   }
 
   @Test func residentBytesAreReadableFromBuffer() throws {
@@ -29,7 +30,7 @@ extension ModelLoaderTests {
     let model = try Model.load(
       directoryURL: dir, device: device,
       expecting: .gemma4Toy())
-    let norm = model.finalNorm
+    let norm = try model.finalNorm()
     let contents = norm.buffer.contents()
     // Norm region was patterned 0xC0 | (i & 0x3F).
     for i in 0..<Int(norm.length) {
@@ -90,11 +91,13 @@ extension ModelLoaderTests {
       expecting: .gemma4Toy(),
       integrityPolicy: .sizeCheckTrustedReceipt)
 
-    #expect(full.embedding.length == trusted.embedding.length)
-    let fullEmbedding = full.embedding.buffer.contents().advanced(by: Int(full.embedding.offset))
-    let trustedEmbedding = trusted.embedding.buffer.contents().advanced(
-      by: Int(trusted.embedding.offset))
-    #expect(memcmp(fullEmbedding, trustedEmbedding, Int(full.embedding.length)) == 0)
+    let fullEmbedding = try full.embedding()
+    let trustedEmbedding = try trusted.embedding()
+    #expect(fullEmbedding.length == trustedEmbedding.length)
+    let fullEmbeddingBytes = fullEmbedding.buffer.contents().advanced(by: Int(fullEmbedding.offset))
+    let trustedEmbeddingBytes = trustedEmbedding.buffer.contents().advanced(
+      by: Int(trustedEmbedding.offset))
+    #expect(memcmp(fullEmbeddingBytes, trustedEmbeddingBytes, Int(fullEmbedding.length)) == 0)
 
     let fullExpert = try full.routedExpert(layer: 0, expert: 0)
     let trustedExpert = try trusted.routedExpert(layer: 0, expert: 0)
