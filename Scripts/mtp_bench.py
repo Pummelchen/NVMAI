@@ -27,7 +27,7 @@ print(f"Cache={'on' if CACHE_MODE == 'multi-prefix' else 'off'}, MTP={'on' if MT
 # ---- Start Server ----
 print("Starting server...")
 args = [
-    str(ROOT / ".build/release/TurboFieldfareServer"),
+    str(ROOT / ".build/release/NVMAIServer"),
     "--model", MODEL,
     "--model-id", MODEL_ID,
     "--port", "8080",

@@ -32,7 +32,7 @@ print()
 # ---- Start Server ----
 print("Starting server...")
 args = [
-    f"{ROOT}/.build/release/TurboFieldfareServer",
+    f"{ROOT}/.build/release/NVMAIServer",
     "--model", MODEL,
     "--model-id", MODEL_ID,
     "--port", "8080",

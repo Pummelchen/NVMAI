@@ -6,7 +6,7 @@ Security fixes are applied to the latest version of the `main` branch. Older
 commits, forks, experimental branches, and modified model packages are not
 supported.
 
-TurboFieldfare is a research project. It is not intended for production,
+NVMAI is a research project. It is not intended for production,
 multi-user, or security-critical deployments.
 
 ## Reporting a vulnerability

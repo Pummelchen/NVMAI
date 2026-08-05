@@ -9,20 +9,20 @@ This checkout is for running and reporting existing behavior. Do not edit source
 
 ## Layout and commands
 
-`Sources/TurboFieldfare/` is the runtime; `Sources/TurboFieldfareRepack/`,
-`Sources/TurboFieldfareCLI/`, `Sources/TurboFieldfareServer/`, and
-`Sources/TurboFieldfareApp/` contain the installer, CLI, loopback server, and
+`Sources/NVMAI/` is the runtime; `Sources/NVMAIRepack/`,
+`Sources/NVMAICLI/`, `Sources/NVMAIServer/`, and
+`Sources/NVMAIApp/` contain the installer, CLI, loopback server, and
 Mac app.
 `Tests/` contains focused public tests; `benchmark-prompts/` contains frozen
 benchmark inputs. User and engineering documentation lives in the
 [GitHub Wiki](https://github.com/Pummelchen/NVMAI/wiki).
 
 ```bash
-swift run -c release TurboFieldfareRepack --model qwen36 --output scratch/qwen36.gturbo
-swift run -c release TurboFieldfareRepack --model qwen36 --output scratch/qwen36.gturbo --resume
+swift run -c release NVMAIRepack --model qwen36 --output scratch/qwen36.gturbo
+swift run -c release NVMAIRepack --model qwen36 --output scratch/qwen36.gturbo --resume
 swift build -c release
-.build/release/TurboFieldfareMac
-swift run -c release TurboFieldfareCLI \
+.build/release/NVMAIMac
+swift run -c release NVMAICLI \
   --model scratch/qwen36.gturbo \
   --prompt "The capital of France is" \
   --max-new 64
@@ -44,7 +44,7 @@ the server is needed, and stop only a server you launched.
 
 ## Test rules
 
-Before a model run, require macOS 26+, Swift 6.3+, enough disk, acceptable `memory_pressure -Q`, a completed selected Qwen `.gturbo` installation, and no process from `pgrep -fl 'TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
+Before a model run, require macOS 26+, Swift 6.3+, enough disk, acceptable `memory_pressure -Q`, a completed selected Qwen `.gturbo` installation, and no process from `pgrep -fl 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
 
 Run package tests through `Scripts/test.sh`. Run only one app, CLI, or model-using test at a time.
 
@@ -62,5 +62,5 @@ and RDADVISE. The defaults are temperature `0.2`, Top-K `64`, and Top-P `0.95`.
 Responses can use the context space left after formatting the prompt, and FP16
 is the runtime KV format. The HUD shows generation rate, token count, and
 decode-service memory; Last run also shows time to first token and I/O. Build
-the app with its sibling `TurboFieldfareDecodeService`; it never loads a second
+the app with its sibling `NVMAIDecodeService`; it never loads a second
 in-process model. See [README](README.md) and [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls).

@@ -2,18 +2,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "TurboFieldfare",
+    name: "NVMAI",
     platforms: [
         .macOS(.v26),
         .iOS(.v26),
     ],
     products: [
-        .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
-        .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
-        .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
-        .executable(name: "TurboFieldfareMac", targets: ["TurboFieldfareMac"]),
-        .executable(name: "TurboFieldfareDecodeService", targets: ["TurboFieldfareDecodeService"]),
-        .executable(name: "TurboFieldfareServer", targets: ["TurboFieldfareServer"]),
+        .library(name: "NVMAI", targets: ["NVMAI"]),
+        .executable(name: "NVMAIRepack", targets: ["NVMAIRepack"]),
+        .executable(name: "NVMAICLI", targets: ["NVMAICLI"]),
+        .executable(name: "NVMAIMac", targets: ["NVMAIMac"]),
+        .executable(name: "NVMAIDecodeService", targets: ["NVMAIDecodeService"]),
+        .executable(name: "NVMAIServer", targets: ["NVMAIServer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -21,118 +21,118 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "TurboFieldfare",
+            name: "NVMAI",
             dependencies: [
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
-            path: "Sources/TurboFieldfare",
+            path: "Sources/NVMAI",
             resources: [
                 .copy("Metal"),
             ]
         ),
         .target(
-            name: "TurboFieldfareRepackCore",
-            path: "Sources/TurboFieldfareRepack/Core"
+            name: "NVMAIRepackCore",
+            path: "Sources/NVMAIRepack/Core"
         ),
         .executableTarget(
-            name: "TurboFieldfareRepack",
-            dependencies: ["TurboFieldfareRepackCore"],
-            path: "Sources/TurboFieldfareRepack/Command"
+            name: "NVMAIRepack",
+            dependencies: ["NVMAIRepackCore"],
+            path: "Sources/NVMAIRepack/Command"
         ),
         .target(
-            name: "TurboFieldfareCLICore",
-            dependencies: ["TurboFieldfare"],
-            path: "Sources/TurboFieldfareCLI",
+            name: "NVMAICLICore",
+            dependencies: ["NVMAI"],
+            path: "Sources/NVMAICLI",
             exclude: ["Command"]
         ),
         .executableTarget(
-            name: "TurboFieldfareCLI",
-            dependencies: ["TurboFieldfareCLICore"],
-            path: "Sources/TurboFieldfareCLI/Command"
+            name: "NVMAICLI",
+            dependencies: ["NVMAICLICore"],
+            path: "Sources/NVMAICLI/Command"
         ),
         .target(
-            name: "TurboFieldfareAppCore",
-            dependencies: ["TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
-            path: "Sources/TurboFieldfareApp/Core",
+            name: "NVMAIAppCore",
+            dependencies: ["NVMAI", "NVMAIRepackCore", "NVMAIDecodeProtocol"],
+            path: "Sources/NVMAIApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
             ]
         ),
         .target(
-            name: "TurboFieldfareMacPresentation",
-            dependencies: ["TurboFieldfareAppCore"],
-            path: "Sources/TurboFieldfareApp/MacPresentation"
+            name: "NVMAIMacPresentation",
+            dependencies: ["NVMAIAppCore"],
+            path: "Sources/NVMAIApp/MacPresentation"
         ),
         .target(
-            name: "TurboFieldfareDecodeProtocol",
-            path: "Sources/TurboFieldfareDecodeProtocol"
+            name: "NVMAIDecodeProtocol",
+            path: "Sources/NVMAIDecodeProtocol"
         ),
         .executableTarget(
-            name: "TurboFieldfareDecodeService",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfareDecodeProtocol"],
-            path: "Sources/TurboFieldfareDecodeService"
+            name: "NVMAIDecodeService",
+            dependencies: ["NVMAIAppCore", "NVMAIDecodeProtocol"],
+            path: "Sources/NVMAIDecodeService"
         ),
         .target(
-            name: "TurboFieldfareServerCore",
+            name: "NVMAIServerCore",
             dependencies: [
-                "TurboFieldfare",
+                "NVMAI",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Sources/TurboFieldfareServer/Core"
+            path: "Sources/NVMAIServer/Core"
         ),
         .executableTarget(
-            name: "TurboFieldfareServer",
-            dependencies: ["TurboFieldfareServerCore"],
-            path: "Sources/TurboFieldfareServer/Command"
+            name: "NVMAIServer",
+            dependencies: ["NVMAIServerCore"],
+            path: "Sources/NVMAIServer/Command"
         ),
         .executableTarget(
-            name: "TurboFieldfareMac",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfareMacPresentation"],
-            path: "Sources/TurboFieldfareApp/Mac",
+            name: "NVMAIMac",
+            dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
+            path: "Sources/NVMAIApp/Mac",
             resources: [
-                .copy("Resources/turbofieldfare-app-icon.png"),
+                .copy("Resources/nvmai-app-icon.png"),
             ]
         ),
         .target(
-            name: "TurboFieldfareValidationSupport",
-            dependencies: ["TurboFieldfare"],
-            path: "Sources/TurboFieldfareValidation/Support"
+            name: "NVMAIValidationSupport",
+            dependencies: ["NVMAI"],
+            path: "Sources/NVMAIValidation/Support"
         ),
         .testTarget(
-            name: "TurboFieldfareTestsCore",
-            dependencies: ["TurboFieldfare", "TurboFieldfareValidationSupport", "TurboFieldfareRepackCore", "TurboFieldfareCLICore"],
-            path: "Tests/TurboFieldfare/Core",
+            name: "NVMAITestsCore",
+            dependencies: ["NVMAI", "NVMAIValidationSupport", "NVMAIRepackCore", "NVMAICLICore"],
+            path: "Tests/NVMAI/Core",
             resources: [.copy("Tokenization/Fixtures")]
         ),
         .testTarget(
-            name: "TurboFieldfareRepackTests",
-            dependencies: ["TurboFieldfareRepackCore"],
-            path: "Tests/TurboFieldfareRepack/Core"
+            name: "NVMAIRepackTests",
+            dependencies: ["NVMAIRepackCore"],
+            path: "Tests/NVMAIRepack/Core"
         ),
         .testTarget(
-            name: "TurboFieldfareAppCoreTests",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
-            path: "Tests/TurboFieldfareApp/Core"
+            name: "NVMAIAppCoreTests",
+            dependencies: ["NVMAIAppCore", "NVMAI", "NVMAIRepackCore", "NVMAIDecodeProtocol"],
+            path: "Tests/NVMAIApp/Core"
         ),
         .testTarget(
-            name: "TurboFieldfareDecodeServiceTests",
-            dependencies: ["TurboFieldfareDecodeService", "TurboFieldfareAppCore", "TurboFieldfareDecodeProtocol"],
-            path: "Tests/TurboFieldfareDecodeService"
+            name: "NVMAIDecodeServiceTests",
+            dependencies: ["NVMAIDecodeService", "NVMAIAppCore", "NVMAIDecodeProtocol"],
+            path: "Tests/NVMAIDecodeService"
         ),
         .testTarget(
-            name: "TurboFieldfareMacPresentationTests",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfareMacPresentation"],
-            path: "Tests/TurboFieldfareApp/MacPresentation"
+            name: "NVMAIMacPresentationTests",
+            dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
+            path: "Tests/NVMAIApp/MacPresentation"
         ),
         .testTarget(
-            name: "TurboFieldfareServerTests",
+            name: "NVMAIServerTests",
             dependencies: [
-                "TurboFieldfareServerCore",
+                "NVMAIServerCore",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
-            path: "Tests/TurboFieldfareServer",
+            path: "Tests/NVMAIServer",
             resources: [.copy("Fixtures")]
         ),
     ],
