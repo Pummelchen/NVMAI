@@ -31,7 +31,7 @@ public struct ServerArguments: Equatable, Sendable {
                              installed model: gemma-4-26b-a4b-it or
                              qwen3.6-35b-a3b).
       --max-context <tokens> 4096, 8192, 16384, 32768, 65536, 131072, or 262144
-                             (default 16384).
+                             (default 262144).
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix|multi-prefix>
                              Prompt KV reuse mode (default multi-prefix).
@@ -55,7 +55,7 @@ public struct ServerArguments: Equatable, Sendable {
         var mtpMemoryMiB = StreamingMTPMemoryPlan.defaultBudgetMiB
         var port = 8080
         var modelIDOverride: String?
-        var maxContext = 16_384
+        var maxContext = 262_144
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .multiPrefix
         var promptCacheMaximumEntries = 4

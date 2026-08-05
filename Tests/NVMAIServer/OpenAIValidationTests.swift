@@ -299,7 +299,7 @@ struct ServerArgumentTests {
         #expect(arguments.mtpModel == nil)
         #expect(arguments.mtpMemoryMiB == 384)
         #expect(arguments.port == 8080)
-        #expect(arguments.maxContext == 16_384)
+        #expect(arguments.maxContext == 262_144)
         #expect(arguments.queueLimit == 4)
         #expect(arguments.promptCacheMode == .multiPrefix)
         #expect(arguments.promptCacheMaximumEntries == 4)
