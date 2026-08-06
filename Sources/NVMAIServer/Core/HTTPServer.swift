@@ -199,8 +199,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
             handleCompletion(
                 body: body,
-                client: head.headers.first(name: OpenCodeRequestFilter.clientHeader),
-                profile: head.headers.first(name: OpenCodeRequestFilter.profileHeader),
                 context: context)
         case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"):
             writeError(context, status: .methodNotAllowed,
@@ -214,23 +212,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
 
     private func handleCompletion(body: ByteBuffer,
-                                  client: String?,
-                                  profile: String?,
                                   context: ChannelHandlerContext) {
         do {
             let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
-            let validated = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
+            let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
                                                                 dialect: chatDialect)
-            let selectedProfile = try OpenCodeRequestFilter.resolve(
-                client: client,
-                profile: profile)
-            let request = try selectedProfile.map {
-                try OpenCodeRequestFilter.apply(
-                    validated,
-                    profile: $0,
-                    originalBodyBytes: bytes.count)
-            } ?? validated
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)

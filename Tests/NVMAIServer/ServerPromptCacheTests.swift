@@ -61,63 +61,6 @@ struct ServerPromptCacheTests {
         #expect(effective[cached] == tokenizer.endOfTurnID)
     }
 
-    @Test func capturedOpenCodeToolResultUsesFrozenToolBoundary() async throws {
-        let tokenizer = try await GFTokenizer.load()
-        let initial = try validatedFixture("opencode-1.15.11-initial.json")
-        let continuation = try validatedFixture("opencode-1.15.11-tool-result.json")
-        let initialPrompt = try tokenizer.encodeToolChat(
-            messages: initial.messages,
-            tools: initial.tools)
-        let assistant = continuation.messages[initial.messages.count]
-        let prefix = try tokenizer.encodeToolChat(
-            messages: initial.messages + [assistant],
-            tools: initial.tools)
-        let callStart = try #require(prefix.lastIndex(of: tokenizer.toolCallStartID))
-        let callEnd = try #require(prefix.lastIndex(of: tokenizer.toolCallEndID))
-        let generatedCall = Array(prefix[callStart...callEnd])
-        let kvBacked = initialPrompt + generatedCall
-        let historicalCall = try #require(assistant.toolCalls.first)
-        let parsedCall = ParsedToolCall(
-            id: historicalCall.id,
-            name: historicalCall.name,
-            arguments: historicalCall.arguments,
-            argumentsJSON: try historicalCall.arguments.encoded())
-        var cache = ServerPromptCache()
-        cache.publish(
-            domain: domain,
-            request: initial,
-            content: "",
-            calls: [parsedCall],
-            result: rawResult(
-                prompt: initialPrompt,
-                kvBacked: kvBacked,
-                boundary: tokenizer.toolResponseID,
-                reason: .toolCalls))
-        let rendered = try tokenizer.encodeToolChat(
-            messages: continuation.messages,
-            tools: continuation.tools)
-
-        let match = cache.match(
-            domain: domain,
-            request: continuation,
-            renderedPromptIDs: rendered,
-            tokenizer: tokenizer)
-
-        guard case .hit(_, let effective, let cached) = match else {
-            Issue.record("expected captured OpenCode tool-result hit")
-            return
-        }
-        let bridge = try tokenizer.encodeToolResultContinuation(
-            cachedMessages: initial.messages,
-            assistant: assistant,
-            incomingMessages: continuation.messages,
-            tools: continuation.tools)
-        #expect(cached == kvBacked.count)
-        #expect(effective == kvBacked + bridge)
-        #expect(bridge.first == tokenizer.toolResponseID)
-        #expect(!rendered.prefix(kvBacked.count).elementsEqual(kvBacked))
-    }
-
     @Test func mismatchedLineageDomainAndUnsafeStopsMiss() async throws {
         let tokenizer = try await GFTokenizer.load()
         let initial = request(messages: [
@@ -279,18 +222,5 @@ struct ServerPromptCacheTests {
             kvPosition: kvBacked.count,
             kvBackedTokenIDs: kvBacked,
             uncommittedBoundaryTokenIDs: [boundary])
-    }
-
-    private func validatedFixture(_ name: String) throws -> ValidatedChatRequest {
-        let url = try #require(Bundle.module.url(
-            forResource: name,
-            withExtension: nil,
-            subdirectory: "Fixtures"))
-        let request = try JSONDecoder().decode(
-            OpenAIChatRequest.self,
-            from: Data(contentsOf: url))
-        return try OpenAIRequestValidator.validate(
-            request,
-            modelID: "gemma-4-26b-a4b-it")
     }
 }

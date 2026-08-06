@@ -5,35 +5,6 @@ import Testing
 
 @Suite("OpenAI request validation")
 struct OpenAIValidationTests {
-    @Test func capturedOpenCodeInitialRequestValidates() throws {
-        let request = try fixture("opencode-1.15.11-initial.json")
-        let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "gemma-4-26b-a4b-it")
-        #expect(validated.stream)
-        #expect(validated.includeUsage)
-        #expect(validated.tools.count == 1)
-        #expect(validated.maximumCompletionTokens == 4096)
-    }
-
-    @Test func capturedOpenCodeToolResultValidates() throws {
-        let request = try fixture("opencode-1.15.11-tool-result.json")
-        let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "gemma-4-26b-a4b-it")
-        #expect(validated.messages.count == 4)
-        #expect(validated.messages[2].toolCalls.count == 1)
-        #expect(validated.messages[3].toolCallID == "call_0123456789abcdef01234567")
-    }
-
-    @Test func capturedOpenCodePromptFits16KWith4096Completion() async throws {
-        let request = try fixture("opencode-1.15.11-tool-result.json")
-        let validated = try OpenAIRequestValidator.validate(
-            request, modelID: "gemma-4-26b-a4b-it")
-        let tokenizer = try await GFTokenizer.load()
-        let ids = try tokenizer.encodeToolChat(
-            messages: validated.messages, tools: validated.tools)
-        #expect(ids.count <= 16_384 - 4_096)
-    }
-
     @Test func requiredToolChoiceIsRejected() throws {
         let data = Data(#"""
         {"model":"m","messages":[{"role":"user","content":"x"}],"tool_choice":"required"}
@@ -222,12 +193,6 @@ struct OpenAIValidationTests {
         #expect(throws: ServerRequestError.self) {
             try OpenAIRequestValidator.validate(request, modelID: "m")
         }
-    }
-
-    private func fixture(_ name: String) throws -> OpenAIChatRequest {
-        let url = try #require(Bundle.module.url(
-            forResource: name, withExtension: nil, subdirectory: "Fixtures"))
-        return try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(contentsOf: url))
     }
 }
 

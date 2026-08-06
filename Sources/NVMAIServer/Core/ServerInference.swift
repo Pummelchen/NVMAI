@@ -318,20 +318,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             messages: request.messages,
             tools: request.tools,
             usesToolTemplate: needsToolTemplate)
-        if let audit = request.filterAudit {
-            let originalPromptIDs = try encodePrompt(
-                messages: audit.originalMessages,
-                tools: audit.originalTools,
-                usesToolTemplate: usesToolTemplate(
-                    messages: audit.originalMessages,
-                    tools: audit.originalTools))
-            print(
-                "NVMAI OpenCode profile=\(audit.profile.rawValue) "
-                    + "body_bytes=\(audit.originalBodyBytes) "
-                    + "prompt_tokens=\(originalPromptIDs.count)->\(promptIDs.count) "
-                    + "messages=\(audit.originalMessages.count)->\(request.messages.count) "
-                    + "tools=\(audit.originalTools.count)->\(request.tools.count)")
-        }
         guard promptIDs.count < maxContext else {
             throw ServerRequestError.invalid(
                 message: "prompt exceeds the configured context",

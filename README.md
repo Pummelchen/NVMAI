@@ -32,10 +32,6 @@ listed below.
   OpenAI-compatible loopback server with JSON and SSE streaming.
 - ChatML conversations, function-tool calls, sampling controls, runtime
   diagnostics, and 4K through 256K context settings using FP16 KV state.
-- Explicit OpenCode `coding-lean` and `prompt-only` request profiles. Filtering
-  is opt-in through headers and never inferred from `User-Agent`.
-- Ready-to-use project `opencode.jsonc` with the `NVMAI` provider, the existing
-  `qwen3.6-35b-a3b` model ID, and the full 262,144-token context limit.
 - Exact multi-prefix inference-state reuse with bounded live/RAM caching and an
   optional persistent SSD tier. Qwen snapshots include both full-attention KV
   and gated-DeltaNet recurrent state.
@@ -57,10 +53,9 @@ listed below.
 | Context | Raised the server, CLI, and app ceiling to Qwen's full 262,144-token window while retaining 4K through 128K options. |
 | Apple Silicon tuning | Added larger Qwen prefill chunks, M3 measurements and defaults, runtime controls, and memory/phase diagnostics while retaining the M1-M5 target. |
 | Swift | Moved the package to Swift tools 6.3 and Swift 6 language mode; the current validated toolchain is Apple Swift 6.3.3. |
-| OpenCode | Added explicit `coding-lean` and `prompt-only` profiles to reduce unnecessary client guidance and tool-schema overhead without unsafe heuristic detection. |
 | Prompt reuse | Added exact multi-prefix live/RAM/SSD inference-state caching with compatibility checks, atomic persistence, bounded LRU eviction, integrity validation, and cache-usage reporting. |
 | Native MTP | Added a pinned tensor-only MTP sidecar repacker, shared 4/6/8-bit target embedding/head binding, 4-bit router support, 32-row streaming draft prefill, two-token target verification, bounded draft KV, acceptance metrics, and KV/Gated-DeltaNet rollback. |
-| Validation | Added higher-bit kernel/runtime tests, OpenCode boundary tests, state-snapshot tests, persistent-cache tests, and the reproducible coding-agent stress benchmark. |
+| Validation | Added higher-bit kernel/runtime tests, state-snapshot tests, persistent-cache tests, and the reproducible coding-agent stress benchmark. |
 
 ## 2×2 Precise Benchmark Results (Aug 2026)
 
@@ -122,7 +117,7 @@ logged per prompt and averaged across the suite for each 2×2 config
 
 - [Wiki home](https://github.com/Pummelchen/NVMAI/wiki)
 - [Getting started](https://github.com/Pummelchen/NVMAI/wiki/Getting-Started)
-- [OpenAI-compatible server and OpenCode setup](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server)
+- [OpenAI-compatible server](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server)
 - [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls)
 - [System design](https://github.com/Pummelchen/NVMAI/wiki/System-Design)
 - [Benchmarks and protocol](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
