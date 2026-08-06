@@ -13,8 +13,7 @@ This checkout is for running and reporting existing behavior. Do not edit source
 `Sources/NVMAICLI/`, `Sources/NVMAIServer/`, and
 `Sources/NVMAIApp/` contain the installer, CLI, loopback server, and
 Mac app.
-`Tests/` contains focused public tests; `benchmark-prompts/` contains frozen
-benchmark inputs. User and engineering documentation lives in the
+`Tests/` contains focused public tests. User and engineering documentation lives in the
 [GitHub Wiki](https://github.com/Pummelchen/NVMAI/wiki).
 
 ```bash
