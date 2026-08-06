@@ -23,7 +23,7 @@ let package = Package(
     targets: [
         .target(
             name: "NVMAIFormat",
-            path: "Sources/NVMAIFormat"
+            path: "sources/NVMAIFormat"
         ),
         .target(
             name: "NVMAI",
@@ -31,7 +31,7 @@ let package = Package(
                 "NVMAIFormat",
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
-            path: "Sources/NVMAI",
+            path: "sources/NVMAI",
             resources: [
                 .copy("Metal"),
             ]
@@ -39,28 +39,28 @@ let package = Package(
         .target(
             name: "NVMAIRepackCore",
             dependencies: ["NVMAIFormat"],
-            path: "Sources/NVMAIRepack/Core"
+            path: "sources/NVMAIRepack/Core"
         ),
         .executableTarget(
             name: "NVMAIRepack",
             dependencies: ["NVMAIRepackCore"],
-            path: "Sources/NVMAIRepack/Command"
+            path: "sources/NVMAIRepack/Command"
         ),
         .target(
             name: "NVMAICLICore",
             dependencies: ["NVMAI"],
-            path: "Sources/NVMAICLI",
+            path: "sources/NVMAICLI",
             exclude: ["Command"]
         ),
         .executableTarget(
             name: "NVMAICLI",
             dependencies: ["NVMAICLICore"],
-            path: "Sources/NVMAICLI/Command"
+            path: "sources/NVMAICLI/Command"
         ),
         .target(
             name: "NVMAIAppCore",
             dependencies: ["NVMAI", "NVMAIRepackCore", "NVMAIDecodeProtocol"],
-            path: "Sources/NVMAIApp/Core",
+            path: "sources/NVMAIApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
             ]
@@ -68,16 +68,16 @@ let package = Package(
         .target(
             name: "NVMAIMacPresentation",
             dependencies: ["NVMAIAppCore"],
-            path: "Sources/NVMAIApp/MacPresentation"
+            path: "sources/NVMAIApp/MacPresentation"
         ),
         .target(
             name: "NVMAIDecodeProtocol",
-            path: "Sources/NVMAIDecodeProtocol"
+            path: "sources/NVMAIDecodeProtocol"
         ),
         .executableTarget(
             name: "NVMAIDecodeService",
             dependencies: ["NVMAIAppCore", "NVMAIDecodeProtocol"],
-            path: "Sources/NVMAIDecodeService"
+            path: "sources/NVMAIDecodeService"
         ),
         .target(
             name: "NVMAIServerCore",
@@ -87,17 +87,17 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Sources/NVMAIServer/Core"
+            path: "sources/NVMAIServer/Core"
         ),
         .executableTarget(
             name: "NVMAIServer",
             dependencies: ["NVMAIServerCore"],
-            path: "Sources/NVMAIServer/Command"
+            path: "sources/NVMAIServer/Command"
         ),
         .executableTarget(
             name: "NVMAIMac",
             dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
-            path: "Sources/NVMAIApp/Mac",
+            path: "sources/NVMAIApp/Mac",
             resources: [
                 .copy("Resources/nvmai-app-icon.png"),
             ]
@@ -105,33 +105,33 @@ let package = Package(
         .target(
             name: "NVMAIValidationSupport",
             dependencies: ["NVMAI"],
-            path: "Sources/NVMAIValidation/Support"
+            path: "sources/NVMAIValidation/Support"
         ),
         .testTarget(
             name: "NVMAITestsCore",
             dependencies: ["NVMAI", "NVMAIValidationSupport", "NVMAIRepackCore", "NVMAICLICore"],
-            path: "Tests/NVMAI/Core",
+            path: "tests/NVMAI/Core",
             resources: [.copy("Tokenization/Fixtures")]
         ),
         .testTarget(
             name: "NVMAIRepackTests",
             dependencies: ["NVMAIRepackCore"],
-            path: "Tests/NVMAIRepack/Core"
+            path: "tests/NVMAIRepack/Core"
         ),
         .testTarget(
             name: "NVMAIAppCoreTests",
             dependencies: ["NVMAIAppCore", "NVMAI", "NVMAIRepackCore", "NVMAIDecodeProtocol"],
-            path: "Tests/NVMAIApp/Core"
+            path: "tests/NVMAIApp/Core"
         ),
         .testTarget(
             name: "NVMAIDecodeServiceTests",
             dependencies: ["NVMAIDecodeService", "NVMAIAppCore", "NVMAIDecodeProtocol"],
-            path: "Tests/NVMAIDecodeService"
+            path: "tests/NVMAIDecodeService"
         ),
         .testTarget(
             name: "NVMAIMacPresentationTests",
             dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
-            path: "Tests/NVMAIApp/MacPresentation"
+            path: "tests/NVMAIApp/MacPresentation"
         ),
         .testTarget(
             name: "NVMAIServerTests",
@@ -139,7 +139,7 @@ let package = Package(
                 "NVMAIServerCore",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
-            path: "Tests/NVMAIServer",
+            path: "tests/NVMAIServer",
             resources: [.copy("Fixtures")]
         ),
     ],
