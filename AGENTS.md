@@ -51,6 +51,8 @@ at a time.
 
 For performance results, build release once and follow the [community benchmark guide](https://github.com/Pummelchen/NVMAI/wiki/Benchmarking-Guide) exactly. Do not enable experimental controls or profiling.
 
+Launch helpers live in `benchmark/`. Start the server before running any benchmark script.
+
 Do not download a full checkpoint, duplicate the `.gturbo` model, create a worktree, or purge caches just to run tests.
 
 Report the commit, hardware and RAM, macOS, Swift version, exact command, exit code, complete timing footer or error, and every protocol deviation. Treat results as measurements, not performance ceilings.
