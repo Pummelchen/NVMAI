@@ -1,4 +1,5 @@
 import Foundation
+import NVMAIFormat
 @testable import NVMAI
 @testable import NVMAIRepackCore
 
@@ -33,12 +34,14 @@ enum QwenToySynthetic {
 
         func affineSpec(_ name: String, rows: Int, cols: Int,
                         bits: Int = weightBits) -> ResidentSpec {
+            // Runtime only supports 4 or 8-bit affine.
+            let usedBits = bits <= 4 ? 4 : 8
             let groups = cols / Quantization.groupSize
             let auxBytes = UInt64(rows * groups * u16)
             return ResidentSpec(name: name,
                                 dtype: 0,
                                 shape: [UInt32(rows), UInt32(cols), 0, 0],
-                                weightBytes: UInt64(rows * cols * bits / 8),
+                                weightBytes: UInt64(rows * cols * usedBits / 8),
                                 scaleBytes: auxBytes,
                                 biasBytes: auxBytes)
         }
@@ -78,10 +81,39 @@ enum QwenToySynthetic {
                                   shape: [UInt32(d), 0, 0, 0], count: d))
             specs.append(bf16Spec("\(prefix).post_attention_layernorm.weight",
                                   shape: [UInt32(d), 0, 0, 0], count: d))
+            // Feed-forward sandwich norms and router auxiliaries (Qwen 3.6).
+            specs.append(bf16Spec("\(prefix).pre_feedforward_layernorm.weight",
+                                  shape: [UInt32(d), 0, 0, 0], count: d))
+            specs.append(bf16Spec("\(prefix).pre_feedforward_layernorm_2.weight",
+                                  shape: [UInt32(d), 0, 0, 0], count: d))
+            specs.append(bf16Spec("\(prefix).post_feedforward_layernorm_1.weight",
+                                  shape: [UInt32(d), 0, 0, 0], count: d))
+            specs.append(bf16Spec("\(prefix).post_feedforward_layernorm_2.weight",
+                                  shape: [UInt32(d), 0, 0, 0], count: d))
+            specs.append(bf16Spec("\(prefix).post_feedforward_layernorm.weight",
+                                  shape: [UInt32(d), 0, 0, 0], count: d))
+            specs.append(bf16Spec("\(prefix).router.scale",
+                                  shape: [UInt32(d), 0, 0, 0], count: d))
+            specs.append(bf16Spec("\(prefix).router.per_expert_scale",
+                                  shape: [UInt32(toy.numExperts), 0, 0, 0],
+                                  count: toy.numExperts))
+            specs.append(bf16Spec("\(prefix).layer_scalar",
+                                  shape: [UInt32(1), 0, 0, 0], count: 1))
+            specs.append(int8AffineSpec("\(prefix).router.proj.weight",
+                                        rows: toy.numExperts, cols: d))
+            // q_norm and k_norm are required for ALL layers (full and linear).
+            let headDim = toy.layerIsLinear(L) ? toy.headDim : toy.fullHeadDim
+            specs.append(bf16Spec("\(prefix).self_attn.q_norm.weight",
+                                  shape: [UInt32(headDim), 0, 0, 0],
+                                  count: headDim))
+            specs.append(bf16Spec("\(prefix).self_attn.k_norm.weight",
+                                  shape: [UInt32(headDim), 0, 0, 0],
+                                  count: headDim))
             specs.append(int8AffineSpec("\(prefix).mlp.gate.weight",
                                         rows: toy.numExperts, cols: d))
             specs.append(int8AffineSpec("\(prefix).mlp.shared_expert_gate.weight",
                                         rows: 1, cols: d))
+            // Qwen 3.6 uses `.mlp.shared_expert.{gate,up,down}_proj.weight`.
             specs.append(affineSpec("\(prefix).mlp.shared_expert.gate_proj.weight",
                                         rows: toy.intermediateSize, cols: d))
             specs.append(affineSpec("\(prefix).mlp.shared_expert.up_proj.weight",
@@ -89,6 +121,17 @@ enum QwenToySynthetic {
             specs.append(affineSpec("\(prefix).mlp.shared_expert.down_proj.weight",
                                         rows: d, cols: toy.intermediateSize))
             if toy.layerIsLinear(L) {
+                // Linear attention layers also need self_attn projections per runtime schema.
+                let qDim = toy.numHeads * toy.headDim
+                let kvDim = toy.numFullKVHeads * toy.headDim
+                specs.append(affineSpec("\(prefix).self_attn.q_proj.weight",
+                                            rows: qDim, cols: d))
+                specs.append(affineSpec("\(prefix).self_attn.k_proj.weight",
+                                            rows: kvDim, cols: d))
+                specs.append(affineSpec("\(prefix).self_attn.v_proj.weight",
+                                            rows: kvDim, cols: d))
+                specs.append(affineSpec("\(prefix).self_attn.o_proj.weight",
+                                            rows: d, cols: qDim))
                 specs.append(affineSpec("\(prefix).linear_attn.in_proj_qkv.weight",
                                             rows: la.qkvDim, cols: d))
                 specs.append(affineSpec("\(prefix).linear_attn.in_proj_z.weight",
@@ -114,20 +157,15 @@ enum QwenToySynthetic {
             } else {
                 let qDim = toy.numHeads * toy.fullHeadDim
                 let kvDim = toy.numFullKVHeads * toy.fullHeadDim
+                // Qwen uses separate projections (not packed like Gemma).
                 specs.append(affineSpec("\(prefix).self_attn.q_proj.weight",
-                                            rows: 2 * qDim, cols: d))
+                                            rows: qDim, cols: d))
                 specs.append(affineSpec("\(prefix).self_attn.k_proj.weight",
                                             rows: kvDim, cols: d))
                 specs.append(affineSpec("\(prefix).self_attn.v_proj.weight",
                                             rows: kvDim, cols: d))
                 specs.append(affineSpec("\(prefix).self_attn.o_proj.weight",
                                             rows: d, cols: qDim))
-                specs.append(bf16Spec("\(prefix).self_attn.q_norm.weight",
-                                      shape: [UInt32(toy.fullHeadDim), 0, 0, 0],
-                                      count: toy.fullHeadDim))
-                specs.append(bf16Spec("\(prefix).self_attn.k_norm.weight",
-                                      shape: [UInt32(toy.fullHeadDim), 0, 0, 0],
-                                      count: toy.fullHeadDim))
             }
         }
 
@@ -145,12 +183,20 @@ enum QwenToySynthetic {
             cursor += n.utf8.count
         }
         let indexBytes = UInt64(stringTableBase + stringTable.count)
+        // Align index to 16KB for the GTurbo v1 format validator.
+        let alignedIndexBytes = ((indexBytes + GTurboFormatV1.alignmentBytes - 1) &
+                                 ~(GTurboFormatV1.alignmentBytes - 1))
 
         var entries: [ResidentEntry] = []
         entries.reserveCapacity(specs.count)
-        var payloadCursor = indexBytes
+        var payloadCursor = alignedIndexBytes
+        // Align all weight offsets to 4 bytes (UInt32 alignment) for the affine quant kernels.
+        let align: UInt64 = UInt64(MemoryLayout<UInt32>.alignment)
+        func alignedCursor(_ cursor: UInt64) -> UInt64 {
+            ((cursor + align - 1) & ~(align - 1))
+        }
         for spec in specs {
-            let weightOffset = payloadCursor
+            let weightOffset = alignedCursor(payloadCursor)
             let scaleOffset = spec.scaleBytes > 0 ? weightOffset + spec.weightBytes : 0
             let biasOffset = spec.biasBytes > 0 ? scaleOffset + spec.scaleBytes : 0
             entries.append(ResidentEntry(
@@ -167,16 +213,18 @@ enum QwenToySynthetic {
                 sourceWeight: ModelLoaderTests.dummySource(spec.name),
                 sourceScales: nil,
                 sourceBiases: nil))
-            payloadCursor += spec.weightBytes + spec.scaleBytes + spec.biasBytes
+            // Advance past this tensor's data, aligned to 4 bytes.
+            let tensorSize = spec.weightBytes + spec.scaleBytes + spec.biasBytes
+            payloadCursor = weightOffset + tensorSize
         }
-        let residentSize = payloadCursor - indexBytes
+        let residentSize = alignedCursor(payloadCursor) - alignedIndexBytes
 
-        let totalBytes = Int(indexBytes + residentSize)
+        let totalBytes = Int(alignedIndexBytes + residentSize)
         var fileBuf = [UInt8](repeating: 0, count: totalBytes)
         fileBuf.withUnsafeMutableBytes { raw in
             let base = raw.baseAddress!
             GTurboBinary.writeIndexHeader(into: base,
-                                          indexSize: indexBytes,
+                                          indexSize: alignedIndexBytes,
                                           residentSize: residentSize,
                                           entryCount: UInt64(entries.count))
             for (i, e) in entries.enumerated() {
@@ -239,16 +287,18 @@ enum QwenToySynthetic {
                                                    expert: expert, role: role)
                 let quantized = projectionRows.map { Quantization.quantizeInt4Affine($0) }
                 let packedOffset = bytes.count
-                if weightBits == 4 {
+                // Use 4-bit for bits <= 4, 8-bit for bits > 4 (runtime only supports 4/8).
+                let usedBits = weightBits <= 4 ? 4 : 8
+                if usedBits == 4 {
                     for row in quantized { bytes.append(contentsOf: row.packed) }
                 } else {
                     bytes += [UInt8](repeating: 0x11,
-                                     count: rows * cols * weightBits / 8)
+                                     count: rows * cols * usedBits / 8)
                 }
                 tensors[prefix] = [
                     "offset": packedOffset, "size": bytes.count - packedOffset,
                     "dtype": "U32", "shape": [rows, cols],
-                    "bits": weightBits,
+                    "bits": usedBits,
                 ]
                 let scalesOffset = bytes.count
                 for row in quantized { appendU16(row.scales, to: &bytes) }
@@ -390,7 +440,10 @@ enum QwenToySynthetic {
     }
 
     private static func quantSlot(_ bits: Int) -> [String: Any] {
-        ["weightBits": bits, "scheme": "affine", "scaleType": "bf16",
+        // Runtime only supports 4 or 8-bit affine. Use 4 for any bits <= 4,
+        // 8 for bits > 4.
+        let usedBits = bits <= 4 ? 4 : 8
+        return ["weightBits": usedBits, "scheme": "affine", "scaleType": "bf16",
          "biasType": "bf16", "groupSize": Quantization.groupSize]
     }
 }
@@ -413,7 +466,7 @@ extension ArchConfig {
             headDim: 32,
             fullHeadDim: 32,
             vocabSize: 1024,
-            slidingWindow: 0,
+            slidingWindow: 1024,
             finalLogitSoftcap: 0.0,
             ropeTheta: 10_000_000.0,
             fullRopeTheta: 10_000_000.0,

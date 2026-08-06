@@ -1,0 +1,143 @@
+{
+  "config": "cache_on_mtp_on_6bit",
+  "cache_mode": "multi-prefix",
+  "mtp_config": "on",
+  "results": [
+    {
+      "capability": "Basic fact",
+      "wall": 8.21688985824585,
+      "ttft": 8.216625928878784,
+      "decode_time": 0.0002639293670654297,
+      "prompt_tokens": 25,
+      "completion_tokens": 2,
+      "cached_tokens": 0,
+      "decode_rate": 7577.7850045167115
+    },
+    {
+      "capability": "Arithmetic",
+      "wall": 10.22082781791687,
+      "ttft": 10.220603704452515,
+      "decode_time": 0.00022411346435546875,
+      "prompt_tokens": 27,
+      "completion_tokens": 4,
+      "cached_tokens": 0,
+      "decode_rate": 17848.102127659575
+    },
+    {
+      "capability": "Instruction following",
+      "wall": 9.865002155303955,
+      "ttft": 9.86450719833374,
+      "decode_time": 0.0004949569702148438,
+      "prompt_tokens": 20,
+      "completion_tokens": 2,
+      "cached_tokens": 0,
+      "decode_rate": 4040.7552986512524
+    },
+    {
+      "capability": "Classification",
+      "wall": 63.97332286834717,
+      "ttft": 13.217418909072876,
+      "decode_time": 50.75590395927429,
+      "prompt_tokens": 29,
+      "completion_tokens": 54,
+      "cached_tokens": 0,
+      "decode_rate": 1.0639156391210907
+    },
+    {
+      "capability": "Extraction",
+      "wall": 20.306520700454712,
+      "ttft": 12.653669834136963,
+      "decode_time": 7.652850866317749,
+      "prompt_tokens": 25,
+      "completion_tokens": 11,
+      "cached_tokens": 0,
+      "decode_rate": 1.4373728421148193
+    },
+    {
+      "capability": "Structured output",
+      "wall": 20.03486204147339,
+      "ttft": 13.716518878936768,
+      "decode_time": 6.318343162536621,
+      "prompt_tokens": 31,
+      "completion_tokens": 26,
+      "cached_tokens": 0,
+      "decode_rate": 4.115002830831018
+    },
+    {
+      "capability": "Logic",
+      "wall": 6.716684103012085,
+      "ttft": 6.716631889343262,
+      "decode_time": 5.221366882324219e-05,
+      "prompt_tokens": 43,
+      "completion_tokens": 2,
+      "cached_tokens": 0,
+      "decode_rate": 38304.14611872146
+    },
+    {
+      "capability": "Context use",
+      "wall": 7.1150221824646,
+      "ttft": 6.85139012336731,
+      "decode_time": 0.26363205909729004,
+      "prompt_tokens": 36,
+      "completion_tokens": 5,
+      "cached_tokens": 0,
+      "decode_rate": 18.96582690709408
+    },
+    {
+      "capability": "Refusal/honesty",
+      "wall": 17.999530792236328,
+      "ttft": 7.629525899887085,
+      "decode_time": 10.370004892349243,
+      "prompt_tokens": 26,
+      "completion_tokens": 45,
+      "cached_tokens": 0,
+      "decode_rate": 4.339438647054061
+    },
+    {
+      "capability": "Summarization",
+      "wall": 8.344542026519775,
+      "ttft": 7.662757158279419,
+      "decode_time": 0.6817848682403564,
+      "prompt_tokens": 28,
+      "completion_tokens": 7,
+      "cached_tokens": 0,
+      "decode_rate": 10.267168319629265
+    },
+    {
+      "capability": "Transformation",
+      "wall": 7.3096349239349365,
+      "ttft": 6.309557914733887,
+      "decode_time": 1.0000770092010498,
+      "prompt_tokens": 23,
+      "completion_tokens": 8,
+      "cached_tokens": 0,
+      "decode_rate": 7.999383973831285
+    },
+    {
+      "capability": "Simple coding",
+      "wall": 8.473911046981812,
+      "ttft": 6.956431150436401,
+      "decode_time": 1.5174798965454102,
+      "prompt_tokens": 24,
+      "completion_tokens": 9,
+      "cached_tokens": 0,
+      "decode_rate": 5.930885819633445
+    }
+  ],
+  "summary": {
+    "total_requests": 12,
+    "total_wall_s": 188.58,
+    "total_completion_tokens": 175,
+    "avg_decode_tok_s": 5.02,
+    "warm_rates": [
+      1.06,
+      1.44,
+      4.12,
+      4.34,
+      10.27,
+      8.0,
+      5.93
+    ],
+    "last6_avg": 5.68
+  }
+}

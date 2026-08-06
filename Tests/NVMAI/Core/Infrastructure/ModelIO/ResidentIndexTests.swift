@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import NVMAIFormat
 @testable import NVMAI
 @testable import NVMAIRepackCore
 
@@ -31,23 +32,25 @@ import Foundation
         let rawIndexBytes = stringTableBase + stringTable.count
         // Writer rounds the index region up to 16 KB; we keep the test snug
         // (no padding) since the parser only needs indexSize ≥ that minimum.
-        let indexBytes = rawIndexBytes
-        let residentBytes = 64
+        // However, the validator now enforces 16KB alignment on the index size.
+        let alignedIndexBytes = Int(((UInt64(rawIndexBytes) + GTurboFormatV1.alignmentBytes - 1) &
+                                     ~(GTurboFormatV1.alignmentBytes - 1)))
+        let residentBytes = 96
 
         let entries: [ResidentEntry] = [
             ResidentEntry(
                 name: names[0], dtype: 0,
                 logicalShape4: [1024, 64, 0, 0],
-                fileOffset: UInt64(indexBytes), sizeBytes: 32,
-                scaleOffset: UInt64(indexBytes) + 32, scaleSize: 16,
-                biasOffset:  UInt64(indexBytes) + 48, biasSize:  16,
+                fileOffset: UInt64(alignedIndexBytes), sizeBytes: 32,
+                scaleOffset: UInt64(alignedIndexBytes) + 32, scaleSize: 16,
+                biasOffset:  UInt64(alignedIndexBytes) + 48, biasSize:  16,
                 quantSpec: nil,
                 sourceWeight: Self.dummySource(names[0]),
                 sourceScales: nil, sourceBiases: nil),
             ResidentEntry(
                 name: names[1], dtype: 0,
                 logicalShape4: [256, 64, 0, 0],
-                fileOffset: UInt64(indexBytes) + 64, sizeBytes: 0,
+                fileOffset: UInt64(alignedIndexBytes) + 64, sizeBytes: 32,
                 scaleOffset: 0, scaleSize: 0,
                 biasOffset:  0, biasSize:  0,
                 quantSpec: nil,
@@ -55,11 +58,11 @@ import Foundation
                 sourceScales: nil, sourceBiases: nil),
         ]
 
-        var fileBuf = [UInt8](repeating: 0, count: indexBytes + residentBytes)
+        var fileBuf = [UInt8](repeating: 0, count: alignedIndexBytes + residentBytes)
         fileBuf.withUnsafeMutableBytes { raw in
             let base = raw.baseAddress!
             GTurboBinary.writeIndexHeader(into: base,
-                                          indexSize: UInt64(indexBytes),
+                                          indexSize: UInt64(alignedIndexBytes),
                                           residentSize: UInt64(residentBytes),
                                           entryCount: UInt64(entries.count))
             for (i, e) in entries.enumerated() {
@@ -70,6 +73,8 @@ import Foundation
             stringTable.withUnsafeBytes { sb in
                 _ = memcpy(base.advanced(by: stringTableBase), sb.baseAddress!, stringTable.count)
             }
+            // Entry 1 payload (32 bytes at offset + 64).
+            memset(base.advanced(by: Int(UInt64(alignedIndexBytes) + 64)), 0x22, 32)
         }
 
         let url = FileManager.default.temporaryDirectory
@@ -79,17 +84,18 @@ import Foundation
 
         let parsed = try ResidentIndexReader.load(fileURL: url)
         #expect(parsed.header.entryCount == UInt64(entries.count))
-        #expect(parsed.header.indexSize == UInt64(indexBytes))
+        #expect(parsed.header.indexSize == UInt64(alignedIndexBytes))
         #expect(parsed.header.residentSize == UInt64(residentBytes))
         let e0 = try #require(parsed.entries[names[0]])
         #expect(e0.shape.0 == 1024 && e0.shape.1 == 64)
-        #expect(e0.fileOffset == UInt64(indexBytes))
+        #expect(e0.fileOffset == UInt64(alignedIndexBytes))
         #expect(e0.sizeBytes == 32)
-        #expect(e0.scaleOffset == UInt64(indexBytes) + 32 && e0.scaleSize == 16)
-        #expect(e0.biasOffset  == UInt64(indexBytes) + 48 && e0.biasSize  == 16)
+        #expect(e0.scaleOffset == UInt64(alignedIndexBytes) + 32 && e0.scaleSize == 16)
+        #expect(e0.biasOffset  == UInt64(alignedIndexBytes) + 48 && e0.biasSize  == 16)
         let e1 = try #require(parsed.entries[names[1]])
         #expect(e1.shape.0 == 256 && e1.shape.1 == 64)
-        #expect(e1.fileOffset == UInt64(indexBytes) + 64)
+        #expect(e1.fileOffset == UInt64(alignedIndexBytes) + 64)
+        #expect(e1.sizeBytes == 32)
         #expect(e1.scaleSize == 0 && e1.biasSize == 0)
     }
 

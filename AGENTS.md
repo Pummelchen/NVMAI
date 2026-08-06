@@ -18,12 +18,12 @@ benchmark inputs. User and engineering documentation lives in the
 [GitHub Wiki](https://github.com/Pummelchen/NVMAI/wiki).
 
 ```bash
-swift run -c release NVMAIRepack --model qwen36 --output scratch/qwen36.gturbo
-swift run -c release NVMAIRepack --model qwen36 --output scratch/qwen36.gturbo --resume
+swift run -c release NVMAIRepack --model qwen36 --output models/qwen36.gturbo
+swift run -c release NVMAIRepack --model qwen36 --output models/qwen36.gturbo --resume
 swift build -c release
 .build/release/NVMAIMac
 swift run -c release NVMAICLI \
-  --model scratch/qwen36.gturbo \
+  --model models/qwen36.gturbo \
   --prompt "The capital of France is" \
   --max-new 64
 ```

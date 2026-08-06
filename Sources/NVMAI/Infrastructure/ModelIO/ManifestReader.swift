@@ -1,4 +1,5 @@
 import Foundation
+import NVMAIFormat
 
 public struct ManifestFileEntry: Decodable, Equatable, Sendable {
     public let size: UInt64
@@ -27,22 +28,6 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let attentionKEqV: Bool
     public let hiddenActivation: String
     public let fullAttentionLayerMask: [Int]
-
-    // Family extensions. Optional so legacy Gemma manifests decode unchanged;
-    // absent values validate against the Gemma defaults in `ArchConfig`.
-    public let family: String?
-    public let attnOutputGate: Bool?
-    public let attentionScale: Double?
-    public let embeddingScaledBySqrtHidden: Bool?
-    public let routerScaled: Bool?
-    public let ffnSandwichNorms: Bool?
-    public let sharedExpertGated: Bool?
-    public let ropeNeoxSubdim: Bool?
-    public let linearNumKHeads: Int?
-    public let linearNumVHeads: Int?
-    public let linearKeyHeadDim: Int?
-    public let linearValueHeadDim: Int?
-    public let linearConvKernelSize: Int?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -80,15 +65,10 @@ public enum ManifestReader {
     public static let defaultMaxBytes: UInt64 = 4 * 1024 * 1024
 
     /// Recognized flag keys. Anything else in `manifest.flags` is an error.
-    public static let knownFlags: Set<String> = [
-        "streamingPresent", "turboQuantKV", "aneSharedExpert"
-    ]
+    public static let knownFlags: Set<String> = GTurboFormatV1.knownFlags
 
-    /// Required file entries (relative to `model.gturbo/`). Layer files
-    /// `packed_experts/layer_<L>.bin` for L in 0..<numLayers are checked
-    /// after decode against `numLayers` (with the zero-padded "layer_%02d"
-    /// naming the writer produces; falling back to plain "layer_<L>" when
-    /// only the unpadded form is present, for toy synthetics).
+    /// Fixed required entries. Packed-layer filenames come from layout.json and
+    /// are cross-validated only after that document is decoded.
     public static let requiredFiles: [String] = [
         "model_weights.bin",
         "packed_experts/layout.json",
@@ -97,49 +77,75 @@ public enum ManifestReader {
     public static func load(directoryURL: URL,
                             expecting: ArchConfig,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> Manifest {
-        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
+        let directory = try GTurboModelDirectory(rootURL: directoryURL)
+        let data: Data
+        do {
+            data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
+        } catch ModelError.missingFile {
             throw ModelError.partialInstall(path: directoryURL.path)
         }
-        let size = try metadataFileSize(manifestURL, fileName: "manifest.json")
-        guard size <= maxBytes else {
-            throw ModelError.indexCorrupt(
-                detail: "manifest.json size \(size) exceeds metadata cap \(maxBytes)")
-        }
-        let data = try Data(contentsOf: manifestURL)
+        return try decode(data: data, expecting: expecting)
+    }
+
+    package static func decode(data: Data,
+                               expecting: ArchConfig) throws -> Manifest {
         let manifest: Manifest
         do {
-            manifest = try JSONDecoder().decode(Manifest.self, from: data)
+            let wire = try GTurboManifestCodec.decodeUnchecked(data)
+            guard wire.magic == GTurboFormatV1.magic else {
+                throw ModelError.notAGTurboDirectory
+            }
+            guard wire.versionMajor == GTurboFormatV1.versionMajor,
+                  wire.versionMinor >= 0 else {
+                throw ModelError.unsupportedVersion(major: wire.versionMajor,
+                                                    minor: wire.versionMinor)
+            }
+            for key in wire.flags.keys where !GTurboFormatV1.knownFlags.contains(key) {
+                throw ModelError.unknownFlag(name: key)
+            }
+            if wire.expertStride % GTurboFormatV1.alignmentBytes != 0 {
+                throw ModelError.expertStrideNotPageAligned(
+                    stride: wire.expertStride,
+                    pageSize: Int(GTurboFormatV1.alignmentBytes))
+            }
+            try GTurboManifestCodec.validate(wire)
+            manifest = Manifest(wire: wire)
+        } catch let error as ModelError {
+            throw error
         } catch {
             throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
         }
 
-        try validate(manifest, against: expecting,
-                     directoryURL: directoryURL)
+        try validate(manifest, against: expecting)
         return manifest
     }
 
-    private static func metadataFileSize(_ url: URL,
-                                         fileName: String) throws -> UInt64 {
-        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard let number = attrs[.size] as? NSNumber else {
-            throw ModelError.indexCorrupt(detail: "\(fileName): file size unavailable")
+    /// Extract the architecture dimensions from the manifest without full
+    /// cross-validation so it can be used to auto-select the expected
+    /// configuration (e.g. by the installation probe).
+    public static func peekFamily(directoryURL: URL) throws -> ModelFamily {
+        let directory = try GTurboModelDirectory(rootURL: directoryURL)
+        let data = try directory.readMetadata("manifest.json", maxBytes: 4 * 1024 * 1024)
+        let wire = try JSONDecoder().decode(GTurboManifestV1.self, from: data)
+        // Determine family from hiddenActivation which is unique per family.
+        // gemma4 uses "gelu_pytorch_tanh", qwen36 uses "silu".
+        let family: ModelFamily
+        switch wire.arch.hiddenActivation {
+        case "silu":
+            // Check if this is a Qwen 3.6 variant with MTP bit-width overrides.
+            if wire.bitWidthOverridesHonored != nil {
+                family = .qwen36MTP
+            } else {
+                family = .qwen36
+            }
+        default:
+            family = .gemma4
         }
-        return number.uint64Value
+        return family
     }
 
     static func validate(_ m: Manifest,
-                         against expected: ArchConfig,
-                         directoryURL: URL) throws {
-        guard m.magic == "GTURBO" else { throw ModelError.notAGTurboDirectory }
-        guard m.versionMajor == 1 else {
-            throw ModelError.unsupportedVersion(major: m.versionMajor, minor: m.versionMinor)
-        }
-        for key in m.flags.keys {
-            if !knownFlags.contains(key) {
-                throw ModelError.unknownFlag(name: key)
-            }
-        }
+                         against expected: ArchConfig) throws {
         if m.flags["turboQuantKV"] == true {
             throw ModelError.indexCorrupt(
                 detail: "manifest requests removed TurboQuant KV runtime support")
@@ -147,64 +153,39 @@ public enum ManifestReader {
         try validateArch(m.arch, expected: expected)
         if let quant = m.quant {
             try validateQuant(quant, family: expected.family)
-        } else if isProductionArch(expected) {
+        } else if expected.numLayers == ArchConfig.gemma4_26B_A4B.numLayers,
+                  expected.hiddenSize == ArchConfig.gemma4_26B_A4B.hiddenSize {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
-        }
-        let pageSize = UInt64(getpagesize())
-        guard m.expertStride % pageSize == 0 else {
-            throw ModelError.expertStrideNotPageAligned(stride: m.expertStride,
-                                                        pageSize: Int(pageSize))
         }
         for f in requiredFiles {
             if m.files[f] == nil { throw ModelError.missingFile(name: f) }
         }
+        // Validate that all expected layer files are listed in the manifest.
+        // Accept both `layer_0.bin` and `layer_00.bin` naming conventions.
         for L in 0..<m.numLayers {
-            let padded = String(format: "packed_experts/layer_%02d.bin", L)
-            let plain  = "packed_experts/layer_\(L).bin"
-            if m.files[padded] == nil && m.files[plain] == nil {
-                throw ModelError.missingFile(name: padded)
+            let layerFileShort = String(format: "packed_experts/layer_%d.bin", L)
+            let layerFilePadded = String(format: "packed_experts/layer_%02d.bin", L)
+            if m.files[layerFileShort] == nil && m.files[layerFilePadded] == nil {
+                throw ModelError.missingFile(name: layerFileShort)
             }
         }
-    }
-
-    /// A manifest matching one of the shipped production baselines must carry
-    /// quantization metadata; toy/synthetic manifests may omit it.
-    private static func isProductionArch(_ expected: ArchConfig) -> Bool {
-        for baseline in ArchConfig.knownArchitectures.values {
-            if expected.numLayers == baseline.numLayers,
-               expected.hiddenSize == baseline.hiddenSize {
-                return true
-            }
-        }
-        return false
     }
 
     private static func validateQuant(_ quant: ManifestQuant,
-                                      family: ModelFamily) throws {
-        if family == .qwen36 || family == .qwen36MTP {
-            let baseBits = quant.embedding.weightBits
-            guard [4, 6, 8].contains(baseBits),
-                  quant.attention.weightBits == baseBits,
-                  quant.sharedExpert.weightBits == baseBits,
-                  quant.routedExpert.weightBits == baseBits,
-                  (family == .qwen36MTP
-                    ? [4, 8].contains(quant.router.weightBits)
-                    : quant.router.weightBits == 8) else {
-                let router = family == .qwen36MTP ? "a 4- or 8-bit router" : "an 8-bit router"
-                throw ModelError.indexCorrupt(
-                    detail: "Qwen 3.6 requires consistent 4-, 6-, or 8-bit base weights and \(router)")
-            }
+                                      family: ModelFamily = .gemma4) throws {
+        let allowedRouterBits: Set<Int>
+        switch family {
+        case .qwen36MTP:
+            allowedRouterBits = [4, 8]
+        default:
+            allowedRouterBits = [8]
         }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding,
-             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4]),
-            ("attention", quant.attention,
-             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4]),
-            ("router", quant.router, family == .qwen36MTP ? [4, 8] : [8]),
-            ("sharedExpert", quant.sharedExpert,
-             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4, 8]),
-            ("routedExpert", quant.routedExpert,
-             family == .qwen36 || family == .qwen36MTP ? [4, 6, 8] : [4]),
+            ("embedding", quant.embedding, [4, 6, 8]),
+            ("attention", quant.attention, [4, 6, 8]),
+            ("router", quant.router, allowedRouterBits),
+            ("sharedExpert", quant.sharedExpert, [4, 6, 8]),
+            ("routedExpert", quant.routedExpert, [4, 6, 8]),
         ]
         for (name, slot, allowedBits) in slots {
             guard allowedBits.contains(slot.weightBits),
@@ -251,69 +232,72 @@ public enum ManifestReader {
         try check("fullAttentionLayerMask",
                   actualMask.description,
                   e.fullAttentionLayerMask.description)
-
-        // Family extensions: absent fields mean the Gemma defaults.
-        let gemmaDefaults = ArchConfig.gemma4_26B_A4B
-        try check("family",
-                  a.family ?? ModelFamily.gemma4.rawValue,
-                  e.family.rawValue)
-        try check("attnOutputGate",
-                  a.attnOutputGate ?? gemmaDefaults.attnOutputGate,
-                  e.attnOutputGate)
-        try check("attentionScale",
-                  a.attentionScale ?? gemmaDefaults.attentionScale,
-                  e.attentionScale)
-        try check("embeddingScaledBySqrtHidden",
-                  a.embeddingScaledBySqrtHidden ?? gemmaDefaults.embeddingScaledBySqrtHidden,
-                  e.embeddingScaledBySqrtHidden)
-        try check("routerScaled",
-                  a.routerScaled ?? gemmaDefaults.routerScaled,
-                  e.routerScaled)
-        try check("ffnSandwichNorms",
-                  a.ffnSandwichNorms ?? gemmaDefaults.ffnSandwichNorms,
-                  e.ffnSandwichNorms)
-        try check("sharedExpertGated",
-                  a.sharedExpertGated ?? gemmaDefaults.sharedExpertGated,
-                  e.sharedExpertGated)
-        try check("ropeNeoxSubdim",
-                  a.ropeNeoxSubdim ?? gemmaDefaults.ropeNeoxSubdim,
-                  e.ropeNeoxSubdim)
-        try check("linearNumKHeads",
-                  a.linearNumKHeads ?? 0, e.linearAttention.numKHeads)
-        try check("linearNumVHeads",
-                  a.linearNumVHeads ?? 0, e.linearAttention.numVHeads)
-        try check("linearKeyHeadDim",
-                  a.linearKeyHeadDim ?? 0, e.linearAttention.keyHeadDim)
-        try check("linearValueHeadDim",
-                  a.linearValueHeadDim ?? 0, e.linearAttention.valueHeadDim)
-        try check("linearConvKernelSize",
-                  a.linearConvKernelSize ?? 0, e.linearAttention.convKernelSize)
     }
+}
 
-    /// Decode just enough of `manifest.json` to identify the model family,
-    /// without arch validation. Used by `Model.load` auto-detection.
-    public static func peekFamily(directoryURL: URL,
-                                  maxBytes: UInt64 = defaultMaxBytes) throws -> ModelFamily {
-        let manifestURL = directoryURL.appendingPathComponent("manifest.json")
-        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
-            throw ModelError.partialInstall(path: directoryURL.path)
-        }
-        let size = try metadataFileSize(manifestURL, fileName: "manifest.json")
-        guard size <= maxBytes else {
-            throw ModelError.indexCorrupt(
-                detail: "manifest.json size \(size) exceeds metadata cap \(maxBytes)")
-        }
-        let data = try Data(contentsOf: manifestURL)
-        let manifest: Manifest
-        do {
-            manifest = try JSONDecoder().decode(Manifest.self, from: data)
-        } catch {
-            throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
-        }
-        guard let raw = manifest.arch.family else { return .gemma4 }
-        guard let family = ModelFamily(rawValue: raw) else {
-            throw ModelError.indexCorrupt(detail: "unknown arch.family \"\(raw)\"")
-        }
-        return family
+private extension ManifestFileEntry {
+    init(wire: GTurboManifestFileV1) {
+        self.init(size: wire.size, sha256: wire.sha256)
+    }
+}
+
+private extension ManifestArch {
+    init(wire: GTurboManifestArchV1) {
+        self.init(hiddenSize: wire.hiddenSize,
+                  ffnIntermediate: wire.ffnIntermediate,
+                  moeIntermediateSize: wire.moeIntermediateSize,
+                  numHeads: wire.numHeads,
+                  numKVHeads: wire.numKVHeads,
+                  numFullKVHeads: wire.numFullKVHeads,
+                  headDim: wire.headDim,
+                  fullHeadDim: wire.fullHeadDim,
+                  vocabSize: wire.vocabSize,
+                  slidingWindow: wire.slidingWindow,
+                  finalLogitSoftcap: wire.finalLogitSoftcap,
+                  ropeTheta: wire.ropeTheta,
+                  fullRopeTheta: wire.fullRopeTheta,
+                  partialRotaryFactor: wire.partialRotaryFactor,
+                  numLayers: wire.numLayers,
+                  numExperts: wire.numExperts,
+                  topKExperts: wire.topKExperts,
+                  tieWordEmbeddings: wire.tieWordEmbeddings,
+                  attentionKEqV: wire.attentionKEqV,
+                  hiddenActivation: wire.hiddenActivation,
+                  fullAttentionLayerMask: wire.fullAttentionLayerMask)
+    }
+}
+
+private extension ManifestQuantSlot {
+    init(wire: GTurboManifestQuantSlotV1) {
+        self.init(weightBits: wire.weightBits, scheme: wire.scheme,
+                  scaleType: wire.scaleType, biasType: wire.biasType,
+                  groupSize: wire.groupSize)
+    }
+}
+
+private extension ManifestQuant {
+    init(wire: GTurboManifestQuantV1) {
+        self.init(embedding: ManifestQuantSlot(wire: wire.embedding),
+                  attention: ManifestQuantSlot(wire: wire.attention),
+                  router: ManifestQuantSlot(wire: wire.router),
+                  sharedExpert: ManifestQuantSlot(wire: wire.sharedExpert),
+                  routedExpert: ManifestQuantSlot(wire: wire.routedExpert))
+    }
+}
+
+private extension Manifest {
+    init(wire: GTurboManifestV1) {
+        self.init(magic: wire.magic,
+                  versionMajor: wire.versionMajor,
+                  versionMinor: wire.versionMinor,
+                  flags: wire.flags,
+                  modelID: wire.modelID,
+                  sourceSnapshotHash: wire.sourceSnapshotHash,
+                  arch: ManifestArch(wire: wire.arch),
+                  quant: wire.quant.map(ManifestQuant.init(wire:)),
+                  files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
+                  expertsPerLayer: wire.expertsPerLayer,
+                  numLayers: wire.numLayers,
+                  expertStride: wire.expertStride)
     }
 }

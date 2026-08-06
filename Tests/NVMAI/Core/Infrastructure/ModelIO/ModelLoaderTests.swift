@@ -40,10 +40,26 @@ import Metal
         func int4AffineSpec(_ name: String, rows: Int, cols: Int) -> ResidentSpec {
             let groups = (cols + Quantization.groupSize - 1) / Quantization.groupSize
             let auxBytes = UInt64(rows * groups * MemoryLayout<UInt16>.stride)
+            // int4 packs 2 values per byte
+            let packedWeightBytes = UInt64(rows * cols / 2)
             return ResidentSpec(name: name,
                                 dtype: 0,
                                 shape: [UInt32(rows), UInt32(cols), 0, 0],
-                                weightBytes: UInt64(rows * cols),
+                                weightBytes: packedWeightBytes,
+                                scaleBytes: auxBytes,
+                                biasBytes: auxBytes)
+        }
+
+        func int8AffineSpec(_ name: String, rows: Int, cols: Int) -> ResidentSpec {
+            // int8: 1 value per byte, no packing
+            let weightBytes = UInt64(rows * cols)
+            // int8 affine still has scale/bias aux metadata
+            let groups = (cols + Quantization.groupSize - 1) / Quantization.groupSize
+            let auxBytes = UInt64(rows * groups * MemoryLayout<UInt16>.stride)
+            return ResidentSpec(name: name,
+                                dtype: 0,
+                                shape: [UInt32(rows), UInt32(cols), 0, 0],
+                                weightBytes: weightBytes,
                                 scaleBytes: auxBytes,
                                 biasBytes: auxBytes)
         }
@@ -114,10 +130,11 @@ import Metal
         }
 
         var specs: [ResidentSpec] = [
+            // Embedding is int4 affine: weight data is packed 2 values per byte
             ResidentSpec(name: "language_model.model.embed_tokens.weight",
                          dtype: 0,
                          shape: [UInt32(toy.vocabSize), UInt32(toy.hiddenSize), 0, 0],
-                         weightBytes: embedSize,
+                         weightBytes: embedSize / 2,
                          scaleBytes: UInt64(toy.vocabSize * (d / Quantization.groupSize) * MemoryLayout<UInt16>.stride),
                          biasBytes: UInt64(toy.vocabSize * (d / Quantization.groupSize) * MemoryLayout<UInt16>.stride)),
             ResidentSpec(name: "language_model.model.norm.weight",
@@ -238,7 +255,7 @@ import Metal
                 weightBytes: bf16DBytes,
                 scaleBytes: 0,
                 biasBytes: 0))
-            specs.append(int4AffineSpec(
+            specs.append(int8AffineSpec(
                 "language_model.model.layers.\(L).router.proj.weight",
                 rows: toy.numExperts,
                 cols: d))
@@ -264,10 +281,15 @@ import Metal
             cursor += n.utf8.count
         }
         let indexBytes = UInt64(stringTableBase + stringTable.count)
+        // Pad the index to 16 KB alignment (GTurbo v1 format requirement).
+        let alignmentBytes: UInt64 = 16_384
+        let alignedIndexBytes = ((indexBytes + alignmentBytes - 1) / alignmentBytes)
+            * alignmentBytes
+        let paddingBytes = alignedIndexBytes - indexBytes
 
         var entries: [ResidentEntry] = []
         entries.reserveCapacity(specs.count)
-        var payloadCursor = indexBytes
+        var payloadCursor = alignedIndexBytes
         for spec in specs {
             let weightOffset = payloadCursor
             let scaleOffset = spec.scaleBytes > 0 ? weightOffset + spec.weightBytes : 0
@@ -288,14 +310,14 @@ import Metal
                 sourceBiases: nil))
             payloadCursor += spec.weightBytes + spec.scaleBytes + spec.biasBytes
         }
-        let residentSize = payloadCursor - indexBytes
+        let residentSize = payloadCursor - alignedIndexBytes
 
-        let totalBytes = Int(indexBytes + residentSize)
+        let totalBytes = Int(alignedIndexBytes + residentSize)
         var fileBuf = [UInt8](repeating: 0, count: totalBytes)
         fileBuf.withUnsafeMutableBytes { raw in
             let base = raw.baseAddress!
             GTurboBinary.writeIndexHeader(into: base,
-                                          indexSize: indexBytes,
+                                          indexSize: alignedIndexBytes,
                                           residentSize: residentSize,
                                           entryCount: UInt64(entries.count))
             for (i, e) in entries.enumerated() {
@@ -423,6 +445,23 @@ import Metal
             "hiddenActivation": toy.hiddenActivation,
             "fullAttentionLayerMask": toy.fullAttentionLayerMask.map { Int($0) },
         ]
+        let quantSlotInt4: [String: Any] = [
+            "weightBits": 4, "scheme": "affine",
+            "scaleType": "bf16", "biasType": "bf16",
+            "groupSize": 64,
+        ]
+        let quantSlotInt8: [String: Any] = [
+            "weightBits": 8, "scheme": "affine",
+            "scaleType": "bf16", "biasType": "bf16",
+            "groupSize": 64,
+        ]
+        let quant: [String: Any] = [
+            "embedding": quantSlotInt4,
+            "attention": quantSlotInt4,
+            "router": quantSlotInt8,
+            "sharedExpert": quantSlotInt4,
+            "routedExpert": quantSlotInt4,
+        ]
         let manifestRoot: [String: Any] = [
             "magic": "GTURBO",
             "versionMajor": 1,
@@ -430,6 +469,7 @@ import Metal
             "flags": ["streamingPresent": true, "turboQuantKV": false, "aneSharedExpert": false],
             "modelID": "toy",
             "arch": archDict,
+            "quant": quant,
             "files": files,
             "expertsPerLayer": toy.numExperts,
             "numLayers": toy.numLayers,

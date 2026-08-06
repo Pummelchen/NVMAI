@@ -97,7 +97,7 @@ def send_request_stream(messages, port=8080):
 
 def run_config(cache_mode, mtp_config, config_label, port=8080):
     print(f"\n{'#'*110}", flush=True)
-    print(f"# PRECISE: {config_label}", flush=True)
+    print(f"# BENCHMARK: {config_label}", flush=True)
     print(f"# Cache: {cache_mode}, MTP: {mtp_config}, Port: {port}", flush=True)
     print(f"{'#'*110}", flush=True)
 
@@ -156,7 +156,7 @@ def run_config(cache_mode, mtp_config, config_label, port=8080):
     print(f"\nWall: {total_wall:.1f}s | Decode only: {total_ct/avg_warm:.1f}s | Overhead: {overhead:.1f}s ({overhead/len(results):.2f}s/req)", flush=True)
     
     ts = time.strftime('%Y%m%dT%H%M%S')
-    outdir = f"benchmark-results/bench-2x2-precise-{config_label.replace(' ', '_').lower()}-{ts}"
+    outdir = f"benchmark-results/bench-{config_label}-{ts}"
     os.makedirs(outdir, exist_ok=True)
     with open(os.path.join(outdir, "aggregate.json"), "w") as f:
         json.dump({"config": config_label, "cache_mode": cache_mode, "mtp_config": mtp_config,
@@ -168,19 +168,32 @@ def run_config(cache_mode, mtp_config, config_label, port=8080):
     return avg_warm
 
 if __name__ == "__main__":
+    # Accept model path from command-line argument
+    base_dir = os.environ.get("NVMAI_DIR", "/Users/andreborchert/Downloads/NVMAI")
+    main_model = sys.argv[1] if len(sys.argv) > 1 else os.path.join(base_dir, "models", "qwen36.gturbo")
+    mtp_model = os.path.join(base_dir, "models", "qwen36-mtp.gturbo")
+
+    # Detect quantization from model path for labeling
+    quant_label = "4bit"
+    if "6bit" in main_model:
+        quant_label = "6bit"
+    elif "8bit" in main_model:
+        quant_label = "8bit"
+
     configs = [
-        ("off", "off", "cache_off_mtp_off", 8080),
-        ("multi-prefix", "off", "cache_on_mtp_off", 8081),
-        ("off", "on", "cache_off_mtp_on", 8082),
-        ("multi-prefix", "on", "cache_on_mtp_on", 8083),
+        ("off", "off", f"cache_off_mtp_off_{quant_label}", 8080),
+        ("multi-prefix", "off", f"cache_on_mtp_off_{quant_label}", 8081),
+        ("off", "on", f"cache_off_mtp_on_{quant_label}", 8082),
+        ("multi-prefix", "on", f"cache_on_mtp_on_{quant_label}", 8083),
     ]
 
-    base_dir = os.environ.get("NVMAI_DIR", "/Users/andreborchert/Downloads/NVMAI")
-    mtp_model = os.path.join(base_dir, "scratch", "qwen36-mtp.gturbo")
-    main_model = os.path.join(base_dir, "scratch", "qwen36.gturbo")
+    print(f"\n{'#'*110}", flush=True)
+    print(f"# BENCHMARKING MODEL: {os.path.basename(main_model)}", flush=True)
+    print(f"# Quantization: {quant_label}", flush=True)
+    print(f"{'#'*110}", flush=True)
 
     for cache_mode, mtp_config, config_label, port in configs:
-        cmd = f'cd {base_dir} && .build/release/NVMAIServer --port {port} --model {main_model} --prompt-cache-mode {cache_mode}'
+        cmd = f'cd {base_dir} && .build/arm64-apple-macosx/release/NVMAIServer --port {port} --model {main_model} --prompt-cache-mode {cache_mode}'
         if mtp_config == "on":
             cmd += f' --mtp-model {mtp_model} --mtp-memory-mib 384'
         cmd += f' > /tmp/nvmaiserver_{port}.log 2>&1 &'

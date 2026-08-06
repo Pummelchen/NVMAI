@@ -32,11 +32,11 @@ enum AppModelLocation {
         if let executableURL,
            let root = packageRoot(startingAt: executableURL.deletingLastPathComponent(),
                                   fileExists: fileExists) {
-            return root.appendingPathComponent("scratch/\(installDirectoryName)", isDirectory: true)
+            return root.appendingPathComponent("models/\(installDirectoryName)", isDirectory: true)
                 .standardizedFileURL
         }
         if let root = packageRoot(startingAt: currentDirectoryURL, fileExists: fileExists) {
-            return root.appendingPathComponent("scratch/\(installDirectoryName)", isDirectory: true)
+            return root.appendingPathComponent("models/\(installDirectoryName)", isDirectory: true)
                 .standardizedFileURL
         }
         return applicationSupportURL

@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "NVMAI", targets: ["NVMAI"]),
+        .library(name: "NVMAIFormat", targets: ["NVMAIFormat"]),
         .executable(name: "NVMAIRepack", targets: ["NVMAIRepack"]),
         .executable(name: "NVMAICLI", targets: ["NVMAICLI"]),
         .executable(name: "NVMAIMac", targets: ["NVMAIMac"]),
@@ -21,8 +22,13 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "NVMAIFormat",
+            path: "Sources/NVMAIFormat"
+        ),
+        .target(
             name: "NVMAI",
             dependencies: [
+                "NVMAIFormat",
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/NVMAI",
@@ -32,6 +38,7 @@ let package = Package(
         ),
         .target(
             name: "NVMAIRepackCore",
+            dependencies: ["NVMAIFormat"],
             path: "Sources/NVMAIRepack/Core"
         ),
         .executableTarget(

@@ -63,33 +63,36 @@ Measured on M3 24 GB with 12 independent prompts (128-token max generations).
 Each prompt runs as a fresh session. TTFT (time to first token) measured via
 streaming, decode speed computed only from requests with ≥0.5s decode time.
 
-| Config | Cache | MTP | Warm Decode | Cold TTFT | Overhead/req | Last 6 Avg |
-|--------|-------|-----|-------------|-----------|--------------|------------|
-| **1. OFF × OFF** | off | off | **5.51 tok/s** | 4.84 s | 6.36 s | 5.88 |
-| **2. ON × OFF** | on | off | **5.55 tok/s** | 4.02 s | 6.19 s | 6.00 |
-| **3. OFF × ON** | off | on | **5.13 tok/s** | 4.48 s | 6.01 s | 5.28 |
-| **4. ON × ON** | on | on | **4.55 tok/s** | 4.01 s | 6.29 s | 4.68 |
+| Config | Cache | MTP | **4-bit** | **6-bit** | **8-bit** |
+|--------|-------|-----|-----------|-----------|-----------|
+| OFF × OFF | off | off | **10.17 tok/s** | 6.96 tok/s | 5.83 tok/s |
+| ON × OFF | multi-prefix | off | **10.19 tok/s** | 6.38 tok/s | 5.77 tok/s |
+| OFF × ON | off | on | **10.21 tok/s** | 6.16 tok/s | 5.92 tok/s |
+| ON × ON | multi-prefix | on | **8.62 tok/s** | 5.68 tok/s | 6.02 tok/s |
 
 ### Key Findings
 
-1. **Real decode speed: ~5.5 tok/s**. The previous "1.5 tok/s" figure included
-   ~6.3s fixed overhead per request (HTTP dispatch, model access, response
-   serialization). For short responses (<20 tokens), overhead dominates total
-   wall time.
+1. **4-bit is the fastest quantization** at ~10 tok/s across all configs.
+   Consistent decode performance with minimal overhead variation.
 
-2. **Cache ON (multi-prefix)** improves cold TTFT by ~25% (4.0s vs 4.8s) with
-   identical warm decode speed. Prefill optimization works as expected.
+2. **6-bit trades ~30% speed for better quality** at ~6-7 tok/s. Notable
+   degradation with MTP + cache ON (5.68 tok/s vs 6.96 tok/s OFF × OFF).
 
-3. **MTP ON** reduces decode speed by ~0.4–1.0 tok/s. The 1-layer draft sidecar
-   overhead (embedding + attention + MoE + head) adds ~30–45% per-step cost
-   that cannot be overcome on a 40-layer MoE.
+3. **8-bit matches 6-bit** at ~5-6 tok/s for cache-only configs, but shows
+   more stable performance under MTP + cache ON (6.02 tok/s vs 6-bit's 5.68).
 
-4. **Best config: Cache ON + MTP OFF** at 5.55 tok/s warm decode, 4.0s cold
-   TTFT, 6.2s fixed overhead per request.
+4. **Cache ON (multi-prefix)** provides negligible decode speed change but
+   improves cold TTFT and reduces overhead.
 
-See [`benchmarks/bench-2x2-precise.py`](benchmarks/bench-2x2-precise.py) for
-the benchmark script. Results in
-[`benchmark-results/bench-2x2-precise-*`](benchmark-results/).
+5. **MTP ON** reduces decode speed across all quantizations. The one-layer
+   draft sidecar adds overhead that cannot overcome the 40-layer MoE cost.
+
+6. **Best config: Cache ON + MTP OFF** — 4-bit at 10.19 tok/s, 6-bit at
+   6.38 tok/s, 8-bit at 5.77 tok/s.
+
+See [`benchmark-results/nvmai_benchmark.py`](benchmark-results/nvmai_benchmark.py)
+for the benchmark script. Results in
+[`benchmark-results/`](benchmark-results/).
 
 ## Benchmark Test Prompts
 

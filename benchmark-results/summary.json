@@ -1,0 +1,41 @@
+{
+  "runs": [
+    {
+      "folder": "cache_off_mtp_off-20260806T125344",
+      "config": "cache_off_mtp_off",
+      "cache_mode": "off",
+      "mtp_config": "off",
+      "avg_decode_tok_s": 8.27,
+      "last6_avg": 8.68,
+      "total_wall_s": 64.0
+    },
+    {
+      "folder": "cache_off_mtp_on-20260806T125746",
+      "config": "cache_off_mtp_on",
+      "cache_mode": "off",
+      "mtp_config": "on",
+      "avg_decode_tok_s": 8.13,
+      "last6_avg": 8.53,
+      "total_wall_s": 69.68
+    },
+    {
+      "folder": "cache_on_mtp_off-20260806T125549",
+      "config": "cache_on_mtp_off",
+      "cache_mode": "multi-prefix",
+      "mtp_config": "off",
+      "avg_decode_tok_s": 7.42,
+      "last6_avg": 7.76,
+      "total_wall_s": 76.59
+    },
+    {
+      "folder": "cache_on_mtp_on-20260806T125947",
+      "config": "cache_on_mtp_on",
+      "cache_mode": "multi-prefix",
+      "mtp_config": "on",
+      "avg_decode_tok_s": 7.79,
+      "last6_avg": 8.06,
+      "total_wall_s": 73.36
+    }
+  ],
+  "total": 4
+}

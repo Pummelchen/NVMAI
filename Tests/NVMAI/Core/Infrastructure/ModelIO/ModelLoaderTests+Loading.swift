@@ -13,7 +13,8 @@ extension ModelLoaderTests {
       directoryURL: dir, device: device,
       expecting: .gemma4Toy())
     let embed = try model.embedding()
-    #expect(embed.length == UInt64(1024 * 64))
+    // Embedding is int4-packed: 2 values per byte, so length = vocabSize * hiddenSize / 2
+    #expect(embed.length == UInt64(1024 * 64 / 2))
     #expect(embed.shape.0 == 1024 && embed.shape.1 == 64)
     let norm = try model.finalNorm()
     #expect(norm.length == UInt64(64 * 2))
