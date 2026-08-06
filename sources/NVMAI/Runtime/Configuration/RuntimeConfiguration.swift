@@ -42,7 +42,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public static let allowedPrefillChunkTokens = [
         32, 64, 128, 256, 512, 1_024, 2_048, 4_096,
     ]
-    public static let qwenLongPrefillChunkTokens = 1_024
+    public static let qwenLongPrefillChunkTokens = 4_096
 
     public let expertCacheSlots: Int
     public let expertCachePolicy: RuntimeExpertCachePolicy
