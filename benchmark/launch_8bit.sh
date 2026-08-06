@@ -28,11 +28,28 @@ echo " Model:     $MODEL"
 echo "============================================================"
 echo ""
 
-# Kill any stale server on this port
-if lsof -i :"$PORT" >/dev/null 2>&1; then
-  echo "Stopping existing process on port $PORT..."
-  lsof -ti :"$PORT" | xargs kill
-  sleep 2
+# Kill only a stale NVMAIServer on this port — never an unrelated process
+# that happens to hold it — then wait until the port actually frees (no
+# fixed sleep, so a slow teardown can't race the new server's bind).
+if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "Stopping existing NVMAIServer on port $PORT..."
+  for pid in $(lsof -ti :"$PORT" -sTCP:LISTEN); do
+    if ps -p "$pid" -o command= | grep -q NVMAIServer; then
+      kill "$pid"
+    else
+      echo "  skipping non-NVMAIServer pid $pid on port $PORT" >&2
+    fi
+  done
+  for _ in $(seq 1 100); do
+    if ! lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "ERROR: port $PORT still in use after waiting for it to free" >&2
+    exit 1
+  fi
 fi
 
 exec "$BINARY" \

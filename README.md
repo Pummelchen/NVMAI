@@ -63,12 +63,24 @@ Measured on M3 24 GB with 12 independent prompts (128-token max generations).
 Each prompt runs as a fresh session. TTFT (time to first token) measured via
 streaming, decode speed computed only from requests with ≥0.5s decode time.
 
+> **Methodology caveat (audit correction):** the server forces prompt cache
+> **off** whenever MTP is enabled (a target-only snapshot cannot restore the
+> draft stream), so the `ON × ON` cell below never actually ran with both
+> enabled — it re-ran the cache-off × MTP-on configuration and is marked
+> invalid. In addition, all published runs used unique one-shot prompts, so
+> `cached_tokens` was 0 everywhere and the multi-prefix cache dimension was
+> not measured. `benchmark/nvmai_benchmark.py` has been corrected (replayable
+> warm sends that verify cache hits, PID-managed servers, answer
+> verification) and the matrix is being regenerated; treat the cache column
+> and the ON × ON row below as unmeasured until the regenerated numbers are
+> published.
+
 | Config | Cache | MTP | **4-bit** | **6-bit** | **8-bit** |
 |--------|-------|-----|-----------|-----------|-----------|
 | OFF × OFF | off | off | **10.17 tok/s** | 6.96 tok/s | 5.83 tok/s |
 | ON × OFF | multi-prefix | off | **10.19 tok/s** | 6.38 tok/s | 5.77 tok/s |
 | OFF × ON | off | on | **10.21 tok/s** | 6.16 tok/s | 5.92 tok/s |
-| ON × ON | multi-prefix | on | **8.62 tok/s** | 5.68 tok/s | 6.02 tok/s |
+| ~~ON × ON~~ | — | — | ~~8.62~~ | ~~5.68~~ | ~~6.02~~ |
 
 ### Key Findings
 
@@ -76,15 +88,11 @@ streaming, decode speed computed only from requests with ≥0.5s decode time.
    Consistent decode performance with minimal overhead variation.
 
 2. **6-bit trades ~30% speed for better quality** at ~6-7 tok/s. Notable
-   degradation with MTP + cache ON (5.68 tok/s vs 6.96 tok/s OFF × OFF).
+   degradation with MTP on (6.16 tok/s vs 6.96 tok/s OFF × OFF).
 
-3. **8-bit matches 6-bit** at ~5-6 tok/s for cache-only configs, but shows
-   more stable performance under MTP + cache ON (6.02 tok/s vs 6-bit's 5.68).
+3. **8-bit matches 6-bit** at ~5-6 tok/s for cache-only configs.
 
-4. **Cache ON (multi-prefix)** provides negligible decode speed change but
-   improves cold TTFT and reduces overhead.
-
-5. **MTP ON** reduces decode speed across all quantizations. The one-layer
+4. **MTP ON** reduces decode speed across all quantizations. The one-layer
    draft sidecar adds overhead that cannot overcome the 40-layer MoE cost.
 
 ## Documentation

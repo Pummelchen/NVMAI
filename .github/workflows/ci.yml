@@ -25,9 +25,17 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      - name: Build release products
-        run: swift build -c release
+      - name: Build release products (0 warnings gate)
+        run: |
+          swift build -c release 2>&1 | tee /tmp/build.log
+          if grep -q 'warning:' /tmp/build.log; then
+            echo "::error::build emitted warnings; CI requires a warning-free release build"
+            exit 1
+          fi
       - name: Run serial tests
+        # `swift test` (Scripts/test.sh) implicitly performs its own DEBUG
+        # build, which also produces the `.build/debug/NVMAIRepack` binary
+        # that RepackCLITests spawns — no separate debug build step is needed.
         run: Scripts/test.sh
       - name: Check Markdown links
         run: ruby Scripts/check_markdown_links.rb
