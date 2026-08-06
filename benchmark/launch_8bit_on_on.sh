@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # Launch NVMAIServer for 8-bit model with prompt cache (multi-prefix) and MTP ON.
+#
+# NOTE: When MTP is active, the server forces prompt cache OFF. This is a
+# hard limit — a target-only cache snapshot cannot restore the draft stream.
+#
+# The config is referred to as "ON/ON" for consistency with the benchmark
+# matrix, but the cache will run in OFF mode in practice.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
