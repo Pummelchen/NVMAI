@@ -56,3 +56,6 @@ __pycache__/
 *.pyc
 .venv/
 .qwen/
+
+# Standalone release binaries
+Binary/
