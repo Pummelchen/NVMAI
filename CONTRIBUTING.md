@@ -16,8 +16,7 @@ Run the release build, serial tests, and Markdown link check:
 
 ```bash
 swift build -c release
-Scripts/test.sh
-ruby Scripts/check_markdown_links.rb
+swift test --no-parallel
 ```
 
 These checks do not download or load the model. For a real-model change, also

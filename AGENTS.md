@@ -46,7 +46,9 @@ the server is needed, and stop only a server you launched.
 
 Before a model run, require macOS 26+, Swift 6.3+, enough disk, acceptable `memory_pressure -Q`, a completed selected Qwen `.gturbo` installation, and no process from `pgrep -fl 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
 
-Run package tests through `Scripts/test.sh`. Run only one app, CLI, or model-using test at a time.
+Run package tests serially (`swift test --no-parallel`), passing any extra
+arguments like `--filter` through. Run only one app, CLI, or model-using test
+at a time.
 
 For performance results, build release once and follow the [community benchmark guide](https://github.com/Pummelchen/NVMAI/wiki/Benchmarking-Guide) exactly. Do not enable experimental controls or profiling.
 
