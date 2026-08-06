@@ -118,7 +118,7 @@ import NVMAIValidationSupport
     func runLoop(seq: [Int32], end: Int32, prompt: String = "go",
                          config: GenerationConfig) async throws -> (Collected, RawDecodeResult) {
         let ctx = try MetalContext()
-        let tok = try await GFTokenizer.load()
+        let tok = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
         let producer = ScriptedLogitProducer(vocabSize: tok.vocabSize,
                                              step: automaton(seq, end: end))
         let promptIds = tok.encode(prompt, addBOS: true)

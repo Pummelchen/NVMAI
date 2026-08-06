@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import NVMAIFormat
 
 public struct VerifyInstallOptions: Sendable {
     public let inputGTurbo: String
@@ -19,46 +20,68 @@ public struct VerifyInstallResult: Sendable {
 public enum VerifiedInstallTool {
     // 64 MiB: sized for Qwen 3.6's ~22 MB layout.json (40 layers x 256 experts).
     public static let metadataMaxBytes: UInt64 = 64 * 1024 * 1024
+    // Hard ceiling for any single payload file named by the manifest. The
+    // manifest size remains the exact per-file contract (verified below); this
+    // cap only rejects absurd corrupted manifests before hashing.
+    public static let payloadMaxBytes: UInt64 = 64 * 1024 * 1024 * 1024
 
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
-        let root = URL(fileURLWithPath: options.inputGTurbo).standardizedFileURL
-        let manifestPath = root.appendingPathComponent("manifest.json").path
-        let manifestSize = try fileSize(path: manifestPath, relativePath: "manifest.json")
-        let manifestSha = try Sha256Stream.hashFile(path: manifestPath, noCache: true)
-        let manifest = try loadManifest(path: manifestPath)
-        try validatePackedExpertLayout(root: root, manifest: manifest)
+        let access = try GTurboDirectoryAccess(rootPath: options.inputGTurbo)
+        let manifestPath = "manifest.json"
+        try GTurboPathValidator.validateRelativePath(
+            manifestPath, field: "manifest.files.manifest.json")
+        let manifestSize = try access.fileSize(manifestPath)
+        let manifestSha = try access.hash(manifestPath, noCache: true)
+        let manifest = try loadManifest(access: access)
+        try validatePackedExpertLayout(access: access, manifest: manifest)
 
         var files: [RepackAudit.OutputFile] = []
         files.reserveCapacity(manifest.files.count)
         var bytesVerified = manifestSize
         for relativePath in manifest.files.keys.sorted() {
             guard let entry = manifest.files[relativePath] else { continue }
-            let path = root.appendingPathComponent(relativePath).path
-            let actualSize = try fileSize(path: path, relativePath: relativePath)
+            // Path validation before any filesystem operation: reject `..`,
+            // absolute and non-normalized names, and duplicate filesystem keys.
+            try GTurboPathValidator.validateRelativePath(
+                relativePath, field: "manifest.files.\(relativePath)")
+            guard entry.size <= payloadMaxBytes else {
+                throw RepackError.configurationInvalid(
+                    detail: "\(relativePath) manifest size \(entry.size) exceeds "
+                        + "the \(payloadMaxBytes)-byte per-file cap")
+            }
+            // All reads go through the root-anchored openat chain with
+            // O_NOFOLLOW at every level (no symlink escapes) and the
+            // descriptor's type is verified after open.
+            let actualSize = try access.fileSize(relativePath)
             guard actualSize == entry.size else {
                 throw RepackError.configurationInvalid(
                     detail: "\(relativePath) size \(actualSize) != manifest \(entry.size)")
             }
-            let actualSha = try Sha256Stream.hashFile(path: path, noCache: true)
+            let actualSha = try access.hash(relativePath, noCache: true)
             guard actualSha.lowercased() == entry.sha256.lowercased() else {
                 throw RepackError.configurationInvalid(detail: "\(relativePath) SHA mismatch")
             }
-            bytesVerified &+= actualSize
+            let (verified, overflow) = bytesVerified.addingReportingOverflow(actualSize)
+            guard !overflow else {
+                throw RepackError.configurationInvalid(detail: "verified byte total overflows")
+            }
+            bytesVerified = verified
             files.append(RepackAudit.OutputFile(relativePath: relativePath,
                                                 size: actualSize,
                                                 sha256: actualSha))
         }
-        let unexpectedEntries = try findUnexpectedEntries(root: root, manifest: manifest)
+        let unexpectedEntries = try findUnexpectedEntries(access: access, manifest: manifest)
 
         let receiptData = try VerifiedInstallReceiptWriter.encode(
-            outputDir: root.path,
+            outputDir: access.rootPath,
             manifestSha256: manifestSha,
             manifestSize: manifestSize,
             sourceRepoID: nil,
             sourceRevision: manifest.sourceSnapshotHash,
             toolVersion: "NVMAIRepack verify-install",
             files: files)
-        let receiptPath = root.appendingPathComponent(VerifiedInstallReceiptWriter.fileName).path
+        let receiptPath = access.rootPath
+            + "/" + VerifiedInstallReceiptWriter.fileName
         try receiptData.write(to: URL(fileURLWithPath: receiptPath), options: .atomic)
         return VerifyInstallResult(receiptPath: receiptPath,
                                    fileCount: files.count + 1,
@@ -67,10 +90,9 @@ public enum VerifiedInstallTool {
     }
 
     static func validatePackedExpertLayout(inputGTurbo: String) throws {
-        let root = URL(fileURLWithPath: inputGTurbo).standardizedFileURL
-        let manifest = try loadManifest(
-            path: root.appendingPathComponent("manifest.json").path)
-        try validatePackedExpertLayout(root: root, manifest: manifest)
+        let access = try GTurboDirectoryAccess(rootPath: inputGTurbo)
+        let manifest = try loadManifest(access: access)
+        try validatePackedExpertLayout(access: access, manifest: manifest)
     }
 
     private struct ManifestFileEntry: Decodable {
@@ -105,39 +127,39 @@ public enum VerifiedInstallTool {
         let size: UInt64
     }
 
-    private static func loadManifest(path: String) throws -> Manifest {
+    private static func loadManifest(access: GTurboDirectoryAccess) throws -> Manifest {
         do {
-            let data = try loadMetadataJSON(path: path, relativePath: "manifest.json")
+            let data = try loadMetadataJSON(access: access, relativePath: "manifest.json")
             return try JSONDecoder().decode(Manifest.self, from: data)
         } catch {
             throw RepackError.configurationInvalid(detail: "manifest.json invalid: \(error)")
         }
     }
 
-    private static func loadLayout(path: String) throws -> PackedExpertsLayout {
+    private static func loadLayout(access: GTurboDirectoryAccess) throws -> PackedExpertsLayout {
         do {
-            let data = try loadMetadataJSON(path: path, relativePath: "packed_experts/layout.json")
+            let data = try loadMetadataJSON(access: access,
+                                            relativePath: "packed_experts/layout.json")
             return try JSONDecoder().decode(PackedExpertsLayout.self, from: data)
         } catch {
             throw RepackError.configurationInvalid(detail: "packed_experts/layout.json invalid: \(error)")
         }
     }
 
-    private static func loadMetadataJSON(path: String, relativePath: String) throws -> Data {
-        let size = try fileSize(path: path, relativePath: relativePath)
-        guard size <= metadataMaxBytes else {
-            throw RepackError.configurationInvalid(
-                detail: "\(relativePath) size \(size) exceeds metadata cap \(metadataMaxBytes)")
-        }
-        return try Data(contentsOf: URL(fileURLWithPath: path))
+    private static func loadMetadataJSON(access: GTurboDirectoryAccess,
+                                         relativePath: String) throws -> Data {
+        try GTurboPathValidator.validateRelativePath(
+            relativePath, field: "metadata.\(relativePath)")
+        return try access.readMetadata(relativePath, maxBytes: metadataMaxBytes)
     }
 
-    private static func validatePackedExpertLayout(root: URL, manifest: Manifest) throws {
+    private static func validatePackedExpertLayout(access: GTurboDirectoryAccess,
+                                                   manifest: Manifest) throws {
         let layoutRelativePath = "packed_experts/layout.json"
         guard manifest.files[layoutRelativePath] != nil else {
             throw RepackError.configurationInvalid(detail: "manifest missing \(layoutRelativePath)")
         }
-        let layout = try loadLayout(path: root.appendingPathComponent(layoutRelativePath).path)
+        let layout = try loadLayout(access: access)
         let pageSize = UInt64(getpagesize())
         guard layout.expertStride == manifest.expertStride,
               layout.numLayers == manifest.numLayers,
@@ -160,6 +182,8 @@ public enum VerifiedInstallTool {
                 throw RepackError.configurationInvalid(
                     detail: "packed_experts/\(layer.file) expert count mismatch")
             }
+            try GTurboPathValidator.validateBasename(
+                layer.file, field: "packed_experts/layout.json layers[\(layer.layer)].file")
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw RepackError.configurationInvalid(detail: "manifest missing \(relativePath)")
@@ -168,8 +192,7 @@ public enum VerifiedInstallTool {
                 throw RepackError.configurationInvalid(
                     detail: "\(relativePath) manifest size \(manifestEntry.size) != \(expectedLayerSize)")
             }
-            let actualSize = try fileSize(path: root.appendingPathComponent(relativePath).path,
-                                          relativePath: relativePath)
+            let actualSize = try access.fileSize(relativePath)
             guard actualSize == expectedLayerSize else {
                 throw RepackError.configurationInvalid(
                     detail: "\(relativePath) size \(actualSize) != \(expectedLayerSize)")
@@ -202,18 +225,8 @@ public enum VerifiedInstallTool {
         }
     }
 
-    private static func fileSize(path: String, relativePath: String) throws -> UInt64 {
-        var st = stat()
-        guard stat(path, &st) == 0 else {
-            throw RepackError.fileStatFailed(path: path, errno: errno)
-        }
-        guard st.st_size >= 0 else {
-            throw RepackError.configurationInvalid(detail: "\(relativePath) has negative file size")
-        }
-        return UInt64(st.st_size)
-    }
-
-    private static func findUnexpectedEntries(root: URL, manifest: Manifest) throws -> [String] {
+    private static func findUnexpectedEntries(access: GTurboDirectoryAccess,
+                                              manifest: Manifest) throws -> [String] {
         let declaredFiles = Set(manifest.files.keys)
             .union(["manifest.json", VerifiedInstallReceiptWriter.fileName])
         var allowed = declaredFiles
@@ -226,30 +239,17 @@ public enum VerifiedInstallTool {
         }
         allowed.insert("tokenizer")
 
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsPackageDescendants]) else {
-            return []
-        }
-
+        let entries = try access.relativeEntries()
         var unexpected: [String] = []
-        for case let url as URL in enumerator {
-            let rel = relativePath(for: url, root: root)
-            if rel == ".DS_Store" { continue }
+        for rel in entries {
+            // .DS_Store may appear at any depth (Finder writes it into
+            // subdirectories too).
+            if rel == ".DS_Store" || rel.hasSuffix("/.DS_Store") { continue }
             if rel == "tokenizer" || rel.hasPrefix("tokenizer/") { continue }
             if !allowed.contains(rel) {
                 unexpected.append(rel)
             }
         }
         return unexpected.sorted()
-    }
-
-    private static func relativePath(for url: URL, root: URL) -> String {
-        let rootPathRaw = root.standardizedFileURL.path
-        let rootPath = rootPathRaw.hasSuffix("/") ? rootPathRaw : rootPathRaw + "/"
-        let path = url.standardizedFileURL.path
-        guard path.hasPrefix(rootPath) else { return url.lastPathComponent }
-        return String(path.dropFirst(rootPath.count))
     }
 }

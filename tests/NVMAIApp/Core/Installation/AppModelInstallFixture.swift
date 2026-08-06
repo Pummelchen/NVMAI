@@ -10,7 +10,7 @@ func makeCompleteModelInstall(_ tag: String) throws -> URL {
     try FileManager.default.createDirectory(at: experts, withIntermediateDirectories: true)
     try Data("{}".utf8).write(to: experts.appendingPathComponent("layout.json"))
 
-    let arch = ArchConfig.gemma4_26B_A4B
+    let arch = ArchConfig.qwen36_35B_A3B
     var files: [String: Any] = [
         "model_weights.bin": ["size": 0, "sha256": String(repeating: "0", count: 64)],
         "packed_experts/layout.json": ["size": 2, "sha256": String(repeating: "0", count: 64)],
@@ -26,8 +26,8 @@ func makeCompleteModelInstall(_ tag: String) throws -> URL {
         "versionMajor": 1,
         "versionMinor": 0,
         "flags": ["streamingPresent": true],
-        "modelID": "test/gemma-4-26b-a4b",
-        "sourceSnapshotHash": "sha256:" + AppModelInstallDescriptor.default.sourceIndexSHA256,
+        "modelID": "test/qwen36",
+        "sourceSnapshotHash": "sha256:" + AppModelInstallDescriptor.qwen36.sourceIndexSHA256,
         "quant": [
             "embedding": quantSlot(4),
             "attention": quantSlot(4),

@@ -81,6 +81,33 @@ import Testing
     _ = first
   }
 
+  /// Wires the fake through AppModel's full cancel path: loadModel() drives
+  /// the fake's ensureLoaded event stream, run() streams its token events,
+  /// and a mid-generation cancel surfaces as the app-level `.cancelled`
+  /// terminal state with the transcript preserved.
+  @MainActor
+  @Test func appModelCancelThroughFakeClientTerminatesCleanly() async throws {
+    let directory = try makeCompleteModelInstall("fake-cancel")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let model = AppModel(
+      modelDirectory: directory,
+      client: FakeInferenceClient(eventDelay: .milliseconds(5)),
+      installer: MockModelInstallerClient())
+
+    model.loadModel()
+    try await waitForFakeClient { model.loadState.isReady }
+    model.promptText = "cancel me"
+    model.run()
+    try await waitForFakeClient { model.liveTokenCount > 0 }
+    model.cancel()
+    try await waitForFakeClient { !model.isRunning }
+
+    #expect(model.error == .cancelled)
+    #expect(model.hasOutputTranscript)
+    #expect(model.outputConversationPlainText.hasPrefix(
+      "You:\ncancel me\n\nAnswer:\n"))
+  }
+
   @MainActor
   private func waitForFakeClient(_ predicate: @escaping @MainActor () -> Bool) async throws {
     for _ in 0..<200 {

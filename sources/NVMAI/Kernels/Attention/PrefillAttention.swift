@@ -40,17 +40,46 @@ struct PrefillAttentionParams: Sendable, Equatable {
 }
 
 
+enum PrefillAttentionError: Error, CustomStringConvertible {
+    case tensorOpsUnavailable(reason: String)
+    case commandEncoderFailed
+
+    public var description: String {
+        switch self {
+        case .tensorOpsUnavailable(let reason):
+            return "TensorOps 2D prefill attention requested but unavailable: \(reason)"
+        case .commandEncoderFailed:
+            return "Failed to create Metal compute command encoder"
+        }
+    }
+}
+
+
 final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
+    /// K7: recorded once at init so an explicit TensorOps path request can
+    /// throw the real reason instead of a bare `preconditionFailure`.
+    private let tensorOpsUnavailableReason: String
 
     init(context: MetalContext) throws {
         self.context = context
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
-        self.psoFullTensorOps2DValidityV2 = context.device.supportsFamily(.apple10)
-            ? try? context.pipeline("attention_prefill_full_tensorops_2d_validity_v2")
-            : nil
+        if context.device.supportsFamily(.apple10) {
+            do {
+                self.psoFullTensorOps2DValidityV2 = try context.pipeline(
+                    "attention_prefill_full_tensorops_2d_validity_v2")
+                self.tensorOpsUnavailableReason = ""
+            } catch {
+                self.psoFullTensorOps2DValidityV2 = nil
+                self.tensorOpsUnavailableReason = "\(error)"
+            }
+        } else {
+            self.psoFullTensorOps2DValidityV2 = nil
+            self.tensorOpsUnavailableReason =
+                "device does not support Apple10 MPP tensor operations"
+        }
     }
 
     func encodeCausal(commandBuffer: MTLCommandBuffer,
@@ -60,7 +89,7 @@ final class PrefillAttention {
                              out: MTLBuffer, outOffset: Int = 0,
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
-                             path: RuntimePrefillAttentionPath = .causalTiled) {
+                             path: RuntimePrefillAttentionPath = .causalTiled) throws {
         validate(params)
 
         let requestsTensorOps = path == .fullTensorOps2DPreferred
@@ -80,8 +109,13 @@ final class PrefillAttention {
         if let tensorOpsPipeline {
             pipeline = tensorOpsPipeline
         } else if tensorOpsShape && path == .fullTensorOps2DValidityV2 {
-            preconditionFailure(
-                "TensorOps 2D prefill attention requires Apple10 MPP tensor support")
+            // K7: the caller explicitly requested the TensorOps path — fail
+            // loudly with the recorded reason instead of crashing or silently
+            // running a different kernel. Only auto-selected paths fall back.
+            throw PrefillAttentionError.tensorOpsUnavailable(
+                reason: tensorOpsUnavailableReason.isEmpty
+                    ? "TensorOps pipeline failed to compile"
+                    : tensorOpsUnavailableReason)
         } else {
             // Explicit mode also falls back for incompatible shapes. Benchmark
             // fixtures must use 512/16/2 to prove that TensorOps ran.
@@ -95,7 +129,9 @@ final class PrefillAttention {
         precondition(threadCount <= pipeline.maxTotalThreadsPerThreadgroup,
                      "tiled prefill attention requires headDim <= maxTotalThreadsPerThreadgroup")
 
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw PrefillAttentionError.commandEncoderFailed
+        }
         enc.setComputePipelineState(pipeline)
         enc.setBuffer(q, offset: qOffset, index: 0)
         enc.setBuffer(k, offset: kOffset, index: 1)

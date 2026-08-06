@@ -160,9 +160,16 @@ private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegat
         lock.lock()
         let mayReceive = responseAccepted && rejection == nil
         lock.unlock()
-        guard mayReceive else { return }
-        let attempted = receivedBytes + UInt64(data.count)
-        guard attempted <= expectation.length else {
+        guard mayReceive else {
+            // The response was rejected or a previous chunk already failed:
+            // stop the server from streaming further instead of silently
+            // dropping the body.
+            dataTask.cancel()
+            return
+        }
+        let (attempted, overflow) = receivedBytes.addingReportingOverflow(
+            UInt64(data.count))
+        guard !overflow, attempted <= expectation.length else {
             reject(RepackError.remoteBodyExceeded(
                 path: expectation.filename,
                 limit: expectation.length,
@@ -328,6 +335,12 @@ struct RemoteRedirectPolicy {
                 url: redactRemoteURL(proposedRequest.url),
                 detail: "only HTTPS redirects are allowed")
         }
+        // Ranged GETs must follow the HF `resolve/...` → object-store redirect
+        // wherever it leads (the CDN fronting a repo is not guaranteed to be a
+        // fixed name), so any HTTPS host is accepted — including the shared
+        // HF object-store hosts in RemoteHFObjectStoreHosts that the metadata
+        // HEAD policy additionally allows. Authorization is forwarded only
+        // while the host stays the same and is permanently dropped afterwards.
         let targetHost = proposedRequest.url?.host?.lowercased()
         if targetHost != sourceHost {
             authorizationMayBeForwarded = false

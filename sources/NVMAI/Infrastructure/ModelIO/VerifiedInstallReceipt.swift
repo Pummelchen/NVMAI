@@ -3,6 +3,19 @@ import Foundation
 public enum ModelIntegrityPolicy: Sendable, Equatable {
     case fullSha256
     case sizeCheckTrustedReceipt
+
+    /// Strongest policy that skips re-hashing the full payload: when the
+    /// installer's `verified-install.json` receipt is present, the per-file
+    /// hashes were already pinned at install time, so loads verify the
+    /// receipt binding and file sizes instead of re-hashing the weights.
+    /// Without a receipt, fall back to a full SHA-256 of everything.
+    public static func resolved(directoryURL: URL) -> ModelIntegrityPolicy {
+        let receiptURL = directoryURL
+            .appendingPathComponent(VerifiedInstallReceiptReader.fileName)
+        return FileManager.default.fileExists(atPath: receiptURL.path)
+            ? .sizeCheckTrustedReceipt
+            : .fullSha256
+    }
 }
 
 public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {
@@ -55,26 +68,20 @@ public enum VerifiedInstallReceiptReader {
             throw ModelError.trustedReceiptInvalid(detail: "\(fileName) is missing")
         }
         do {
-            let size = try fileSize(url)
-            guard size <= maxBytes else {
-                throw ModelError.trustedReceiptInvalid(
-                    detail: "\(fileName) size \(size) exceeds metadata cap \(maxBytes)")
-            }
+            // K17: read first, then verify the size against the same data —
+            // checking attributesOfItem and then re-reading the file was a
+            // TOCTOU window (the file could grow between the two).
             let data = try Data(contentsOf: url)
+            guard UInt64(data.count) <= maxBytes else {
+                throw ModelError.trustedReceiptInvalid(
+                    detail: "\(fileName) size \(data.count) exceeds metadata cap \(maxBytes)")
+            }
             return try JSONDecoder().decode(VerifiedInstallReceipt.self, from: data)
         } catch let error as ModelError {
             throw error
         } catch {
             throw ModelError.trustedReceiptInvalid(detail: "\(fileName): \(error)")
         }
-    }
-
-    private static func fileSize(_ url: URL) throws -> UInt64 {
-        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard let number = attrs[.size] as? NSNumber else {
-            throw ModelError.trustedReceiptInvalid(detail: "\(fileName) size unavailable")
-        }
-        return number.uint64Value
     }
 
     public static func validate(_ receipt: VerifiedInstallReceipt,

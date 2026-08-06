@@ -36,7 +36,7 @@ import NVMAIValidationSupport
             return UInt32.max
         }
 
-        kernel.encode(commandBuffer: cmd,
+        try kernel.encode(commandBuffer: cmd,
                       probs: inBuf, outToken: outBuf,
                       v: UInt32(v),
                       temperature: temperature,

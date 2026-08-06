@@ -15,7 +15,7 @@ struct ServerPromptStateStoreTests {
         fp16RingEnabled: true,
         templateSHA256: "template")
 
-    @Test func diskSnapshotSurvivesStoreRecreation() throws {
+    @Test func diskSnapshotSurvivesStoreRecreation() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let entry = makeEntry(tokens: [1, 2])
@@ -26,7 +26,7 @@ struct ServerPromptStateStoreTests {
             diskLimitBytes: 1_024)
 
         let writer = try ServerPromptStateStore(configuration: configuration)
-        let saved = writer.save(entry: entry, snapshot: snapshot)
+        let saved = await writer.save(entry: entry, snapshot: snapshot)
         #expect(saved.diskError == nil)
         #expect(saved.diskBytes == snapshot.payload.count)
         let entryDirectory = root.appendingPathComponent(
@@ -46,7 +46,7 @@ struct ServerPromptStateStoreTests {
         #expect(restored.snapshot == snapshot)
     }
 
-    @Test func memoryLRUEvictsOldestUnbackedSnapshot() throws {
+    @Test func memoryLRUEvictsOldestUnbackedSnapshot() async throws {
         let store = try ServerPromptStateStore(
             configuration: ServerPromptCacheStorageConfiguration(
                 memoryLimitBytes: 10,
@@ -57,8 +57,8 @@ struct ServerPromptStateStoreTests {
         let firstSnapshot = makeSnapshot(position: 1, payload: Data(repeating: 1, count: 6))
         let secondSnapshot = makeSnapshot(position: 1, payload: Data(repeating: 2, count: 6))
 
-        _ = store.save(entry: first, snapshot: firstSnapshot)
-        let saved = store.save(entry: second, snapshot: secondSnapshot)
+        _ = await store.save(entry: first, snapshot: firstSnapshot)
+        let saved = await store.save(entry: second, snapshot: secondSnapshot)
 
         #expect(saved.unbackedEntryIDs.contains(first.id))
         #expect(!store.contains(first.id))
@@ -66,7 +66,7 @@ struct ServerPromptStateStoreTests {
         #expect(try store.loadSnapshot(entryID: second.id).snapshot == secondSnapshot)
     }
 
-    @Test func diskLRUEvictsOldestUnbackedSnapshot() throws {
+    @Test func diskLRUEvictsOldestUnbackedSnapshot() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try ServerPromptStateStore(
@@ -77,12 +77,12 @@ struct ServerPromptStateStoreTests {
         let first = makeEntry(tokens: [1])
         let second = makeEntry(tokens: [2])
 
-        _ = store.save(
+        _ = await store.save(
             entry: first,
             snapshot: makeSnapshot(
                 position: 1,
                 payload: Data(repeating: 1, count: 6)))
-        let saved = store.save(
+        let saved = await store.save(
             entry: second,
             snapshot: makeSnapshot(
                 position: 1,
@@ -94,7 +94,7 @@ struct ServerPromptStateStoreTests {
         #expect(saved.diskBytes == 6)
     }
 
-    @Test func corruptDiskPayloadFailsClosedAndIsRemoved() throws {
+    @Test func corruptDiskPayloadFailsClosedAndIsRemoved() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let entry = makeEntry(tokens: [1, 2])
@@ -104,7 +104,7 @@ struct ServerPromptStateStoreTests {
             diskDirectory: root,
             diskLimitBytes: 1_024)
         let writer = try ServerPromptStateStore(configuration: configuration)
-        _ = writer.save(entry: entry, snapshot: snapshot)
+        _ = await writer.save(entry: entry, snapshot: snapshot)
         let payload = root
             .appendingPathComponent(entry.id.uuidString.lowercased())
             .appendingPathComponent("state.bin")

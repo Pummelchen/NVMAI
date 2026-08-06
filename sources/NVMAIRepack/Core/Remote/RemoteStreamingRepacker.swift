@@ -30,7 +30,7 @@ public struct RemoteStreamingRepackOptions: Sendable {
                 resume: Bool = false,
                 dryRunSpaceCheck: Bool = false,
                 downloadSession: RemoteDownloadSession = RemoteDownloadSession(),
-                baseURL: URL = URL(string: "https://huggingface.co")!,
+                baseURL: URL = RemoteBaseURL.huggingFace,
                 rangeRetryAttempts: Int = 4,
                 retryBaseDelayNs: UInt64 = 1_000_000_000) {
         self.repoID = repoID
@@ -56,11 +56,18 @@ public struct RemoteStreamingRepackResult: Sendable {
     public let outputDir: String
     public let resolvedCommit: String
     let plan: RepackPlan
+    /// Number of ranged HTTP requests issued this run. Retried attempts are
+    /// not counted here; see `remoteRetryCount`.
     public let rangeRequestCount: Int
     public let remoteBytesToDownload: UInt64
     public let remoteGapBytesDownloaded: UInt64
     public let remoteRetryCount: UInt64
     public let reusedBytes: UInt64
+    /// Unique payload bytes transferred this run: each coalesced range's
+    /// successful transfer is counted once, so retries are not double-counted
+    /// and the value equals `remoteBytesToDownload` on a fresh install. The
+    /// live progress callbacks may temporarily report attempt-bytes while a
+    /// retried transfer is re-streaming, but this final value is exact.
     public let downloadedThisRunBytes: UInt64
     public let dryRun: Bool
 }
@@ -87,7 +94,26 @@ public final class RemoteStreamingRepacker {
                 "output directory already exists: \(paths.finalDirectory)")
         }
         let hasPartial = try Posix.entryKind(paths.partialDirectory) == .directory
-        let hasCheckpoint = try Posix.entryKind(paths.checkpointFile) == .regular
+        var hasCheckpoint = try Posix.entryKind(paths.checkpointFile) == .regular
+        if !hasPartial, hasCheckpoint,
+           try Posix.entryKind(paths.finalDirectory) == .directory {
+            // A previous run renamed the partial directory into place but
+            // crashed before deleting the checkpoint. The final directory is
+            // authoritative: re-verify its completion markers and drop the
+            // stale checkpoint instead of throwing installStateCorrupt.
+            let manifestKind = try Posix.entryKind((paths.finalDirectory as NSString)
+                .appendingPathComponent("manifest.json"))
+            let receiptKind = try Posix.entryKind((paths.finalDirectory as NSString)
+                .appendingPathComponent(VerifiedInstallReceiptWriter.fileName))
+            guard manifestKind == .regular, receiptKind == .regular else {
+                throw RepackError.installStateCorrupt(
+                    path: paths.partialDirectory,
+                    detail: "final directory exists without a complete verified install")
+            }
+            try FileManager.default.removeItem(atPath: paths.checkpointFile)
+            try Posix.fsyncDirectory(paths.parentDirectory)
+            hasCheckpoint = false
+        }
         guard hasPartial == hasCheckpoint else {
             throw RepackError.installStateCorrupt(
                 path: paths.partialDirectory,
@@ -123,6 +149,15 @@ public final class RemoteStreamingRepacker {
         let partial = try Posix.entryKind(paths.partialDirectory)
         let checkpoint = try Posix.entryKind(paths.checkpointFile)
         if partial == .absent, checkpoint == .absent { return nil }
+        if partial == .absent, checkpoint == .regular,
+           try Posix.entryKind(paths.finalDirectory) == .directory {
+            // Crash window: the previous run renamed partial → final but
+            // crashed before deleting the checkpoint. Nothing is resumable;
+            // drop the stale checkpoint and report no saved state.
+            try? FileManager.default.removeItem(atPath: paths.checkpointFile)
+            try Posix.fsyncDirectory(paths.parentDirectory)
+            return nil
+        }
         guard partial == .directory, checkpoint == .regular else {
             throw RepackError.installStateCorrupt(
                 path: paths.partialDirectory,
@@ -235,6 +270,9 @@ public final class RemoteStreamingRepacker {
         let remainingOutputBytes = outputBytes > reusedDestinationBytes
             ? outputBytes - reusedDestinationBytes
             : 0
+        // The extra chunk budget accounts for the `.range.tmp` staging file
+        // (at most one chunk is staged at a time, including on failure paths
+        // where the file is unlinked before the error propagates).
         let diskRequirement = try DiskSpaceChecker.requireAvailable(
             path: paths.parentDirectory,
             bytes: remainingOutputBytes + UInt64(options.rangeChunkBytes),
@@ -259,6 +297,8 @@ public final class RemoteStreamingRepacker {
             return RemoteStreamingRepackResult(outputDir: options.outputDir,
                                                resolvedCommit: snapshot.resolvedCommit,
                                                plan: plan,
+                                               // Dry run issues no HTTP requests,
+                                               // so report the planned count.
                                                rangeRequestCount: rangePlan.coalescedCopies.count,
                                                remoteBytesToDownload: rangePlan.remoteBytesToDownload,
                                                remoteGapBytesDownloaded: rangePlan.remoteGapBytesDownloaded,
@@ -289,6 +329,15 @@ public final class RemoteStreamingRepacker {
             reusedBytes: reusedBytes,
             downloadedThisRunBytes: 0,
             totalBytes: rangePlan.remoteBytesToDownload))
+        // The checkpoint is rewritten at most once per 16 coalesced ranges
+        // (or 64 MiB of payload) instead of after every range. The first
+        // commit is still written immediately so an early cancellation keeps
+        // its completed ranges, and one final fsynced write after the batch
+        // makes the last ranges durable before they are relied on. Resume
+        // correctness does not depend on the checkpoint being fresh: the next
+        // run re-hashes destination bytes before trusting completedRanges.
+        var rangesSinceCheckpointWrite = 0
+        var pendingCheckpointBytes: UInt64 = 0
         try await provider.copyBatch(
             rangePlan.coalescedCopies,
             completedRangeIDs: Set(checkpoint.completedRanges.map(\.id)),
@@ -305,10 +354,24 @@ public final class RemoteStreamingRepacker {
                 checkpoint.completedRanges.removeAll { $0.id == completed.id }
                 checkpoint.completedRanges.append(completed)
                 checkpoint.completedRanges.sort { $0.id < $1.id }
-                try checkpoint.write(
-                    to: paths.checkpointFile,
-                    parentDirectory: paths.parentDirectory)
+                rangesSinceCheckpointWrite += 1
+                pendingCheckpointBytes += completed.sourceBytes
+                // The first commit is written immediately (an early
+                // cancellation must keep its completed ranges); afterwards the
+                // checkpoint is rewritten at most once every 16 ranges or
+                // 64 MiB of payload.
+                if rangesSinceCheckpointWrite == 1
+                    || rangesSinceCheckpointWrite % 16 == 0
+                    || pendingCheckpointBytes >= 64 * 1024 * 1024 {
+                    pendingCheckpointBytes = 0
+                    try checkpoint.write(
+                        to: paths.checkpointFile,
+                        parentDirectory: paths.parentDirectory)
+                }
             })
+        try checkpoint.write(
+            to: paths.checkpointFile,
+            parentDirectory: paths.parentDirectory)
 
         try recordOutputFile(relativePath: "model_weights.bin",
                              path: plan.resident.path,
@@ -373,7 +436,12 @@ public final class RemoteStreamingRepacker {
         return RemoteStreamingRepackResult(outputDir: options.outputDir,
                                            resolvedCommit: snapshot.resolvedCommit,
                                            plan: plan,
-                                           rangeRequestCount: rangePlan.coalescedCopies.count,
+                                           // Actual ranged HTTP requests issued
+                                           // this run, counted by the byte
+                                           // provider (retries are separate).
+                                           rangeRequestCount: Int(min(
+                                               audit.remoteRangeRequests,
+                                               UInt64(Int.max))),
                                            remoteBytesToDownload: rangePlan.remoteBytesToDownload,
                                            remoteGapBytesDownloaded: rangePlan.remoteGapBytesDownloaded,
                                            remoteRetryCount: audit.remoteRangeRetries,
@@ -384,9 +452,11 @@ public final class RemoteStreamingRepacker {
     }
 
     private func validateOptions() throws {
-        guard options.rangeChunkBytes > 0,
+        guard options.rangeChunkBytes >= RemoteChunkPolicy.minBytes,
               options.rangeChunkBytes <= RemoteChunkPolicy.maxBytes else {
-            throw RepackError.configurationInvalid(detail: "bad range chunk bytes \(options.rangeChunkBytes)")
+            throw RepackError.configurationInvalid(
+                detail: "range chunk bytes \(options.rangeChunkBytes) outside "
+                    + "[\(RemoteChunkPolicy.minBytes), \(RemoteChunkPolicy.maxBytes)]")
         }
         guard options.writeTileBytes > 0,
               options.writeTileBytes <= BoundedScratch.defaultLimitBytes else {
@@ -488,7 +558,9 @@ public final class RemoteStreamingRepacker {
                                   progress: @Sendable (ModelInstallProgress) -> Void) throws {
         progress(.hashingOutput(relativePath))
         try Task.checkCancellation()
-        let fd = try Posix.openRead(path)
+        // O_NOFOLLOW: hashing must never follow a symlink planted inside the
+        // partial directory.
+        let fd = try Posix.openReadNoFollow(path)
         defer { close(fd) }
         let size = try Posix.fileSize(fd: fd, path: path)
         let sha = try WriterCore.hashEntireFile(path: path,
@@ -509,22 +581,46 @@ public final class RemoteStreamingRepacker {
                                            partialDir: String,
                                            progress: @Sendable (ModelInstallProgress) -> Void) async throws {
         let tokenizerDir = (partialDir as NSString).appendingPathComponent("tokenizer")
-        for filename in ["config.json"] {
-            try Task.checkCancellation()
-            let src = (snapshot.metadataDirectory as NSString).appendingPathComponent(filename)
-            guard FileManager.default.fileExists(atPath: src) else { continue }
-            try Posix.mkdirP(tokenizerDir)
-            let dst = (tokenizerDir as NSString).appendingPathComponent(filename)
-            if FileManager.default.fileExists(atPath: dst) {
-                try FileManager.default.removeItem(atPath: dst)
-            }
-            try FileManager.default.copyItem(atPath: src, toPath: dst)
-            try recordOutputFile(relativePath: "tokenizer/\(filename)",
-                                 path: dst,
-                                 progress: progress)
-        }
-
         let pinned = remote.pinned(commit: snapshot.resolvedCommit)
+        try Posix.mkdirP(tokenizerDir)
+
+        // config.json is a required sidecar: the source snapshot always
+        // declares it (metadata loading fails without it). Prefer the copy
+        // fetched this run into .remote-metadata; if a resume-mismatch wiped
+        // the partial directory (and with it the fresh metadata), re-fetch it
+        // from the remote instead of silently skipping it. The read doubles as
+        // the existence check, and atomicWrite fsyncs both the file and its
+        // directory after the rename.
+        let localConfig = (snapshot.metadataDirectory as NSString)
+            .appendingPathComponent("config.json")
+        let dstConfig = (tokenizerDir as NSString).appendingPathComponent("config.json")
+        do {
+            let configData = try Posix.readBoundedData(localConfig,
+                                                       maximumBytes: 1024 * 1024)
+            try Posix.atomicWrite(configData, to: dstConfig, durableIn: tokenizerDir)
+        } catch {
+            if (try? Posix.entryKind(localConfig)) != .regular {
+                let info = try await pinned.resolveFileInfo(filename: "config.json",
+                                                            audit: audit)
+                guard info.size <= 1024 * 1024 else {
+                    throw RepackError.remoteFileTooLarge(
+                        path: "config.json",
+                        size: info.size,
+                        cap: 1024 * 1024)
+                }
+                try await pinned.fetchSmallFile(filename: "config.json",
+                                                info: info,
+                                                capBytes: 1024 * 1024,
+                                                outputPath: dstConfig,
+                                                audit: audit)
+            } else {
+                throw error
+            }
+        }
+        try recordOutputFile(relativePath: "tokenizer/config.json",
+                             path: dstConfig,
+                             progress: progress)
+
         let tokenizerFiles: [(name: String, cap: UInt64, required: Bool)] = [
             ("tokenizer.json", 64 * 1024 * 1024, true),
             ("tokenizer_config.json", 4 * 1024 * 1024, true),
@@ -579,8 +675,7 @@ public final class RemoteStreamingRepacker {
             routedExpert: 4)
         for e in plan.resident.entries {
             guard let quantSpec = e.quantSpec else { continue }
-            if e.name.hasSuffix(".embed_tokens.weight")
-                || e.name.hasSuffix(".embed_tokens.weight") {
+            if e.name.hasSuffix(".embed_tokens.weight") {
                 bits.embedding = quantSpec.bits
             }
             if e.name.hasSuffix(".self_attn.q_proj.weight")
@@ -594,17 +689,18 @@ public final class RemoteStreamingRepacker {
                 || e.name.hasSuffix(".linear_attn.out_proj.weight") {
                 bits.attention = quantSpec.bits
             }
+            // Router slot: the Qwen router tensor is `.mlp.gate.weight`.
             if e.name.hasSuffix(".router.proj.weight")
-                || e.name.hasSuffix(".mlp.gate.weight")
-                || e.name.hasSuffix(".mlp.gate_proj.weight") {
+                || e.name.hasSuffix(".mlp.gate.weight") {
                 bits.router = quantSpec.bits
             }
+            // Shared-expert slot: the sigmoid-gated shared expert MLP. Routed
+            // experts (`.mlp.switch_mlp.*`) are deliberately excluded here —
+            // their bits land in `bits.routedExpert` below from the layer
+            // sub-tensors, so no tensor feeds more than one slot.
             if e.name.hasSuffix(".mlp.shared_expert.gate_proj.weight")
                 || e.name.hasSuffix(".mlp.shared_expert.up_proj.weight")
-                || e.name.hasSuffix(".mlp.shared_expert.down_proj.weight")
-                || e.name.hasSuffix(".mlp.gate_proj.weight")
-                || e.name.hasSuffix(".mlp.up_proj.weight")
-                || e.name.hasSuffix(".mlp.down_proj.weight") {
+                || e.name.hasSuffix(".mlp.shared_expert.down_proj.weight") {
                 bits.sharedExpert = quantSpec.bits
             }
         }

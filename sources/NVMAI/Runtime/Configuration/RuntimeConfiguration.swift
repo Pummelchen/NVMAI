@@ -19,12 +19,26 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lru
 }
 
+public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable {
+    case invalidExpertCacheSlots(Int)
+    case invalidPrefillChunkTokens(Int)
+
+    public var description: String {
+        switch self {
+        case .invalidExpertCacheSlots(let value):
+            return "unsupported expert-cache slot count \(value); allowed: \(RuntimeConfiguration.allowedExpertCacheSlots)"
+        case .invalidPrefillChunkTokens(let value):
+            return "unsupported prefill chunk size \(value); allowed: \(RuntimeConfiguration.allowedPrefillChunkTokens)"
+        }
+    }
+}
+
 public struct RuntimeConfiguration: Sendable, Equatable {
     public static let supportedContextTokens = [
         4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144,
     ]
     public static let maximumContextTokens = 262_144
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32]
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64]
     public static let allowedPrefillChunkTokens = [
         32, 64, 128, 256, 512, 1_024, 2_048, 4_096,
     ]
@@ -38,17 +52,19 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
 
-    public init(expertCacheSlots: Int = 16,
+    public init(expertCacheSlots: Int = 32,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
                 rdadvisePolicy: RDAdvicePolicyMode = .off,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
-                forceLogitsHead: Bool = false) {
-        precondition(Self.allowedExpertCacheSlots.contains(expertCacheSlots),
-                     "unsupported expert-cache slot count")
-        precondition(Self.allowedPrefillChunkTokens.contains(prefillChunkTokens),
-                     "unsupported prefill chunk size")
+                forceLogitsHead: Bool = false) throws {
+        guard Self.allowedExpertCacheSlots.contains(expertCacheSlots) else {
+            throw RuntimeConfigurationError.invalidExpertCacheSlots(expertCacheSlots)
+        }
+        guard Self.allowedPrefillChunkTokens.contains(prefillChunkTokens) else {
+            throw RuntimeConfigurationError.invalidPrefillChunkTokens(prefillChunkTokens)
+        }
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.rdadvisePolicy = rdadvisePolicy
@@ -59,7 +75,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     }
 
     public static var production: RuntimeConfiguration {
-        RuntimeConfiguration()
+        // Defaults (16 slots, 128 chunk) are compile-time constants on the
+        // allowed lists, so this can never throw.
+        try! RuntimeConfiguration()
     }
 
     public var fp16RingEnabled: Bool { true }

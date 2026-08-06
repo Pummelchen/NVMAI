@@ -22,11 +22,6 @@ struct ChatMLTemplateTests {
 
     private typealias Message = GFTokenizer.Message
 
-    @Test("Fixture resolves to the chatml dialect")
-    func dialectDetection() {
-        #expect(tok.dialect == .chatml)
-    }
-
     @Test("Special-token IDs match the Qwen3.6 contract")
     func specialTokenIDs() {
         #expect(tok.endOfTurnID == 248046)
@@ -79,7 +74,7 @@ struct ChatMLTemplateTests {
             + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
     }
 
-    @Test("Message content is trimmed like the Gemma path")
+    @Test("Message content is trimmed before rendering")
     func contentTrimming() throws {
         let p = try tok.applyChatTemplate([Message(role: .user, content: "  Hi \n")])
         #expect(p.contains("<|im_start|>user\nHi<|im_end|>\n"))

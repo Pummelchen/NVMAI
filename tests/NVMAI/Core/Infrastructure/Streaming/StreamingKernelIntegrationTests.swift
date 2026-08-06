@@ -11,7 +11,7 @@ import NVMAIValidationSupport
 /// CPU.
 ///
 /// This is the smoke test for the streaming → kernel data path on the affine
-/// decode hot path. No real Gemma weights, no model — just proof that the
+/// decode hot path. No real model weights, no model — just proof that the
 /// pipe works end-to-end with the new layout.
 @Suite struct StreamingKernelIntegrationTests {
 
@@ -145,7 +145,7 @@ import NVMAIValidationSupport
         guard let cmd = ctx.queue.makeCommandBuffer() else {
             Issue.record("Failed to make command buffer"); return
         }
-        kernel.encode(commandBuffer: cmd,
+        try kernel.encode(commandBuffer: cmd,
                       weights: weightsBuf, weightsOffset: Int(expert.offset),
                       scales: weightsBuf, scalesOffset: Int(expert.offset) + scalesOffset,
                       biases: weightsBuf, biasesOffset: Int(expert.offset) + biasesOffset,

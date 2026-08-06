@@ -64,6 +64,9 @@ public enum AttentionRef {
             }
 
             // Softmax (numerically stable).
+            // With no keys to attend to (seqLen == 0) the score row is empty;
+            // the output row stays zero rather than indexing into nothing.
+            guard !scores.isEmpty else { continue }
             var mx = scores[0]
             for s in scores { if s > mx { mx = s } }
             var negMax = -mx

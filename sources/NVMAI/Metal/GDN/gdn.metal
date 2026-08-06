@@ -26,12 +26,22 @@ using namespace metal;
 // ============================================================================
 
 constant constexpr float kGdnRmsEps = 1e-6f;
+constant constexpr uint kGdnGroupSize = 64;
 
 constant uint FC_GDN_IN_QKV    [[function_constant(90)]];
 constant uint FC_GDN_IN_Z      [[function_constant(91)]];
 constant uint FC_GDN_IN_AB     [[function_constant(92)]];
 constant uint FC_GDN_IN_N      [[function_constant(93)]];
 constant bool FC_GDN_IN_USE_FC [[function_constant(94)]];
+// Threads per threadgroup for the norm kernels (gdn_qk_norm/gdn_gated_norm).
+// The wrapper passes the same value it dispatches with, so the partial-count
+// loop below can never drift from the actual SIMD-group count.
+constant uint FC_GDN_TG_THREADS [[function_constant(95)]];
+
+static inline uint gdn_tg_threads() {
+    return is_function_constant_defined(FC_GDN_TG_THREADS)
+        ? FC_GDN_TG_THREADS : 128u;
+}
 
 static inline bool gdn_in_use_fc() {
     return is_function_constant_defined(FC_GDN_IN_USE_FC) && FC_GDN_IN_USE_FC;
@@ -68,6 +78,88 @@ static inline float gdn_softplus(float x) {
 }
 
 // ----------------------------------------------------------------------------
+// One-SIMD-per-row affine INT4 GEMV body. This is the same math as
+// `dequant_int4_gemv_simd_body` in dequant_int4.metal, duplicated here so
+// gdn.metal self-contains its dependencies (the combined shader library
+// concatenates modules, so relying on another module's static inline would
+// silently break if the module order or set changes). K24: keep both copies
+// in lockstep; the row body must keep reading packed weights via `ushort*`
+// (sub-tensor offsets are only 2-byte aligned).
+//
+//   y[row] = sum_n W[row, n] * x[n],  W row is N/2 bytes of nibbles with
+//   N/64 BF16 scale/bias pairs (MLX affine), one SIMD (32 threads) per row.
+// ----------------------------------------------------------------------------
+static inline void gdn_dequant_int4_gemv_simd_body(
+    device const uint8_t* W,
+    device const bfloat*  scales,
+    device const bfloat*  biases,
+    device const half*    x,
+    device half*          y,
+    uint                  M,
+    uint                  N,
+    uint                  rows_per_tg,
+    uint                  tg_idx,
+    uint                  sg_idx,
+    uint                  lane
+) {
+    const uint row = tg_idx * rows_per_tg + sg_idx;
+    if (row >= M) return;
+    const uint n_groups  = N / kGdnGroupSize;
+    const uint row_bytes = N / 2;
+    device const uint8_t* W_row = W      + uint(row) * row_bytes;
+    device const bfloat*  s_row = scales + uint(row) * n_groups;
+    device const bfloat*  b_row = biases + uint(row) * n_groups;
+
+    float acc = 0.0f;
+    const uint full_blocks = n_groups / 4;
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        // Read the 4-byte weight chunk as two ushorts: row stride N/2,
+        // sub-tensor weightsOffset, and byte_base are all even, so a
+        // `ushort*` load is always aligned even when the row is only
+        // 2-byte aligned overall.
+        device const ushort* wp = (device const ushort*)(W_row + byte_base);
+        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
+        const uint g  = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 2u;
+        const half4 xa = *((device const half4*)(x + elem));
+        const half4 xb = *((device const half4*)(x + elem + 4u));
+        const uint b0 =  w4        & 0xFFu;
+        const uint b1 = (w4 >> 8)  & 0xFFu;
+        const uint b2 = (w4 >> 16) & 0xFFu;
+        const uint b3 = (w4 >> 24) & 0xFFu;
+        const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
+        const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
+        float dot = 0.0f;
+        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
+        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
+        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
+        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
+        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint8_t byte = W_row[g * (kGdnGroupSize / 2) + lane];
+        const float x0 = float(x[g * kGdnGroupSize + lane * 2u]);
+        const float x1 = float(x[g * kGdnGroupSize + lane * 2u + 1u]);
+        float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+        dot = fma(float(uint(byte >> 4)), x1, dot);
+        const float sum = x0 + x1;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        y[row] = half(acc);
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Fused GDN input projection. Decode issues four INT4 GEMVs that all read the
 // same hidden vector `x` (N = hiddenSize): in_proj_qkv (qkvRows), in_proj_z
 // (zRows), in_proj_a and in_proj_b (abRows each — 32 rows for Qwen 3.6, i.e.
@@ -75,9 +167,10 @@ static inline float gdn_softplus(float x) {
 // concatenated row space and routes each row to its own weight/scale/bias base
 // and output buffer with a 4-way compare on the global row index.
 //
-// The per-row math is `dequant_int4_gemv_simd_body` verbatim (dequant_int4.metal
-// precedes gdn.metal in the combined shader source), called with the sub-matrix
-// local row, so results are bit-identical to the four separate dispatches.
+// The per-row math is `gdn_dequant_int4_gemv_simd_body` (defined above in this
+// module — see K24; the module must self-contain the body rather than borrow
+// dequant_int4.metal's static inline), called with the sub-matrix local row,
+// so results are bit-identical to the four separate dispatches.
 // That body reads packed weights via `ushort*`: sub-tensor offsets are only
 // 2-byte aligned, so the ushort-pair path must stay.
 //
@@ -141,8 +234,8 @@ kernel void gdn_in_proj_gemv_simd(
         local_row = global_row - QKV - Z - AB;
         M = AB;
     }
-    dequant_int4_gemv_simd_body(W, scales, biases, x, y, M, NN,
-                                1u, local_row, 0u, lane);
+    gdn_dequant_int4_gemv_simd_body(W, scales, biases, x, y, M, NN,
+                                    1u, local_row, 0u, lane);
 }
 
 // ----------------------------------------------------------------------------
@@ -310,12 +403,17 @@ kernel void gdn_qk_norm(
     const uint row = tg.y;
     if (headIndex >= 2u * Hk) return;
 
+    // Threadgroup size and SIMD-partial count are a function-constant pair
+    // (FC_GDN_TG_THREADS); the wrapper dispatches exactly tgThreads threads.
+    const uint tgThreads = gdn_tg_threads();
+    const uint partialCount = tgThreads / 32u;
+
     const bool isQ = headIndex < Hk;
     const uint head = isQ ? headIndex : headIndex - Hk;
     const uint base = row * rowStride + (isQ ? 0u : Hk * Dk) + head * Dk;
 
     float sumsq = 0.0f;
-    for (uint i = tid; i < Dk; i += 128u) {
+    for (uint i = tid; i < Dk; i += tgThreads) {
         const float x = float(conv_out[base + i]);
         sumsq = fma(x, x, sumsq);
     }
@@ -324,7 +422,7 @@ kernel void gdn_qk_norm(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
         float total = 0.0f;
-        for (uint i = 0; i < 4u; ++i) total += partial[i];
+        for (uint i = 0; i < partialCount; ++i) total += partial[i];
         partial[0] = total;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -332,7 +430,7 @@ kernel void gdn_qk_norm(
     const float invRms = rsqrt(mean + kGdnRmsEps);
     const float scale = isQ ? (1.0f / float(Dk)) : rsqrt(float(Dk));
 
-    for (uint i = tid; i < Dk; i += 128u) {
+    for (uint i = tid; i < Dk; i += tgThreads) {
         const float x = float(conv_out[base + i]);
         conv_out[base + i] = half(x * invRms * scale);
     }
@@ -512,10 +610,15 @@ kernel void gdn_gated_norm(
     const uint row = tg.y;
     if (head >= Hv) return;
 
+    // Threadgroup size and SIMD-partial count are a function-constant pair
+    // (FC_GDN_TG_THREADS); the wrapper dispatches exactly tgThreads threads.
+    const uint tgThreads = gdn_tg_threads();
+    const uint partialCount = tgThreads / 32u;
+
     const uint base = row * Hv * Dv + head * Dv;
 
     float sumsq = 0.0f;
-    for (uint i = tid; i < Dv; i += 128u) {
+    for (uint i = tid; i < Dv; i += tgThreads) {
         const float x = float(y[base + i]);
         sumsq = fma(x, x, sumsq);
     }
@@ -524,14 +627,14 @@ kernel void gdn_gated_norm(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
         float total = 0.0f;
-        for (uint i = 0; i < 4u; ++i) total += partial[i];
+        for (uint i = 0; i < partialCount; ++i) total += partial[i];
         partial[0] = total;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const float mean = partial[0] / float(Dv);
     const float invRms = rsqrt(mean + kGdnRmsEps);
 
-    for (uint i = tid; i < Dv; i += 128u) {
+    for (uint i = tid; i < Dv; i += tgThreads) {
         const float normed = float(y[base + i]) * invRms * float(weight[i]);
         const float gate = gdn_silu(float(z[base + i]));
         out[base + i] = half(normed * gate);

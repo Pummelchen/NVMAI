@@ -63,8 +63,8 @@ public enum RopeRef {
     }
 
     /// NeoX-convention RoPE. Pairs `(x[i], x[i+headDim/2])` for `i ∈ [0, rotatedPairs)`.
-    /// Frequencies divide by `headDim` (not `2 * rotatedPairs`) — matching HF
-    /// Gemma 4's proportional-RoPE init. Setting `rotatedPairs == headDim/2`
+    /// Frequencies divide by `headDim` (not `2 * rotatedPairs`) — matching the
+    /// proportional-RoPE init. Setting `rotatedPairs == headDim/2`
     /// recovers full NeoX rotation.
     public static func applyNeox(
         input: [Float],

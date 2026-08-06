@@ -1,7 +1,7 @@
 import Foundation
 import Metal
 
-/// Single-kernel Gemma 4 Q/K/V epilogue.
+/// Single-kernel Q/K/V epilogue.
 ///
 /// Equivalent to:
 ///   Q = rmsnorm_bf16w_perhead(Q, q_norm); rope_neox(Q)
@@ -56,12 +56,14 @@ final class FusedQKVEpilogue {
                        position: UInt32,
                        theta: Float,
                        rotatedPairs: UInt32,
-                       eps: Float) {
+                       eps: Float) throws {
         precondition(headDim <= 512,
                      "headDim > 512 exceeds the fused QKV epilogue scratch")
         precondition(rotatedPairs * 2 <= headDim,
                      "rotatedPairs must fit inside one NeoX head")
-        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        guard let enc = cb.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(
             specializedPSOs[Shape(headDim: headDim,
                                   numQHeads: numQHeads,

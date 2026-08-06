@@ -8,7 +8,7 @@ import NVMAIValidationSupport
 extension RawCompletionLoopTests {
   @Test func cancellationPropagatesMidDecode() async throws {
     let ctx = try MetalContext()
-    let tok = try await GFTokenizer.load()
+    let tok = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
     let idA = tok.encode("a", addBOS: false).first!
     let producer = ScriptedLogitProducer(
       vocabSize: tok.vocabSize,

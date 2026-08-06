@@ -108,7 +108,7 @@ enum RepackPlanner {
                          family: RepackModelFamily) -> Bucket {
         if family == .qwen36MTP {
             if name.hasPrefix("layers.") {
-                if let role = routedExpertRole(in: name, family: family),
+                if let role = routedExpertRole(in: name),
                    let layer = layerIndex(in: name),
                    layer >= 0 && layer < numLayers {
                     return .routedExpert(role: role, layer: layer)
@@ -123,7 +123,7 @@ enum RepackPlanner {
         }
         if name.hasPrefix("language_model.") {
             // Routed expert?
-            if let role = routedExpertRole(in: name, family: family),
+            if let role = routedExpertRole(in: name),
                let layer = layerIndex(in: name),
                layer >= 0 && layer < numLayers {
                 return .routedExpert(role: role, layer: layer)
@@ -136,14 +136,8 @@ enum RepackPlanner {
         return .unknown
     }
 
-    private static func routedExpertRole(in name: String,
-                                         family: RepackModelFamily) -> String? {
-        let routedContainer: String
-        switch family {
-        case .gemma4: routedContainer = ".experts.switch_glu."
-        case .qwen36, .qwen36MTP: routedContainer = ".mlp.switch_mlp."
-        }
-        guard name.contains(routedContainer) else { return nil }
+    private static func routedExpertRole(in name: String) -> String? {
+        guard name.contains(".mlp.switch_mlp.") else { return nil }
         if name.contains(".gate_proj.") { return "gate" }
         if name.contains(".up_proj.")   { return "up" }
         if name.contains(".down_proj.") { return "down" }
@@ -182,10 +176,14 @@ enum RepackPlanner {
         var excludedMultimodalNames: [String] = []
         var routedByLayerAndRole: [Int: [String: String]] = [:]
         for (name, _) in registry {
+            // Companion tensors (.scales/.biases) are dropped together with
+            // their primary tensor below; listing them separately would make
+            // `excludedMultimodalTensorNames` mention tensors that are never
+            // planned on their own.
+            if name.hasSuffix(".scales") || name.hasSuffix(".biases") { continue }
             if isMultimodalTensorName(name) {
                 excludedMultimodalNames.append(name)
             }
-            if name.hasSuffix(".scales") || name.hasSuffix(".biases") { continue }
             let b = classify(name, numLayers: arch.numLayers, family: arch.family)
             switch b {
             case .lmResident:                   lmResidentBases.append(name)
@@ -306,8 +304,8 @@ enum RepackPlanner {
                         detail: "expected BF16 scales/biases, got \(scales.dtype)/\(biases.dtype)")
                 }
                 let spec = IndexLoader.quantSpec(forTensor: sourceName, meta: meta)
-                let logical = logicalShape(forPackedSource: weight.shape,
-                                           scalesShape: scales.shape)
+                let logical = try logicalShape(forPackedSource: weight.shape,
+                                               scalesShape: scales.shape)
 
                 let wOff = fileCursor
                 let wSize = weight.sizeBytes
@@ -319,7 +317,7 @@ enum RepackPlanner {
 
                 entries.append(ResidentEntry(
                     name: name, dtype: 0,
-                    logicalShape4: padTo4(logical),
+                    logicalShape4: try padTo4(logical),
                     fileOffset: wOff, sizeBytes: wSize,
                     scaleOffset: sOff, scaleSize: sSize,
                     biasOffset: bOff, biasSize: bSize,
@@ -333,7 +331,7 @@ enum RepackPlanner {
 
                 entries.append(ResidentEntry(
                     name: name, dtype: dtype,
-                    logicalShape4: padTo4(weight.shape),
+                    logicalShape4: try padTo4(weight.shape),
                     fileOffset: off, sizeBytes: size,
                     scaleOffset: 0, scaleSize: 0,
                     biasOffset: 0, biasSize: 0,
@@ -360,6 +358,10 @@ enum RepackPlanner {
                                       meta: IndexLoader.SourceMetadata,
                                       arch: ArchInfo) throws -> LayerFilePlan {
         let expertCount = arch.numExperts
+        guard expertCount > 0 else {
+            throw RepackError.configurationInvalid(
+                detail: "layer \(layer) has routed experts but numExperts is zero")
+        }
         let roles: [(role: String, name: String)] = [
             ("gate", gateName), ("up", upName), ("down", downName)
         ]
@@ -395,8 +397,8 @@ enum RepackPlanner {
             let perExpertSourceShape = Array(w.shape.dropFirst())
             let scalesLogical = Array(s.shape.dropFirst())
             let biasesLogical = Array(b.shape.dropFirst())
-            let logicalPerExpert = logicalShape(forPackedSource: perExpertSourceShape,
-                                                scalesShape: scalesLogical)
+            let logicalPerExpert = try logicalShape(forPackedSource: perExpertSourceShape,
+                                                    scalesShape: scalesLogical)
 
             let wSlice = PerExpertTensorSlice(
                 role: role, component: "weights", dtype: 0,
@@ -441,10 +443,17 @@ enum RepackPlanner {
         return ((v + p - 1) / p) * p
     }
 
-    private static func padTo4(_ s: [UInt64]) -> [UInt32] {
+    private static func padTo4(_ s: [UInt64]) throws -> [UInt32] {
         var out: [UInt32] = []
         out.reserveCapacity(4)
-        for v in s.prefix(4) { out.append(UInt32(v)) }
+        for v in s.prefix(4) {
+            guard v <= UInt64(UInt32.max) else {
+                throw RepackError.shapeMismatch(
+                    name: "shape",
+                    detail: "dimension \(v) does not fit a UInt32 index")
+            }
+            out.append(UInt32(v))
+        }
         while out.count < 4 { out.append(0) }
         return out
     }
@@ -453,10 +462,21 @@ enum RepackPlanner {
     /// authoritative because six-bit values do not have an integral U32
     /// packing factor.
     private static func logicalShape(forPackedSource source: [UInt64],
-                                     scalesShape: [UInt64]) -> [UInt64] {
+                                     scalesShape: [UInt64]) throws -> [UInt64] {
         guard !source.isEmpty else { return source }
+        guard let lastScale = scalesShape.last else {
+            throw RepackError.shapeMismatch(
+                name: "scales",
+                detail: "packed tensor has an empty scales shape")
+        }
+        let (scaled, overflow) = lastScale.multipliedReportingOverflow(by: 64)
+        guard !overflow else {
+            throw RepackError.shapeMismatch(
+                name: "scales",
+                detail: "scales dimension \(lastScale) overflows when scaled by 64")
+        }
         var out = source
-        out[out.count - 1] = scalesShape.last! * 64
+        out[out.count - 1] = scaled
         return out
     }
 
@@ -471,11 +491,7 @@ enum RepackPlanner {
             if n == "language_model.model.norm.weight"          { return (3, 0, 0, n) }
             if n == "language_model.lm_head.weight"             { return (4, 0, 0, n) }
             if let li = layerIndex(in: n) {
-                let slot: Int
-                switch family {
-                case .gemma4: slot = slotRank(in: n)
-                case .qwen36, .qwen36MTP: slot = qwenSlotRank(in: n)
-                }
+                let slot = qwenSlotRank(in: n)
                 return (1, li, slot, n)
             }
             return (2, 0, 0, n)

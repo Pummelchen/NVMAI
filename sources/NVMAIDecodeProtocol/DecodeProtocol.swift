@@ -8,7 +8,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var rdadvisePolicy: String
     public var modelVerification: String
 
-    public init(expertCacheSlots: Int = 16,
+    public init(expertCacheSlots: Int = 32,
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
@@ -68,7 +68,10 @@ public struct DecodeGenerationRequest: Codable, Sendable {
 public enum DecodeServiceCommand: Codable, Sendable {
     case load(DecodeLoadRequest)
     case generate(DecodeGenerationRequest)
-    case cancel
+    /// Cancel a specific generation (matched by ID), or cancel whatever is
+    /// currently active — the in-flight generation, or an in-flight load when
+    /// no generation is running — when the ID is nil.
+    case cancel(UUID?)
     case unload(UUID)
     case shutdown
 }
@@ -149,6 +152,11 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var tokensPerSecond: Double
     public var stopReason: String?
     public var error: String?
+    /// Progress phase label (`AppModelLoadPhase.rawValue`) for `.loading`
+    /// events emitted while the service loads a model.
+    public var loadPhase: String?
+    /// Measured model-load wall time in seconds, carried on `.ready` events.
+    public var loadSeconds: Double?
     public var currentMemoryBytes: UInt64?
     public var peakMemoryBytes: UInt64?
     public var prefill: DecodePrefillDiagnostics?
@@ -162,6 +170,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 timeToFirstTokenSeconds: Double? = nil,
                 decodeSeconds: Double = 0, tokensPerSecond: Double = 0,
                 stopReason: String? = nil, error: String? = nil,
+                loadPhase: String? = nil, loadSeconds: Double? = nil,
                 currentMemoryBytes: UInt64? = nil, peakMemoryBytes: UInt64? = nil,
                 prefill: DecodePrefillDiagnostics? = nil,
                 runner: DecodeRunnerDiagnostics? = nil) {
@@ -179,6 +188,8 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.tokensPerSecond = tokensPerSecond
         self.stopReason = stopReason
         self.error = error
+        self.loadPhase = loadPhase
+        self.loadSeconds = loadSeconds
         self.currentMemoryBytes = currentMemoryBytes
         self.peakMemoryBytes = peakMemoryBytes
         self.prefill = prefill
@@ -199,7 +210,10 @@ public enum DecodeFrameCodec {
     }
 
     public static func read<T: Decodable>(_ type: T.Type, from handle: FileHandle) throws -> T {
-        let header = try readExactly(4, from: handle)
+        let header = try readExactly(MemoryLayout<UInt32>.size, from: handle)
+        guard header.count == MemoryLayout<UInt32>.size else {
+            throw DecodeFrameError.invalidHeader
+        }
         let count = header.withUnsafeBytes { raw -> UInt32 in
             raw.loadUnaligned(as: UInt32.self).littleEndian
         }
@@ -224,4 +238,7 @@ public enum DecodeFrameCodec {
 public enum DecodeFrameError: Error {
     case oversized
     case unexpectedEOF
+    case invalidHeader
+    /// No event arrived for the matching request within the response timeout.
+    case timedOut
 }

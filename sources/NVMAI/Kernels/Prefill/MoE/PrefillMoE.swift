@@ -17,11 +17,13 @@ final class PrefillMoE {
                                        h2Offset: Int = 0,
                                        queryCount: UInt32,
                                        topK: UInt32,
-                                       d: UInt32) {
+                                       d: UInt32) throws {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(topK > 0, "topK must be positive")
         precondition(d > 0, "D must be positive")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(reducePSO)
         enc.setBuffer(routePartials, offset: routePartialsOffset, index: 0)
         enc.setBuffer(routeWeights, offset: routeWeightsOffset, index: 1)

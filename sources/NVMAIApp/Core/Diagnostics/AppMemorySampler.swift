@@ -5,6 +5,9 @@ import Foundation
 public final class AppMemorySampler: @unchecked Sendable {
     private let lock = NSLock()
     private var peak: UInt64 = 0
+    // D30: distinguishes "no sample yet" (peakBytes == nil) from a sampled
+    // zero peak (peakBytes == 0).
+    private var hasPeakSample = false
     private let processFootprint: @Sendable () -> UInt64?
 
     public init() {
@@ -18,13 +21,17 @@ public final class AppMemorySampler: @unchecked Sendable {
     public func resetPeak() {
         lock.lock()
         peak = 0
+        hasPeakSample = false
         lock.unlock()
     }
 
     public func sample() -> UInt64? {
         guard let current = processFootprint() else { return nil }
         lock.lock()
-        if current > peak { peak = current }
+        if !hasPeakSample || current > peak {
+            peak = current
+            hasPeakSample = true
+        }
         lock.unlock()
         return current
     }
@@ -43,8 +50,9 @@ public final class AppMemorySampler: @unchecked Sendable {
 
     public var peakBytes: UInt64? {
         lock.lock()
+        let sampled = hasPeakSample
         let value = peak
         lock.unlock()
-        return value == 0 ? nil : value
+        return sampled ? value : nil
     }
 }

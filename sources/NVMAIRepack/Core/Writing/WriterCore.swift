@@ -9,40 +9,17 @@ public enum WriterCore {
     /// the 1 MB BoundedScratch budget.
     public static let tileBytes: Int = 512 * 1024
 
-    /// Copy `size` bytes from `srcShard.base + srcOffset` to file `dstFd` at
-    /// `dstOffset`, in pwrite-sized tiles. Pages consumed from the source map
-    /// are evicted via madvise after each tile, capping the source-side RSS.
-    public static func pwriteTensorRegion(srcShard: MmapHandle,
-                                          srcAbsoluteOffset: UInt64,
-                                          size: UInt64,
-                                          dstFd: Int32, dstPath: String,
-                                          dstOffset: UInt64,
-                                          audit: RepackAudit) throws {
-        var remaining = Int(size)
-        var srcOff = srcAbsoluteOffset
-        var dstOff = dstOffset
-        let tile = WriterCore.tileBytes
-        while remaining > 0 {
-            let n = min(remaining, tile)
-            let p = srcShard.base.advanced(by: Int(srcOff))
-            try Posix.pwriteAll(fd: dstFd, path: dstPath, buf: p, count: n, offset: dstOff)
-            audit.recordTile(bytes: n)
-            audit.recordWrite(bytes: n)
-            audit.recordRead(bytes: n)
-            srcShard.adviseDontNeed(offset: srcOff, count: n)
-            srcOff += UInt64(n)
-            dstOff += UInt64(n)
-            remaining -= n
-        }
-    }
-
     /// Compute SHA-256 of an entire (presumed-written) file by streaming it
     /// through `tileBytes` pread chunks. Drops pages with `F_NOCACHE` style
     /// behaviour via fcntl. Allocates one bounded scratch buffer.
     public static func hashEntireFile(path: String, size: UInt64,
                                       audit: RepackAudit,
                                       cancellationCheck: () throws -> Void = {}) throws -> String {
-        let fd = try Posix.openRead(path)
+        guard size <= UInt64(Int.max) else {
+            throw RepackError.configurationInvalid(
+                detail: "file \(path) size \(size) exceeds the hashing range")
+        }
+        let fd = try Posix.openReadNoFollow(path)
         defer { close(fd) }
         // Hint the kernel that we will read this file sequentially and then
         // drop it from cache — keeps the post-write working set from blowing
@@ -58,19 +35,23 @@ public enum WriterCore {
 
         var hasher = Sha256Stream()
         var off: UInt64 = 0
-        let total = Int(size)
-        var remaining = total
+        var remaining = size
         while remaining > 0 {
             try cancellationCheck()
-            let want = min(remaining, WriterCore.tileBytes)
+            let want = Int(min(remaining, UInt64(WriterCore.tileBytes)))
+            errno = 0
             let got = pread(fd, buf.baseAddress, want, off_t(off))
-            if got <= 0 {
-                throw RepackError.preadShort(path: path, expected: want, got: 0, errno: errno)
+            if got < 0, errno == EINTR { continue }
+            guard got > 0 else {
+                // Report the actual short-read count (0 at EOF) with an
+                // accurate errno instead of a stale value.
+                throw RepackError.preadShort(
+                    path: path, expected: want, got: max(got, 0), errno: errno)
             }
             hasher.update(UnsafeRawBufferPointer(start: buf.baseAddress, count: got))
             audit.byteCopyTiles &+= 1
             off += UInt64(got)
-            remaining -= got
+            remaining -= UInt64(got)
         }
         return hasher.finalizeHexString()
     }

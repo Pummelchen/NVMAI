@@ -24,8 +24,10 @@ public enum DiskSpaceChecker {
                               bytes: UInt64,
                               reserveBytes: UInt64 = 1 * 1024 * 1024 * 1024) throws
         -> DiskSpaceRequirement {
-        let requestedDirectory = directoryForProbe(path)
-        let probeDirectory = nearestExistingDirectory(requestedDirectory)
+        // Probe the actual install location: the path itself is the volume we
+        // will write to, extension or not. `assess` walks up to the nearest
+        // existing directory (it never creates anything).
+        let probeDirectory = nearestExistingDirectory(path)
         return try requirement(path: probeDirectory,
                                bytes: bytes,
                                reserveBytes: reserveBytes)
@@ -34,11 +36,10 @@ public enum DiskSpaceChecker {
     public static func requireAvailable(path: String,
                                         bytes: UInt64,
                                         reserveBytes: UInt64 = 1 * 1024 * 1024 * 1024) throws -> DiskSpaceRequirement {
-        let dir = directoryForProbe(path)
-        try Posix.mkdirP(dir)
-        let result = try requirement(path: dir, bytes: bytes, reserveBytes: reserveBytes)
+        try Posix.mkdirP(path)
+        let result = try requirement(path: path, bytes: bytes, reserveBytes: reserveBytes)
         guard result.canInstall else {
-            throw RepackError.diskSpaceInsufficient(path: dir,
+            throw RepackError.diskSpaceInsufficient(path: path,
                                                     required: result.requiredBytes,
                                                     available: result.availableBytes)
         }
@@ -72,14 +73,5 @@ public enum DiskSpaceChecker {
             url = parent
         }
         return url.path
-    }
-
-    private static func directoryForProbe(_ path: String) -> String {
-        let ns = path as NSString
-        let ext = ns.pathExtension
-        if ext.isEmpty {
-            return path
-        }
-        return ns.deletingLastPathComponent
     }
 }

@@ -17,8 +17,8 @@ public struct RoutedExpertFetchPlan: Sendable {
 }
 
 extension Model {
-    public func routedExpertOffsets(layer: Int) -> MoEExpertOffsets {
-        let expert = packedExpertsLayout.expert(layer: layer, expert: 0)
+    public func routedExpertOffsets(layer: Int) throws -> MoEExpertOffsets {
+        let expert = try packedExpertsLayout.expert(layer: layer, expert: 0)
         func offset(_ role: String) -> UInt32 {
             UInt32(expert.subTensors[role]?.offset ?? 0)
         }
@@ -61,7 +61,7 @@ extension Model {
         let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
         return RoutedExpertFetchPlan(
             layer: layer,
-            cachePlan: streamer.planExpertsCached(experts: experts, avoidingSlots: validSlots))
+            cachePlan: try streamer.planExpertsCached(experts: experts, avoidingSlots: validSlots))
     }
 
     public func planRoutedExpertsIfPossible(layer: Int,
@@ -80,7 +80,9 @@ extension Model {
         return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan)
     }
 
-    public func routedExpertCacheSlotCount(layer _: Int) -> Int? {
+    /// Cache slot count is a per-model streaming property (the same for every
+    /// layer), so it deliberately takes no layer argument.
+    public func routedExpertCacheSlotCount() -> Int? {
         guard case .pread(let slotCount) = streamingMode else { return nil }
         return slotCount
     }

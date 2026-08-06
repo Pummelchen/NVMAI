@@ -1,13 +1,12 @@
 import Foundation
 
 enum ServerLog {
+    /// S32: requests log from concurrent tasks; serialize stderr writes so
+    /// lines never interleave.
+    private static let writeLock = NSLock()
+
     static func accepted(id: String, streaming: Bool) {
         write("request \(id) accepted streaming=\(streaming)")
-    }
-
-    static func prepared(id: String, promptTokens: Int?) {
-        let count = promptTokens.map(String.init) ?? "backend-managed"
-        write("request \(id) prepared prompt=\(count)")
     }
 
     static func queued(id: String) {
@@ -45,6 +44,8 @@ enum ServerLog {
 
     private static func write(_ message: String) {
         let line = "[\(Date().formatted(.iso8601))] \(message)\n"
-        FileHandle.standardError.write(Data(line.utf8))
+        writeLock.withLock {
+            FileHandle.standardError.write(Data(line.utf8))
+        }
     }
 }

@@ -140,6 +140,21 @@ private actor CapturingServerBackend: ServerInferenceBackend {
     }
 }
 
+/// Emits one content event, then fails mid-stream (S5/S20: the stream must
+/// still terminate with an error frame followed by [DONE]).
+private actor ThrowingMidStreamBackend: ServerInferenceBackend {
+    func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        onEvent(.content("partial"))
+        throw ServerRequestError.invalid(
+            message: "synthetic mid-stream failure",
+            param: "messages",
+            code: "synthetic_stream_error")
+    }
+}
+
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
     @Test func healthModelsAndNonStreamingCompletion() async throws {
@@ -432,6 +447,88 @@ struct HTTPServerTests {
         #expect(await server.queuedRequestCount == 0)
         #expect(await !server.hasActiveRequest)
         #expect(await server.acceptedConnectionCount == 0)
+        try await server.shutdown()
+    }
+
+    // MARK: - SSE edge cases (T30)
+
+    /// A backend failure mid-stream must emit the error frame and still
+    /// terminate with [DONE] — the terminal marker may never go missing on
+    /// the error path (S5/S20).
+    @Test func errorDuringStreamEmitsErrorFrameAndTerminalDone() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ThrowingMidStreamBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"fail"}],
+         "stream":true}
+        """#.utf8)
+        let text = String(decoding: try await URLSession.shared.data(for: request).0,
+                          as: UTF8.self)
+
+        // The partial content arrived, then the error envelope...
+        #expect(text.contains(#""content":"partial""#))
+        #expect(text.contains(#""code":"synthetic_stream_error""#))
+        #expect(text.contains("synthetic mid-stream failure"))
+        // ...and the stream still terminated with [DONE] (never missing on
+        // the error path), with the error frame preceding the terminal.
+        #expect(text.hasSuffix("data: [DONE]\n\n"))
+        let errorRange = try #require(text.range(of: "synthetic_stream_error"))
+        let doneRange = try #require(text.range(of: "data: [DONE]"))
+        #expect(errorRange.lowerBound < doneRange.lowerBound)
+
+        try await server.shutdown()
+    }
+
+    /// A client that disconnects mid-stream must cancel the in-flight
+    /// generation (S25: channelInactive cancels the active task).
+    @Test func midStreamClientDisconnectCancelsGeneration() async throws {
+        let backend = CancellableServerBackend()
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: backend)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        let socket = try connectedSocket(port: port)
+        let body =
+            #"{"model":"test-model","messages":[{"role":"user","content":"wait"}],"stream":true}"#
+        let request =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            + "Host: 127.0.0.1:\(port)\r\n"
+            + "Content-Type: application/json\r\n"
+            + "Content-Length: \(body.utf8.count)\r\n"
+            + "Connection: keep-alive\r\n"
+            + "\r\n"
+            + body
+        try writeAll(socket: socket, text: request)
+
+        // The stream must actually start before we disconnect, so the cancel
+        // lands on a live generation rather than a not-yet-routed request.
+        _ = try readUntil(socket: socket, timeoutMilliseconds: 2_000) {
+            $0.contains("data:")
+        }
+        let startedDeadline = ContinuousClock.now + .seconds(2)
+        while await backend.startedCount != 1, ContinuousClock.now < startedDeadline {
+            await Task.yield()
+        }
+        #expect(await backend.startedCount == 1)
+
+        Darwin.close(socket)
+        let cancelledDeadline = ContinuousClock.now + .seconds(2)
+        while await backend.cancellationCount != 1, ContinuousClock.now < cancelledDeadline {
+            await Task.yield()
+        }
+        #expect(await backend.cancellationCount == 1,
+                "mid-stream client disconnect did not cancel the generation")
+
         try await server.shutdown()
     }
 }

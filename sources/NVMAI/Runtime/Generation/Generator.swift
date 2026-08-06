@@ -6,6 +6,9 @@ public enum StopReason: String, Codable, Sendable, Equatable {
     case maxTokens
     case stopString
     case toolCalls
+    /// The caller's `shouldStop()` closure returned true (external stop
+    /// signal) before any configured stop string matched.
+    case external
 }
 
 enum GeneratorError: Error, CustomStringConvertible, Equatable {

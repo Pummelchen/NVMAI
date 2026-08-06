@@ -87,7 +87,7 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for row in 0..<t {
-            gemv.encode(commandBuffer: cb,
+            try gemv.encode(commandBuffer: cb,
                         weights: wBuf,
                         scales: sBuf,
                         biases: bBuf,
@@ -98,7 +98,7 @@ import NVMAIValidationSupport
                         m: UInt32(n),
                         n: UInt32(k))
         }
-        qmm.encode(commandBuffer: cb,
+        try qmm.encode(commandBuffer: cb,
                    weights: wBuf,
                    scales: sBuf,
                    biases: bBuf,
@@ -167,7 +167,7 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for row in 0..<t {
-            gemv.encode(commandBuffer: cb,
+            try gemv.encode(commandBuffer: cb,
                         weights: wBuf,
                         scales: sBuf,
                         biases: bBuf,
@@ -178,7 +178,7 @@ import NVMAIValidationSupport
                         m: UInt32(n),
                         n: UInt32(k))
         }
-        qmm.encode(commandBuffer: cb,
+        try qmm.encode(commandBuffer: cb,
                    weights: wBuf,
                    scales: sBuf,
                    biases: bBuf,
@@ -241,13 +241,13 @@ import NVMAIValidationSupport
             return
         }
         for row in 0..<t {
-            gemv.encode(commandBuffer: cb, weights: weights,
+            try gemv.encode(commandBuffer: cb, weights: weights,
                         scales: scaleBuffer, biases: biasBuffer,
                         x: input, xOffset: row * k * MemoryLayout<Float16>.stride,
                         y: expected, yOffset: row * n * MemoryLayout<Float16>.stride,
                         m: UInt32(n), n: UInt32(k))
         }
-        gemv.encodeTwoRows(commandBuffer: cb, weights: weights,
+        try gemv.encodeTwoRows(commandBuffer: cb, weights: weights,
                            scales: scaleBuffer, biases: biasBuffer,
                            x: input, y: actual,
                            m: UInt32(n), n: UInt32(k))
@@ -287,13 +287,13 @@ import NVMAIValidationSupport
             return
         }
         for row in 0..<t {
-            gemv.encode(commandBuffer: cb, weights: weights,
+            try gemv.encode(commandBuffer: cb, weights: weights,
                         scales: scaleBuffer, biases: biasBuffer,
                         x: input, xOffset: row * k * MemoryLayout<Float16>.stride,
                         y: expected, yOffset: row * n * MemoryLayout<Float16>.stride,
                         m: UInt32(n), n: UInt32(k))
         }
-        gemv.encodeTwoRows(commandBuffer: cb, weights: weights,
+        try gemv.encodeTwoRows(commandBuffer: cb, weights: weights,
                            scales: scaleBuffer, biases: biasBuffer,
                            x: input, y: actual,
                            m: UInt32(n), n: UInt32(k))
@@ -343,7 +343,7 @@ import NVMAIValidationSupport
         }
 
         for row in 0..<t {
-            gemv.encode(commandBuffer: commandBuffer,
+            try gemv.encode(commandBuffer: commandBuffer,
                         weights: weights,
                         scales: scaleBuffer,
                         biases: biasBuffer,
@@ -354,7 +354,7 @@ import NVMAIValidationSupport
                         m: UInt32(n),
                         n: UInt32(k))
         }
-        qmm.encode(commandBuffer: commandBuffer,
+        try qmm.encode(commandBuffer: commandBuffer,
                    weights: weights,
                    scales: scaleBuffer,
                    biases: biasBuffer,

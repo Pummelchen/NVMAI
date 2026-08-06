@@ -9,6 +9,9 @@ public enum AppStopReason: String, Equatable, Sendable {
     case endOfTurn
     case stopString
     case toolCalls
+    /// The generation stopped because the caller's `shouldStop()` closure
+    /// returned true before any configured stop string matched.
+    case external
 }
 
 public struct AppRunnerDiagnostics: Equatable, Sendable {

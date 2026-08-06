@@ -20,10 +20,13 @@ final class PrefillEmbedLookupInt4 {
                        out: MTLBuffer, outOffset: Int = 0,
                        t: UInt32,
                        d: UInt32,
-                       outScale: Float) {
+                       outScale: Float,
+                       vocab: UInt32) throws {
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "D must be a multiple of \(Quantization.groupSize)")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(pso)
         enc.setBuffer(table, offset: tableOffset, index: 0)
         enc.setBuffer(scales, offset: scalesOffset, index: 1)
@@ -33,9 +36,11 @@ final class PrefillEmbedLookupInt4 {
         var tVar = t
         var dVar = d
         var scaleVar = outScale
+        var vocabVar = vocab
         enc.setBytes(&tVar, length: MemoryLayout<UInt32>.size, index: 5)
         enc.setBytes(&dVar, length: MemoryLayout<UInt32>.size, index: 6)
         enc.setBytes(&scaleVar, length: MemoryLayout<Float>.size, index: 7)
+        enc.setBytes(&vocabVar, length: MemoryLayout<UInt32>.size, index: 8)
         enc.dispatchThreads(MTLSize(width: Int(d), height: Int(t), depth: 1),
                             threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
         enc.endEncoding()
@@ -55,8 +60,10 @@ final class PrefillRMSNorm {
                             out: MTLBuffer, outOffset: Int = 0,
                             t: UInt32,
                             d: UInt32,
-                            eps: Float) {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+                            eps: Float) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(psoBF16W)
         enc.setBuffer(x, offset: xOffset, index: 0)
         enc.setBuffer(weight, offset: weightOffset, index: 1)
@@ -93,10 +100,12 @@ final class PrefillInt4QMM {
                        y: MTLBuffer, yOffset: Int = 0,
                        t: Int,
                        n: Int,
-                       k: Int) {
+                       k: Int) throws {
         precondition(k % Quantization.groupSize == 0,
                      "K must be a multiple of \(Quantization.groupSize)")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(pso)
         enc.setBuffer(weights, offset: weightsOffset, index: 0)
         enc.setBuffer(scales, offset: scalesOffset, index: 1)

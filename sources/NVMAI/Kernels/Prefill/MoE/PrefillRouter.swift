@@ -33,12 +33,12 @@ final class PrefillRouter {
     init(context: MetalContext, weightBits: Int = 8) throws {
         precondition([4, 8].contains(weightBits))
         self.pso = try context.pipeline(
-            "prefill_router_gemma4_block",
+            "prefill_router_block",
             constants: [MetalFunctionConstant(index: 79,
                                               value: .uint32(UInt32(weightBits)))])
     }
 
-    func encodeGemma4Block(commandBuffer: MTLCommandBuffer,
+    func encodeBlock(commandBuffer: MTLCommandBuffer,
                                   weights: MTLBuffer,
                                   weightsOffset: Int = 0,
                                   scales: MTLBuffer,
@@ -59,14 +59,16 @@ final class PrefillRouter {
                                   numExperts: UInt32,
                                   d: UInt32,
                                   topK: UInt32,
-                                  hiddenStrideElements: UInt32) {
+                                  hiddenStrideElements: UInt32) throws {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(numExperts <= 256, "numExperts > 256 is not supported")
         precondition(topK > 0 && topK <= 64, "topK must be in 1...64")
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "D must be a multiple of \(Quantization.groupSize)")
         precondition(hiddenStrideElements >= d, "hidden stride is too small")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(pso)
         enc.setBuffer(weights, offset: weightsOffset, index: 0)
         enc.setBuffer(scales, offset: scalesOffset, index: 1)

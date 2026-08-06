@@ -42,7 +42,7 @@ enum StructuredOutputFailureCause: String, Equatable, Sendable {
     case none
 
     static func classify(_ error: Error) -> Self {
-        guard let parserError = error as? GemmaToolCallParserError else {
+        guard let parserError = error as? ToolCallParserError else {
             return .unexpected
         }
         switch parserError {
@@ -239,6 +239,7 @@ struct StructuredOutputFailureDiagnostics: Equatable, Sendable {
         case .maxTokens: "max_tokens"
         case .stopString: "stop_string"
         case .toolCalls: "tool_calls"
+        case .external: "external"
         }
     }
 }
@@ -258,35 +259,16 @@ struct StructuredOutputFailure: Error, CustomDebugStringConvertible, Sendable {
 // MARK: - End of Structured Output Diagnostics
 
 public protocol ServerInferenceBackend: Sendable {
-    func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest
+    /// The backend's configured context window, used to validate
+    /// max_tokens/max_completion_tokens against the session's maxContext (S11).
+    var maximumContext: Int { get }
     func generate(_ request: ValidatedChatRequest,
-                  onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion
-    func generate(_ prepared: ServerPreparedRequest,
                   onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion
 }
 
 public extension ServerInferenceBackend {
-    func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
-        ServerPreparedRequest(request: request)
-    }
-
-    func generate(
-        _ prepared: ServerPreparedRequest,
-        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
-    ) async throws -> ServerCompletion {
-        try await generate(prepared.request, onEvent: onEvent)
-    }
-}
-
-public struct ServerPreparedRequest: Sendable {
-    public let request: ValidatedChatRequest
-    fileprivate let promptIDs: [Int32]?
-
-    public var promptTokenCount: Int? { promptIDs?.count }
-
-    init(request: ValidatedChatRequest, promptIDs: [Int32]? = nil) {
-        self.request = request
-        self.promptIDs = promptIDs
+    var maximumContext: Int {
+        RuntimeConfiguration.supportedContextTokens.max() ?? 262_144
     }
 }
 
@@ -323,7 +305,9 @@ public actor ServerCoordinator {
     ) async throws -> T {
         try Task.checkCancellation()
         guard !shuttingDown else { throw CancellationError() }
-        guard admittedCount <= queueLimit else { throw ServerRequestError.queueFull }
+        // S6: strictly fewer than queueLimit admitted requests; `<=` admitted
+        // queueLimit + 1.
+        guard admittedCount < queueLimit else { throw ServerRequestError.queueFull }
         admittedCount += 1
         defer { admittedCount -= 1 }
 
@@ -385,16 +369,16 @@ public actor ServerCoordinator {
 }
 
 public actor ServerModelSession: ServerInferenceBackend {
-    /// Chat dialect of the loaded tokenizer; drives request-validation rules.
-    public nonisolated let chatDialect: ChatDialect
     /// Family-derived API model identifier used when --model-id is absent.
     public nonisolated var defaultModelID: String {
         switch modelFamily {
-        case .gemma4: return "gemma-4-26b-a4b-it"
         case .qwen36: return "qwen3.6-35b-a3b"
         case .qwen36MTP: return "qwen3.6-35b-a3b-mtp"
         }
     }
+    /// The session's configured context window; the HTTP layer validates
+    /// max_tokens against it (S11).
+    public nonisolated var maximumContext: Int { maxContext }
     private nonisolated let modelFamily: ModelFamily
 
     private let context: MetalContext
@@ -442,15 +426,15 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         let tokenizer = try await GFTokenizer.load(from: tokenizerFolder)
         let context = try MetalContext()
-        let loadRuntime = RuntimeConfiguration(forceLogitsHead: true)
+        let loadRuntime = try RuntimeConfiguration(forceLogitsHead: true)
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
             expecting: .qwen36_35B_A3B,
             streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
-        let runtime = RuntimeConfiguration(
+            integrityPolicy: .resolved(directoryURL: modelDirectory))
+        let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
             rdadvisePolicy: loadRuntime.rdadvisePolicy,
@@ -469,7 +453,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 expecting: .qwen36MTP,
                 streamingMode: .pread(slotCount: StreamingMTPMemoryPlan.expertSlots),
                 expertCachePolicy: runtime.modelExpertCachePolicy,
-                integrityPolicy: .fullSha256)
+                integrityPolicy: .resolved(directoryURL: mtpModelDirectory))
             let decoder = try StreamingMTPDecoder(
                 targetModel: model,
                 mtpSidecar: sidecar,
@@ -564,7 +548,6 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
-        self.chatDialect = tokenizer.dialect
         self.modelFamily = model.config.family
         self.runner = runner
         self.mtpDecoder = mtpDecoder
@@ -608,7 +591,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
 
         let effectivePromptIDs: [Int32]
-        let completionStart: RawCompletionStart
+        var completionStart: RawCompletionStart
         if promptCacheMode == .singlePrefix {
             switch promptCache.match(
                 domain: promptCacheDomain,
@@ -620,8 +603,17 @@ public actor ServerModelSession: ServerInferenceBackend {
                 effectivePromptIDs = promptIDs
                 completionStart = .reset
             case .hit(_, let effective, let cached):
-                effectivePromptIDs = effective
-                completionStart = .resume(cachedPromptTokens: cached)
+                if runner.continuationPosition != cached {
+                    // S15: the live KV no longer sits at the cached entry's
+                    // position; re-prefill instead of resuming from a stale
+                    // or mismatched in-memory state.
+                    promptCache.invalidate()
+                    effectivePromptIDs = promptIDs
+                    completionStart = .reset
+                } else {
+                    effectivePromptIDs = effective
+                    completionStart = .resume(cachedPromptTokens: cached)
+                }
             }
         } else if promptCacheMode == .multiPrefix {
             switch promptCache.match(
@@ -634,12 +626,23 @@ public actor ServerModelSession: ServerInferenceBackend {
                 effectivePromptIDs = promptIDs
                 completionStart = .reset
             case .hit(let entryID, let effective, let cached):
-                if entryID != activePromptCacheEntryID {
+                if entryID == activePromptCacheEntryID,
+                   runner.continuationPosition == cached {
+                    // S15: tier=live is only trusted when the in-memory KV
+                    // still matches the entry (same entry id and the KV
+                    // cursor sits exactly at the request's expected
+                    // position). Anything else falls through to a snapshot
+                    // restore or a full prefill instead of resuming from a
+                    // stale or mismatched KV.
+                    print(
+                        "NVMAI prompt_cache hit tier=live "
+                            + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
+                } else {
                     do {
                         guard let promptStateStore else {
                             throw ServerPromptStateStoreError.missing(entryID)
                         }
-                        let tier = try promptStateStore.restore(
+                        let tier = try await promptStateStore.restore(
                             entryID: entryID,
                             into: runner)
                         print(
@@ -656,10 +659,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                         completionStart = .reset
                         break
                     }
-                } else {
-                    print(
-                        "NVMAI prompt_cache hit tier=live "
-                            + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
                 }
                 activePromptCacheEntryID = entryID
                 effectivePromptIDs = effective
@@ -669,6 +668,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             promptCache.invalidate()
             activePromptCacheEntryID = nil
             effectivePromptIDs = promptIDs
+            completionStart = .reset
+        }
+        // S12: an identical-prompt replay whose render equals the entry's
+        // KV-backed prefix has nothing to prefill (cached == prompt count).
+        // The continuation API requires cached < prompt count (it must
+        // prefill at least one token), so resume as a full prefill; the
+        // entry stays active for later extending requests.
+        if case .resume(let cached) = completionStart,
+           cached >= effectivePromptIDs.count {
             completionStart = .reset
         }
         guard effectivePromptIDs.count < maxContext else {
@@ -859,31 +867,43 @@ public actor ServerModelSession: ServerInferenceBackend {
                         throw ServerPromptStateStoreError.missing(
                             publication.entry.id)
                     }
+                    // S2: capture is bounded by the store's hard snapshot cap;
+                    // the payload is a plain Data copy, so the disk write can
+                    // proceed off the actor (dedicated store disk queue) while
+                    // the next request starts. Concurrent saves serialize on
+                    // the queue, so a later generation's snapshot can never
+                    // clobber an in-flight write. The entry is already in the
+                    // in-memory cache; a request that races the write simply
+                    // misses and re-prefills (restore failure self-heals).
                     let snapshot = try runner.captureInferenceState(
                         maximumBytes: promptStateStore.maximumSnapshotBytes)
                     guard snapshot.descriptor.position == publication.entry.kvPosition else {
                         throw InferenceStateSnapshotError.invalidPosition(
                             snapshot.descriptor.position)
                     }
-                    let saved = promptStateStore.save(
-                        entry: publication.entry,
-                        snapshot: snapshot)
-                    let invalidated = saved.unbackedEntryIDs.filter {
-                        $0 != publication.entry.id
+                    let entry = publication.entry
+                    Task.detached(priority: .utility) { [promptStateStore] in
+                        let saved = await promptStateStore.save(
+                            entry: entry,
+                            snapshot: snapshot)
+                        if let diskError = saved.diskError {
+                            print("NVMAI prompt_cache disk_write_failed error=\(diskError)")
+                        }
+                        print(
+                            "NVMAI prompt_cache stored "
+                                + "tokens=\(entry.kvPosition) "
+                                + "state_bytes=\(snapshot.payload.count) "
+                                + "ram_bytes=\(saved.memoryBytes) "
+                                + "disk_bytes=\(saved.diskBytes) "
+                                + "entry=\(entry.id.uuidString.lowercased())")
                     }
-                    promptCache.remove(entryIDs: invalidated)
-                    if let diskError = saved.diskError {
-                        print("NVMAI prompt_cache disk_write_failed error=\(diskError)")
-                    }
-                    print(
-                        "NVMAI prompt_cache stored "
-                            + "tokens=\(publication.entry.kvPosition) "
-                            + "state_bytes=\(snapshot.payload.count) "
-                            + "ram_bytes=\(saved.memoryBytes) "
-                            + "disk_bytes=\(saved.diskBytes) "
-                            + "entry=\(publication.entry.id.uuidString.lowercased())")
                 } catch {
+                    // S24: a snapshot that cannot be captured or verified is
+                    // never left published without backing; drop the entry so
+                    // the next hit re-prefills instead of a doomed restore.
                     print("NVMAI prompt_cache snapshot_failed error=\(error)")
+                    promptCache.remove(entryIDs: [publication.entry.id])
+                    activePromptCacheEntryID = nil
                 }
                 if let previousActive,
                    previousActive != publication.entry.id,
@@ -900,6 +920,10 @@ public actor ServerModelSession: ServerInferenceBackend {
             content: content,
             toolCalls: calls,
             finishReason: reason,
+            // S26: completion_tokens reports the number of GENERATED tokens,
+            // matching OpenAI's "completion_tokens = tokens in the generated
+            // completion". A stop-string-hidden suffix is therefore counted as
+            // generated even though it is filtered from the visible content.
             usage: OpenAIUsage(promptTokens: result.prefillTokens,
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,

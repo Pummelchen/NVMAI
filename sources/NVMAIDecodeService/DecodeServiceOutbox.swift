@@ -38,6 +38,9 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         case .token(let token):
             state.pendingText += token.textDelta
             state.latestToken = token
+            // D32: wake the writer on tokens so streaming latency is not
+            // gated on the full 0.1 s batch window.
+            condition.signal()
         case .finished(let diagnostics):
             if !state.terminalCommitted {
                 state.terminal = terminal(.finished, diagnostics: diagnostics)

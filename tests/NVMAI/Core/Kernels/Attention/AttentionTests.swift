@@ -46,12 +46,12 @@ import NVMAIValidationSupport
         #expect(!full.useSWAGroupedPartial)
     }
 
-    // MARK: - Gemma 4 scale=1.0 path
+    // MARK: - scale=1.0 path
 
-    /// Gemma 4 uses an attention scale of 1.0. Verify the kernel honours the
-    /// runtime scale argument by computing the same forward with
-    /// scale=1.0 in both kernel and reference, and confirming the output
-    /// differs from the default rsqrt(head_dim) scale path.
+    /// Verify the kernel honours the runtime `scale` argument by computing
+    /// the same forward with scale=1.0 in both kernel and reference, and
+    /// confirming the output differs from the default rsqrt(head_dim) scale
+    /// path.
     @Test func attentionSWA_unitScale_matchesReference_andDiffersFromDefault() throws {
         let headDim = 64, numQHeads = 4, numKVHeads = 2
         let seqLen = 8, window = 8
@@ -76,12 +76,12 @@ import NVMAIValidationSupport
             Issue.record("alloc failed"); return
         }
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encodeSWA(commandBuffer: cb,
+        try kernel.encodeSWA(commandBuffer: cb,
                          q: qBuf, k: kBuf, v: vBuf, out: outScaled,
                          headDim: UInt32(headDim), numQHeads: UInt32(numQHeads),
                          numKVHeads: UInt32(numKVHeads),
                          seqLen: UInt32(seqLen), window: UInt32(window))
-        kernel.encodeSWA(commandBuffer: cb,
+        try kernel.encodeSWA(commandBuffer: cb,
                          q: qBuf, k: kBuf, v: vBuf, out: outUnit,
                          headDim: UInt32(headDim), numQHeads: UInt32(numQHeads),
                          numKVHeads: UInt32(numKVHeads),
@@ -158,7 +158,7 @@ import NVMAIValidationSupport
         }
         switch mode {
         case .swa(let window):
-            kernel.encodeSWA(commandBuffer: cmd,
+            try kernel.encodeSWA(commandBuffer: cmd,
                              q: qBuf, k: kBuf, v: vBuf, out: outBuf,
                              headDim: UInt32(headDim),
                              numQHeads: UInt32(numQHeads),
@@ -166,7 +166,7 @@ import NVMAIValidationSupport
                              seqLen: UInt32(seqLen),
                              window: UInt32(window))
         case .full:
-            kernel.encodeFull(commandBuffer: cmd,
+            try kernel.encodeFull(commandBuffer: cmd,
                               q: qBuf, k: kBuf, v: vBuf, out: outBuf,
                               headDim: UInt32(headDim),
                               numQHeads: UInt32(numQHeads),
@@ -255,7 +255,7 @@ import NVMAIValidationSupport
         }
 
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encodeSWA(commandBuffer: cb,
+        try kernel.encodeSWA(commandBuffer: cb,
                          q: qBuf,
                          k: kBuf,
                          v: vBuf,
@@ -325,7 +325,7 @@ import NVMAIValidationSupport
         }
 
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encodeSWA(commandBuffer: cb,
+        try kernel.encodeSWA(commandBuffer: cb,
                          q: qBuf,
                          k: kLinearBuf,
                          v: vLinearBuf,
@@ -336,7 +336,7 @@ import NVMAIValidationSupport
                          seqLen: UInt32(seqLen),
                          window: UInt32(window),
                          ringCapacity: 0)
-        kernel.encodeSWA(commandBuffer: cb,
+        try kernel.encodeSWA(commandBuffer: cb,
                          q: qBuf,
                          k: kRingBuf,
                          v: vRingBuf,
@@ -366,13 +366,14 @@ import NVMAIValidationSupport
     }
 
     @Test func attentionFull_realShape() throws {
-        try Self.runAndCompare(headDim: 512, numQHeads: 16, numKVHeads: 2,
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
                                seqLen: 128, mode: .full, seed: 0x175)
     }
 
 
 
-    /// Generic aliasing coverage. Gemma 4 runtime uses distinct post-norm K/V.
+    /// Generic aliasing coverage. The Qwen runtime binds distinct post-norm
+    /// K/V buffers; the kernel must still tolerate aliased input.
     @Test func attentionFull_kvShared_smallShape() throws {
         try Self.runAndCompare(headDim: 64, numQHeads: 8, numKVHeads: 1,
                                seqLen: 128, mode: .full, shareKV: true,
@@ -380,7 +381,7 @@ import NVMAIValidationSupport
     }
 
     @Test func attentionFull_kvShared_realShape() throws {
-        try Self.runAndCompare(headDim: 512, numQHeads: 16, numKVHeads: 2,
+        try Self.runAndCompare(headDim: 256, numQHeads: 16, numKVHeads: 2,
                                seqLen: 128, mode: .full, shareKV: true,
                                seed: 0x177)
     }

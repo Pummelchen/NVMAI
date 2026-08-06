@@ -12,7 +12,7 @@ import Foundation
                                                           "aneSharedExpert": false],
                                  archOverrides: [String: Any] = [:],
                                  filesOverride: [String: [String: Any]]? = nil,
-                                 config: ArchConfig = .gemma4Toy()) throws
+                                 config: ArchConfig = .qwenToy()) throws
                                  -> (URL, ArchConfig) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-manifest-test-\(UUID().uuidString)")
@@ -115,7 +115,7 @@ import Foundation
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
-            _ = try ManifestReader.load(directoryURL: dir, expecting: .gemma4Toy())
+            _ = try ManifestReader.load(directoryURL: dir, expecting: .qwenToy())
         } throws: { error in
             if case ModelError.partialInstall = error { return true }
             return false
@@ -185,7 +185,7 @@ import Foundation
     }
 
     @Test func productionManifestRequiresQuantMetadata() throws {
-        let (dir, config) = try Self.writeToyManifest(config: .gemma4_26B_A4B)
+        let (dir, config) = try Self.writeToyManifest(config: .qwen36_35B_A3B)
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
             _ = try ManifestReader.load(directoryURL: dir, expecting: config)
@@ -198,7 +198,7 @@ import Foundation
     @Test func productionManifestAcceptsInt4SharedExpert() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(sharedExpertBits: 4)],
-            config: .gemma4_26B_A4B)
+            config: .qwen36_35B_A3B)
         defer { try? FileManager.default.removeItem(at: dir) }
         let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
         #expect(manifest.quant?.sharedExpert.weightBits == 4)
@@ -207,7 +207,7 @@ import Foundation
     @Test func productionManifestAcceptsHistoricalInt8SharedExpert() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(sharedExpertBits: 8)],
-            config: .gemma4_26B_A4B)
+            config: .qwen36_35B_A3B)
         defer { try? FileManager.default.removeItem(at: dir) }
         let manifest = try ManifestReader.load(directoryURL: dir, expecting: config)
         #expect(manifest.quant?.sharedExpert.weightBits == 8)
@@ -216,7 +216,7 @@ import Foundation
     @Test func productionManifestRejectsUnsupportedQuantMetadata() throws {
         let (dir, config) = try Self.writeToyManifest(
             ["quant": Self.quant(sharedExpertBits: 3, routerBits: 4)],
-            config: .gemma4_26B_A4B)
+            config: .qwen36_35B_A3B)
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect {
             _ = try ManifestReader.load(directoryURL: dir, expecting: config)
@@ -280,31 +280,46 @@ import Foundation
 }
 
 extension ArchConfig {
-    /// Tiny baseline used across the loader tests. 2 layers (both full), hidden 64,
-    /// vocab 1024, 8 experts. Numbers are intentionally toy.
-    static func gemma4Toy() -> ArchConfig {
+    /// Tiny baseline used across the loader tests. 4 layers alternating
+    /// gated-DeltaNet linear (mask 2) and full attention (mask 1), 8 experts
+    /// (top-8 for the fixed-top-k decode kernels), gated shared expert,
+    /// untied lm_head. Numbers are intentionally toy but respect every kernel
+    /// divisibility constraint (D % 64, keyHeadDim % 32, even rotaryDim).
+    static func qwenToy() -> ArchConfig {
         ArchConfig(
             hiddenSize: 64,
-            intermediateSize: 256,
+            intermediateSize: 128,
             moeIntermediateSize: 128,
             numHeads: 4,
             numKVHeads: 2,
-            numFullKVHeads: 1,
-            headDim: 16,
+            numFullKVHeads: 2,
+            headDim: 32,
             fullHeadDim: 32,
             vocabSize: 1024,
-            slidingWindow: 256,
-            finalLogitSoftcap: 30.0,
-            ropeTheta: 10_000.0,
-            fullRopeTheta: 1_000_000.0,
+            slidingWindow: 1024,
+            finalLogitSoftcap: 0.0,
+            ropeTheta: 10_000_000.0,
+            fullRopeTheta: 10_000_000.0,
             partialRotaryFactor: 0.25,
-            numLayers: 2,
+            numLayers: 4,
             numExperts: 8,
-            topKExperts: 2,
-            tieWordEmbeddings: true,
-            attentionKEqV: true,
-            fullAttentionLayerMask: [0, 1],
-            hiddenActivation: "gelu_pytorch_tanh"
+            topKExperts: 8,
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [2, 1, 2, 1],
+            hiddenActivation: "silu",
+            family: .qwen36,
+            attnOutputGate: true,
+            attentionScale: 0.125,   // 32^-0.5
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: true,
+            ropeNeoxSubdim: true,
+            linearAttention: LinearAttentionConfig(
+                numKHeads: 2, numVHeads: 4,
+                keyHeadDim: 32, valueHeadDim: 32,
+                convKernelSize: 4)
         )
     }
 }

@@ -66,7 +66,7 @@ extension RawCompletionLoopTests {
 
     @Test func resumedChunkedPrefillUsesNonzeroStart() async throws {
         let context = try MetalContext()
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
         let prompt = tokenizer.encode("one two three four", addBOS: true)
         let cached = prompt.count - 1
         let producer = ContinuationProducer(
@@ -106,7 +106,7 @@ extension RawCompletionLoopTests {
 
     @Test func resumeRejectsInvalidCachedCountsBeforeMutatingProducer() async throws {
         let context = try MetalContext()
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
         let prompt = tokenizer.encode("one two", addBOS: true)
         let producer = ContinuationProducer(
             vocabSize: tokenizer.vocabSize,

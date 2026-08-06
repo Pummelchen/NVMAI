@@ -4,6 +4,13 @@ import Testing
 @testable import NVMAI
 import NVMAIValidationSupport
 
+// MPP (matrix-product pipeline) TensorOps is a runtime/hardware capability:
+// it is unavailable on some Apple Silicon configurations. These tests are
+// gated with .enabled(if:) so the skip is *recorded* in the test output
+// instead of silently passing or being dropped — an unavailable MPP path is
+// an expected skip, never a green result. The un-gated
+// unsupportedOrUnalignedInputsReportFallback test below still pins the
+// fallback contract on every machine.
 private let mppTensorOpsAvailable: Bool = {
     guard let context = try? MetalContext() else { return false }
     return MPPPrefillInt4QMM(context: context).isAvailable
@@ -146,7 +153,7 @@ private let mppTensorOpsAvailable: Bool = {
             throw CocoaError(.fileReadUnknown)
         }
 
-        baseline.encode(commandBuffer: commandBuffer,
+        try baseline.encode(commandBuffer: commandBuffer,
                         weights: weights,
                         weightsOffset: weightOffset,
                         scales: scaleBuffer,
@@ -158,7 +165,7 @@ private let mppTensorOpsAvailable: Bool = {
                         t: m,
                         n: n,
                         k: k)
-        let path = candidate.encode(commandBuffer: commandBuffer,
+        let path = try candidate.encode(commandBuffer: commandBuffer,
                                     weights: weights,
                                     weightsOffset: weightOffset,
                                     scales: scaleBuffer,
@@ -284,7 +291,7 @@ private let mppTensorOpsAvailable: Bool = {
             return
         }
         for run in 0..<32 {
-            let path = candidate.encode(commandBuffer: commandBuffer,
+            let path = try candidate.encode(commandBuffer: commandBuffer,
                                         weights: weights,
                                         scales: scales,
                                         biases: biases,
@@ -323,7 +330,7 @@ private let mppTensorOpsAvailable: Bool = {
             Issue.record("buffer allocation failed")
             return
         }
-        let unsupportedShape = candidate.encode(commandBuffer: commandBuffer,
+        let unsupportedShape = try candidate.encode(commandBuffer: commandBuffer,
                                                 weights: buffer,
                                                 scales: buffer,
                                                 biases: buffer,
@@ -332,7 +339,7 @@ private let mppTensorOpsAvailable: Bool = {
                                                 m: 1,
                                                 n: 1,
                                                 k: 65)
-        let unalignedScale = candidate.encode(commandBuffer: commandBuffer,
+        let unalignedScale = try candidate.encode(commandBuffer: commandBuffer,
                                               weights: buffer,
                                               weightsOffset: 1,
                                               scales: buffer,

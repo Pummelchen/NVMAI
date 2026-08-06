@@ -37,11 +37,11 @@ import NVMAIValidationSupport
         memset(residual.contents(), 0, residual.length)
         let args = kernel.makeRoutedArgumentBuffer(routedBlobs: routed, topK: 8)!
         let cb = context.queue.makeCommandBuffer()!
-        kernel.encodeRoutedPersistentPhase1U16Load(
+        try kernel.encodeRoutedPersistentPhase1U16Load(
             commandBuffer: cb, routedArgBuffer: args, routedBlobs: routed,
             routedOffsets: blobs[0].offsets, x: x, acts: acts,
             d: 128, f: 64, topK: 8)
-        kernel.encodeRoutedPersistentPhase2Reduce(
+        try kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: cb, routedArgBuffer: args, routedBlobs: routed,
             routedOffsets: blobs[0].offsets, acts: acts,
             routingWeights: weights, residual: residual, y: output,
@@ -131,7 +131,7 @@ import NVMAIValidationSupport
         }
 
         let fullCommand = context.queue.makeCommandBuffer()!
-        kernel.encodeRoutedPersistentPhase1U16Load(
+        try kernel.encodeRoutedPersistentPhase1U16Load(
             commandBuffer: fullCommand,
             routedArgBuffer: argumentBuffer,
             routedBlobs: routedBuffers,
@@ -141,7 +141,7 @@ import NVMAIValidationSupport
             d: UInt32(Self.dimension),
             f: UInt32(Self.intermediate),
             topK: UInt32(Self.topK))
-        kernel.encodeRoutedPersistentPhase2Reduce(
+        try kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: fullCommand,
             routedArgBuffer: argumentBuffer,
             routedBlobs: routedBuffers,
@@ -160,7 +160,7 @@ import NVMAIValidationSupport
         let splitCommand = context.queue.makeCommandBuffer()!
         for (slots, activeSlots) in [([UInt32](0...3), lowSlots),
                                      ([UInt32](4...7), highSlots)] {
-            kernel.encodeRoutedPersistentPhase1SubsetU16Load(
+            try kernel.encodeRoutedPersistentPhase1SubsetU16Load(
                 commandBuffer: splitCommand,
                 routedArgBuffer: argumentBuffer,
                 routedBlobs: routedBuffers,
@@ -174,7 +174,7 @@ import NVMAIValidationSupport
                 f: UInt32(Self.intermediate),
                 topK: UInt32(Self.topK))
         }
-        kernel.encodeRoutedPersistentPhase2Reduce(
+        try kernel.encodeRoutedPersistentPhase2Reduce(
             commandBuffer: splitCommand,
             routedArgBuffer: argumentBuffer,
             routedBlobs: routedBuffers,

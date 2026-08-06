@@ -69,20 +69,6 @@ package enum GTurboPackedExpertsLayoutCodec {
         try GTurboV1StructuralValidator.validate(layout)
         return layout
     }
-
-    package static func encode(_ layout: GTurboPackedExpertsLayoutV1) throws -> Data {
-        try GTurboV1StructuralValidator.validate(layout)
-        let encoder = JSONEncoder()
-        do {
-            let object = try JSONSerialization.jsonObject(with: encoder.encode(layout))
-            return try JSONSerialization.data(
-                withJSONObject: object,
-                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        } catch {
-            throw NVMAIFormatError.invalid(
-                field: "packed_experts/layout.json", reason: "\(error)")
-        }
-    }
 }
 
 package enum GTurboV1StructuralValidator {

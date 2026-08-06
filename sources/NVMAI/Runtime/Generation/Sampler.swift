@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import Synchronization
 
 /// Generation knobs threaded from the caller through the `Generator` into the
 /// sampler. Pure value type; one per `generate(...)` call.
@@ -90,6 +91,19 @@ final class Sampler {
     let vocab: Int
     private let logitSoftcap: Float
 
+    /// Incremental repetition-penalty history (R25): id -> occurrence count,
+    /// carried across `sample` calls within one generation. The penalty is
+    /// applied once per distinct id (HF convention), so the counts themselves
+    /// are bookkeeping; the dict replaces the per-token `Set(history)` build.
+    private var penaltyFrequency: [Int32: Int] = [:]
+    /// Whether the current generation's prompt has been folded into
+    /// `penaltyFrequency` yet.
+    private var penaltyHistorySeeded = false
+
+    /// Monotonic counter combined with the clock so two samples in the same
+    /// nanosecond still draw distinct non-deterministic seeds (R34).
+    private static let nondeterministicSeedCounter = Atomic<UInt64>(0)
+
     init(context: MetalContext, vocab: Int = 262_144,
                 logitSoftcap: Float = 30.0) throws {
         self.softcap = try LogitSoftcapSoftmax(context: context)
@@ -111,7 +125,7 @@ final class Sampler {
                        history: [Int32],
                        config: GenerationConfig,
                        position: Int,
-                       outToken: MTLBuffer) -> SamplePath {
+                       outToken: MTLBuffer) throws -> SamplePath {
         let v = UInt32(vocab)
 
         let appliedPenalty = config.repetitionPenalty != 1.0 && !history.isEmpty
@@ -120,28 +134,27 @@ final class Sampler {
                                           history: history,
                                           penalty: config.repetitionPenalty)
         }
-
-        softcap.encode(commandBuffer: commandBuffer,
-                       logits: logits, probs: probs, v: v, softcap: logitSoftcap)
+        try softcap.encode(commandBuffer: commandBuffer,
+                           logits: logits, probs: probs, v: v, softcap: logitSoftcap)
 
         let isGreedy = config.temperature == 0
         let seed = Self.seedFor(config: config, position: position)
         if config.temperature > 0,
            config.topK == 64 {
-            topK64Kernel.encode(commandBuffer: commandBuffer,
-                                probs: probs,
-                                outToken: outToken,
-                                temperature: config.temperature,
-                                topP: config.topP ?? 1.0,
-                                seed: seed)
+            try topK64Kernel.encode(commandBuffer: commandBuffer,
+                                    probs: probs,
+                                    outToken: outToken,
+                                    temperature: config.temperature,
+                                    topP: config.topP ?? 1.0,
+                                    seed: seed)
         } else {
-            sampleKernel.encode(commandBuffer: commandBuffer,
-                                probs: probs, outToken: outToken, v: v,
-                                temperature: isGreedy ? 0.0 : config.temperature,
-                                topK: UInt32(config.topK ?? 0),
-                                topP: config.topP ?? 1.0,
-                                seed: seed,
-                                position: UInt32(position))
+            try sampleKernel.encode(commandBuffer: commandBuffer,
+                                    probs: probs, outToken: outToken, v: v,
+                                    temperature: isGreedy ? 0.0 : config.temperature,
+                                    topK: UInt32(config.topK ?? 0),
+                                    topP: config.topP ?? 1.0,
+                                    seed: seed,
+                                    position: UInt32(position))
         }
 
         if appliedPenalty { return .hostPenalty }
@@ -153,24 +166,38 @@ final class Sampler {
     /// HF convention: for each token id seen in `history`, a positive logit is
     /// divided by `penalty`, a negative logit multiplied. Edits the shared
     /// `logits` buffer in place — no full-buffer copy, only the unique history
-    /// entries are touched (counted for the audit).
+    /// entries are touched.
     ///
     /// The penalty must act on the POST-softcap logit (HF applies it to the
-    /// model's output logits, and Gemma's output includes the 30*tanh(z/30)
-    /// cap). Real Gemma 4 raw logits reach the hundreds, deep in tanh
-    /// saturation, where dividing the raw value by 1.1 moves the capped logit
-    /// by ~nothing — the penalty silently no-ops on exactly the
-    /// high-confidence tokens that form repetition loops. So: softcap the raw
-    /// value, penalize, and invert through atanh so the downstream
-    /// softcap+softmax kernel reproduces the penalized capped logit.
+    /// model's output logits). For architectures with a logit softcap the raw
+    /// logits can reach deep into tanh saturation, where dividing the raw value
+    /// by 1.1 moves the capped logit by ~nothing — the penalty silently no-ops
+    /// on exactly the high-confidence tokens that form repetition loops. So:
+    /// softcap the raw value, penalize, and invert through atanh so the
+    /// downstream softcap+softmax kernel reproduces the penalized capped logit.
+    /// (Qwen 3.6 has no logit softcap, so the 0.0 branch is the production
+    /// path.)
+    ///
+    /// Incremental history (R25): the first call of a generation folds the
+    /// prompt into `penaltyFrequency`; each later call only adds the single
+    /// token appended since the last call (the history's last element). The
+    /// logit edit still runs for every distinct id every call because the
+    /// logits buffer is fresh per token.
     private func applyRepetitionPenaltyInPlace(logits: MTLBuffer,
                                                history: [Int32],
                                                penalty: Float) {
+        if !penaltyHistorySeeded {
+            for id in history where id >= 0 && Int(id) < vocab {
+                penaltyFrequency[id, default: 0] += 1
+            }
+            penaltyHistorySeeded = true
+        } else if let last = history.last, last >= 0, Int(last) < vocab {
+            penaltyFrequency[last, default: 0] += 1
+        }
+
         let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
-        var seen = Set<Int32>()
-        seen.reserveCapacity(history.count)
-        for id in history {
-            guard id >= 0 && Int(id) < vocab, seen.insert(id).inserted else { continue }
+        for (id, _) in penaltyFrequency {
+            guard id >= 0 && Int(id) < vocab else { continue }
             let i = Int(id)
             let z = Float(ptr[i])
             let penalized: Float
@@ -190,6 +217,13 @@ final class Sampler {
         }
     }
 
+    /// Clear the incremental penalty history. The scratch sampler outlives a
+    /// single generation, so the caller resets it at the start of each one.
+    func resetPenaltyHistory() {
+        penaltyFrequency.removeAll(keepingCapacity: true)
+        penaltyHistorySeeded = false
+    }
+
     // MARK: - Seed
 
     /// Deterministic per-position seed when `config.seed != nil` so a fixed seed
@@ -202,7 +236,11 @@ final class Sampler {
         }
         var t = timespec()
         clock_gettime(CLOCK_MONOTONIC, &t)
-        let raw = UInt64(bitPattern: Int64(t.tv_nsec)) &* 0x9E3779B97F4A7C15
+        // Combine the clock with a monotonic counter (R34) so two samples in
+        // the same nanosecond still draw distinct seeds.
+        let counter = Self.nondeterministicSeedCounter
+            .wrappingAdd(1, ordering: .relaxed).newValue
+        let raw = (UInt64(bitPattern: Int64(t.tv_nsec)) &+ counter) &* 0x9E3779B97F4A7C15
             &+ UInt64(bitPattern: Int64(t.tv_sec))
         return raw == 0 ? 0x9E3779B97F4A7C15 : raw
     }

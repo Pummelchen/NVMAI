@@ -7,6 +7,9 @@ enum MetalError: Error, CustomStringConvertible {
     case missingShaderResource(String)
     case missingFunction(String)
     case libraryCompileFailed(String)
+    case commandEncoderFailed
+    case bufferAllocationFailed(String)
+    case invalidState(String)
 
     public var description: String {
         switch self {
@@ -15,6 +18,10 @@ enum MetalError: Error, CustomStringConvertible {
         case .missingShaderResource(let n): return "Shader resource missing: \(n)"
         case .missingFunction(let n):     return "Metal function missing in library: \(n)"
         case .libraryCompileFailed(let s):return "Metal library compile failed: \(s)"
+        case .commandEncoderFailed:       return "Failed to create Metal compute command encoder"
+        case .bufferAllocationFailed(let label):
+            return "Failed to allocate Metal buffer: \(label)"
+        case .invalidState(let detail):   return "Invalid Metal encoder state: \(detail)"
         }
     }
 }
@@ -166,10 +173,14 @@ public final class MetalContext: @unchecked Sendable {
         let key = PipelineCacheKey(name: name,
                                    constants: sortedConstants,
                                    maxTotalThreadsPerThreadgroup: hint)
+        // K2: compile+insert happen inside the lock. The naive double-checked
+        // locking compiled the PSO *outside* the lock, so a concurrent miss on
+        // the same key compiled the pipeline multiple times. Compiling under
+        // the lock serializes only the (rare, startup-only) cold-miss path;
+        // reads after initialization are served from the fast path above.
         pipelineCacheLock.lock()
-        let cached = pipelineCache[key]
-        pipelineCacheLock.unlock()
-        if let cached { return cached }
+        defer { pipelineCacheLock.unlock() }
+        if let existing = pipelineCache[key] { return existing }
 
         guard library.functionNames.contains(name) else {
             throw MetalError.missingFunction(name)
@@ -203,9 +214,7 @@ public final class MetalContext: @unchecked Sendable {
         } else {
             p = try device.makeComputePipelineState(function: fn)
         }
-        pipelineCacheLock.lock()
         pipelineCache[key] = p
-        pipelineCacheLock.unlock()
         return p
     }
 

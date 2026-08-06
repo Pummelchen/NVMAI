@@ -32,7 +32,7 @@ final class MockModelInstallerClient: AppModelInstallerClient, Sendable {
          requirement: AppModelInstallRequirement = AppModelInstallRequirement(
             requiredBytes: 1,
             availableBytes: UInt64.max),
-         descriptor: AppModelInstallDescriptor = .default,
+         descriptor: AppModelInstallDescriptor = .qwen36,
          holdOpen: Bool = false,
          delayCancellationAcknowledgement: Bool = false) {
         self.events = events

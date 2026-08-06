@@ -1,35 +1,11 @@
 import Darwin
 import Foundation
+import NVMAIFormat
 
-/// Path validation utilities for GTurbo directory operations.
-/// Adapted from NVMAIFormat to avoid a separate target dependency.
-package enum GTurboPathValidator {
-    package static func appleFilesystemKey(_ path: String) -> String {
-        path.precomposedStringWithCanonicalMapping
-            .lowercased(with: Locale(identifier: "en_US_POSIX"))
-    }
-
-    package static func validateRelativePath(_ path: String, field: String) throws {
-        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\0") else {
-            throw RepackError.configurationInvalid(detail: "\(field): unsafe relative path")
-        }
-        let components = path.components(separatedBy: "/")
-        guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
-            throw RepackError.configurationInvalid(detail: "\(field): non-canonical path")
-        }
-        let normalized = NSString.path(withComponents: components)
-        guard normalized == path else {
-            throw RepackError.configurationInvalid(detail: "\(field): non-normalized path")
-        }
-    }
-
-    package static func validateBasename(_ name: String, field: String) throws {
-        try validateRelativePath(name, field: field)
-        guard !name.contains("/") else {
-            throw RepackError.configurationInvalid(detail: "\(field): expected basename")
-        }
-    }
-}
+/// Path validation for GTurbo directory operations uses the single
+/// `GTurboPathValidator` from NVMAIFormat (there is deliberately no duplicate
+/// here; both this module and the runtime validate against the same rules).
+/// Errors from the validator are wrapped into `RepackError` at the call sites.
 
 package final class GTurboDirectoryAccess {
     package let rootPath: String
@@ -187,7 +163,9 @@ package final class GTurboDirectoryAccess {
                     path: "\(rootPath)/\(relativePath)", errno: errno)
             }
             if (info.st_mode & S_IFMT) == S_IFDIR {
-                if prefix.isEmpty, name == "tokenizer" { continue }
+                // Skip any tokenizer directory at any depth: its contents are
+                // metadata sidecars, not model artifacts.
+                if name == "tokenizer" { continue }
                 guard depth < maxDepth else {
                     throw RepackError.configurationInvalid(
                         detail: "artifact directory nesting exceeds \(maxDepth)")

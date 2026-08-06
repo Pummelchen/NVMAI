@@ -27,8 +27,6 @@ xcuserdata/
 *.pdf
 weights/
 models/
-Model/
-!Tests/**/Model/
 # Repacked .gturbo directories (manifest.json/layout.json inside aren't caught by *.bin)
 *.gturbo/
 
@@ -40,16 +38,9 @@ Model/
 
 # Logs / scratch
 *.log
-benchmark-results/cache-stress-*/
-benchmark-results/bench-4bit-*/
-benchmark-results/bench-2x2-full-*/
-benchmark-results/bench-2x2-*/
-benchmark-results/aggregate.json
+benchmark-results/
 scratch/
 tmp/
-
-# Keep precise benchmark results
-!benchmark-results/bench-2x2-precise-*/
 
 # Python
 __pycache__/

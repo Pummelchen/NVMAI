@@ -78,7 +78,21 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                 for destination in copy.destinations {
                     let destinationFD: Int32
                     if let existing = outputFDs[destination.destinationPath] {
-                        destinationFD = existing
+                        // The fd cache holds O_RDWR descriptors for the whole
+                        // run; verify the cached fd still refers to the same
+                        // file (dev/ino) before reusing it, and reopen if the
+                        // file was replaced underneath us.
+                        if try Posix.descriptorMatchesPath(
+                            existing,
+                            path: destination.destinationPath) {
+                            destinationFD = existing
+                        } else {
+                            close(existing)
+                            let reopened = try Posix.openExistingRW(
+                                destination.destinationPath)
+                            outputFDs[destination.destinationPath] = reopened
+                            destinationFD = reopened
+                        }
                     } else {
                         destinationFD = try Posix.openExistingRW(
                             destination.destinationPath)
@@ -99,6 +113,9 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
                 close(sourceFD)
             } catch {
                 close(sourceFD)
+                // Do not leave the range temporary behind on a failed copy:
+                // the next attempt (or a resume) must start from a clean slate.
+                try? FileManager.default.removeItem(atPath: temporary.path)
                 throw error
             }
 

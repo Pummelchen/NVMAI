@@ -1,6 +1,7 @@
 import Foundation
 import NVMAIRepackCore
 import Observation
+import os
 
 @MainActor
 @Observable
@@ -60,6 +61,7 @@ public final class AppModel {
     private let installETAClock: SuspendingClock
     private let installETAOrigin: SuspendingClock.Instant
     private var installETAEstimator = DownloadETAEstimator()
+    private static let modelLog = Logger(subsystem: "com.nvmai.app", category: "model")
 
     public init(modelDirectory: URL? = nil,
                 client: any AppInferenceClient = RealInferenceClient(),
@@ -247,7 +249,10 @@ public final class AppModel {
     }
 
     public var currentProcessMemoryBytes: UInt64? {
-        guard loadState.isReady || isRunning else { return nil }
+        // D15: report a live metric only while a generation is running. When
+        // idle, the reporter holds the previous run's last snapshot — a
+        // generation-old value the HUD must not show.
+        guard isRunning else { return nil }
         if let reporter = client as? any AppInferenceMemoryReporting,
            let bytes = reporter.currentInferenceMemoryBytes {
             return bytes
@@ -391,6 +396,10 @@ public final class AppModel {
         loadTask?.cancel()
         loadTask = nil
         pendingExplicitLoadRuntimeKey = nil
+        // D5: abort the load on the service side too; cancelling only the
+        // app-side wait would leave the service loading a model the user
+        // asked to cancel.
+        lifecycle.cancelLoad()
         unloadGeneration &+= 1
         let generation = unloadGeneration
         unloadTask = Task { [weak self, lifecycle] in
@@ -453,8 +462,16 @@ public final class AppModel {
     }
 
     public var hasPartialModelDownload: Bool {
-        guard let paths = try? RemoteInstallPaths(outputDirectory: modelPathText) else {
-            // Note: error silently ignored — user will see validation error on install attempt
+        let paths: RemoteInstallPaths
+        do {
+            paths = try RemoteInstallPaths(outputDirectory: modelPathText)
+        } catch {
+            // D22: treat an unreadable install layout as "no partial
+            // download", but record the failure instead of swallowing it
+            // silently; the user will still see a validation error if they
+            // attempt an install.
+            Self.modelLog.error(
+                "hasPartialModelDownload: cannot resolve install paths for \(self.modelPathText): \(String(describing: error))")
             return false
         }
         return FileManager.default.fileExists(atPath: paths.partialDirectory)
@@ -668,7 +685,6 @@ public final class AppModel {
             installReadiness = .insufficientSpace(requirement)
         } else {
             refreshInstallReadiness()
-            // No override needed — state already set correctly above
         }
     }
 
@@ -849,6 +865,8 @@ public final class AppModel {
         isCancellationPending = false
         activeRunRuntimeKey = nil
         runTask = nil
+        // D14: the live snapshot belongs to the generation that just ended.
+        liveMemoryBytes = nil
     }
 
     private func clearLoadTask(generation: UInt64) {

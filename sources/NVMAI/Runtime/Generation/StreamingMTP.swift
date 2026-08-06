@@ -21,7 +21,6 @@ public struct StreamingMTPMemoryPlan: Sendable, Equatable {
         residentTensorBytes + streamedExpertCacheBytes + draftKVBytes
             + targetRollbackBytes + scratchBytes
     }
-    public var headroomBytes: Int { budgetBytes - requiredBytes }
 
     public init(budgetMiB: Int = defaultBudgetMiB,
                 residentTensorBytes: Int,
@@ -64,6 +63,10 @@ public enum StreamingMTPError: Error, Equatable, CustomStringConvertible {
     case sidecarMustBeQwen36MTP
     case greedyOnly
     case draftNotReady
+    /// A logic invariant the decoder believes is impossible was violated.
+    /// Distinct from `.draftNotReady` so a genuine internal bug is debuggable
+    /// instead of masquerading as "call advance before prepare" (R24).
+    case internalInconsistency(String)
 
     public var description: String {
         switch self {
@@ -81,6 +84,8 @@ public enum StreamingMTPError: Error, Equatable, CustomStringConvertible {
             "native MTP currently preserves exact output only for greedy decoding"
         case .draftNotReady:
             "MTP draft state has not been aligned with the target prompt"
+        case .internalInconsistency(let detail):
+            "MTP internal inconsistency: \(detail)"
         }
     }
 }
@@ -159,10 +164,12 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
         guard mtpSidecar.config.family == .qwen36MTP else {
             throw StreamingMTPError.sidecarMustBeQwen36MTP
         }
-        // Validate MTP tensors exist before attempting weight sharing
-        _ = try? mtpSidecar.mtpProjection()
-        _ = try? mtpSidecar.mtpEmbeddingNorm()
-        _ = try? mtpSidecar.mtpHiddenNorm()
+        // Validate MTP tensors exist before attempting weight sharing. The
+        // errors (missing tensor, wrong layout) propagate as-is (R19) — a
+        // broken sidecar must fail loudly at session construction.
+        _ = try mtpSidecar.mtpProjection()
+        _ = try mtpSidecar.mtpEmbeddingNorm()
+        _ = try mtpSidecar.mtpHiddenNorm()
         let boundDraft = try mtpSidecar.sharingTargetWeights(from: targetModel)
         let targetRunner = try RealForwardRunner(model: targetModel,
                                                  context: context,
@@ -171,7 +178,7 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
                                                  enableSpeculativeGDN: true)
         let draftContext = min(maxContext,
                                StreamingMTPMemoryPlan.defaultDraftKVTokens)
-        let draftRuntime = RuntimeConfiguration(
+        let draftRuntime = try RuntimeConfiguration(
             expertCacheSlots: StreamingMTPMemoryPlan.expertSlots,
             expertCachePolicy: runtimeConfiguration.expertCachePolicy,
             rdadvisePolicy: runtimeConfiguration.rdadvisePolicy,
@@ -252,7 +259,13 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
             targetHiddenRows: boundaryHidden,
             startPosition: draft.continuationPosition,
             predictNext: true)
-        guard let draftToken else { throw StreamingMTPError.draftNotReady }
+        // `advanceMTP` with `predictNext: true` always returns a token unless
+        // a logic error regressed the prediction path; a distinct error keeps
+        // that debuggable instead of masquerading as draft-not-ready (R24).
+        guard let draftToken else {
+            throw StreamingMTPError.internalInconsistency(
+                "draft advance returned no prediction token")
+        }
 
         let checkpoint = try target.captureSpeculativeCheckpoint(
             maximumBytes: memoryPlan.targetRollbackBytes)

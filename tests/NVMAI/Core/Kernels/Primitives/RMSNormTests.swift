@@ -15,7 +15,7 @@ import NVMAIValidationSupport
 
     private static let eps: Float = 1e-6
 
-    // Every Gemma 4 norm weight is BF16. The reference is
+    // Every Qwen norm weight is BF16. The reference is
     // `RmsNormRef.apply` over weights that have been round-tripped through
     // BF16 (matching what the kernel reads from device memory).
 
@@ -42,7 +42,7 @@ import NVMAIValidationSupport
         for i in 0..<wBits.count { wPtr[i] = wBits[i] }
 
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encodeBF16W(commandBuffer: cb, x: xBuf, weight: wBuf, out: yBuf,
+        try kernel.encodeBF16W(commandBuffer: cb, x: xBuf, weight: wBuf, out: yBuf,
                            d: UInt32(d), eps: eps)
         cb.commit(); cb.waitUntilCompleted()
 
@@ -57,8 +57,8 @@ import NVMAIValidationSupport
     @Test func rmsNorm_bf16w_d256() throws {
         try Self.runAndCompareBF16W(d: 256, seed: 0xC3)
     }
-    @Test func rmsNorm_bf16w_d2816() throws {
-        try Self.runAndCompareBF16W(d: 2816, seed: 0xD4)
+    @Test func rmsNorm_bf16w_d2048() throws {
+        try Self.runAndCompareBF16W(d: 2048, seed: 0xD4)
     }
 
     // MARK: - No-scale variant
@@ -82,7 +82,7 @@ import NVMAIValidationSupport
             Issue.record("alloc failed"); return
         }
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encodeNoScale(commandBuffer: cb, x: xBuf, out: yBuf,
+        try kernel.encodeNoScale(commandBuffer: cb, x: xBuf, out: yBuf,
                              d: UInt32(d), eps: eps)
         cb.commit(); cb.waitUntilCompleted()
 
@@ -97,8 +97,8 @@ import NVMAIValidationSupport
     @Test func rmsNorm_noScale_d256() throws {
         try Self.runAndCompareNoScale(d: 256, seed: 0xE5)
     }
-    @Test func rmsNorm_noScale_d2816() throws {
-        try Self.runAndCompareNoScale(d: 2816, seed: 0xF6)
+    @Test func rmsNorm_noScale_d2048() throws {
+        try Self.runAndCompareNoScale(d: 2048, seed: 0xF6)
     }
 
     // MARK: - Per-head dispatch coverage
@@ -146,7 +146,7 @@ import NVMAIValidationSupport
         let headBytes = headDim * MemoryLayout<Float16>.size
         let cb = ctx.queue.makeCommandBuffer()!
         for h in 0..<numHeads {
-            kernel.encodeBF16W(commandBuffer: cb,
+            try kernel.encodeBF16W(commandBuffer: cb,
                                x: xBuf, xOffset: h * headBytes,
                                weight: wBuf, weightOffset: 0,
                                out: xBuf, outOffset: h * headBytes,
@@ -167,7 +167,7 @@ import NVMAIValidationSupport
     /// Mirror of the K/V branch using the no-scale variant dispatched for V.
     /// Each head's output should normalize to ±1.
     @Test func rmsNorm_noScale_perHead_offsetsCoverEachHeadInIsolation() throws {
-        let numKVL  = 8
+        let numKVL  = 2
         let headDim = 256
         let total   = numKVL * headDim
         var x = [Float16](repeating: 0, count: total)
@@ -185,7 +185,7 @@ import NVMAIValidationSupport
         let headBytes = headDim * MemoryLayout<Float16>.size
         let cb = ctx.queue.makeCommandBuffer()!
         for h in 0..<numKVL {
-            kernel.encodeNoScale(commandBuffer: cb,
+            try kernel.encodeNoScale(commandBuffer: cb,
                                  x: xBuf, xOffset: h * headBytes,
                                  out: xBuf, outOffset: h * headBytes,
                                  d: UInt32(headDim), eps: 1e-6)
@@ -228,11 +228,11 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for h in 0..<numHeads {
-            kernel.encodeBF16W(commandBuffer: cb, x: loopOut, xOffset: h * headBytes,
+            try kernel.encodeBF16W(commandBuffer: cb, x: loopOut, xOffset: h * headBytes,
                                weight: wBuf, out: loopOut, outOffset: h * headBytes,
                                d: UInt32(headDim), eps: 1e-6)
         }
-        kernel.encodeBF16WPerHead(commandBuffer: cb, x: batchOut, weight: wBuf, out: batchOut,
+        try kernel.encodeBF16WPerHead(commandBuffer: cb, x: batchOut, weight: wBuf, out: batchOut,
                                   headDim: UInt32(headDim), numHeads: numHeads, eps: 1e-6)
         cb.commit(); cb.waitUntilCompleted()
 
@@ -242,7 +242,7 @@ import NVMAIValidationSupport
     }
 
     @Test func rmsNorm_noScalePerHead_matchesLoop() throws {
-        let numKVL = 8, headDim = 512, total = numKVL * headDim
+        let numKVL = 2, headDim = 256, total = numKVL * headDim
         var rng = SeedTree(0x2C2).key("rmsnorm-perhead-noscale")
         let x = (0..<total).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
 
@@ -255,11 +255,11 @@ import NVMAIValidationSupport
         let headBytes = headDim * MemoryLayout<Float16>.size
         let cb = ctx.queue.makeCommandBuffer()!
         for h in 0..<numKVL {
-            kernel.encodeNoScale(commandBuffer: cb, x: loopOut, xOffset: h * headBytes,
+            try kernel.encodeNoScale(commandBuffer: cb, x: loopOut, xOffset: h * headBytes,
                                  out: loopOut, outOffset: h * headBytes,
                                  d: UInt32(headDim), eps: 1e-6)
         }
-        kernel.encodeNoScalePerHead(commandBuffer: cb, x: batchOut, out: batchOut,
+        try kernel.encodeNoScalePerHead(commandBuffer: cb, x: batchOut, out: batchOut,
                                     headDim: UInt32(headDim), numHeads: numKVL, eps: 1e-6)
         cb.commit(); cb.waitUntilCompleted()
 

@@ -28,7 +28,7 @@ import NVMAIValidationSupport
             Issue.record("alloc failed")
             return
         }
-        prefill.encodeReduceTokenMajor(commandBuffer: cb,
+        try prefill.encodeReduceTokenMajor(commandBuffer: cb,
                                        routePartials: partialsBuf,
                                        routeWeights: weightsBuf,
                                        h2: h2Buf,

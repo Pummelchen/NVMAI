@@ -4,35 +4,35 @@ import Metal
 @testable import NVMAI
 
 /// Tests `KVCacheManager` FP16 shape, growth, separate K/V storage, ring,
-/// and reset semantics against the Gemma 4 config.
+/// and reset semantics against the Qwen 3.6 config. Qwen has no
+/// sliding-window layers (mask values are 1 = full and 2 = linear), so the
+/// FP16 ring never engages and linear layers carry no per-token K/V rows.
 @Suite struct KVCacheManagerTests {
 
-    private let config = ArchConfig.gemma4_26B_A4B
+    private let config = ArchConfig.qwen36_35B_A3B
 
     private func makeManager(maxContext: Int,
-                             fp16RingEnabled: Bool = false,
-                             fp16RingCapacityOverride: Int? = nil) throws -> (MetalContext, KVCacheManager) {
+                             fp16RingEnabled: Bool = false) throws -> (MetalContext, KVCacheManager) {
         let ctx = try MetalContext()
         let kv = try KVCacheManager(device: ctx.device,
                                     config: config,
                                     maxContext: maxContext,
                                     fp16RingEnabled: fp16RingEnabled,
                                     slidingWindow: config.slidingWindow,
-                                    maxPrefillChunkTokens: 128,
-                                    fp16RingCapacityOverride: fp16RingCapacityOverride)
+                                    maxPrefillChunkTokens: 128)
         return (ctx, kv)
     }
-
 
     @Test func strideAndBufferSizes_matchConfig() throws {
         let (_, kv) = try makeManager(maxContext: 128)
 
-        // SWA: numKVHeads(8) * headDim(256) * 2 = 4096 B/token.
-        // Full: numFullKVHeads(2) * fullHeadDim(512) * 2 = 2048 B/token.
-        #expect(kv.kRange(layer: 0, start: 0, count: 1).stride == 8 * 256 * 2)
-        #expect(kv.kRange(layer: 5, start: 0, count: 1).stride == 2 * 512 * 2)
-        #expect(kv.keyBuffer(layer: 0, validTokenCount: 0).length == 128 * 4096)
-        #expect(kv.keyBuffer(layer: 5, validTokenCount: 0).length == 128 * 2048)
+        // Full: numFullKVHeads(2) * fullHeadDim(256) * 2 = 1024 B/token.
+        // Linear layers carry no per-token K/V storage at all.
+        #expect(kv.kRange(layer: 3, start: 0, count: 1).stride == 2 * 256 * 2)
+        #expect(kv.keyBuffer(layer: 3, validTokenCount: 0).length == 128 * 1024)
+        #expect(kv.layerKind(0) == .linear)
+        #expect(kv.stride(layer: 0) == 0)
+        #expect(kv.capacity(layer: 0) == 0)
     }
 
     @Test func linearGrowth_tracksAdvance() throws {
@@ -44,99 +44,64 @@ import Metal
         }
     }
 
-    /// Full layers share the raw k_proj output, then diverge: K runs k_norm +
-    /// RoPE while V runs no-scale v_norm without RoPE. They therefore require
-    /// separate cache slots.
+    /// Full layers run k_norm + RoPE on K while V runs the no-scale norm
+    /// without RoPE, so they require separate cache slots.
     @Test func fullLayer_separatesKAndVBuffers() throws {
         let (_, kv) = try makeManager(maxContext: 16)
-        let k = kv.keyBuffer(layer: 5, validTokenCount: 0)
-        let v = kv.valueBuffer(layer: 5, validTokenCount: 0)
+        let k = kv.keyBuffer(layer: 3, validTokenCount: 0)
+        let v = kv.valueBuffer(layer: 3, validTokenCount: 0)
         #expect(k !== v, "full-layer K and V must NOT alias")
-        let ks = kv.kSlot(layer: 5, position: 3)
-        let vs = kv.vSlot(layer: 5, position: 3)
+        let ks = kv.kSlot(layer: 3, position: 3)
+        let vs = kv.vSlot(layer: 3, position: 3)
         #expect(ks.buffer !== vs.buffer, "full-layer K/V slots must NOT alias")
         // Offsets are still per-position-strided in both buffers.
         #expect(ks.offset == vs.offset)
     }
 
-    @Test func swaLayer_hasSeparateKVBuffers() throws {
-        let (_, kv) = try makeManager(maxContext: 16)
-        #expect(kv.keyBuffer(layer: 0, validTokenCount: 0)
-                !== kv.valueBuffer(layer: 0, validTokenCount: 0))
-    }
-
     @Test func slotOffsets_areLinear() throws {
         let (_, kv) = try makeManager(maxContext: 128)
-        #expect(kv.kSlot(layer: 0, position: 0).offset == 0)
-        #expect(kv.kSlot(layer: 0, position: 3).offset == 3 * 4096)
-        #expect(kv.vSlot(layer: 5, position: 7).offset == 7 * 2048)
+        #expect(kv.kSlot(layer: 3, position: 0).offset == 0)
+        #expect(kv.kSlot(layer: 3, position: 3).offset == 3 * 1024)
+        #expect(kv.vSlot(layer: 3, position: 7).offset == 7 * 1024)
     }
 
-    @Test func fp16Ring_capsSWALayersAndLeavesFullLayersLinear() throws {
+    @Test func fp16Ring_neverEngagesWithoutSWALayers() throws {
         let (_, kv) = try makeManager(maxContext: 4096,
                                       fp16RingEnabled: true)
 
         #expect(kv.fp16RingEnabled)
-        #expect(kv.capacity(layer: 0) == 1152)
-        #expect(kv.ringCapacity(layer: 0) == 1152)
-        #expect(kv.keyBuffer(layer: 0, validTokenCount: 0).length == 1152 * 4096)
-        #expect(kv.capacity(layer: 5) == 4096)
-        #expect(kv.ringCapacity(layer: 5) == 0)
-        #expect(kv.keyBuffer(layer: 5, validTokenCount: 0).length == 4096 * 2048)
+        // Full layers stay linear; no SWA layer exists to cap.
+        #expect(kv.capacity(layer: 3) == 4096)
+        #expect(kv.ringCapacity(layer: 3) == 0)
+        #expect(kv.keyBuffer(layer: 3, validTokenCount: 0).length == 4096 * 1024)
+        // Linear layers keep no KV rows even with the ring enabled.
+        #expect(kv.capacity(layer: 0) == 0)
+        #expect(kv.ringCapacity(layer: 0) == 0)
     }
 
-    @Test func fp16Ring_shortSessionCapsSWAToMaxContext() throws {
-        let (_, kv) = try makeManager(maxContext: 256,
+    @Test func fp16Ring_slotOffsetsNeverWrap() throws {
+        let (_, kv) = try makeManager(maxContext: 128,
                                       fp16RingEnabled: true)
 
-        #expect(kv.fp16RingEnabled)
-        #expect(kv.capacity(layer: 0) == 256)
-        #expect(kv.ringCapacity(layer: 0) == 256)
-        #expect(kv.keyBuffer(layer: 0, validTokenCount: 0).length == 256 * 4096)
-        #expect(kv.capacity(layer: 5) == 256)
-        #expect(kv.ringCapacity(layer: 5) == 0)
-        #expect(kv.keyBuffer(layer: 5, validTokenCount: 0).length == 256 * 2048)
-    }
-
-    @Test func fp16Ring_slotOffsetsWrapOnlyForSWALayers() throws {
-        let (_, kv) = try makeManager(maxContext: 128,
-                                      fp16RingEnabled: true,
-                                      fp16RingCapacityOverride: 32)
-
-        #expect(kv.kSlot(layer: 0, position: 0).offset == 0)
-        #expect(kv.kSlot(layer: 0, position: 31).offset == 31 * 4096)
-        #expect(kv.kSlot(layer: 0, position: 32).offset == 0)
-        #expect(kv.vSlot(layer: 0, position: 35).offset == 3 * 4096)
-
-        #expect(kv.kSlot(layer: 5, position: 35).offset == 35 * 2048)
-        #expect(kv.vSlot(layer: 5, position: 35).offset == 35 * 2048)
-    }
-
-    @Test func fp16Ring_rangesMustNotWrap() throws {
-        let (_, kv) = try makeManager(maxContext: 128,
-                                      fp16RingEnabled: true,
-                                      fp16RingCapacityOverride: 32)
-
-        let k = kv.kRange(layer: 0, start: 28, count: 4)
-        #expect(k.offset == 28 * 4096)
-        let v = kv.vRange(layer: 0, start: 32, count: 3)
-        #expect(v.offset == 0)
+        // No SWA layer wraps; full-layer slots stay linear within maxContext.
+        #expect(kv.kSlot(layer: 3, position: 0).offset == 0)
+        #expect(kv.kSlot(layer: 3, position: 127).offset == 127 * 1024)
+        #expect(kv.vSlot(layer: 3, position: 35).offset == 35 * 1024)
     }
 
     @Test func rangeSlotsHaveLinearOffsets() throws {
         let (_, kv) = try makeManager(maxContext: 128)
-        let swaStride = kv.kRange(layer: 0, start: 0, count: 1).stride
-        let fullStride = kv.vRange(layer: 5, start: 0, count: 1).stride
+        let fullStride = kv.kRange(layer: 3, start: 0, count: 1).stride
 
-        let k = kv.kRange(layer: 0, start: 7, count: 3)
-        let v = kv.vRange(layer: 5, start: 11, count: 5)
+        let k = kv.kRange(layer: 3, start: 7, count: 3)
+        let v = kv.vRange(layer: 7, start: 11, count: 5)
 
-        #expect(k.offset == 7 * swaStride)
-        #expect(k.stride == swaStride)
+        #expect(k.offset == 7 * fullStride)
+        #expect(k.stride == fullStride)
         #expect(v.offset == 11 * fullStride)
         #expect(v.stride == fullStride)
-        #expect(k.buffer === kv.keyBuffer(layer: 0, validTokenCount: 0))
-        #expect(v.buffer === kv.valueBuffer(layer: 5, validTokenCount: 0))
+        #expect(k.buffer === kv.keyBuffer(layer: 3, validTokenCount: 0))
+        #expect(v.buffer === kv.valueBuffer(layer: 7, validTokenCount: 0))
     }
 
     @Test func advanceByCountTracksCursor() throws {
@@ -163,10 +128,10 @@ import Metal
     @Test func speculativeRewindMovesOnlyTheLogicalCursor() throws {
         let (_, kv) = try makeManager(maxContext: 128)
         kv.advance(by: 17)
-        let slotBefore = kv.kSlot(layer: 5, position: 12)
+        let slotBefore = kv.kSlot(layer: 3, position: 12)
         try kv.rewind(to: 12)
         #expect(kv.position == 12)
-        let slotAfter = kv.kSlot(layer: 5, position: 12)
+        let slotAfter = kv.kSlot(layer: 3, position: 12)
         #expect(slotBefore.buffer === slotAfter.buffer)
         #expect(slotBefore.offset == slotAfter.offset)
         #expect(throws: InferenceStateSnapshotError.self) {

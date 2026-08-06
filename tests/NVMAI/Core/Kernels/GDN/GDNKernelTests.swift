@@ -210,16 +210,16 @@ import NVMAIValidationSupport
             throw MetalError.noDevice
         }
         guard let cb = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
-        gdn.encodeConvDecode(commandBuffer: cb, tail: tail, qkv: qkv,
+        try gdn.encodeConvDecode(commandBuffer: cb, tail: tail, qkv: qkv,
                              convWeight: convW, convWeightOffset: 0,
                              out: convOut)
-        gdn.encodeQKNorm(commandBuffer: cb, convOut: convOut)
-        gdn.encodeDeltaStepDecode(commandBuffer: cb, convOut: convOut,
+        try gdn.encodeQKNorm(commandBuffer: cb, convOut: convOut)
+        try gdn.encodeDeltaStepDecode(commandBuffer: cb, convOut: convOut,
                                   aProj: aProj, bProj: bProj,
                                   aLog: aLog, aLogOffset: 0,
                                   dtBias: dtBias, dtBiasOffset: 0,
                                   state: state, y: yBuf)
-        gdn.encodeGatedNorm(commandBuffer: cb, y: yBuf, z: zBuf,
+        try gdn.encodeGatedNorm(commandBuffer: cb, y: yBuf, z: zBuf,
                             weight: normW, weightOffset: 0, out: outBuf)
         cb.commit()
         cb.waitUntilCompleted()
@@ -335,18 +335,18 @@ import NVMAIValidationSupport
         guard let cb = ctx.queue.makeCommandBuffer() else {
             Issue.record("no command buffer"); return
         }
-        gdn.encodeConvPrefill(commandBuffer: cb, tail: tailB, qkvRows: qkvRows,
+        try gdn.encodeConvPrefill(commandBuffer: cb, tail: tailB, qkvRows: qkvRows,
                               convWeight: convW, convWeightOffset: 0,
                               out: convOutB, rows: rows)
-        gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tailB,
+        try gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tailB,
                                  qkvRows: qkvRows, rows: rows)
-        gdn.encodeQKNorm(commandBuffer: cb, convOut: convOutB, rows: rows)
-        gdn.encodeDeltaStepPrefill(commandBuffer: cb, convOut: convOutB,
+        try gdn.encodeQKNorm(commandBuffer: cb, convOut: convOutB, rows: rows)
+        try gdn.encodeDeltaStepPrefill(commandBuffer: cb, convOut: convOutB,
                                    aProj: aRows, bProj: bRows,
                                    aLog: aLog, aLogOffset: 0,
                                    dtBias: dtBias, dtBiasOffset: 0,
                                    state: stateB, y: yB, rows: rows)
-        gdn.encodeGatedNorm(commandBuffer: cb, y: yB, z: zRows,
+        try gdn.encodeGatedNorm(commandBuffer: cb, y: yB, z: zRows,
                             weight: normW, weightOffset: 0,
                             out: outB, rows: rows)
         cb.commit()
@@ -423,15 +423,15 @@ import NVMAIValidationSupport
             memset(buffer.contents(), 0, buffer.length)
         }
 
-        gdn.encodeConvPrefill(commandBuffer: cb, tail: tail, qkvRows: qkvRows,
+        try gdn.encodeConvPrefill(commandBuffer: cb, tail: tail, qkvRows: qkvRows,
                               convWeight: convW, convWeightOffset: 0,
                               out: convOut, rows: 2)
-        gdn.encodeConvTailCheckpoint(commandBuffer: cb, tail: tail,
+        try gdn.encodeConvTailCheckpoint(commandBuffer: cb, tail: tail,
                                      qkvRows: qkvRows, checkpoint: checkpointTail)
-        gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tail,
+        try gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tail,
                                  qkvRows: qkvRows, rows: 2)
-        gdn.encodeQKNorm(commandBuffer: cb, convOut: convOut, rows: 2)
-        gdn.encodeDeltaStepPrefill(commandBuffer: cb, convOut: convOut,
+        try gdn.encodeQKNorm(commandBuffer: cb, convOut: convOut, rows: 2)
+        try gdn.encodeDeltaStepPrefill(commandBuffer: cb, convOut: convOut,
                                    aProj: aRows, bProj: bRows,
                                    aLog: aLog, aLogOffset: 0,
                                    dtBias: dtBias, dtBiasOffset: 0,
@@ -565,14 +565,14 @@ import NVMAIValidationSupport
         for (proj, out, rows) in [(qkv, qkvRef, cfg.qkvDim), (z, zRef, cfg.valueDim),
                                   (a, aRef, cfg.numVHeads), (b, bRef, cfg.numVHeads)] {
             let v = proj.view
-            gemv.encode(commandBuffer: cb,
+            try gemv.encode(commandBuffer: cb,
                         weights: v.buffer, weightsOffset: Int(v.offset),
                         scales: v.buffer, scalesOffset: Int(v.scaleOffset),
                         biases: v.buffer, biasesOffset: Int(v.biasOffset),
                         x: xBuf, y: out,
                         m: UInt32(rows), n: UInt32(hiddenSize))
         }
-        gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
+        try gdn.encodeInputProjections(commandBuffer: cb, x: xBuf,
                                    qkv: qkv.view, qkvOut: qkvGot,
                                    z: z.view, zOut: zGot,
                                    a: a.view, aOut: aGot,
@@ -646,7 +646,7 @@ import NVMAIValidationSupport
                       let cb = ctx.queue.makeCommandBuffer() else {
                     throw MetalError.noDevice
                 }
-                gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tail,
+                try gdn.encodeConvTailUpdate(commandBuffer: cb, tail: tail,
                                          qkvRows: rowsBuf, rows: chunk.count)
                 cb.commit()
                 cb.waitUntilCompleted()

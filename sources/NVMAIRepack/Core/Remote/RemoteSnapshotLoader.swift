@@ -77,7 +77,9 @@ enum RemoteSnapshotLoader {
                 }
                 return value
             }
-            if headerSize > Safetensors.maxHeaderBytes || headerSize > info.size - 8 {
+            if info.size < 8
+                || headerSize > Safetensors.maxHeaderBytes
+                || headerSize > info.size - 8 {
                 throw RepackError.safetensorsHeaderTooLarge(path: shard, size: headerSize)
             }
             let headerFile = try await pinned.downloadRangeToTempFile(filename: shard,

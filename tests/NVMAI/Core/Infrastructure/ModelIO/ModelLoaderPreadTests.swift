@@ -16,7 +16,7 @@ import Metal
         defer { try? FileManager.default.removeItem(at: dir) }
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
-                                   expecting: .gemma4Toy(),
+                                   expecting: .qwenToy(),
                                    streamingMode: .pread(slotCount: 2))
 
         #expect(model.openLayerFileCount() == 0)
@@ -39,11 +39,11 @@ import Metal
         defer { try? FileManager.default.removeItem(at: dir) }
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
-                                   expecting: .gemma4Toy(),
+                                   expecting: .qwenToy(),
                                    streamingMode: .pread(slotCount: 2))
 
         #expect(model.openLayerFileCount() == 0)
-        #expect(model.routedExpertCacheSlotCount(layer: 1) == 2)
+        #expect(model.routedExpertCacheSlotCount() == 2)
         #expect(model.openLayerFileCount() == 0)
     }
 
@@ -52,7 +52,7 @@ import Metal
         defer { try? FileManager.default.removeItem(at: dir) }
         let device = try #require(MTLCreateSystemDefaultDevice())
         let model = try Model.load(directoryURL: dir, device: device,
-                                   expecting: .gemma4Toy(),
+                                   expecting: .qwenToy(),
                                    streamingMode: .pread(slotCount: 2))
 
         model.beginOpeningRoutedExpertStreamer(layer: 1)

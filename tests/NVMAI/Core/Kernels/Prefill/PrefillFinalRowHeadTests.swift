@@ -98,14 +98,14 @@ import NVMAIValidationSupport
         }
 
         let cb = ctx.queue.makeCommandBuffer()!
-        scalarNorm.encodeBF16W(commandBuffer: cb,
+        try scalarNorm.encodeBF16W(commandBuffer: cb,
                                x: hiddenBuf,
                                xOffset: selectedRow * rowStride * MemoryLayout<Float16>.size,
                                weight: normBuf,
                                out: scalarNormed,
                                d: UInt32(d),
                                eps: eps)
-        scalarHead.encode(commandBuffer: cb,
+        try scalarHead.encode(commandBuffer: cb,
                           weights: wBuf,
                           scales: sBuf,
                           biases: bBuf,
@@ -113,7 +113,7 @@ import NVMAIValidationSupport
                           y: scalarLogits,
                           m: UInt32(vocab),
                           n: UInt32(d))
-        finalRowHead.encodeLogits(commandBuffer: cb,
+        try finalRowHead.encodeLogits(commandBuffer: cb,
                                   hiddenBlock: hiddenBuf,
                                   row: selectedRow,
                                   rowStrideElements: rowStride,
@@ -188,7 +188,7 @@ import NVMAIValidationSupport
             return
         }
 
-        scalarNorm.encodeBF16W(
+        try scalarNorm.encodeBF16W(
             commandBuffer: commandBuffer,
             x: hiddenBuffer,
             xOffset: selectedRow * rowStride * MemoryLayout<Float16>.stride,
@@ -196,7 +196,7 @@ import NVMAIValidationSupport
             out: normed,
             d: UInt32(d),
             eps: eps)
-        scalarHead.encode(commandBuffer: commandBuffer,
+        try scalarHead.encode(commandBuffer: commandBuffer,
                           weights: weights,
                           scales: scaleBuffer,
                           biases: biasBuffer,
@@ -204,7 +204,7 @@ import NVMAIValidationSupport
                           y: expected,
                           m: UInt32(vocab),
                           n: UInt32(d))
-        finalRowHead.encodeLogits(commandBuffer: commandBuffer,
+        try finalRowHead.encodeLogits(commandBuffer: commandBuffer,
                                   hiddenBlock: hiddenBuffer,
                                   row: selectedRow,
                                   rowStrideElements: rowStride,

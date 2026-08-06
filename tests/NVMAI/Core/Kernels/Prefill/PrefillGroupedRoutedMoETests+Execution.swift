@@ -82,7 +82,7 @@ extension PrefillGroupedRoutedMoETests {
     let argumentBuffer = try grouped.makeStreamedArgumentBuffer(
       device: ctx.device,
       binding: binding)
-    let microbatches = grouped.encodeStreamedBatched(
+    let microbatches = try grouped.encodeStreamedBatched(
       commandBuffer: commandBuffer,
       hidden: hiddenBuffer,
       sortedPairs: pairBuffer,

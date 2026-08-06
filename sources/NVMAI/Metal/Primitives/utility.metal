@@ -2,7 +2,8 @@
 using namespace metal;
 
 // Kept in the shared library so both INT4 and INT8 shared-expert paths use
-// the same Gemma activation without compiling a private shader module.
+// the same gelu_pytorch_tanh activation without compiling a private shader
+// module.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void gelu_mul_fp16(
     device const half* gate [[buffer(0)]],
@@ -79,7 +80,7 @@ void split_q_gate_fp16(
 }
 
 // hidden[i] += delta[i] — plain pre-norm residual add for architectures
-// without Gemma's fused sandwich tail.
+// without a fused sandwich tail.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void residual_add_fp16(
     device half*       hidden [[buffer(0)]],

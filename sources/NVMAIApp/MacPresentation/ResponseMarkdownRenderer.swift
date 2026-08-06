@@ -92,10 +92,6 @@ public struct ResponseMarkdownRenderer {
         }
     }
 
-    public func plainText(_ source: String) -> String {
-        render(source).attributedString.string
-    }
-
     private func requiresRawFallback(_ source: String) -> Bool {
         let fenceCount = source.components(separatedBy: "```").count - 1
         if !fenceCount.isMultiple(of: 2) { return true }

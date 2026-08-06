@@ -95,44 +95,4 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
         if sortedKeys { encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes] }
         return String(decoding: try encoder.encode(self), as: UTF8.self)
     }
-
-    public func gemmaToolArgumentBody() throws -> String {
-        guard case .object(let value) = self else {
-            throw ToolCallParserError.malformed
-        }
-        return try value.keys.sorted().map { key in
-            guard GemmaToolCallParser.isRepresentableObjectKey(key) else {
-                throw ToolCallParserError.malformed
-            }
-            return "\(key):\(try value[key]!.gemmaToolValue())"
-        }.joined(separator: ",")
-    }
-
-    private func gemmaToolValue() throws -> String {
-        switch self {
-        case .object:
-            return "{\(try gemmaToolArgumentBody())}"
-        case .array(let value):
-            return "[\(try value.map { try $0.gemmaToolValue() }.joined(separator: ","))]"
-        case .string(let value):
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.withoutEscapingSlashes]
-            return String(decoding: try encoder.encode(value), as: UTF8.self)
-        case .integer(let value):
-            return String(value)
-        case .unsignedInteger(let value):
-            return String(value)
-        case .decimal(let value):
-            return NSDecimalNumber(decimal: value).stringValue
-        case .number(let value):
-            guard value.isFinite else {
-                throw ToolCallParserError.malformed
-            }
-            return String(value)
-        case .bool(let value):
-            return value ? "true" : "false"
-        case .null:
-            return "null"
-        }
-    }
 }

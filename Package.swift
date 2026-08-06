@@ -5,7 +5,6 @@ let package = Package(
     name: "NVMAI",
     platforms: [
         .macOS(.v26),
-        .iOS(.v26),
     ],
     products: [
         .library(name: "NVMAI", targets: ["NVMAI"]),

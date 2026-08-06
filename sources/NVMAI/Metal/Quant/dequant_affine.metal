@@ -113,9 +113,16 @@ kernel void affine_quant_embedding_lookup(
     constant uint&       token_id  [[buffer(4)]],
     constant uint&       dimension [[buffer(5)]],
     constant float&      out_scale [[buffer(6)]],
+    constant uint&       vocab     [[buffer(7)]],
     uint element [[thread_position_in_grid]]
 ) {
     if (element >= dimension) return;
+    // OOB token guard: never index past the vocab rows; write zeros so the
+    // pipeline stays well-defined for out-of-range token ids.
+    if (token_id >= vocab) {
+        output[element] = half(0.0f);
+        return;
+    }
     const uint bits = affine_quant_bits();
     const uint groups_per_row = dimension / kAffineGroupSize;
     const uint words_per_row = (dimension * bits) / 32u;

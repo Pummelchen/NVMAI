@@ -11,16 +11,16 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .qwenToy())
     let embed = try model.embedding()
     // Embedding is int4-packed: 2 values per byte, so length = vocabSize * hiddenSize / 2
     #expect(embed.length == UInt64(1024 * 64 / 2))
     #expect(embed.shape.0 == 1024 && embed.shape.1 == 64)
     let norm = try model.finalNorm()
     #expect(norm.length == UInt64(64 * 2))
-    // Tied lm_head returns the same view as embedding.
+    // Qwen carries a separate untied lm_head.
     let lmHead = try model.lmHead()
-    #expect(lmHead.offset == embed.offset)
+    #expect(lmHead.offset != embed.offset)
     #expect(lmHead.length == embed.length)
   }
 
@@ -30,7 +30,7 @@ extension ModelLoaderTests {
     let device = try #require(MTLCreateSystemDefaultDevice())
     let model = try Model.load(
       directoryURL: dir, device: device,
-      expecting: .gemma4Toy())
+      expecting: .qwenToy())
     let norm = try model.finalNorm()
     let contents = norm.buffer.contents()
     // Norm region was patterned 0xC0 | (i & 0x3F).
@@ -48,7 +48,7 @@ extension ModelLoaderTests {
     #expect {
       _ = try Model.load(
         directoryURL: dir, device: device,
-        expecting: .gemma4Toy())
+        expecting: .qwenToy())
     } throws: { error in
       if case ModelError.partialInstall = error { return true }
       return false
@@ -69,7 +69,7 @@ extension ModelLoaderTests {
     #expect {
       _ = try Model.load(
         directoryURL: dir, device: device,
-        expecting: .gemma4Toy())
+        expecting: .qwenToy())
     } throws: { error in
       if case ModelError.checksumMismatch = error { return true }
       return false
@@ -84,12 +84,12 @@ extension ModelLoaderTests {
     let full = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .qwenToy(),
       integrityPolicy: .fullSha256)
     let trusted = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .qwenToy(),
       integrityPolicy: .sizeCheckTrustedReceipt)
 
     let fullEmbedding = try full.embedding()
@@ -122,7 +122,7 @@ extension ModelLoaderTests {
     #expect {
       _ = try Model.load(
         directoryURL: dir, device: device,
-        expecting: .gemma4Toy())
+        expecting: .qwenToy())
     } throws: { error in
       if case ModelError.expertStrideNotPageAligned = error { return true }
       return false

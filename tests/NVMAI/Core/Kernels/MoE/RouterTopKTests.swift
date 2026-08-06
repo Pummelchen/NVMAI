@@ -135,7 +135,7 @@ import NVMAIValidationSupport
               let commandBuffer = context.queue.makeCommandBuffer() else {
             throw CocoaError(.fileReadUnknown)
         }
-        kernel.encodeRouterGemma4(
+        try kernel.encodeRouter(
             commandBuffer: commandBuffer,
             weights: weightBuffer,
             scales: scaleBuffer,

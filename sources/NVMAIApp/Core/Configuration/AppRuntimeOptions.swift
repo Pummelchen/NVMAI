@@ -61,7 +61,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
 
-    public init(expertCacheSlots: Int = 16,
+    public init(expertCacheSlots: Int = 32,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
@@ -97,18 +97,15 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     }
 
     public static func slotsLabel(for slots: Int) -> String {
-        switch slots {
-        case 8: "8, -0.8 GB"
-        case 16: "16, Default"
-        case 24: "24, +0.8 GB"
-        case 32: "32, +1.61 GB"
-        default: "\(slots)"
-        }
+        // D21: the per-slot memory deltas were hardcoded and drifted from the
+        // real pack layout, so the picker shows names only; the memory
+        // implications are described in the UI text next to the picker.
+        "\(slots)"
     }
 
     public func resolvedRuntimeConfiguration(forceLogitsHead: Bool) throws -> RuntimeConfiguration {
         try validate()
-        return RuntimeConfiguration(
+        return try RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
             expertCachePolicy: expertCachePolicy == .lru ? .lru : .lfu,
             rdadvisePolicy: rdadvisePolicy.runtimeValue,

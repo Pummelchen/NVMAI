@@ -25,7 +25,7 @@ enum AppModelLocation {
                         currentDirectoryURL: URL,
                         applicationSupportURL: URL,
                         fileExists: (String) -> Bool,
-                        installDirectoryName: String = "gemma4.gturbo") -> URL {
+                        installDirectoryName: String = "qwen36.gturbo") -> URL {
         if let explicitURL {
             return absoluteURL(explicitURL, relativeTo: currentDirectoryURL)
         }

@@ -56,7 +56,7 @@ import Testing
         #expect(arguments.quiet)
     }
 
-    @Test func contextAcceptsQwenMaximumAndRejectsLargerValues() throws {
+    @Test func contextArgumentAcceptsQwenMaximumAndRejectsLargerValues() throws {
         let maximum = try Args.parse([
             "--model", "m.gturbo", "--prompt", "hi",
             "--max-context", "262144",

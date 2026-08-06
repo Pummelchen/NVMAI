@@ -11,12 +11,15 @@ import Metal
     }
 
     /// Build a minimal valid `model.gturbo/` directory in a temp dir and
-    /// return the URL. Uses the toy ArchConfig `gemma4Toy()`: 2 layers,
-    /// 8 experts, hidden 64, vocab 1024. Resident contains the embedding
-    /// (alias: lmHead), final norm, and the tiny layer-resident tensors needed
-    /// to construct `RealForwardRunner` in unit tests.
+    /// return the URL. Uses the toy ArchConfig `qwenToy()`: 4 layers
+    /// (alternating gated-DeltaNet linear and full attention), 8 experts,
+    /// hidden 64, vocab 1024, untied lm_head. Resident contains the embedding,
+    /// the separate lm_head, the final norm, and the Qwen layer-resident
+    /// tensors (router, gated shared expert, full-attention or linear_attn
+    /// bundle per layer) needed to construct `RealForwardRunner` in unit
+    /// tests. No auxiliary sandwich/scale tensors, matching the real model.
     static func writeToySynthetic() throws -> URL {
-        let toy = ArchConfig.gemma4Toy()
+        let toy = ArchConfig.qwenToy()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-toy-\(UUID().uuidString)")
         let exp = dir.appendingPathComponent("packed_experts")
@@ -33,7 +36,6 @@ import Metal
         }
 
         let d = toy.hiddenSize
-        let f = toy.intermediateSize
         let embedSize = UInt64(toy.vocabSize * toy.hiddenSize)
         let bf16DBytes = UInt64(d * MemoryLayout<UInt16>.stride)
 
@@ -130,8 +132,15 @@ import Metal
         }
 
         var specs: [ResidentSpec] = [
-            // Embedding is int4 affine: weight data is packed 2 values per byte
+            // Embedding is int4 affine: weight data is packed 2 values per byte.
             ResidentSpec(name: "language_model.model.embed_tokens.weight",
+                         dtype: 0,
+                         shape: [UInt32(toy.vocabSize), UInt32(toy.hiddenSize), 0, 0],
+                         weightBytes: embedSize / 2,
+                         scaleBytes: UInt64(toy.vocabSize * (d / Quantization.groupSize) * MemoryLayout<UInt16>.stride),
+                         biasBytes: UInt64(toy.vocabSize * (d / Quantization.groupSize) * MemoryLayout<UInt16>.stride)),
+            // Qwen carries a separate untied lm_head.
+            ResidentSpec(name: "language_model.lm_head.weight",
                          dtype: 0,
                          shape: [UInt32(toy.vocabSize), UInt32(toy.hiddenSize), 0, 0],
                          weightBytes: embedSize / 2,
@@ -145,127 +154,131 @@ import Metal
                          biasBytes: 0),
         ]
         for L in 0..<toy.numLayers {
-            let isFull = toy.fullAttentionLayerMask[L] != 0
-            let headDim = isFull ? toy.fullHeadDim : toy.headDim
-            let numKVHeads = isFull ? toy.numFullKVHeads : toy.numKVHeads
-            let qDim = toy.numHeads * headDim
-            let kvDim = numKVHeads * headDim
+            let prefix = "language_model.model.layers.\(L)"
             specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).input_layernorm.weight",
-                dtype: 1,
-                shape: [UInt32(toy.hiddenSize), 0, 0, 0],
-                weightBytes: bf16DBytes,
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(int4AffineSpec(
-                "language_model.model.layers.\(L).self_attn.q_proj.weight",
-                rows: qDim,
-                cols: d))
-            specs.append(int4AffineSpec(
-                "language_model.model.layers.\(L).self_attn.k_proj.weight",
-                rows: kvDim,
-                cols: d))
-            specs.append(int4AffineSpec(
-                "language_model.model.layers.\(L).self_attn.v_proj.weight",
-                rows: kvDim,
-                cols: d))
-            specs.append(int4AffineSpec(
-                "language_model.model.layers.\(L).self_attn.o_proj.weight",
-                rows: d,
-                cols: qDim))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).post_attention_layernorm.weight",
+                name: "\(prefix).input_layernorm.weight",
                 dtype: 1,
                 shape: [UInt32(toy.hiddenSize), 0, 0, 0],
                 weightBytes: bf16DBytes,
                 scaleBytes: 0,
                 biasBytes: 0))
             specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).pre_feedforward_layernorm.weight",
+                name: "\(prefix).post_attention_layernorm.weight",
                 dtype: 1,
                 shape: [UInt32(toy.hiddenSize), 0, 0, 0],
                 weightBytes: bf16DBytes,
                 scaleBytes: 0,
                 biasBytes: 0))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).pre_feedforward_layernorm_2.weight",
-                dtype: 1,
-                shape: [UInt32(toy.hiddenSize), 0, 0, 0],
-                weightBytes: bf16DBytes,
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).self_attn.q_norm.weight",
-                dtype: 1,
-                shape: [UInt32(headDim), 0, 0, 0],
-                weightBytes: UInt64(headDim * MemoryLayout<UInt16>.stride),
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).self_attn.k_norm.weight",
-                dtype: 1,
-                shape: [UInt32(headDim), 0, 0, 0],
-                weightBytes: UInt64(headDim * MemoryLayout<UInt16>.stride),
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(int4AffineSpec(
-                "language_model.model.layers.\(L).mlp.gate_proj.weight",
-                rows: f,
-                cols: d))
-            specs.append(int4AffineSpec(
-                "language_model.model.layers.\(L).mlp.up_proj.weight",
-                rows: f,
-                cols: d))
-            specs.append(int4AffineSpec(
-                "language_model.model.layers.\(L).mlp.down_proj.weight",
-                rows: d,
-                cols: f))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).post_feedforward_layernorm_1.weight",
-                dtype: 1,
-                shape: [UInt32(toy.hiddenSize), 0, 0, 0],
-                weightBytes: bf16DBytes,
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).post_feedforward_layernorm_2.weight",
-                dtype: 1,
-                shape: [UInt32(toy.hiddenSize), 0, 0, 0],
-                weightBytes: bf16DBytes,
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).post_feedforward_layernorm.weight",
-                dtype: 1,
-                shape: [UInt32(toy.hiddenSize), 0, 0, 0],
-                weightBytes: bf16DBytes,
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).layer_scalar",
-                dtype: 1,
-                shape: [1, 0, 0, 0],
-                weightBytes: UInt64(MemoryLayout<UInt16>.stride),
-                scaleBytes: 0,
-                biasBytes: 0))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).router.scale",
-                dtype: 1,
-                shape: [UInt32(toy.hiddenSize), 0, 0, 0],
-                weightBytes: bf16DBytes,
-                scaleBytes: 0,
-                biasBytes: 0))
+            // Router (8-bit, matching quant.router) + sigmoid-gated shared
+            // expert at the sharedExpert slot width (Qwen names, no aux
+            // scales).
             specs.append(int8AffineSpec(
-                "language_model.model.layers.\(L).router.proj.weight",
+                "\(prefix).mlp.gate.weight",
                 rows: toy.numExperts,
                 cols: d))
-            specs.append(ResidentSpec(
-                name: "language_model.model.layers.\(L).router.per_expert_scale",
-                dtype: 1,
-                shape: [UInt32(toy.numExperts), 0, 0, 0],
-                weightBytes: UInt64(toy.numExperts * MemoryLayout<UInt16>.stride),
-                scaleBytes: 0,
-                biasBytes: 0))
+            specs.append(int4AffineSpec(
+                "\(prefix).mlp.shared_expert_gate.weight",
+                rows: 1,
+                cols: d))
+            specs.append(int4AffineSpec(
+                "\(prefix).mlp.shared_expert.gate_proj.weight",
+                rows: toy.intermediateSize,
+                cols: d))
+            specs.append(int4AffineSpec(
+                "\(prefix).mlp.shared_expert.up_proj.weight",
+                rows: toy.intermediateSize,
+                cols: d))
+            specs.append(int4AffineSpec(
+                "\(prefix).mlp.shared_expert.down_proj.weight",
+                rows: d,
+                cols: toy.intermediateSize))
+            if toy.layerIsLinear(L) {
+                // Gated-DeltaNet layers carry only the linear_attn bundle.
+                let la = toy.linearAttention
+                specs.append(int4AffineSpec(
+                    "\(prefix).linear_attn.in_proj_qkv.weight",
+                    rows: la.qkvDim,
+                    cols: d))
+                specs.append(int4AffineSpec(
+                    "\(prefix).linear_attn.in_proj_z.weight",
+                    rows: la.valueDim,
+                    cols: d))
+                specs.append(int4AffineSpec(
+                    "\(prefix).linear_attn.in_proj_a.weight",
+                    rows: la.numVHeads,
+                    cols: d))
+                specs.append(int4AffineSpec(
+                    "\(prefix).linear_attn.in_proj_b.weight",
+                    rows: la.numVHeads,
+                    cols: d))
+                specs.append(int4AffineSpec(
+                    "\(prefix).linear_attn.out_proj.weight",
+                    rows: d,
+                    cols: la.valueDim))
+                specs.append(ResidentSpec(
+                    name: "\(prefix).linear_attn.conv1d.weight",
+                    dtype: 1,
+                    shape: [UInt32(la.qkvDim), UInt32(la.convKernelSize), 1, 0],
+                    weightBytes: UInt64(la.qkvDim * la.convKernelSize * MemoryLayout<UInt16>.stride),
+                    scaleBytes: 0,
+                    biasBytes: 0))
+                specs.append(ResidentSpec(
+                    name: "\(prefix).linear_attn.A_log",
+                    dtype: 1,
+                    shape: [UInt32(la.numVHeads), 0, 0, 0],
+                    weightBytes: UInt64(la.numVHeads * MemoryLayout<UInt16>.stride),
+                    scaleBytes: 0,
+                    biasBytes: 0))
+                specs.append(ResidentSpec(
+                    name: "\(prefix).linear_attn.dt_bias",
+                    dtype: 1,
+                    shape: [UInt32(la.numVHeads), 0, 0, 0],
+                    weightBytes: UInt64(la.numVHeads * MemoryLayout<UInt16>.stride),
+                    scaleBytes: 0,
+                    biasBytes: 0))
+                specs.append(ResidentSpec(
+                    name: "\(prefix).linear_attn.norm.weight",
+                    dtype: 1,
+                    shape: [UInt32(la.valueHeadDim), 0, 0, 0],
+                    weightBytes: UInt64(la.valueHeadDim * MemoryLayout<UInt16>.stride),
+                    scaleBytes: 0,
+                    biasBytes: 0))
+            } else {
+                // Full-attention layer: gate-packed q_proj (2x rows) and
+                // per-head q/k norms.
+                let queryDim = 2 * toy.numHeads * toy.fullHeadDim
+                let kvDim = toy.numFullKVHeads * toy.fullHeadDim
+                specs.append(ResidentSpec(
+                    name: "\(prefix).self_attn.q_norm.weight",
+                    dtype: 1,
+                    shape: [UInt32(toy.fullHeadDim), 0, 0, 0],
+                    weightBytes: UInt64(toy.fullHeadDim * MemoryLayout<UInt16>.stride),
+                    scaleBytes: 0,
+                    biasBytes: 0))
+                specs.append(ResidentSpec(
+                    name: "\(prefix).self_attn.k_norm.weight",
+                    dtype: 1,
+                    shape: [UInt32(toy.fullHeadDim), 0, 0, 0],
+                    weightBytes: UInt64(toy.fullHeadDim * MemoryLayout<UInt16>.stride),
+                    scaleBytes: 0,
+                    biasBytes: 0))
+                specs.append(int4AffineSpec(
+                    "\(prefix).self_attn.q_proj.weight",
+                    rows: queryDim,
+                    cols: d))
+                specs.append(int4AffineSpec(
+                    "\(prefix).self_attn.k_proj.weight",
+                    rows: kvDim,
+                    cols: d))
+                specs.append(int4AffineSpec(
+                    "\(prefix).self_attn.v_proj.weight",
+                    rows: kvDim,
+                    cols: d))
+                specs.append(int4AffineSpec(
+                    "\(prefix).self_attn.o_proj.weight",
+                    rows: d,
+                    cols: toy.numHeads * toy.fullHeadDim))
+            }
         }
 
         let names = specs.map(\.name)
@@ -328,10 +341,14 @@ import Metal
             _ = stringTable.withUnsafeBytes { sb in
                 memcpy(base.advanced(by: stringTableBase), sb.baseAddress!, stringTable.count)
             }
-            // Recognizable resident payload pattern in the norm region only;
-            // other payload bytes stay zero except router.scale unit BF16s.
-            let normStart = Int(entries[1].fileOffset)
-            for i in 0..<Int(entries[1].sizeBytes) {
+            // Recognizable resident payload pattern in the final-norm region
+            // only; other payload bytes stay zero except quantized scale
+            // regions.
+            let normEntry = entries.first {
+                $0.name == "language_model.model.norm.weight"
+            }!
+            let normStart = Int(normEntry.fileOffset)
+            for i in 0..<Int(normEntry.sizeBytes) {
                 base.advanced(by: normStart + i)
                     .assumingMemoryBound(to: UInt8.self)[0] = UInt8(0xC0 | (i & 0x3F))
             }
@@ -482,7 +499,7 @@ import Metal
     }
 
     static func writeVerifiedInstallReceipt(directoryURL dir: URL) throws {
-        let manifest = try ManifestReader.load(directoryURL: dir, expecting: .gemma4Toy())
+        let manifest = try ManifestReader.load(directoryURL: dir, expecting: .qwenToy())
         let manifestURL = dir.appendingPathComponent("manifest.json")
         let manifestSha = try Sha256Verifier.hashFile(at: manifestURL)
         let manifestSize = try FileManager.default

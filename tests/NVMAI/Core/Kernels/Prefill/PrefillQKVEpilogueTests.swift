@@ -91,7 +91,7 @@ import NVMAIValidationSupport
         for row in 0..<rows {
             let qOffset = row * qStride * MemoryLayout<Float16>.size
             let kvOffset = row * kvStride * MemoryLayout<Float16>.size
-            scalarNorm.encodeBF16WPerHead(commandBuffer: cb,
+            try scalarNorm.encodeBF16WPerHead(commandBuffer: cb,
                                           x: qRef,
                                           xOffset: qOffset,
                                           weight: qWeightBuf,
@@ -100,7 +100,7 @@ import NVMAIValidationSupport
                                           headDim: UInt32(headDim),
                                           numHeads: numQHeads,
                                           eps: 1e-6)
-            scalarNorm.encodeBF16WPerHead(commandBuffer: cb,
+            try scalarNorm.encodeBF16WPerHead(commandBuffer: cb,
                                           x: kRef,
                                           xOffset: kvOffset,
                                           weight: kWeightBuf,
@@ -109,7 +109,7 @@ import NVMAIValidationSupport
                                           headDim: UInt32(headDim),
                                           numHeads: numKVHeads,
                                           eps: 1e-6)
-            scalarNorm.encodeNoScalePerHead(commandBuffer: cb,
+            try scalarNorm.encodeNoScalePerHead(commandBuffer: cb,
                                             x: vRef,
                                             xOffset: kvOffset,
                                             out: vRef,
@@ -118,7 +118,7 @@ import NVMAIValidationSupport
                                             numHeads: numKVHeads,
                                             eps: 1e-6)
             if rotatedPairs * 2 == UInt32(headDim) {
-                scalarRoPE.encodeDefaultNeox(commandBuffer: cb,
+                try scalarRoPE.encodeDefaultNeox(commandBuffer: cb,
                                              data: qRef,
                                              dataOffset: qOffset,
                                              position: UInt32(startPosition + row),
@@ -126,7 +126,7 @@ import NVMAIValidationSupport
                                              numHeads: UInt32(numQHeads),
                                              numTokens: 1,
                                              theta: theta)
-                scalarRoPE.encodeDefaultNeox(commandBuffer: cb,
+                try scalarRoPE.encodeDefaultNeox(commandBuffer: cb,
                                              data: kRef,
                                              dataOffset: kvOffset,
                                              position: UInt32(startPosition + row),
@@ -135,7 +135,7 @@ import NVMAIValidationSupport
                                              numTokens: 1,
                                              theta: theta)
             } else {
-                scalarRoPE.encodeProportionalNeox(commandBuffer: cb,
+                try scalarRoPE.encodeProportionalNeox(commandBuffer: cb,
                                                   data: qRef,
                                                   dataOffset: qOffset,
                                                   position: UInt32(startPosition + row),
@@ -144,7 +144,7 @@ import NVMAIValidationSupport
                                                   rotatedPairs: rotatedPairs,
                                                   numTokens: 1,
                                                   theta: theta)
-                scalarRoPE.encodeProportionalNeox(commandBuffer: cb,
+                try scalarRoPE.encodeProportionalNeox(commandBuffer: cb,
                                                   data: kRef,
                                                   dataOffset: kvOffset,
                                                   position: UInt32(startPosition + row),
@@ -155,7 +155,7 @@ import NVMAIValidationSupport
                                                   theta: theta)
             }
         }
-        block.encode(commandBuffer: cb,
+        try block.encode(commandBuffer: cb,
                      q: qBlock,
                      k: kBlock,
                      v: vBlock,

@@ -35,16 +35,27 @@ public struct ExpertIOAdviceResult: Sendable, Equatable {
 }
 
 public struct ExpertCachePlan: Sendable, Equatable {
+    /// K11: the layer the plan's pread offsets are computed against.
+    ///
+    /// NOTE: the streamer is bound to ONE layer file at construction, and
+    /// `StreamLayout.expertOffset(layer: 0, ...)` is the branch that consults
+    /// that file's per-layer `expertOffsets` table — so 0 is the correct value
+    /// for the current per-layer design (passing the real layer would select
+    /// the dense cross-layer formula and mis-offset). Callers must only pass a
+    /// nonzero layer if the streamer ever serves a multi-layer file.
+    public let layer: Int
     public let experts: [Int]
     public let assignedSlots: [Int]
     public let misses: [Int]
     public let hits: Int
 
-    public init(experts: [Int], assignedSlots: [Int], misses: [Int], hits: Int) {
+    public init(experts: [Int], assignedSlots: [Int], misses: [Int], hits: Int,
+                layer: Int = 0) {
         self.experts = experts
         self.assignedSlots = assignedSlots
         self.misses = misses
         self.hits = hits
+        self.layer = layer
     }
 }
 
@@ -67,12 +78,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private let slotBuffers: [MTLBuffer]
 
     private var nextSlot = 0
-    private let cursorLock = NSLock()
 
     private var slotExpert: [Int]
     private var slotLastUse: [Int]
     private var expertUseCount: [Int]
     private var useClock = 0
+    /// K12: slots whose pread fill has been planned but not yet completed.
+    /// Set under `cacheLock` by `makeExpertCachePlan` for miss slots, cleared
+    /// when the fill lands. Concurrent plans and round-robin loads skip and
+    /// never overwrite these slots.
+    private var slotPendingFill: [Bool]
     private let cacheLock = NSLock()
 
     public init(layout: StreamLayout,
@@ -92,14 +107,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.fd = openedFD
 
         var fileStats = stat()
-        if fstat(openedFD, &fileStats) == 0 {
-            let required = layout.streamOffset + layout.streamSize
-            if UInt64(fileStats.st_size) < required {
-                close(openedFD)
-                throw StreamerError.sizeMismatch(
-                    expected: required,
-                    actual: UInt64(fileStats.st_size))
-            }
+        // K9: fstat failure must not silently skip size validation — a
+        // truncated file would then be read out of bounds by pread.
+        guard fstat(openedFD, &fileStats) == 0 else {
+            let statErrno = errno
+            close(openedFD)
+            throw ModelError.posixFailed(call: "fstat(\(layout.path))", errno: statErrno)
+        }
+        let required = layout.streamOffset + layout.streamSize
+        if UInt64(fileStats.st_size) < required {
+            close(openedFD)
+            throw StreamerError.sizeMismatch(
+                expected: required,
+                actual: UInt64(fileStats.st_size))
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
@@ -140,6 +160,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotBuffers = buffers
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
+        self.slotPendingFill = [Bool](repeating: false, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
     }
 
@@ -149,11 +170,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     public func loadExpert(layer: Int, expert: Int) throws
         -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
-        cursorLock.lock()
-        let slot = nextSlot
-        nextSlot = (nextSlot + 1) % slotCount
-        cursorLock.unlock()
-        return try loadExpert(layer: layer, expert: expert, slot: slot)
+        // K12: slot selection and fill share one critical section so the
+        // round-robin path never lands on a slot a concurrent plan reserved
+        // (slotPendingFill) and no fill can interleave with another pread.
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        var candidate = nextSlot
+        var scanned = 0
+        while slotPendingFill[candidate] && scanned < slotCount {
+            candidate = (candidate + 1) % slotCount
+            scanned += 1
+        }
+        nextSlot = (candidate + 1) % slotCount
+        return try loadExpertUnlocked(layer: layer, expert: expert, slot: candidate)
     }
 
     public func loadExpert(layer: Int, expert: Int, slot: Int) throws
@@ -161,6 +190,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard slot >= 0 && slot < slotCount else {
             throw StreamerError.slotOutOfRange(slot)
         }
+        // K12: the pread fill and the slot bookkeeping share one critical
+        // section so a concurrent plan/execute or another load cannot write
+        // into this slot while the pread is in flight.
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return try loadExpertUnlocked(layer: layer, expert: expert, slot: slot)
+    }
+
+    /// Fill `slot` with `expert` and update bookkeeping. Callers hold
+    /// `cacheLock`.
+    private func loadExpertUnlocked(layer: Int, expert: Int, slot: Int) throws
+        -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
         let regionOffset = layout.expertOffset(layer: layer, expert: expert)
         guard regionOffset + layout.expertStride <= layout.streamSize else {
             throw StreamerError.offsetOutOfRange(regionOffset)
@@ -169,6 +210,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             into: slotPointers[slot],
             fileOffset: layout.streamOffset + regionOffset,
             count: Int(layout.expertStride))
+        slotPendingFill[slot] = false
+        slotExpert[slot] = expert
+        slotLastUse[slot] = useClock
         return (slotBuffers[slot], 0, layout.expertStride)
     }
 
@@ -178,19 +222,28 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     }
 
     public func planExpertsCached(experts: [Int],
-                                  avoidingSlots: Set<Int> = []) -> ExpertCachePlan {
-        guard let plan = makeExpertCachePlan(experts: experts, avoidingSlots: avoidingSlots) else {
-            preconditionFailure("expert cache cannot place requested misses")
+                                  layer: Int = 0,
+                                  avoidingSlots: Set<Int> = []) throws -> ExpertCachePlan {
+        guard let plan = makeExpertCachePlan(layer: layer,
+                                             experts: experts,
+                                             avoidingSlots: avoidingSlots) else {
+            // K10: config-triggered placement failure (too few slots for the
+            // requested expert set) is recoverable — throw instead of
+            // crashing; the runner already handles thrown errors.
+            throw ModelError.expertCacheUnplaceable(
+                detail: "\(experts.count) experts do not fit in \(slotCount) cache slots (policy \(cachePolicy.rawValue), avoiding \(avoidingSlots.count) slots)")
         }
         return plan
     }
 
     public func planExpertsCachedIfPossible(experts: [Int],
+                                            layer: Int = 0,
                                             avoidingSlots: Set<Int> = []) -> ExpertCachePlan? {
-        makeExpertCachePlan(experts: experts, avoidingSlots: avoidingSlots)
+        makeExpertCachePlan(layer: layer, experts: experts, avoidingSlots: avoidingSlots)
     }
 
-    private func makeExpertCachePlan(experts: [Int],
+    private func makeExpertCachePlan(layer: Int,
+                                     experts: [Int],
                                      avoidingSlots rawAvoidingSlots: Set<Int>) -> ExpertCachePlan? {
         precondition(experts.count <= slotCount,
                      "expert cache needs at least \(experts.count) slots")
@@ -202,6 +255,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         let clock = useClock + 1
         var assignedSlots = [Int](repeating: -1, count: experts.count)
         var reserved = [Bool](repeating: false, count: slotCount)
+        // K12: slots with a fill already planned by an in-flight plan are not
+        // assignable until their execute completes.
+        for slot in 0..<slotCount where slotPendingFill[slot] {
+            reserved[slot] = true
+        }
 
         for index in experts.indices {
             for slot in 0..<slotCount
@@ -217,7 +275,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         let misses = experts.indices.filter { assignedSlots[$0] == -1 }
         let evictable = (0..<slotCount)
-            .filter { !reserved[$0] }
+            .filter { !reserved[$0] && !slotPendingFill[$0] }
             .sorted { shouldEvictSlot($0, before: $1) }
         guard misses.count <= evictable.count else { return nil }
 
@@ -234,13 +292,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             reserved[slot] = true
             slotExpert[slot] = -1
             slotLastUse[slot] = clock
+            slotPendingFill[slot] = true
         }
 
         return ExpertCachePlan(
             experts: experts,
             assignedSlots: assignedSlots,
             misses: misses,
-            hits: experts.count - misses.count)
+            hits: experts.count - misses.count,
+            layer: layer)
     }
 
     public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws
@@ -250,28 +310,29 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
 
-        let errorLock = NSLock()
-        nonisolated(unsafe) var firstError: Error?
-        DispatchQueue.concurrentPerform(iterations: plan.misses.count) { missOffset in
-            let index = plan.misses[missOffset]
-            do {
-                _ = try self.loadExpert(
-                    layer: 0,
-                    expert: plan.experts[index],
-                    slot: plan.assignedSlots[index])
-            } catch {
-                errorLock.lock()
-                if firstError == nil { firstError = error }
-                errorLock.unlock()
-            }
-        }
-        if let firstError { throw firstError }
-
+        // K12: hold the cache lock across the pread fills. `makeExpertCachePlan`
+        // reserved the miss slots under the same lock (slotPendingFill), and
+        // the fills complete here under it, so no concurrent plan or
+        // round-robin load can clobber a slot mid-pread. This serializes the
+        // fills (previously concurrentPerform) — correctness first; the fills
+        // are the only writers of slot contents.
         cacheLock.lock()
+        defer { cacheLock.unlock() }
         for index in plan.misses {
-            slotExpert[plan.assignedSlots[index]] = plan.experts[index]
+            let slot = plan.assignedSlots[index]
+            let expert = plan.experts[index]
+            let regionOffset = layout.expertOffset(layer: plan.layer, expert: expert)
+            guard regionOffset + layout.expertStride <= layout.streamSize else {
+                throw StreamerError.offsetOutOfRange(regionOffset)
+            }
+            try readFull(
+                into: slotPointers[slot],
+                fileOffset: layout.streamOffset + regionOffset,
+                count: Int(layout.expertStride))
+            slotPendingFill[slot] = false
+            slotExpert[slot] = expert
+            slotLastUse[slot] = useClock
         }
-        cacheLock.unlock()
 
         return expertCachePlanBuffers(plan)
     }
@@ -287,18 +348,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     public func adviseExpertCachePlanMisses(_ plan: ExpertCachePlan) -> ExpertIOAdviceResult {
         let experts = plan.misses.map { plan.experts[$0] }
-        return adviseRanges(expertAdviceRanges(experts: experts), requested: experts.count)
+        return adviseRanges(expertAdviceRanges(experts: experts, layer: plan.layer),
+                            requested: experts.count)
     }
 
     public func adviseExperts(experts: [Int]) -> ExpertIOAdviceResult {
-        adviseRanges(expertAdviceRanges(experts: experts), requested: experts.count)
+        adviseRanges(expertAdviceRanges(experts: experts, layer: 0), requested: experts.count)
     }
 
     public func adviseExpertMisses(experts: [Int]) -> ExpertIOAdviceResult {
         cacheLock.lock()
         let misses = experts.filter { !slotExpert.contains($0) }
         cacheLock.unlock()
-        return adviseRanges(expertAdviceRanges(experts: misses), requested: misses.count)
+        return adviseRanges(expertAdviceRanges(experts: misses, layer: 0), requested: misses.count)
     }
 
     static func coalescedAdjacentAdviceRanges(_ ranges: [(offset: UInt64, count: UInt64)])
@@ -312,8 +374,17 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 result.append(range)
                 continue
             }
-            let lastEnd = last.offset &+ last.count
-            let rangeEnd = range.offset &+ range.count
+            // K28: checked arithmetic — a wrapping `&+` could merge two
+            // huge ranges into a nonsense span. On overflow keep the ranges
+            // separate (the merge is an optimization, never a correctness
+            // requirement).
+            let (lastEnd, lastOverflow) = last.offset.addingReportingOverflow(last.count)
+            let (rangeEnd, rangeOverflow) = range.offset.addingReportingOverflow(range.count)
+            if lastOverflow || rangeOverflow {
+                result.append(last)
+                result.append(range)
+                continue
+            }
             if range.offset <= lastEnd {
                 last.count = max(lastEnd, rangeEnd) - last.offset
                 result.append(last)
@@ -340,9 +411,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return slotLastUse[lhs] < slotLastUse[rhs]
     }
 
-    private func expertAdviceRanges(experts: [Int]) -> [(offset: UInt64, count: UInt64)] {
+    private func expertAdviceRanges(experts: [Int],
+                                    layer: Int) -> [(offset: UInt64, count: UInt64)] {
         experts.compactMap { expert in
-            let regionOffset = layout.expertOffset(layer: 0, expert: expert)
+            let regionOffset = layout.expertOffset(layer: layer, expert: expert)
             guard regionOffset + layout.expertStride <= layout.streamSize else { return nil }
             return (layout.streamOffset + regionOffset, layout.expertStride)
         }

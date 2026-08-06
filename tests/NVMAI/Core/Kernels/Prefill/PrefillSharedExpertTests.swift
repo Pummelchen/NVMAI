@@ -133,7 +133,7 @@ import NVMAIValidationSupport
                               y: yRef,
                               yOffset: row * Self.d * halfBytes,
                               scratchAct: scratchAct)
-            scalarRMS.encodeBF16W(commandBuffer: refCB,
+            try scalarRMS.encodeBF16W(commandBuffer: refCB,
                                   x: yRef,
                                   xOffset: row * Self.d * halfBytes,
                                   weight: postF1Buf,
@@ -161,7 +161,7 @@ import NVMAIValidationSupport
                                 intermediate: Self.f,
                                 xStrideElements: Self.xStride,
                                 yStrideElements: Self.d)
-        prefillRMS.encodeBF16W(commandBuffer: gotCB,
+        try prefillRMS.encodeBF16W(commandBuffer: gotCB,
                                x: yGot,
                                weight: postF1Buf,
                                out: yGot,

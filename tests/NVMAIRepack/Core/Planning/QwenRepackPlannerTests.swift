@@ -93,9 +93,6 @@ struct QwenRepackPlannerTests {
             "3db12edeebeb65cab9a6eeb63cd74be4e0c74139a75f672701290b98230501cf")
             == "qwen3.6-35b-a3b-8bit")
         #expect(SourceFingerprint.modelID(forIndexSha256:
-            "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
-            == "mlx-community/gemma-4-26b-a4b-it-4bit")
-        #expect(SourceFingerprint.modelID(forIndexSha256:
             "00e220ddb21ceeb6290a3a1161f97339c553f3d27fc4319900a96edb5cfae74c")
             == "qwen3.6-35b-a3b-mtp-4bit")
     }
@@ -280,9 +277,14 @@ struct QwenRepackPlannerTests {
         #expect(!names.contains { $0.hasPrefix("vision_tower.") })
     }
 
-    @Test func gemmaManifestOmitsFamilyFields() throws {
-        let snapshotDir = temporaryRoot("gemma-manifest")
-        let outputDir = temporaryRoot("gemma-manifest-out")
+    /// The manifest writer always emits the Qwen family-extension fields
+    /// (family, attnOutputGate, attentionScale, linear-attention dims, ...).
+    /// Assert they are present with the values derived from the synthetic
+    /// snapshot's config.json — the same contract RemoteQwenInstallTests
+    /// checks on the real installed manifest.
+    @Test func qwenManifestEmitsFamilyExtensionFields() throws {
+        let snapshotDir = temporaryRoot("qwen-manifest")
+        let outputDir = temporaryRoot("qwen-manifest-out")
         defer {
             try? FileManager.default.removeItem(atPath: snapshotDir)
             try? FileManager.default.removeItem(atPath: outputDir)
@@ -308,13 +310,22 @@ struct QwenRepackPlannerTests {
                 sharedExpert: 8, routedExpert: 4))
         let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let archDict = obj["arch"] as! [String: Any]
-        for key in ["family", "attnOutputGate", "attentionScale",
-                    "embeddingScaledBySqrtHidden", "routerScaled",
-                    "ffnSandwichNorms", "sharedExpertGated", "ropeNeoxSubdim",
-                    "linearNumKHeads", "linearNumVHeads", "linearKeyHeadDim",
-                    "linearValueHeadDim", "linearConvKernelSize"] {
-            #expect(archDict[key] == nil, "gemma manifest must omit \(key)")
-        }
+        // Family extension fields are always present for the Qwen families
+        // and must round-trip the values `ArchInfo.load` derived.
+        #expect(archDict["family"] as? String == "qwen36")
+        #expect(archDict["attnOutputGate"] as? Bool == true)
+        #expect(archDict["attentionScale"] as? Double == 0.125)
+        #expect(archDict["embeddingScaledBySqrtHidden"] as? Bool == false)
+        #expect(archDict["routerScaled"] as? Bool == false)
+        #expect(archDict["ffnSandwichNorms"] as? Bool == false)
+        #expect(archDict["sharedExpertGated"] as? Bool == true)
+        #expect(archDict["ropeNeoxSubdim"] as? Bool == true)
+        #expect(archDict["linearNumKHeads"] as? Int == 2)
+        #expect(archDict["linearNumVHeads"] as? Int == 4)
+        #expect(archDict["linearKeyHeadDim"] as? Int == 32)
+        #expect(archDict["linearValueHeadDim"] as? Int == 32)
+        #expect(archDict["linearConvKernelSize"] as? Int == 4)
+        #expect(archDict["fullAttentionLayerMask"] as? [Int] == [2, 2, 2, 1])
     }
 
     // MARK: - Helpers

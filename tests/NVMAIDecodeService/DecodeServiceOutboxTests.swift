@@ -38,11 +38,11 @@ import NVMAIDecodeProtocol
         finishError: Error
     ) throws -> DecodeServiceEvent {
         let pipe = Pipe()
-        let writerFinished = DispatchSemaphore(value: 0)
+        let completion = WriterCompletion()
         let writer = Thread {
             defer {
                 try? pipe.fileHandleForWriting.close()
-                writerFinished.signal()
+                completion.signal()
             }
             try? outbox.runWriter(to: pipe.fileHandleForWriting)
         }
@@ -53,7 +53,11 @@ import NVMAIDecodeProtocol
             DecodeServiceEvent.self, from: pipe.fileHandleForReading)
         outbox.finish(error: finishError)
 
-        #expect(writerFinished.wait(timeout: .now() + 2) == .success)
+        // Deterministic: block until the writer thread signals the terminal
+        // write. The watchdog only guards against a genuinely hung writer
+        // (fail loudly), never a fixed race window.
+        let writerFinished = completion.waitForCompletion()
+        #expect(writerFinished, "writer did not finish after the terminal event")
         #expect(pipe.fileHandleForReading.readDataToEndOfFile().isEmpty)
         return terminal
     }
@@ -67,5 +71,28 @@ import NVMAIDecodeProtocol
             tokensPerSecond: 0,
             peakMemoryBytes: nil,
             runtimeOptions: AppRuntimeOptions())
+    }
+}
+
+/// Signals writer completion via NSCondition so the test blocks on the
+/// terminal event instead of a fixed sleep/semaphore race window.
+private final class WriterCompletion: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var finished = false
+
+    func signal() {
+        condition.lock()
+        finished = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func waitForCompletion(watchdog: TimeInterval = 10) -> Bool {
+        condition.lock()
+        while !finished {
+            if !condition.wait(until: Date().addingTimeInterval(watchdog)) { break }
+        }
+        condition.unlock()
+        return finished
     }
 }

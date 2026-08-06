@@ -53,7 +53,7 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
-        let loadRuntime = RuntimeConfiguration(
+        let loadRuntime = try RuntimeConfiguration(
             expertCacheSlots: args.expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             forceLogitsHead: !config.isPureGreedy)
@@ -67,7 +67,7 @@ public func run(args: Args,
             device: context.device,
             streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
+            integrityPolicy: .resolved(directoryURL: modelURL))
         let prefillChunkTokens: Int
         switch args.prefillChunk {
         case .fixed(let tokens):
@@ -81,7 +81,7 @@ public func run(args: Args,
                 ? RuntimeConfiguration.qwenLongPrefillChunkTokens
                 : loadRuntime.prefillChunkTokens
         }
-        let runtime = RuntimeConfiguration(
+        let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
             rdadvisePolicy: loadRuntime.rdadvisePolicy,

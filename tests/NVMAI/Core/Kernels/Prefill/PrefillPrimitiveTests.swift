@@ -85,7 +85,7 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for (row, token) in tokens.enumerated() {
-            scalar.encode(commandBuffer: cb,
+            try scalar.encode(commandBuffer: cb,
                           table: tableBuf,
                           scales: scalesBuf,
                           biases: biasesBuf,
@@ -93,9 +93,10 @@ import NVMAIValidationSupport
                           outOffset: row * Self.d * MemoryLayout<Float16>.size,
                           tokenId: token,
                           d: UInt32(Self.d),
-                          outScale: outScale)
+                          outScale: outScale,
+                          vocab: UInt32(Self.vocab))
         }
-        block.encode(commandBuffer: cb,
+        try block.encode(commandBuffer: cb,
                      table: tableBuf,
                      scales: scalesBuf,
                      biases: biasesBuf,
@@ -103,7 +104,8 @@ import NVMAIValidationSupport
                      out: blockOut,
                      t: UInt32(tokens.count),
                      d: UInt32(Self.d),
-                     outScale: outScale)
+                     outScale: outScale,
+                     vocab: UInt32(Self.vocab))
         cb.commit()
         cb.waitUntilCompleted()
 
@@ -138,7 +140,7 @@ import NVMAIValidationSupport
         }
 
         for (row, token) in tokens.enumerated() {
-            scalar.encode(commandBuffer: commandBuffer,
+            try scalar.encode(commandBuffer: commandBuffer,
                           table: table,
                           scales: scaleBuffer,
                           biases: biasBuffer,
@@ -146,9 +148,10 @@ import NVMAIValidationSupport
                           outOffset: row * Self.d * MemoryLayout<Float16>.stride,
                           tokenId: token,
                           d: UInt32(Self.d),
-                          outScale: 1)
+                          outScale: 1,
+                          vocab: UInt32(Self.vocab))
         }
-        block.encode(commandBuffer: commandBuffer,
+        try block.encode(commandBuffer: commandBuffer,
                      table: table,
                      scales: scaleBuffer,
                      biases: biasBuffer,
@@ -156,7 +159,8 @@ import NVMAIValidationSupport
                      out: actual,
                      t: UInt32(tokens.count),
                      d: UInt32(Self.d),
-                     outScale: 1)
+                     outScale: 1,
+                     vocab: UInt32(Self.vocab))
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         if let error = commandBuffer.error { throw error }
@@ -190,7 +194,7 @@ import NVMAIValidationSupport
         let rowBytes = dim * MemoryLayout<Float16>.size
         let cb = ctx.queue.makeCommandBuffer()!
         for row in 0..<rows {
-            scalar.encodeBF16W(commandBuffer: cb,
+            try scalar.encodeBF16W(commandBuffer: cb,
                                x: xBuf,
                                xOffset: row * rowBytes,
                                weight: wBuf,
@@ -199,7 +203,7 @@ import NVMAIValidationSupport
                                d: UInt32(dim),
                                eps: eps)
         }
-        block.encodeBF16W(commandBuffer: cb,
+        try block.encodeBF16W(commandBuffer: cb,
                           x: xBuf,
                           weight: wBuf,
                           out: blockOut,

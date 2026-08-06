@@ -10,7 +10,7 @@ import Accelerate
 /// different summation order — any bug that depends on the kernel's online
 /// (m, d) merge logic won't replicate here.
 ///
-/// Softcap is `c * tanh(x / c)` with c=30.0 by default for Gemma 4.
+/// Softcap is `c * tanh(x / c)` with c=30.0 by default.
 public enum LogitSoftcapSoftmaxRef {
     public static func apply(x: [Float], softcap: Float) -> [Float] {
         let v = x.count
@@ -45,6 +45,11 @@ public enum LogitSoftcapSoftmaxRef {
         var sum: Float = 0
         y.withUnsafeBufferPointer { py in
             vDSP_sve(py.baseAddress!, 1, &sum, vDSP_Length(v))
+        }
+        // An all-zero exponent vector (sum == 0) has no valid distribution;
+        // return a zero distribution instead of dividing by zero.
+        guard sum > 0 else {
+            return [Float](repeating: 0, count: v)
         }
         var invSum = 1.0 / sum
         y.withUnsafeMutableBufferPointer { py in

@@ -70,48 +70,48 @@ import NVMAIValidationSupport
             Issue.record("Failed to allocate command buffer")
             return
         }
-        rms.encodeBF16WPerHead(commandBuffer: cb,
+        try rms.encodeBF16WPerHead(commandBuffer: cb,
                                x: qLegacy,
                                weight: qW,
                                out: qLegacy,
                                headDim: UInt32(headDim),
                                numHeads: numQHeads,
                                eps: 1e-6)
-        rms.encodeBF16WPerHead(commandBuffer: cb,
+        try rms.encodeBF16WPerHead(commandBuffer: cb,
                                x: kLegacy,
                                weight: kW,
                                out: kLegacy,
                                headDim: UInt32(headDim),
                                numHeads: numKVHeads,
                                eps: 1e-6)
-        rms.encodeNoScalePerHead(commandBuffer: cb,
+        try rms.encodeNoScalePerHead(commandBuffer: cb,
                                  x: vLegacy,
                                  out: vLegacy,
                                  headDim: UInt32(headDim),
                                  numHeads: numKVHeads,
                                  eps: 1e-6)
         if rotatedPairs * 2 == UInt32(headDim) {
-            rope.encodeDefaultNeox(commandBuffer: cb,
+            try rope.encodeDefaultNeox(commandBuffer: cb,
                                    data: qLegacy,
                                    position: UInt32(position),
                                    headDim: UInt32(headDim),
                                    numHeads: UInt32(numQHeads),
                                    theta: theta)
-            rope.encodeDefaultNeox(commandBuffer: cb,
+            try rope.encodeDefaultNeox(commandBuffer: cb,
                                    data: kLegacy,
                                    position: UInt32(position),
                                    headDim: UInt32(headDim),
                                    numHeads: UInt32(numKVHeads),
                                    theta: theta)
         } else {
-            rope.encodeProportionalNeox(commandBuffer: cb,
+            try rope.encodeProportionalNeox(commandBuffer: cb,
                                         data: qLegacy,
                                         position: UInt32(position),
                                         headDim: UInt32(headDim),
                                         numHeads: UInt32(numQHeads),
                                         rotatedPairs: rotatedPairs,
                                         theta: theta)
-            rope.encodeProportionalNeox(commandBuffer: cb,
+            try rope.encodeProportionalNeox(commandBuffer: cb,
                                         data: kLegacy,
                                         position: UInt32(position),
                                         headDim: UInt32(headDim),
@@ -119,7 +119,7 @@ import NVMAIValidationSupport
                                         rotatedPairs: rotatedPairs,
                                         theta: theta)
         }
-        fused.encode(commandBuffer: cb,
+        try fused.encode(commandBuffer: cb,
                      q: qFused,
                      k: kFused,
                      v: vFused,

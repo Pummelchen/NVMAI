@@ -63,7 +63,7 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for row in 0..<rows {
-            scalar.encodeBF16WPerHead(commandBuffer: cb,
+            try scalar.encodeBF16WPerHead(commandBuffer: cb,
                                       x: ref,
                                       xOffset: row * rowStride * MemoryLayout<Float16>.size,
                                       weight: weightBuf,
@@ -73,7 +73,7 @@ import NVMAIValidationSupport
                                       numHeads: heads,
                                       eps: 1e-6)
         }
-        block.encodeBF16W(commandBuffer: cb,
+        try block.encodeBF16W(commandBuffer: cb,
                           x: candidate,
                           weight: weightBuf,
                           out: candidate,
@@ -119,7 +119,7 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for row in 0..<rows {
-            scalar.encodeNoScalePerHead(commandBuffer: cb,
+            try scalar.encodeNoScalePerHead(commandBuffer: cb,
                                         x: ref,
                                         xOffset: row * rowStride * MemoryLayout<Float16>.size,
                                         out: ref,
@@ -128,7 +128,7 @@ import NVMAIValidationSupport
                                         numHeads: heads,
                                         eps: 1e-6)
         }
-        block.encodeNoScale(commandBuffer: cb,
+        try block.encodeNoScale(commandBuffer: cb,
                             x: candidate,
                             out: candidate,
                             queryCount: UInt32(rows),

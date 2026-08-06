@@ -8,25 +8,31 @@ import NVMAI
 public actor NVMAIHTTPServer {
     public static let maximumBodyBytes = 1_048_576
 
+    /// S1: close a connection that has been idle (no request in flight) for
+    /// this long. Also used as the pipeline read timeout, bounding slowloris
+    /// style partial-request stalls.
+    public static let idleReadTimeout: TimeAmount = .seconds(120)
+
+    /// S1: reject connections beyond this cap to bound FD/memory usage.
+    public static let maximumConcurrentConnections = 64
+
     private let group: MultiThreadedEventLoopGroup
     private let modelID: String
-    private let chatDialect: ChatDialect
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
-    private let childChannels = ChildChannelRegistry()
+    private let childChannels = ChildChannelRegistry(
+        maximumChannels: maximumConcurrentConnections)
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
 
     public init(modelID: String,
                 queueLimit: Int,
                 backend: any ServerInferenceBackend,
-                chatDialect: ChatDialect = .gemma,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
-        self.chatDialect = chatDialect
         self.backend = backend
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
@@ -34,7 +40,6 @@ public actor NVMAIHTTPServer {
 
     public func start(port: Int) async throws -> Channel {
         let modelID = self.modelID
-        let chatDialect = self.chatDialect
         let backend = self.backend
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
@@ -50,14 +55,14 @@ public actor NVMAIHTTPServer {
                 ).flatMap {
                     channel.pipeline.addHandler(ServerHTTPHandler(
                         modelID: modelID,
-                        chatDialect: chatDialect,
                         backend: backend,
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
                         childChannels: childChannels))
                 }
             }
-            .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            // S29: so_reuseaddr belongs on the listening socket only, not on
+            // accepted sockets.
         let channel = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
         self.channel = channel
         return channel
@@ -118,8 +123,15 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
+    /// S4: cap on SSE frames waiting to be written; a slow reader that exceeds
+    /// it fails the stream instead of growing the pending queue without bound.
+    private static let maximumPendingStreamChunks = 512
+
+    private static let minimalErrorData = Data(#"""
+    {"error":{"message":"internal server error","type":"server_error","code":"internal_error"}}
+    """#.utf8)
+
     private let modelID: String
-    private let chatDialect: ChatDialect
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
@@ -127,29 +139,57 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private var head: HTTPRequestHead?
     private var body = ByteBuffer()
     private var oversized = false
-    private var activeTask: Task<Void, Never>?
+
+    // Access to activeTask is lock-guarded because the SSE drainer and the
+    // backpressure fail path read it from the cooperative pool while the event
+    // loop writes it for each new request.
+    private let taskLock = NSLock()
+    private var _activeTask: Task<Void, Never>?
+    private var activeTask: Task<Void, Never>? {
+        get { taskLock.withLock { _activeTask } }
+        set { taskLock.withLock { _activeTask = newValue } }
+    }
+
     private var requestPhaseState = RequestPhaseState()
+    /// Requests currently being processed on this connection; idle closing and
+    /// phase bookkeeping key off it (S10, S25, S1).
+    private var inFlightRequests = 0
+    private var idleCloseTask: Scheduled<Void>?
 
     init(modelID: String,
-         chatDialect: ChatDialect = .gemma,
          backend: any ServerInferenceBackend,
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
-        self.chatDialect = chatDialect
         self.backend = backend
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
         self.childChannels = childChannels
     }
 
+    func channelActive(context: ChannelHandlerContext) {
+        // S1: start the per-connection idle deadline so a connection that
+        // never sends anything is closed.
+        resetIdleDeadline(context)
+        context.fireChannelActive()
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        // S1: any read activity pushes the idle deadline out (slowloris
+        // connections stall once the trickle stops).
+        resetIdleDeadline(context)
         switch unwrapInboundIn(data) {
         case .head(let head):
             self.head = head
             body.clear()
             oversized = false
+            // S10/S25: reset per-request phase state and drop the reference to
+            // any previous request's (finished) task when a new request head
+            // arrives.
+            requestPhaseState = RequestPhaseState()
+            activeTask = nil
+            inFlightRequests += 1
         case .body(var part):
             if body.readableBytes + part.readableBytes > NVMAIHTTPServer.maximumBodyBytes {
                 oversized = true
@@ -159,6 +199,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         case .end:
             guard let head else { return }
             self.head = nil
+            // S35: do not retain the (up to 1 MiB) request body buffer across
+            // keep-alive requests.
+            defer { body = ByteBuffer() }
             if oversized {
                 writeError(context, status: .payloadTooLarge,
                            OpenAIErrorEnvelope(message: "request body is too large",
@@ -170,8 +213,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        activeTask?.cancel()
+        // S25: cancel by identity — capture this connection's current task,
+        // clear the property, then cancel so a stale reference can never
+        // cancel a task that belongs to a later request.
+        let task = activeTask
         activeTask = nil
+        task?.cancel()
+        idleCloseTask?.cancel()
+        idleCloseTask = nil
         childChannels.remove(context.channel)
         context.fireChannelInactive()
     }
@@ -179,6 +228,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func route(head: HTTPRequestHead,
                        body: ByteBuffer,
                        context: ChannelHandlerContext) {
+        // S27: HTTP/1.1 requires a Host header; reject requests without one.
+        if head.version == .http1_1, head.headers.first(name: "host") == nil {
+            writeError(context, status: .badRequest,
+                       OpenAIErrorEnvelope(message: "missing Host header",
+                                           code: "missing_host"))
+            return
+        }
         let path = head.uri.split(separator: "?", maxSplits: 1,
                                   omittingEmptySubsequences: false).first.map(String.init) ?? head.uri
         switch (head.method, path) {
@@ -189,9 +245,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 object: "list",
                 data: [.init(id: modelID,
                              object: "model",
-                             created: 0,
+                             created: nil,
                              ownedBy: "nvmai")])
             writeCodable(context, status: .ok, response)
+        case (.HEAD, "/health"), (.HEAD, "/v1/models"):
+            // S28: HEAD is answered with headers only.
+            writeHeadOnly(context, status: .ok)
         case (.POST, "/v1/chat/completions"):
             guard head.headers.first(name: "content-type")?
                 .lowercased().hasPrefix("application/json") == true else {
@@ -219,8 +278,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
-            let request = try OpenAIRequestValidator.validate(decoded, modelID: modelID,
-                                                                dialect: chatDialect)
+            let request = try OpenAIRequestValidator.validate(
+                decoded, modelID: modelID, maxContext: backend.maximumContext)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -249,51 +308,54 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 defer { streamState.stop() }
                 let started = ContinuousClock.now
                 ServerLog.accepted(id: responseID, streaming: request.stream)
+                let outbox: SSEOutbox? = request.stream
+                    ? SSEOutbox(capacity: Self.maximumPendingStreamChunks)
+                    : nil
+                let drainer = outbox.map { outbox in
+                    Task { [self] in
+                        await self.drainOutbox(contextBox.value, outbox: outbox)
+                    }
+                }
                 do {
-                    let completion = try await self.coordinator.runPreparing(
-                        onQueued: onQueued,
-                        prepare: {
-                            let prepared = try await self.backend.prepare(request)
-                            phaseState.set("prepared")
-                            ServerLog.prepared(id: responseID,
-                                               promptTokens: prepared.promptTokenCount)
-                            return prepared
-                        },
-                        operation: { prepared in
-                            try Task.checkCancellation()
-                            startStream()
-                            try await streamState.waitUntilStarted()
-                            try Task.checkCancellation()
-                            phaseState.set("generating")
-                            ServerLog.generating(id: responseID)
-                            return try await self.backend.generate(prepared) { event in
-                                guard request.stream else { return }
-                                switch event {
-                                case .content(let text):
-                                    self.writeStreamChunk(
-                                        contextBox.value,
-                                        self.chunk(id: responseID, created: created,
-                                                   delta: ["content": text],
-                                                   finishReason: nil))
-                                case .toolCall(let call):
-                                    self.writeToolCall(contextBox.value,
-                                                       id: responseID,
-                                                       created: created,
-                                                       toolIndex: streamState.nextToolIndex(),
-                                                       call: call)
-                                }
+                    let completion = try await self.coordinator.run(onQueued: onQueued) {
+                        try Task.checkCancellation()
+                        startStream()
+                        try await streamState.waitUntilStarted()
+                        try Task.checkCancellation()
+                        phaseState.set("generating")
+                        ServerLog.generating(id: responseID)
+                        return try await self.backend.generate(request) { event in
+                            guard request.stream, let outbox else { return }
+                            switch event {
+                            case .content(let text):
+                                self.enqueueStreamChunk(
+                                    self.chunk(id: responseID, created: created,
+                                               delta: ["content": text],
+                                               finishReason: nil),
+                                    outbox: outbox,
+                                    context: contextBox.value)
+                            case .toolCall(let call):
+                                self.enqueueToolCallChunks(
+                                    id: responseID,
+                                    created: created,
+                                    toolIndex: streamState.nextToolIndex(),
+                                    call: call,
+                                    outbox: outbox,
+                                    context: contextBox.value)
                             }
-                    })
+                        }
+                    }
                     ServerLog.completed(id: responseID,
                                         duration: started.duration(to: .now),
                                         completion: completion)
-                    if request.stream {
+                    if request.stream, let outbox {
                         streamState.stop()
                         self.finishStream(contextBox.value,
                                           id: responseID,
                                           created: created,
                                           completion: completion,
-                                          includeUsage: request.includeUsage)
+                                          includeUsage: request.includeUsage,
+                                          outbox: outbox)
                     } else {
                         self.writeCompletion(contextBox.value,
                                              id: responseID,
@@ -306,7 +368,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                           context: contextBox.value,
                                           id: responseID,
                                           phase: phaseState.value,
-                                          stream: streamState.isStarted)
+                                          stream: request.stream,
+                                          outbox: outbox)
+                }
+                if let drainer {
+                    await Self.awaitDrainer(drainer)
                 }
             }
         } catch let error as ServerRequestError {
@@ -381,11 +447,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         return promise.futureResult
     }
 
-    private func writeToolCall(_ context: ChannelHandlerContext,
-                               id: String,
-                               created: Int,
-                               toolIndex: Int,
-                               call: ParsedToolCall) {
+    private func enqueueToolCallChunks(id: String,
+                                       created: Int,
+                                       toolIndex: Int,
+                                       call: ParsedToolCall,
+                                       outbox: SSEOutbox,
+                                       context: ChannelHandlerContext) {
         let fragments = utf8Fragments(call.argumentsJSON, maximumBytes: 1024)
         for (index, fragment) in fragments.enumerated() {
             var function: [String: Any] = ["arguments": fragment]
@@ -396,11 +463,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 tool["type"] = "function"
                 tool["function"] = function
             }
-            writeStreamChunk(
-                context,
+            enqueueStreamChunk(
                 chunk(id: id, created: created,
                       delta: ["tool_calls": [tool]],
-                      finishReason: nil))
+                      finishReason: nil),
+                outbox: outbox,
+                context: context)
         }
     }
 
@@ -408,28 +476,26 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                               id: String,
                               created: Int,
                               completion: ServerCompletion,
-                              includeUsage: Bool) {
-        writeStreamChunk(
-            context,
+                              includeUsage: Bool,
+                              outbox: SSEOutbox) {
+        if let frame = streamFrame(
             chunk(id: id, created: created,
                   delta: [:],
-                  finishReason: completion.finishReason))
-        if includeUsage {
-            writeStreamChunk(context, [
-                "id": id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": modelID,
-                "choices": [],
-                "usage": usageObject(completion.usage),
-            ])
+                  finishReason: completion.finishReason)) {
+            _ = outbox.enqueue(frame)
         }
-        let contextBox = SendableContext(context)
-        context.eventLoop.execute {
-            let buffer = contextBox.value.channel.allocator.buffer(string: "data: [DONE]\n\n")
-            contextBox.value.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-            contextBox.value.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+        if includeUsage,
+           let frame = streamFrame([
+               "id": id,
+               "object": "chat.completion.chunk",
+               "created": created,
+               "model": modelID,
+               "choices": [],
+               "usage": usageObject(completion.usage),
+           ]) {
+            _ = outbox.enqueue(frame)
         }
+        outbox.enqueueTerminal([Self.doneFrame()], closeWhenDrained: false)
     }
 
     private func chunk(id: String,
@@ -450,18 +516,98 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         ]
     }
 
-    private func writeStreamChunk(_ context: ChannelHandlerContext,
-                                  _ object: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+    /// Enqueue one SSE frame. Encoding or backpressure failure fails the
+    /// stream with a terminal frame instead of silently dropping the chunk
+    /// (S4/S5).
+    private func enqueueStreamChunk(_ object: [String: Any],
+                                    outbox: SSEOutbox,
+                                    context: ChannelHandlerContext) {
+        guard let frame = streamFrame(object) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream response could not be encoded",
+                       code: "internal_error")
+            return
+        }
+        guard outbox.enqueue(frame) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream backpressure limit exceeded; client is too slow",
+                       code: "stream_overflow")
+            return
+        }
+    }
+
+    private func streamFrame(_ object: [String: Any]) -> Data? {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            return nil
+        }
+        return Self.sseFrame("data: " + String(decoding: data, as: UTF8.self))
+    }
+
+    private func failStream(outbox: SSEOutbox,
+                            context: ChannelHandlerContext,
+                            message: String,
+                            code: String) {
+        let envelope = OpenAIErrorEnvelope(message: message,
+                                           code: code,
+                                           type: "server_error")
+        outbox.enqueueTerminal(
+            Self.errorFrame(envelope).map { [$0, Self.doneFrame()] } ?? [Self.doneFrame()],
+            closeWhenDrained: true)
+        activeTask?.cancel()
+    }
+
+    /// Drain the outbox with backpressure: each chunk's write future is
+    /// awaited, so a slow reader stalls here (NIO holds the bytes in its
+    /// outbound buffer) instead of letting pending memory grow without bound
+    /// (S4). Write failures cancel the generation and close the connection.
+    private func drainOutbox(_ context: ChannelHandlerContext,
+                             outbox: SSEOutbox) async {
+        while let frame = await outbox.next() {
+            do {
+                try await writeSSEChunk(context, frame)
+            } catch {
+                // The write failed (client gone or socket error): nothing more
+                // can be delivered. Cancel the generation and close.
+                activeTask?.cancel()
+                context.close(promise: nil)
+                return
+            }
+        }
+        // Outbox closed and drained: end the HTTP response body; close the
+        // connection when the stream ended in failure.
+        try? await writeSSEEnd(context)
+        let close = outbox.closeWhenDrained
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
-            var buffer = contextBox.value.channel.allocator.buffer(capacity: data.count + 8)
-            buffer.writeString("data: ")
-            buffer.writeBytes(data)
-            buffer.writeString("\n\n")
-            contextBox.value.writeAndFlush(
-                self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+            if self.inFlightRequests > 0 { self.inFlightRequests -= 1 }
+            self.resetIdleDeadline(contextBox.value)
+            if close {
+                contextBox.value.close(promise: nil)
+            }
         }
+    }
+
+    private func writeSSEChunk(_ context: ChannelHandlerContext,
+                               _ frame: Data) async throws {
+        let promise = context.eventLoop.makePromise(of: Void.self)
+        let contextBox = SendableContext(context)
+        context.eventLoop.execute {
+            var buffer = contextBox.value.channel.allocator.buffer(capacity: frame.count)
+            buffer.writeBytes(frame)
+            contextBox.value.writeAndFlush(
+                self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: promise)
+        }
+        try await promise.futureResult.get()
+    }
+
+    private func writeSSEEnd(_ context: ChannelHandlerContext) async throws {
+        let promise = context.eventLoop.makePromise(of: Void.self)
+        let contextBox = SendableContext(context)
+        context.eventLoop.execute {
+            contextBox.value.writeAndFlush(
+                self.wrapOutboundOut(.end(nil)), promise: promise)
+        }
+        try await promise.futureResult.get()
     }
 
     private func writeHeartbeat(_ context: ChannelHandlerContext) {
@@ -475,7 +621,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                   context: ChannelHandlerContext,
                                   id: String,
                                   phase: String,
-                                  stream: Bool) {
+                                  stream: Bool,
+                                  outbox: SSEOutbox?) {
         let envelope: OpenAIErrorEnvelope
         let status: HTTPResponseStatus
         if let requestError = error as? ServerRequestError {
@@ -491,35 +638,55 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         if !(error is CancellationError) {
             ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
         }
-        if stream {
-            finishStreamWithError(context, envelope: envelope)
+        if stream, let outbox {
+            // S5/S20: never leave a streaming client without a terminal frame.
+            // Cancellation (client disconnect / shutdown) ends the stream
+            // cleanly with [DONE]; real failures emit an error event first and
+            // the connection is closed after the frames drain.
+            if error is CancellationError {
+                outbox.enqueueTerminal([Self.doneFrame()], closeWhenDrained: true)
+            } else {
+                outbox.enqueueTerminal(
+                    Self.errorFrame(envelope).map { [$0, Self.doneFrame()] } ?? [Self.doneFrame()],
+                    closeWhenDrained: true)
+            }
+            return
+        }
+        if error is CancellationError {
+            // S20: the client disconnected or the server is shutting down;
+            // there is no one to write to. Do not emit a misleading 500.
             return
         }
         writeError(context, status: status, envelope)
     }
 
-    private func finishStreamWithError(_ context: ChannelHandlerContext,
-                                       envelope: OpenAIErrorEnvelope) {
-        guard let data = try? JSONEncoder().encode(envelope) else { return }
+    private func writeHeadOnly(_ context: ChannelHandlerContext,
+                               status: HTTPResponseStatus) {
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
-            guard contextBox.value.channel.isActive else { return }
-            var buffer = contextBox.value.channel.allocator.buffer(
-                capacity: data.count + 32)
-            buffer.writeString("data: ")
-            buffer.writeBytes(data)
-            buffer.writeString("\n\ndata: [DONE]\n\n")
-            contextBox.value.write(
-                self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-            contextBox.value.writeAndFlush(
-                self.wrapOutboundOut(.end(nil)), promise: nil)
+            var headers = HTTPHeaders()
+            headers.add(name: "content-type", value: "application/json")
+            headers.add(name: "content-length", value: "0")
+            contextBox.value.write(self.wrapOutboundOut(.head(
+                HTTPResponseHead(version: .http1_1, status: status, headers: headers))),
+                promise: nil)
+            contextBox.value.writeAndFlush(self.wrapOutboundOut(.end(nil))).whenFailure { _ in
+                contextBox.value.close(promise: nil)
+            }
+            if self.inFlightRequests > 0 { self.inFlightRequests -= 1 }
+            self.resetIdleDeadline(contextBox.value)
         }
     }
 
     private func writeCodable<T: Encodable>(_ context: ChannelHandlerContext,
                                             status: HTTPResponseStatus,
                                             _ value: T) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
+        guard let data = try? JSONEncoder().encode(value) else {
+            // S5: encoding failure must not silently drop the response; send a
+            // minimal error envelope instead.
+            writeData(context, status: .internalServerError, data: Self.minimalErrorData)
+            return
+        }
         writeData(context, status: status, data: data)
     }
 
@@ -532,7 +699,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func writeJSON(_ context: ChannelHandlerContext,
                            status: HTTPResponseStatus,
                            object: Any) {
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            writeData(context, status: .internalServerError, data: Self.minimalErrorData)
+            return
+        }
         writeData(context, status: status, data: data)
     }
 
@@ -550,8 +720,52 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             var buffer = contextBox.value.channel.allocator.buffer(capacity: data.count)
             buffer.writeBytes(data)
             contextBox.value.write(self.wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-            contextBox.value.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+            // S5: a failed response write leaves no terminal frame possible;
+            // close the connection so the client never hangs.
+            contextBox.value.writeAndFlush(self.wrapOutboundOut(.end(nil))).whenFailure { _ in
+                contextBox.value.close(promise: nil)
+            }
+            if self.inFlightRequests > 0 { self.inFlightRequests -= 1 }
+            self.resetIdleDeadline(contextBox.value)
         }
+    }
+
+    /// S1: (re)arm the per-connection idle close deadline. Fires after
+    /// `idleReadTimeout` without read activity; the connection is closed only
+    /// when no request is in flight (idle keep-alive or a stalled slowloris
+    /// request), never in the middle of a generation.
+    private func resetIdleDeadline(_ context: ChannelHandlerContext) {
+        idleCloseTask?.cancel()
+        let contextBox = SendableContext(context)
+        idleCloseTask = context.eventLoop.scheduleTask(
+            in: NVMAIHTTPServer.idleReadTimeout) {
+            if self.inFlightRequests == 0 {
+                contextBox.value.close(promise: nil)
+            }
+        }
+    }
+
+    private static func awaitDrainer(_ drainer: Task<Void, Never>) async {
+        await withTaskCancellationHandler {
+            await drainer.value
+        } onCancel: {
+            drainer.cancel()
+        }
+    }
+
+    private static func sseFrame(_ text: String) -> Data {
+        var bytes = Data(text.utf8)
+        bytes.append(Data("\n\n".utf8))
+        return bytes
+    }
+
+    private static func doneFrame() -> Data {
+        sseFrame("data: [DONE]")
+    }
+
+    private static func errorFrame(_ envelope: OpenAIErrorEnvelope) -> Data? {
+        guard let data = try? JSONEncoder().encode(envelope) else { return nil }
+        return sseFrame("data: " + String(decoding: data, as: UTF8.self))
     }
 
     private func usageObject(_ usage: OpenAIUsage) -> [String: Any] {
@@ -596,6 +810,88 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
 }
 
+/// Bounded FIFO of pre-encoded SSE frames for one stream, with a cap that
+/// fails the stream when a slow reader outruns the drainer (S4).
+private final class SSEOutbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var frames: [Data] = []
+    private var pendingDrain: CheckedContinuation<Data?, Never>?
+    private var closed = false
+    private var overflowed = false
+    private var closeAfterDrain = false
+    let capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    var closeWhenDrained: Bool {
+        lock.withLock { closeAfterDrain }
+    }
+
+    /// Enqueue a regular content frame. Returns false when the outbox is
+    /// closed, already failed, or the cap is exceeded (slow reader).
+    func enqueue(_ frame: Data) -> Bool {
+        lock.withLock {
+            guard !closed, !overflowed else { return false }
+            if frames.count >= capacity {
+                overflowed = true
+                return false
+            }
+            push(frame)
+            return true
+        }
+    }
+
+    /// Enqueue terminal frames ([DONE] / error) and close the outbox. Later
+    /// frames are rejected; the drainer writes everything already queued in
+    /// order and then (when `closeWhenDrained`) closes the connection.
+    func enqueueTerminal(_ frames: [Data], closeWhenDrained: Bool) {
+        lock.withLock {
+            guard !closed else { return }
+            for frame in frames { push(frame) }
+            closed = true
+            if closeWhenDrained { closeAfterDrain = true }
+        }
+    }
+
+    /// Await the next frame; nil once the outbox is closed and drained.
+    func next() async -> Data? {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.withLock {
+                    if !frames.isEmpty {
+                        continuation.resume(returning: frames.removeFirst())
+                    } else if closed {
+                        continuation.resume(returning: nil)
+                    } else {
+                        pendingDrain = continuation
+                    }
+                }
+            }
+        } onCancel: {
+            self.cancelPendingDrain()
+        }
+    }
+
+    private func push(_ frame: Data) {
+        frames.append(frame)
+        if let continuation = pendingDrain {
+            pendingDrain = nil
+            continuation.resume(returning: frame)
+        }
+    }
+
+    private func cancelPendingDrain() {
+        lock.withLock {
+            if let continuation = pendingDrain {
+                pendingDrain = nil
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+}
+
 private final class ChildChannelRegistry: Sendable {
     private struct State {
         var channels: [ObjectIdentifier: Channel] = [:]
@@ -604,10 +900,19 @@ private final class ChildChannelRegistry: Sendable {
     }
 
     private let state = Mutex(State())
+    private let maximumChannels: Int
+
+    init(maximumChannels: Int) {
+        self.maximumChannels = maximumChannels
+    }
 
     func insert(_ channel: Channel) {
         let shouldClose = state.withLock {
             guard !$0.shuttingDown else { return true }
+            // S1: connection cap — reject beyond maximumChannels.
+            if $0.channels.count >= maximumChannels {
+                return true
+            }
             $0.channels[ObjectIdentifier(channel)] = channel
             return false
         }

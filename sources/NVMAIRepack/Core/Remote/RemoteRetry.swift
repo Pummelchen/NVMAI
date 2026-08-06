@@ -19,8 +19,15 @@ public struct RemoteRetryPolicy: Sendable {
     public static func isRetryable(_ error: Error) -> Bool {
         if let e = error as? URLError {
             switch e.code {
+            // `.cancelled` is retryable here because the transfer delegate
+            // converts user- or task-intent cancellation into
+            // `CancellationError` before cancelling the URLSessionTask
+            // (see RemoteRangeTransferDelegate.cancel); a raw
+            // URLError.cancelled therefore means the session aborted the task
+            // on its own (teardown, resource limits), which is transient.
             case .timedOut, .networkConnectionLost, .cannotConnectToHost,
-                 .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable:
+                 .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable,
+                 .cancelled:
                 return true
             default:
                 return false

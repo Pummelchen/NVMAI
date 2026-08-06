@@ -95,7 +95,7 @@ import NVMAIValidationSupport
             return 0
         }
 
-        chain.encodeGreedyDecode(commandBuffer: commandBuffer,
+        try chain.encodeGreedyDecode(commandBuffer: commandBuffer,
                                  hidden: hidden,
                                  hiddenOffset: hiddenOffset,
                                  normWeight: norm,

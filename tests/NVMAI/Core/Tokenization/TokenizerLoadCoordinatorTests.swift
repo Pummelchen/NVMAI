@@ -9,7 +9,7 @@ struct TokenizerLoadCoordinatorTests {
         let tokenizers = try await withThrowingTaskGroup(of: GFTokenizer.self) { group in
             for _ in 0..<8 {
                 group.addTask {
-                    try await GFTokenizer.load()
+                    try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
                 }
             }
 
@@ -35,8 +35,8 @@ struct TokenizerLoadCoordinatorTests {
 
     @Test("Consecutive loads reuse the completed process cache")
     func consecutiveLoadsReuseCompletedTask() async throws {
-        let first = try await GFTokenizer.load()
-        let second = try await GFTokenizer.load()
+        let first = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
+        let second = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
 
         #expect(second.bosID == first.bosID)
         #expect(second.eosID == first.eosID)

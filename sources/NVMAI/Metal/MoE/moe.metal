@@ -15,7 +15,7 @@ constant uint FC_MOE_D [[function_constant(0)]];
 constant uint FC_MOE_F [[function_constant(1)]];
 constant uint FC_MOE_TOP_K [[function_constant(2)]];
 constant bool FC_MOE_USE_FC [[function_constant(3)]];
-// Hidden activation for expert FFNs: unset/false = Gemma's gelu_pytorch_tanh,
+// Hidden activation for expert FFNs: unset/false = gelu_pytorch_tanh,
 // true = silu (Qwen 3.6 SwiGLU). Applies to routed decode, routed prefill,
 // and the fused INT8 shared-expert kernel.
 constant bool FC_MOE_ACT_SILU [[function_constant(4)]];
@@ -119,7 +119,7 @@ static inline uint router_affine_value(device const uint8_t* packed,
     return (word >> shift) & ((1u << bits) - 1u);
 }
 
-static inline void router_gemv_gemma4_body(
+static inline void router_gemv_body(
     device const uint8_t* W,
     device const bfloat* scales,
     device const bfloat* biases,
@@ -161,7 +161,7 @@ static inline void router_gemv_gemma4_body(
     if (lane == 0) out_logits[e] = acc;
 }
 
-kernel void router_gemv_gemma4_r4(
+kernel void router_gemv_r4(
     device const uint8_t* W [[buffer(0)]],
     device const bfloat* scales [[buffer(1)]],
     device const bfloat* biases [[buffer(2)]],
@@ -174,7 +174,7 @@ kernel void router_gemv_gemma4_r4(
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    router_gemv_gemma4_body(W, scales, biases, hidden, effective_scale,
+    router_gemv_body(W, scales, biases, hidden, effective_scale,
                             out_logits, num_experts, D, 4, tg_idx, sg_idx, lane);
 }
 
@@ -231,7 +231,9 @@ kernel void router_topk_select_k8(
 }
 
 // Each SIMD computes one affine INT4 row. Four adjacent groups are loaded as
-// aligned 32-bit chunks; remaining groups use one byte per lane.
+// two 16-bit weight halves (sub-tensor offsets are only guaranteed 2-byte
+// aligned, so a 4-byte `uint*` load would be misaligned — undefined); the
+// remaining groups use one byte per lane.
 static inline float moe_int4_gemv_row_simd_dev_vec(
     device const uint8_t* W,
     device const bfloat* S,
@@ -251,7 +253,12 @@ static inline float moe_int4_gemv_row_simd_dev_vec(
     const uint full_blocks = n_groups / 4;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
-        const uint w4 = *((device const uint*)(W_row + byte_base));
+        // Read the 4-byte weight chunk as two ushorts: row stride N/2,
+        // sub-tensor weightsOffset, and byte_base are all even, so a
+        // `ushort*` load is always aligned even when the row is only
+        // 2-byte aligned overall.
+        device const ushort* wp = (device const ushort*)(W_row + byte_base);
+        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
         const uint g = blk * 4u + (lane >> 3);
         const float s = float(s_row[g]);
         const float b = float(b_row[g]);

@@ -17,7 +17,7 @@ import NVMAIValidationSupport
         let buffer = try #require(Fp16Buffer.make(context.device, values: input))
         let commandBuffer = try #require(context.queue.makeCommandBuffer())
 
-        kernel.encodeDefaultNeox(
+        try kernel.encodeDefaultNeox(
             commandBuffer: commandBuffer,
             data: buffer,
             position: UInt32(position),
@@ -58,7 +58,7 @@ import NVMAIValidationSupport
             count: count * MemoryLayout<Float16>.size))
         let commandBuffer = try #require(context.queue.makeCommandBuffer())
 
-        kernel.encodeProportionalNeox(
+        try kernel.encodeProportionalNeox(
             commandBuffer: commandBuffer,
             data: buffer,
             position: UInt32(position),

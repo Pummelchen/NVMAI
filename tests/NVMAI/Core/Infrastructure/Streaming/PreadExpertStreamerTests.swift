@@ -6,7 +6,7 @@ import Metal
 
 /// Unit tests for the synchronous `pread` backend: round-trip correctness,
 /// exact file-byte reads, the short-read failure path,
-/// and round-robin slot reuse. No real Gemma weights — a synthetic layer file
+/// and round-robin slot reuse. No real model weights — a synthetic layer file
 /// of tagged expert blobs.
 @Suite struct PreadExpertStreamerTests {
 

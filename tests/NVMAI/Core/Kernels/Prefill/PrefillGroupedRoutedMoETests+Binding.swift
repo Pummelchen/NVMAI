@@ -154,7 +154,7 @@ extension PrefillGroupedRoutedMoETests {
     let model = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .qwenToy(),
       streamingMode: .pread(slotCount: 16))
     let routes = try Self.tileFetchRoutes()
 
@@ -199,7 +199,7 @@ extension PrefillGroupedRoutedMoETests {
     let model = try Model.load(
       directoryURL: dir,
       device: device,
-      expecting: .gemma4Toy(),
+      expecting: .qwenToy(),
       streamingMode: .pread(slotCount: 16))
     let routes = try Self.tileFetchRoutes()
 

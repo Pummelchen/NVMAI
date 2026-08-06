@@ -18,13 +18,16 @@ final class LogitSoftcapSoftmax {
     }
 
     /// Encodes the kernel onto `commandBuffer`. `logits` and `probs` are FP16
-    /// buffers of length `v`. Gemma 4 uses `softcap=30.0`.
+    /// buffers of length `v`. Pass a very large `softcap` to disable it; the
+    /// Qwen path uses no logit softcap.
     func encode(commandBuffer: MTLCommandBuffer,
                        logits: MTLBuffer,
                        probs: MTLBuffer,
                        v: UInt32,
-                       softcap: Float = 30.0) {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+                       softcap: Float = 30.0) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(pso)
         enc.setBuffer(logits, offset: 0, index: 0)
         enc.setBuffer(probs,  offset: 0, index: 1)
@@ -68,8 +71,10 @@ final class Sample {
                        topK: UInt32 = 0,
                        topP: Float = 1.0,
                        seed: UInt64,
-                       position: UInt32 = 0) {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+                       position: UInt32 = 0) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(pso)
         enc.setBuffer(probs,    offset: 0, index: 0)
         enc.setBuffer(outToken, offset: 0, index: 1)
@@ -98,8 +103,9 @@ enum SampleTopK64Error: Error {
     case scratchAllocationFailed
 }
 
-/// Three-stage Top-64 sampler for the documented Gemma 4 policy and measured
-/// temperature variants. Intermediate pairs remain in private GPU memory.
+/// Three-stage Top-64 sampler for the documented Top-64 sampling policy and
+/// measured temperature variants. Intermediate pairs remain in private GPU
+/// memory.
 final class SampleTopK64 {
     private static let tileSize = 1024
     private static let keptPerTile = 64
@@ -164,50 +170,60 @@ final class SampleTopK64 {
                        outToken: MTLBuffer,
                        temperature: Float,
                        topP: Float,
-                       seed: UInt64) {
+                       seed: UInt64) throws {
+        // K26: the final stage reweights survivors as p^(1/temperature), so
+        // temperature == 0 would produce pow(·, inf) garbage. Greedy sampling
+        // must go through the fused lm_head (or the `sample` kernel's
+        // temperature==0 argmax path) — never dispatch this kernel with
+        // temperature 0.
+        precondition(temperature > 0,
+                     "SampleTopK64 requires temperature > 0 (pow(v, 1/T) is undefined at T=0); greedy must use the fused head")
         let threads = MTLSize(width: 256, height: 1, depth: 1)
 
-        if let enc = commandBuffer.makeComputeCommandEncoder() {
-            enc.setComputePipelineState(stage1PSO)
-            enc.setBuffer(probs, offset: 0, index: 0)
-            enc.setBuffer(stage1Values, offset: 0, index: 1)
-            enc.setBuffer(stage1Indices, offset: 0, index: 2)
-            var v = UInt32(vocab)
-            enc.setBytes(&v, length: MemoryLayout<UInt32>.size, index: 3)
-            enc.dispatchThreadgroups(MTLSize(width: stage1Groups, height: 1, depth: 1),
-                                     threadsPerThreadgroup: threads)
-            enc.endEncoding()
+        guard let enc1 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        enc1.setComputePipelineState(stage1PSO)
+        enc1.setBuffer(probs, offset: 0, index: 0)
+        enc1.setBuffer(stage1Values, offset: 0, index: 1)
+        enc1.setBuffer(stage1Indices, offset: 0, index: 2)
+        var v = UInt32(vocab)
+        enc1.setBytes(&v, length: MemoryLayout<UInt32>.size, index: 3)
+        enc1.dispatchThreadgroups(MTLSize(width: stage1Groups, height: 1, depth: 1),
+                                  threadsPerThreadgroup: threads)
+        enc1.endEncoding()
 
-        if let enc = commandBuffer.makeComputeCommandEncoder() {
-            enc.setComputePipelineState(reducePSO)
-            enc.setBuffer(stage1Values, offset: 0, index: 0)
-            enc.setBuffer(stage1Indices, offset: 0, index: 1)
-            enc.setBuffer(stage2Values, offset: 0, index: 2)
-            enc.setBuffer(stage2Indices, offset: 0, index: 3)
-            var count = UInt32(stage1Count)
-            enc.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 4)
-            enc.dispatchThreadgroups(MTLSize(width: stage2Groups, height: 1, depth: 1),
-                                     threadsPerThreadgroup: threads)
-            enc.endEncoding()
+        guard let enc2 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        enc2.setComputePipelineState(reducePSO)
+        enc2.setBuffer(stage1Values, offset: 0, index: 0)
+        enc2.setBuffer(stage1Indices, offset: 0, index: 1)
+        enc2.setBuffer(stage2Values, offset: 0, index: 2)
+        enc2.setBuffer(stage2Indices, offset: 0, index: 3)
+        var count = UInt32(stage1Count)
+        enc2.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 4)
+        enc2.dispatchThreadgroups(MTLSize(width: stage2Groups, height: 1, depth: 1),
+                                  threadsPerThreadgroup: threads)
+        enc2.endEncoding()
 
-        if let enc = commandBuffer.makeComputeCommandEncoder() {
-            enc.setComputePipelineState(finalPSO)
-            enc.setBuffer(stage2Values, offset: 0, index: 0)
-            enc.setBuffer(stage2Indices, offset: 0, index: 1)
-            enc.setBuffer(outToken, offset: 0, index: 2)
-            var count = UInt32(stage2Count)
-            var temp = temperature
-            var p = topP
-            var rngSeed = seed
-            enc.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
-            enc.setBytes(&temp, length: MemoryLayout<Float>.size, index: 4)
-            enc.setBytes(&p, length: MemoryLayout<Float>.size, index: 5)
-            enc.setBytes(&rngSeed, length: MemoryLayout<UInt64>.size, index: 6)
-            enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
-                                     threadsPerThreadgroup: threads)
-            enc.endEncoding()
+        guard let enc3 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        enc3.setComputePipelineState(finalPSO)
+        enc3.setBuffer(stage2Values, offset: 0, index: 0)
+        enc3.setBuffer(stage2Indices, offset: 0, index: 1)
+        enc3.setBuffer(outToken, offset: 0, index: 2)
+        var finalCount = UInt32(stage2Count)
+        var temp = temperature
+        var p = topP
+        var rngSeed = seed
+        enc3.setBytes(&finalCount, length: MemoryLayout<UInt32>.size, index: 3)
+        enc3.setBytes(&temp, length: MemoryLayout<Float>.size, index: 4)
+        enc3.setBytes(&p, length: MemoryLayout<Float>.size, index: 5)
+        enc3.setBytes(&rngSeed, length: MemoryLayout<UInt64>.size, index: 6)
+        enc3.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                  threadsPerThreadgroup: threads)
+        enc3.endEncoding()
     }
 }

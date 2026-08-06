@@ -289,7 +289,10 @@ actor RealInferenceSession {
             ])
             let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
             progress.promptTokenCount = promptIds.count
-            guard promptIds.count < runner.maxContext else {
+            // D23: reject only when prompt + 1 exceeds the context, so a
+            // prompt that fills the context exactly can still produce one
+            // token.
+            guard promptIds.count + 1 <= runner.maxContext else {
                 throw AppInferenceError.contextOverflow(prompt: promptIds.count,
                                                         maxNew: request.maxNewTokens,
                                                         maxContext: runner.maxContext)
@@ -454,6 +457,7 @@ actor RealInferenceSession {
         case .maxTokens: return .maxTokens
         case .stopString: return .stopString
         case .toolCalls: return .toolCalls
+        case .external: return .external
         }
     }
 

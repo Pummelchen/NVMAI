@@ -40,7 +40,10 @@ package final class GTurboModelDirectory {
             }
             directoryFD = next
         }
-        let fd = openat(directoryFD, components.last!,
+        guard let lastComponent = components.last, !lastComponent.isEmpty else {
+            throw ModelError.indexCorrupt(detail: "empty relative path \(relativePath)")
+        }
+        let fd = openat(directoryFD, lastComponent,
                         O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         let savedErrno = errno
         close(directoryFD)

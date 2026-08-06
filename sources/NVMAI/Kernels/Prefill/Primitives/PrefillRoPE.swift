@@ -24,13 +24,15 @@ final class PrefillRoPE {
                           numHeads: UInt32,
                           rotaryDim: UInt32,
                           tokenStrideElements: UInt32,
-                          theta: Float) {
+                          theta: Float) throws {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(rotaryDim % 2 == 0, "rotaryDim must be even")
         precondition(rotaryDim <= headDim, "rotaryDim must not exceed headDim")
         precondition(tokenStrideElements >= numHeads * headDim,
                      "token stride is too small")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(psoNeoxSubdim)
         enc.setBuffer(data, offset: dataOffset, index: 0)
         var start = startPosition
@@ -63,12 +65,14 @@ final class PrefillRoPE {
                                   headDim: UInt32,
                                   numHeads: UInt32,
                                   tokenStrideElements: UInt32,
-                                  theta: Float = 10_000.0) {
+                                  theta: Float = 10_000.0) throws {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(headDim % 2 == 0, "headDim must be even")
         precondition(tokenStrideElements >= numHeads * headDim,
                      "token stride is too small")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(psoDefaultNeox)
         enc.setBuffer(data, offset: dataOffset, index: 0)
         var start = startPosition
@@ -100,14 +104,16 @@ final class PrefillRoPE {
                                        numHeads: UInt32,
                                        rotatedPairs: UInt32,
                                        tokenStrideElements: UInt32,
-                                       theta: Float = 1_000_000.0) {
+                                       theta: Float = 1_000_000.0) throws {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(headDim % 2 == 0, "headDim must be even")
         precondition(rotatedPairs * 2 <= headDim,
                      "rotatedPairs * 2 must not exceed headDim")
         precondition(tokenStrideElements >= numHeads * headDim,
                      "token stride is too small")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(psoProportionalNeox)
         enc.setBuffer(data, offset: dataOffset, index: 0)
         var start = startPosition

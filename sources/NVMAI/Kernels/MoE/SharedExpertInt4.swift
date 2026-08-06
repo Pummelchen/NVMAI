@@ -58,14 +58,14 @@ public final class SharedExpertInt4 {
             throw SharedExpertError.scratchTooSmall("output range exceeds y buffer")
         }
 
-        int4.encode(commandBuffer: cb,
+        try int4.encode(commandBuffer: cb,
                     weights: gate.weights, weightsOffset: gate.weightsOffset,
                     scales: gate.scales, scalesOffset: gate.scalesOffset,
                     biases: gate.biases, biasesOffset: gate.biasesOffset,
                     x: x, xOffset: xOffset,
                     y: scratchGate, yOffset: scratchGateOffset,
                     m: gate.rows, n: gate.cols)
-        int4.encode(commandBuffer: cb,
+        try int4.encode(commandBuffer: cb,
                     weights: up.weights, weightsOffset: up.weightsOffset,
                     scales: up.scales, scalesOffset: up.scalesOffset,
                     biases: up.biases, biasesOffset: up.biasesOffset,
@@ -73,7 +73,9 @@ public final class SharedExpertInt4 {
                     y: scratchUp, yOffset: scratchUpOffset,
                     m: up.rows, n: up.cols)
 
-        guard let encoder = cb.makeComputeCommandEncoder() else { return }
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw SharedExpertError.dimensionMismatch("encoder alloc failed")
+        }
         encoder.setComputePipelineState(geluMulPSO)
         encoder.setBuffer(scratchGate, offset: scratchGateOffset, index: 0)
         encoder.setBuffer(scratchUp, offset: scratchUpOffset, index: 1)
@@ -85,7 +87,7 @@ public final class SharedExpertInt4 {
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
 
-        int4.encode(commandBuffer: cb,
+        try int4.encode(commandBuffer: cb,
                     weights: down.weights, weightsOffset: down.weightsOffset,
                     scales: down.scales, scalesOffset: down.scalesOffset,
                     biases: down.biases, biasesOffset: down.biasesOffset,

@@ -46,7 +46,7 @@ import NVMAIValidationSupport
         let x = Fp16Buffer.make(ctx.device, halves: input)!
         let y = Fp16Buffer.make(ctx.device, count: rows)!
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encode(commandBuffer: cb, weights: w, scales: s, biases: b,
+        try kernel.encode(commandBuffer: cb, weights: w, scales: s, biases: b,
                       x: x, y: y, m: UInt32(rows), n: UInt32(columns))
         cb.commit(); cb.waitUntilCompleted()
         #expect(cb.status == .completed)
@@ -69,8 +69,9 @@ import NVMAIValidationSupport
         let b = ctx.device.makeBuffer(bytes: biases, length: biases.count * 2)!
         let y = Fp16Buffer.make(ctx.device, count: columns)!
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encode(commandBuffer: cb, table: w, scales: s, biases: b,
-                      out: y, tokenId: 1, d: UInt32(columns), outScale: 1)
+        try kernel.encode(commandBuffer: cb, table: w, scales: s, biases: b,
+                      out: y, tokenId: 1, d: UInt32(columns), outScale: 1,
+                      vocab: UInt32(rows))
         cb.commit(); cb.waitUntilCompleted()
         #expect(cb.status == .completed)
         let actual = Fp16Buffer.read(y, count: columns)

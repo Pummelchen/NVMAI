@@ -156,19 +156,6 @@ package enum GTurboManifestCodec {
         return manifest
     }
 
-    package static func encode(_ manifest: GTurboManifestV1) throws -> Data {
-        try validate(manifest)
-        let encoder = JSONEncoder()
-        do {
-            let object = try JSONSerialization.jsonObject(with: encoder.encode(manifest))
-            return try JSONSerialization.data(
-                withJSONObject: object,
-                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        } catch {
-            throw NVMAIFormatError.invalid(field: "manifest.json", reason: "\(error)")
-        }
-    }
-
     package static func validate(_ manifest: GTurboManifestV1) throws {
         guard manifest.magic == GTurboFormatV1.magic else {
             throw NVMAIFormatError.invalid(field: "manifest.magic", reason: "expected GTURBO")

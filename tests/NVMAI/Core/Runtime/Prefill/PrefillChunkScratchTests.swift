@@ -3,36 +3,48 @@ import Metal
 @testable import NVMAI
 
 @Suite struct PrefillChunkScratchTests {
-    @Test func gemma4T32LayoutMatchesTask7ScratchContract() {
-        let layout = PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 32)
+    @Test func qwen36T32LayoutMatchesScratchContract() {
+        let layout = PrefillChunkScratchLayout(config: .qwen36_35B_A3B, chunkTokens: 32)
 
         #expect(layout.chunkTokens == 32)
-        #expect(layout.hiddenElements == 32 * 2816)
-        #expect(layout.normedElements == 32 * 2816)
+        #expect(layout.hiddenElements == 32 * 2048)
+        #expect(layout.normedElements == 32 * 2048)
+        // q_proj emits per-head [query ; gate] halves: 2 * 16 heads * 256.
         #expect(layout.qElements == 32 * 8192)
-        #expect(layout.kStageElements == 32 * 2048)
-        #expect(layout.vStageElements == 32 * 2048)
-        #expect(layout.attentionOutputElements == 32 * 8192)
-        #expect(layout.denseXElements == 32 * 2816)
-        #expect(layout.routedXElements == 32 * 2816)
-        #expect(layout.routerXElements == 32 * 2816)
-        #expect(layout.h1Elements == 32 * 2816)
-        #expect(layout.h2Elements == 32 * 2816)
-        #expect(layout.routePartialElements == 32 * 8 * 2816)
+        #expect(layout.kStageElements == 32 * 512)
+        #expect(layout.vStageElements == 32 * 512)
+        #expect(layout.attentionOutputElements == 32 * 4096)
+        #expect(layout.denseXElements == 32 * 2048)
+        #expect(layout.routedXElements == 32 * 2048)
+        #expect(layout.routerXElements == 32 * 2048)
+        #expect(layout.h1Elements == 32 * 2048)
+        #expect(layout.h2Elements == 32 * 2048)
+        #expect(layout.routePartialElements == 32 * 8 * 2048)
         #expect(layout.routeIDElements == 32 * 8)
         #expect(layout.routeWeightElements == 32 * 8)
-        #expect(layout.sharedExpertScratchElements == 2112)
+        #expect(layout.sharedExpertScratchElements == 512)
         #expect(layout.routedPairMicrobatchRows == 32)
-        #expect(layout.routedGateUpActElements == 3 * 32 * 704)
-        #expect(layout.routedDownOutputElements == 32 * 2816)
+        #expect(layout.routedGateUpActElements == 3 * 32 * 512)
+        #expect(layout.routedDownOutputElements == 32 * 2048)
+        // Qwen 3.6 extensions: split q/gate halves, gated-DeltaNet bundle,
+        // and the shared-expert scalar gate.
+        #expect(layout.attnGateElementsPerToken == 4096)
+        #expect(layout.gdnQKVDim == 8192)
+        #expect(layout.gdnValueDim == 4096)
+        #expect(layout.gdnVHeads == 32)
+        #expect(layout.sharedScalarGateElements == 1)
+        #expect(layout.gdnConvOutElements == 32 * 8192)
+        #expect(layout.gdnZElements == 32 * 4096)
+        #expect(layout.gdnAElements == 32 * 32)
+        #expect(layout.sharedScalarGateBufferElements == 32)
 
         let worksheetT32UpperBound = Int(4.5 * 1_048_576.0)
         #expect(layout.totalPersistentBytes <= worksheetT32UpperBound)
     }
 
     @Test func layoutClampsChunkSizeToRuntimeBounds() {
-        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 0).chunkTokens == 1)
-        #expect(PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 8_192).chunkTokens == 4_096)
+        #expect(PrefillChunkScratchLayout(config: .qwen36_35B_A3B, chunkTokens: 0).chunkTokens == 1)
+        #expect(PrefillChunkScratchLayout(config: .qwen36_35B_A3B, chunkTokens: 8_192).chunkTokens == 4_096)
     }
 
     @Test func qwenLongChunkScratchRemainsBounded() {
@@ -44,27 +56,7 @@ import Metal
 
     @Test func allocationUsesPrivateScratchAndSharedRouteMetadata() throws {
         let ctx = try MetalContext()
-        let toy = ArchConfig(hiddenSize: 64,
-                             intermediateSize: 48,
-                             moeIntermediateSize: 16,
-                             numHeads: 4,
-                             numKVHeads: 2,
-                             numFullKVHeads: 1,
-                             headDim: 16,
-                             fullHeadDim: 32,
-                             vocabSize: 128,
-                             slidingWindow: 16,
-                             finalLogitSoftcap: 30.0,
-                             ropeTheta: 10_000,
-                             fullRopeTheta: 1_000_000,
-                             partialRotaryFactor: 0.25,
-                             numLayers: 2,
-                             numExperts: 8,
-                             topKExperts: 2,
-                             tieWordEmbeddings: true,
-                             attentionKEqV: true,
-                             fullAttentionLayerMask: [0, 1],
-                             hiddenActivation: "gelu_pytorch_tanh")
+        let toy = ArchConfig.qwenToy()
         let layout = PrefillChunkScratchLayout(config: toy, chunkTokens: 4)
 
         let scratch = try PrefillChunkScratchBuffers.allocate(device: ctx.device, layout: layout)

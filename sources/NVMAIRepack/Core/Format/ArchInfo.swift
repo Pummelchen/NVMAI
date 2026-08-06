@@ -1,10 +1,8 @@
 import Foundation
 
-/// Model family discriminator, mirrored into `manifest.json -> arch.family`
-/// for non-Gemma families (Gemma manifests omit it — the format's original
-/// architecture). Raw values match the runtime's `ModelFamily`.
+/// Model family discriminator, mirrored into `manifest.json -> arch.family`.
+/// Raw values match the runtime's `ModelFamily`.
 enum RepackModelFamily: String, Sendable, Equatable {
-    case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case qwen36MTP = "qwen36_mtp"
 }
@@ -38,8 +36,7 @@ struct ArchInfo: Sendable, Equatable {
     let fullAttentionLayerMask: [UInt8]
     let hiddenActivation: String
 
-    // Family-dependent extensions. Defaults describe Gemma 4 so the Gemma
-    // path (and its manifest output) is unchanged.
+    // Family-dependent extensions. Defaults describe the Qwen 3.6 baseline.
     let family: RepackModelFamily
     let attnOutputGate: Bool
     let attentionScale: Double
@@ -68,74 +65,9 @@ struct ArchInfo: Sendable, Equatable {
         if (root["model_type"] as? String) == "qwen3_5_moe" {
             return try loadQwen36(configPath: configPath, tc: tc)
         }
-        return try loadGemma4(configPath: configPath, tc: tc)
-    }
-
-    // MARK: - Gemma 4
-
-    private static func loadGemma4(configPath: String,
-                                   tc: [String: Any]) throws -> ArchInfo {
-        func i(_ k: String) throws -> Int {
-            guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
-                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
-            }
-            return n
-        }
-        func d(_ k: String) throws -> Double {
-            guard let n = (tc[k] as? Double) ?? (tc[k] as? NSNumber)?.doubleValue else {
-                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
-            }
-            return n
-        }
-        let layerTypes = (tc["layer_types"] as? [String]) ?? []
-        let mask = layerTypes.map { UInt8($0 == "full_attention" ? 1 : 0) }
-        let rope = (tc["rope_parameters"] as? [String: Any]) ?? [:]
-        let ropeFull = (rope["full_attention"] as? [String: Any]) ?? [:]
-        let ropeSWA  = (rope["sliding_attention"] as? [String: Any]) ?? [:]
-        let prf = (ropeFull["partial_rotary_factor"] as? Double)
-            ?? (ropeFull["partial_rotary_factor"] as? NSNumber)?.doubleValue ?? 0.25
-        let fullTheta = (ropeFull["rope_theta"] as? Double)
-            ?? (ropeFull["rope_theta"] as? NSNumber)?.doubleValue ?? 1_000_000.0
-        let swaTheta = (ropeSWA["rope_theta"] as? Double)
-            ?? (ropeSWA["rope_theta"] as? NSNumber)?.doubleValue ?? 10_000.0
-        let kEqV = (tc["attention_k_eq_v"] as? Bool) ?? false
-        let tie = (tc["tie_word_embeddings"] as? Bool) ?? false
-        let act = (tc["hidden_activation"] as? String) ?? "gelu_pytorch_tanh"
-        return ArchInfo(
-            hiddenSize: try i("hidden_size"),
-            intermediateSize: try i("intermediate_size"),
-            moeIntermediateSize: try i("moe_intermediate_size"),
-            numHeads: try i("num_attention_heads"),
-            numKVHeads: try i("num_key_value_heads"),
-            numFullKVHeads: try i("num_global_key_value_heads"),
-            headDim: try i("head_dim"),
-            fullHeadDim: try i("global_head_dim"),
-            vocabSize: try i("vocab_size"),
-            slidingWindow: try i("sliding_window"),
-            finalLogitSoftcap: try d("final_logit_softcapping"),
-            ropeTheta: swaTheta,
-            fullRopeTheta: fullTheta,
-            partialRotaryFactor: prf,
-            numLayers: try i("num_hidden_layers"),
-            numExperts: try i("num_experts"),
-            topKExperts: try i("top_k_experts"),
-            tieWordEmbeddings: tie,
-            attentionKEqV: kEqV,
-            fullAttentionLayerMask: mask,
-            hiddenActivation: act,
-            family: .gemma4,
-            attnOutputGate: false,
-            attentionScale: 1.0,
-            embeddingScaledBySqrtHidden: true,
-            routerScaled: true,
-            ffnSandwichNorms: true,
-            sharedExpertGated: false,
-            ropeNeoxSubdim: false,
-            linearNumKHeads: 0,
-            linearNumVHeads: 0,
-            linearKeyHeadDim: 0,
-            linearValueHeadDim: 0,
-            linearConvKernelSize: 0)
+        throw RepackError.configJsonInvalid(
+            path: configPath,
+            detail: "unsupported model_type (NVMAI is Qwen-only)")
     }
 
     // MARK: - Qwen 3.6 MoE (`model_type == "qwen3_5_moe"`)
@@ -236,6 +168,15 @@ struct ArchInfo: Sendable, Equatable {
                 path: configPath,
                 detail: "Qwen3.6 MTP must reuse the target embedding and head")
         }
+        // MTP contract (mirrors the runtime's `qwen36MTP` arch config):
+        // `numExperts` and `ropeNeoxSubdim` are deliberately kept from the
+        // target baseline. The draft layer shares the target's router shape
+        // (numExperts 256 drives the sidecar's per-expert layout), and the
+        // MTP layer applies the same rotary embedding variant as the target,
+        // so ropeNeoxSubdim stays true. The linear-attention parameters are
+        // zeroed because the MTP layer is pure full-attention and carries no
+        // DeltaNet bundle. numLayers collapses to 1 and the MTP arch reports
+        // no embedding/head of its own (tieWordEmbeddings false).
         base = ArchInfo(
             hiddenSize: base.hiddenSize,
             intermediateSize: base.intermediateSize,

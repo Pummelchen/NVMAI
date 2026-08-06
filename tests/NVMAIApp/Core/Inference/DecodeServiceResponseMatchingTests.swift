@@ -4,6 +4,11 @@ import Testing
 import NVMAIDecodeProtocol
 
 @Suite struct DecodeServiceResponseMatchingTests {
+    /// All events in these tests are pre-written into an in-memory pipe, so
+    /// matching resolves immediately; the timeout is only a safety net against
+    /// a dead reader.
+    private let responseTimeout: TimeInterval = 10
+
     @Test func staleGenerationTerminalIsSkippedBeforeLoadResponse() async throws {
         let expectedID = UUID()
         let pipe = try pipe(containing: [
@@ -12,7 +17,7 @@ import NVMAIDecodeProtocol
         ])
 
         let router = DecodeServiceResponseRouter(output: pipe.fileHandleForReading)
-        let event = try await router.next(matching: expectedID)
+        let event = try await router.next(matching: expectedID, timeout: responseTimeout)
 
         #expect(event.kind == .ready)
         #expect(event.generationID == expectedID)
@@ -26,7 +31,7 @@ import NVMAIDecodeProtocol
         ])
 
         let router = DecodeServiceResponseRouter(output: pipe.fileHandleForReading)
-        let event = try await router.next(matching: expectedID)
+        let event = try await router.next(matching: expectedID, timeout: responseTimeout)
 
         #expect(event.kind == .unloaded)
         #expect(event.generationID == expectedID)
@@ -40,7 +45,7 @@ import NVMAIDecodeProtocol
         ])
 
         let router = DecodeServiceResponseRouter(output: pipe.fileHandleForReading)
-        let event = try await router.next(matching: expectedID)
+        let event = try await router.next(matching: expectedID, timeout: responseTimeout)
 
         #expect(event.kind == .failed)
         #expect(event.error == "load failed")
@@ -51,8 +56,8 @@ import NVMAIDecodeProtocol
         let unloadID = UUID()
         let pipe = Pipe()
         let router = DecodeServiceResponseRouter(output: pipe.fileHandleForReading)
-        async let load = router.next(matching: loadID)
-        async let unload = router.next(matching: unloadID)
+        async let load = router.next(matching: loadID, timeout: responseTimeout)
+        async let unload = router.next(matching: unloadID, timeout: responseTimeout)
 
         try pipe.fileHandleForWriting.write(contentsOf: DecodeFrameCodec.encode(
             DecodeServiceEvent(kind: .unloaded, generationID: unloadID)))
@@ -74,7 +79,7 @@ import NVMAIDecodeProtocol
         let router = DecodeServiceResponseRouter(output: pipe.fileHandleForReading)
 
         await #expect(throws: DecodeFrameError.self) {
-            _ = try await router.next(matching: UUID())
+            _ = try await router.next(matching: UUID(), timeout: responseTimeout)
         }
     }
 

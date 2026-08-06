@@ -51,9 +51,10 @@ final class MoE {
     private let reusableRoutedArgBuffer: MTLBuffer
 
     /// `specializedD`/`specializedF`/`specializedNumExperts` describe the
-    /// production shape this instance specializes for (Gemma 4 by default;
-    /// Qwen 3.6 passes 2048/512/256). `siluActivation` selects the expert
-    /// FFN activation (false = gelu_pytorch_tanh, true = silu).
+    /// production shape this instance specializes for (the specialized
+    /// defaults 2816/704/128 predate Qwen-only support; Qwen 3.6 passes
+    /// 2048/512/256). `siluActivation` selects the expert FFN activation
+    /// (false = gelu_pytorch_tanh, true = silu).
     init(context: MetalContext,
          siluActivation: Bool = false,
          routedWeightBits: Int = 4,
@@ -85,7 +86,7 @@ final class MoE {
             MetalFunctionConstant(index: 43, value: .bool(true)),
             MetalFunctionConstant(index: 44, value: .uint32(UInt32(routerWeightBits))),
         ]
-        let routerName = "router_gemv_gemma4_r4"
+        let routerName = "router_gemv_r4"
         self.routerGemvPSO = try context.pipeline(
             routerName,
             constants: [MetalFunctionConstant(index: 44,
@@ -137,7 +138,7 @@ final class MoE {
         self.reusableRoutedArgBuffer = reusable
     }
 
-    func encodeRouterGemma4(commandBuffer: MTLCommandBuffer,
+    func encodeRouter(commandBuffer: MTLCommandBuffer,
                                    weights: MTLBuffer, weightsOffset: Int = 0,
                                    scales: MTLBuffer, scalesOffset: Int = 0,
                                    biases: MTLBuffer, biasesOffset: Int = 0,
@@ -148,45 +149,57 @@ final class MoE {
                                    outWeights: MTLBuffer,
                                    numExperts: UInt32,
                                    d: UInt32,
-                                   topK: UInt32) {
+                                   topK: UInt32) throws {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
         precondition(numExperts <= 256)
         precondition(topK == UInt32(Self.maxStreamedExperts))
+        // K16: `router_gemv_r4` multiplies every hidden element by
+        // `effective_scale[idx]` and `router_topk_select_k8` multiplies every
+        // weight by `per_expert_scale[expert]`. Qwen 3.6 has no router scale
+        // tensors, so the runner synthesizes 1.0-filled buffers for both —
+        // they must always be supplied with at least the addressed element
+        // count, never nil/undersized, or the kernels read out of bounds.
+        precondition(effectiveScale.length >= Int(d) * MemoryLayout<UInt16>.stride,
+                     "encodeRouter: effectiveScale must cover [d] BF16 (runner synthesizes a 1.0 buffer for Qwen; the kernel always reads it)")
+        precondition(perExpertScale.length >= Int(numExperts) * MemoryLayout<UInt16>.stride,
+                     "encodeRouter: perExpertScale must cover [numExperts] BF16 (runner synthesizes a 1.0 buffer for Qwen; router_topk_select_k8 always dereferences it)")
 
         var expertCount = numExperts
         var dimension = d
         let useSpecialized = numExperts == realDecodeNumExperts
             && d == realDecodeD
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(
-                useSpecialized ? routerGemvSpecializedPSO : routerGemvPSO)
-            encoder.setBuffer(weights, offset: weightsOffset, index: 0)
-            encoder.setBuffer(scales, offset: scalesOffset, index: 1)
-            encoder.setBuffer(biases, offset: biasesOffset, index: 2)
-            encoder.setBuffer(hidden, offset: 0, index: 3)
-            encoder.setBuffer(effectiveScale, offset: effectiveScaleOffset, index: 4)
-            encoder.setBuffer(routerLogits, offset: 0, index: 5)
-            encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
-            encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 7)
-            encoder.dispatchThreadgroups(
-                MTLSize(width: (Int(numExperts) + 3) / 4, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
-            encoder.endEncoding()
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        encoder.setComputePipelineState(
+            useSpecialized ? routerGemvSpecializedPSO : routerGemvPSO)
+        encoder.setBuffer(weights, offset: weightsOffset, index: 0)
+        encoder.setBuffer(scales, offset: scalesOffset, index: 1)
+        encoder.setBuffer(biases, offset: biasesOffset, index: 2)
+        encoder.setBuffer(hidden, offset: 0, index: 3)
+        encoder.setBuffer(effectiveScale, offset: effectiveScaleOffset, index: 4)
+        encoder.setBuffer(routerLogits, offset: 0, index: 5)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(numExperts) + 3) / 4, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        encoder.endEncoding()
 
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(
-                useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
-            encoder.setBuffer(routerLogits, offset: 0, index: 0)
-            encoder.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
-            encoder.setBuffer(outIndices, offset: 0, index: 2)
-            encoder.setBuffer(outWeights, offset: 0, index: 3)
-            encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
-            encoder.dispatchThreadgroups(
-                MTLSize(width: 1, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
-            encoder.endEncoding()
+        guard let selector = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        selector.setComputePipelineState(
+            useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
+        selector.setBuffer(routerLogits, offset: 0, index: 0)
+        selector.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
+        selector.setBuffer(outIndices, offset: 0, index: 2)
+        selector.setBuffer(outWeights, offset: 0, index: 3)
+        selector.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+        selector.dispatchThreadgroups(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        selector.endEncoding()
     }
 
     func makeRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
@@ -218,12 +231,14 @@ final class MoE {
         d: UInt32,
         f: UInt32,
         topK: UInt32
-    ) {
+    ) throws {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
         var intermediate = f
         var expertCount = topK
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
                 ? phase1U16SpecializedPSO
@@ -256,7 +271,7 @@ final class MoE {
         d: UInt32,
         f: UInt32,
         topK: UInt32
-    ) {
+    ) throws {
         guard activeCount > 0 else { return }
         validate(routedBlobs: routedBlobs, topK: topK)
         precondition(activeSlotIndices.count == Int(activeCount))
@@ -264,7 +279,9 @@ final class MoE {
         var intermediate = f
         var expertCount = topK
         var active = activeCount
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
                 ? phase1SubsetU16SpecializedPSO
@@ -300,11 +317,13 @@ final class MoE {
         d: UInt32,
         f: UInt32,
         topK: UInt32
-    ) {
+    ) throws {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
         var intermediate = f
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(
             useRealDecodeConstants(d: d, f: f)
                 ? phase2ReduceK8SpecializedPSO

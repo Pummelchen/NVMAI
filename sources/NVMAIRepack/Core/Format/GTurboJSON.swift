@@ -54,24 +54,20 @@ enum GTurboJSON {
             "hiddenActivation": arch.hiddenActivation,
             "fullAttentionLayerMask": arch.fullAttentionLayerMask.map { Int($0) }
         ]
-        // Family extension fields. Gemma manifests omit them (byte-identical
-        // to the pre-family format); the reader treats absence as the Gemma
-        // defaults.
-        if arch.family != .gemma4 {
-            archDict["family"] = arch.family.rawValue
-            archDict["attnOutputGate"] = arch.attnOutputGate
-            archDict["attentionScale"] = arch.attentionScale
-            archDict["embeddingScaledBySqrtHidden"] = arch.embeddingScaledBySqrtHidden
-            archDict["routerScaled"] = arch.routerScaled
-            archDict["ffnSandwichNorms"] = arch.ffnSandwichNorms
-            archDict["sharedExpertGated"] = arch.sharedExpertGated
-            archDict["ropeNeoxSubdim"] = arch.ropeNeoxSubdim
-            archDict["linearNumKHeads"] = arch.linearNumKHeads
-            archDict["linearNumVHeads"] = arch.linearNumVHeads
-            archDict["linearKeyHeadDim"] = arch.linearKeyHeadDim
-            archDict["linearValueHeadDim"] = arch.linearValueHeadDim
-            archDict["linearConvKernelSize"] = arch.linearConvKernelSize
-        }
+        // Family extension fields. Always written for the Qwen families.
+        archDict["family"] = arch.family.rawValue
+        archDict["attnOutputGate"] = arch.attnOutputGate
+        archDict["attentionScale"] = arch.attentionScale
+        archDict["embeddingScaledBySqrtHidden"] = arch.embeddingScaledBySqrtHidden
+        archDict["routerScaled"] = arch.routerScaled
+        archDict["ffnSandwichNorms"] = arch.ffnSandwichNorms
+        archDict["sharedExpertGated"] = arch.sharedExpertGated
+        archDict["ropeNeoxSubdim"] = arch.ropeNeoxSubdim
+        archDict["linearNumKHeads"] = arch.linearNumKHeads
+        archDict["linearNumVHeads"] = arch.linearNumVHeads
+        archDict["linearKeyHeadDim"] = arch.linearKeyHeadDim
+        archDict["linearValueHeadDim"] = arch.linearValueHeadDim
+        archDict["linearConvKernelSize"] = arch.linearConvKernelSize
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,
@@ -100,9 +96,9 @@ enum GTurboJSON {
             "versionMajor": GTurboJSON.versionMajor,
             "versionMinor": GTurboJSON.versionMinor,
             "flags": [
-                "streamingPresent": true,
-                "turboQuantKV": false,
-                "aneSharedExpert": false
+                "streamingPresent": plan.streamingPresent,
+                "turboQuantKV": plan.turboQuantKV,
+                "aneSharedExpert": plan.aneSharedExpert
             ],
             "modelID": modelID,
             "sourceSnapshotHash": sourceSnapshotHash,
@@ -164,10 +160,23 @@ enum GTurboJSON {
         let obj: [String: Any] = [
             "expertStride": expertStride,
             "numLayers": arch.numLayers,
-            "expertsPerLayer": plan.layers.first?.expertsPerLayer ?? 0,
+            // Same source as `expertStride`: the first layer that actually
+            // packs experts. GTurboPackedExpertsLayoutCodec.decode requires
+            // expertsPerLayer > 0 and consistent across all layers.
+            "expertsPerLayer": plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,
             "layers": layersArr
         ]
         return try JSONSerialization.data(withJSONObject: obj,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
+}
+
+private extension RepackPlan {
+    /// The .gturbo layout always streams routed experts from per-layer files;
+    /// the remaining flags are fixed for the Qwen 3.6 baseline (no quantized
+    /// KV, no ANE shared-expert fusion) and are computed here so the manifest
+    /// mirrors the plan rather than a hardcoded dictionary.
+    var streamingPresent: Bool { layers.contains { $0.expertsPerLayer > 0 } }
+    var turboQuantKV: Bool { false }
+    var aneSharedExpert: Bool { false }
 }

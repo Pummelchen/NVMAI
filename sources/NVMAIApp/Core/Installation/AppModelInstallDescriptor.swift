@@ -34,16 +34,6 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes + rangeStagingBytes + reserveBytes
     }
 
-    public static let `default` = AppModelInstallDescriptor(
-        displayName: "Gemma 4 26B-A4B IT 4-bit",
-        repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
-        sourceIndexSHA256: "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13",
-        approximateDownloadBytes: 14_620_479_420,
-        installedBytes: 14_291_921_884,
-        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
-        reserveBytes: 1_073_741_824)
-
     public static let qwen36 = AppModelInstallDescriptor(
         displayName: "Qwen3.6 35B-A3B 4-bit",
         repoID: "mlx-community/Qwen3.6-35B-A3B-4bit",
@@ -75,13 +65,12 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         reserveBytes: 1_073_741_824)
 
     public static let all: [AppModelInstallDescriptor] = [
-        .default, .qwen36, .qwen36_6bit, .qwen36_8bit,
+        .qwen36, .qwen36_6bit, .qwen36_8bit,
     ]
 
     /// The shipped descriptor for a model family, if one exists.
     public static func descriptor(for family: ModelFamily) -> AppModelInstallDescriptor? {
         switch family {
-        case .gemma4: return .default
         case .qwen36: return .qwen36
         case .qwen36MTP: return nil
         }
@@ -93,14 +82,15 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case Self.qwen36_6bit.repoID: return "qwen36-6bit.gturbo"
         case Self.qwen36_8bit.repoID: return "qwen36-8bit.gturbo"
         case Self.qwen36.repoID: return "qwen36.gturbo"
-        default: return "gemma4.gturbo"
+        default: return "qwen36.gturbo"
         }
     }
 
-    /// The descriptor the app products select at launch. Defaults to Gemma 4.
-    /// `TURBO_FIELDFARE_MODEL=qwen36` in the environment wins; otherwise the
-    /// persisted preference (`defaults write NVMAI model qwen36`)
-    /// applies, so GUI launches without an environment also select Qwen.
+    /// The descriptor the app products select at launch. Defaults to Qwen 3.6
+    /// 4-bit. `TURBO_FIELDFARE_MODEL=qwen36` in the environment wins;
+    /// otherwise the persisted preference (`defaults write NVMAI model
+    /// qwen36`) applies, so GUI launches without an environment also select
+    /// Qwen.
     public static var selected: AppModelInstallDescriptor {
         let environmentValue = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_MODEL"]
         let preferenceValue = UserDefaults(suiteName: "NVMAI")?
@@ -109,7 +99,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case "qwen36": return .qwen36
         case "qwen36-6bit": return .qwen36_6bit
         case "qwen36-8bit": return .qwen36_8bit
-        default: return .default
+        default: return .qwen36
         }
     }
 }

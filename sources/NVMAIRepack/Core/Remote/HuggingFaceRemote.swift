@@ -1,5 +1,18 @@
 import Foundation
 
+/// Force-free factory for the default Hugging Face base URL used by the
+/// installer defaults. `URL(string:)` cannot fail for this constant literal;
+/// the fallback exists only to keep the default arguments free of force
+/// unwraps.
+public enum RemoteBaseURL {
+    public static let huggingFace: URL = {
+        guard let url = URL(string: "https://huggingface.co") else {
+            return URL(fileURLWithPath: "/")
+        }
+        return url
+    }()
+}
+
 public struct RemoteFileInfo: Sendable, Hashable {
     public let filename: String
     public let resolvedCommit: String
@@ -29,7 +42,7 @@ public struct HuggingFaceRemoteSource: Sendable {
                 resolvedCommit: String? = nil,
                 token: String? = nil,
                 downloadSession: RemoteDownloadSession = RemoteDownloadSession(),
-                baseURL: URL = URL(string: "https://huggingface.co")!,
+                baseURL: URL = RemoteBaseURL.huggingFace,
                 tempDirectory: String = NSTemporaryDirectory(),
                 retryPolicy: RemoteRetryPolicy = RemoteRetryPolicy()) {
         self.repoID = repoID
@@ -87,7 +100,11 @@ public struct HuggingFaceRemoteSource: Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw RepackError.remoteProtocolInvalid(detail: "missing HTTP response for \(filename)")
         }
-        guard (200..<400).contains(http.statusCode) else {
+        // Only 2xx counts as success. 3xx responses are redirects that should
+        // have been followed by the session's redirect policy; if one still
+        // arrives here it is a protocol violation, not a valid metadata
+        // response (a 200-range body is required to carry X-Repo-Commit).
+        guard (200..<300).contains(http.statusCode) else {
             throw RepackError.remoteHTTPResponse(
                 url: redactRemoteURL(url),
                 status: http.statusCode,
@@ -132,6 +149,18 @@ public struct HuggingFaceRemoteSource: Sendable {
                         detail: "metadata destination has the wrong entry type")
                 }
                 try Posix.rename(from: tmp.path, to: outputPath)
+                // Re-verify the rename target through an O_NOFOLLOW descriptor:
+                // the destination must be the regular file we just moved, not
+                // a symlink swapped in between validation and rename.
+                let verified = try Posix.openReadNoFollow(outputPath)
+                defer { close(verified) }
+                guard try Posix.fileSize(fd: verified, path: outputPath) == info.size else {
+                    throw RepackError.installPathUnsafe(
+                        path: outputPath,
+                        detail: "metadata destination size does not match the fetched file")
+                }
+                try Posix.fsyncDirectory(
+                    (outputPath as NSString).deletingLastPathComponent)
             } catch {
                 try? FileManager.default.removeItem(atPath: tmp.path)
                 throw error

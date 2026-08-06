@@ -43,7 +43,7 @@ public enum EmbedLookupRef {
     ///
     /// `tablePacked` carries `V * D/2` bytes (low nibble = even index inside a
     /// row, high nibble = odd index). Output is multiplied by `outScale` —
-    /// pass `sqrt(hidden_size)` to match Gemma 4's post-embedding scale, or
+    /// pass `sqrt(hidden_size)` to match the scaled-embedding convention, or
     /// `1.0` for the raw dequant.
     public static func applyInt4(
         tablePacked: [UInt8],

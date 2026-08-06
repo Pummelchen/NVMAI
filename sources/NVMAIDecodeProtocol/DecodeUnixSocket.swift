@@ -33,6 +33,9 @@ public enum DecodeUnixSocket {
                 }
             }
             guard bindResult == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+            // The socket lives in a uid-private directory created by the
+            // client; restrict the socket file itself to the owning user.
+            guard chmod(path, 0o600) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
             guard listen(fd, 1) == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
             let accepted = Darwin.accept(fd, nil, nil)
             guard accepted >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }

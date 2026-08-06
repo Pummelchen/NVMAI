@@ -55,8 +55,10 @@ public final class GDNStateManager {
                 speculativeTails.append(nil)
                 continue
             }
-            precondition(stateBytes > 0 && convTailBytes > 0,
-                         "linear layer present but linearAttention config is empty")
+            guard stateBytes > 0, convTailBytes > 0 else {
+                throw ModelError.internalInconsistency(
+                    detail: "linear layer \(layer) present but linearAttention config is empty")
+            }
             guard let state = device.makeBuffer(length: stateBytes,
                                                 options: .storageModeShared) else {
                 throw ModelError.residentBufferWrapFailed

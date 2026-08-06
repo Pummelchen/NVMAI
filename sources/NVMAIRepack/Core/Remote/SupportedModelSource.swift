@@ -32,23 +32,9 @@ public struct SupportedModelSource: Sendable, Equatable {
             resume: resume)
     }
 
-    public static let gemma4 = SupportedModelSource(
-        name: "gemma4",
-        displayName: "Gemma 4 26B-A4B IT 4-bit",
-        repoID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
-        sourceIndexSHA256:
-            "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13",
-        modelID: "mlx-community/gemma-4-26b-a4b-it-4bit",
-        approximateDownloadBytes: 14_620_479_420,
-        installedBytes: 14_291_921_884,
-        reserveBytes: 1_073_741_824)
-
     /// Download estimate covers the `language_model.*` tensors plus tokenizer
-    /// and metadata sidecars; the vision tower is never fetched. Installed
-    /// bytes add the resident index and per-expert 16 KB page rounding
-    /// (the 1,769,472-byte expert blob is already page-aligned) plus
-    /// layout/manifest sidecars.
+    /// and metadata sidecars. Installed bytes add the resident index and
+    /// per-expert 16 KB page rounding plus layout/manifest sidecars.
     public static let qwen36 = SupportedModelSource(
         name: "qwen36",
         displayName: "Qwen3.6 35B-A3B 4-bit",
@@ -101,10 +87,10 @@ public struct SupportedModelSource: Sendable, Equatable {
         reserveBytes: 536_870_912)
 
     /// Default source when no `--model` selector is given.
-    public static let `default` = gemma4
+    public static let `default` = qwen36
 
     public static let all: [SupportedModelSource] = [
-        gemma4, qwen36, qwen36_6bit, qwen36_8bit, qwen36MTP,
+        qwen36, qwen36_6bit, qwen36_8bit, qwen36MTP,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

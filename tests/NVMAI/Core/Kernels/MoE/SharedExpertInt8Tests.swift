@@ -4,8 +4,9 @@ import Metal
 @testable import NVMAI
 import NVMAIValidationSupport
 
-/// Validates the standalone 8-bit dense MLP wrapper used by Gemma 4 as the
-/// "shared expert" parallel branch of its MoE:
+/// Validates the standalone 8-bit dense MLP wrapper used as the shared-expert
+/// branch of the MoE (gelu_pytorch_tanh default activation; the Qwen runtime
+/// selects the silu variant):
 ///
 ///     y = down(gelu_pytorch_tanh(gate(x)) * up(x))
 ///
@@ -42,7 +43,7 @@ import NVMAIValidationSupport
         return (rowsOut, packed, scales, biases)
     }
 
-    @Test func sharedExpertInt8_matchesReference_swaShape() throws {
+    @Test func sharedExpertInt8_matchesReference() throws {
         try Self.runSharedExpertInt8MatchesReference()
     }
 

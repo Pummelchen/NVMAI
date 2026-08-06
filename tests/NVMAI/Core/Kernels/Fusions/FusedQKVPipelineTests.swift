@@ -68,35 +68,35 @@ import NVMAIValidationSupport
             return
         }
 
-        gemv.encode(commandBuffer: commandBuffer,
+        try gemv.encode(commandBuffer: commandBuffer,
                     weights: qWeights, scales: qScales, biases: qBiases,
                     x: xBuffer, y: qLegacy,
                     m: UInt32(qRows), n: UInt32(n))
-        gemv.encode(commandBuffer: commandBuffer,
+        try gemv.encode(commandBuffer: commandBuffer,
                     weights: kvWeights, scales: kvScales, biases: kvBiases,
                     x: xBuffer, y: kLegacy,
                     m: UInt32(kvRows), n: UInt32(n))
-        gemv.encode(commandBuffer: commandBuffer,
+        try gemv.encode(commandBuffer: commandBuffer,
                     weights: kvWeights, scales: kvScales, biases: kvBiases,
                     x: xBuffer, y: vLegacy,
                     m: UInt32(kvRows), n: UInt32(n))
-        rms.encodeBF16WPerHead(commandBuffer: commandBuffer,
+        try rms.encodeBF16WPerHead(commandBuffer: commandBuffer,
                                x: qLegacy, weight: qNormBuffer, out: qLegacy,
                                headDim: UInt32(headDim), numHeads: numQHeads, eps: 1e-6)
-        rms.encodeBF16WPerHead(commandBuffer: commandBuffer,
+        try rms.encodeBF16WPerHead(commandBuffer: commandBuffer,
                                x: kLegacy, weight: kNormBuffer, out: kLegacy,
                                headDim: UInt32(headDim), numHeads: numKVHeads, eps: 1e-6)
-        rms.encodeNoScalePerHead(commandBuffer: commandBuffer,
+        try rms.encodeNoScalePerHead(commandBuffer: commandBuffer,
                                  x: vLegacy, out: vLegacy,
                                  headDim: UInt32(headDim), numHeads: numKVHeads, eps: 1e-6)
-        rope.encodeProportionalNeox(commandBuffer: commandBuffer,
+        try rope.encodeProportionalNeox(commandBuffer: commandBuffer,
                                     data: qLegacy,
                                     position: 12,
                                     headDim: UInt32(headDim),
                                     numHeads: UInt32(numQHeads),
                                     rotatedPairs: 64,
                                     theta: 1_000_000)
-        rope.encodeProportionalNeox(commandBuffer: commandBuffer,
+        try rope.encodeProportionalNeox(commandBuffer: commandBuffer,
                                     data: kLegacy,
                                     position: 12,
                                     headDim: UInt32(headDim),
@@ -104,14 +104,14 @@ import NVMAIValidationSupport
                                     rotatedPairs: 64,
                                     theta: 1_000_000)
 
-        fusedGEMV.encode(commandBuffer: commandBuffer,
+        try fusedGEMV.encode(commandBuffer: commandBuffer,
                          qWeights: qWeights, qScales: qScales, qBiases: qBiases,
                          kWeights: kvWeights, kScales: kvScales, kBiases: kvBiases,
                          vWeights: kvWeights, vScales: kvScales, vBiases: kvBiases,
                          x: xBuffer,
                          qOut: qFused, kOut: kFused, vOut: vFused,
                          qRows: UInt32(qRows), kvRows: UInt32(kvRows), n: UInt32(n))
-        fusedEpilogue.encode(commandBuffer: commandBuffer,
+        try fusedEpilogue.encode(commandBuffer: commandBuffer,
                              q: qFused, k: kFused, v: vFused,
                              qWeight: qNormBuffer, kWeight: kNormBuffer,
                              headDim: UInt32(headDim),

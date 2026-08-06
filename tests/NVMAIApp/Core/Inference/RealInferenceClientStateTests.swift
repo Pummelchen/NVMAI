@@ -182,15 +182,50 @@ import NVMAI
         #expect(diagnostics.unsupportedReason?.contains("synthetic unsupported") == true)
     }
 
-    @Test func cancelWhenIdleIsNoOp() {
+    @Test func cancelWhenIdleIsNoOp() async throws {
         let client = RealInferenceClient()
         client.cancel()
         client.cancel()
+
+        // An idle cancel must not leave a stale reservation or task behind:
+        // a fresh generate() must still be accepted (the failure below is
+        // .modelNotFound, not .generationInFlight) and terminate normally.
+        let request = AppGenerationRequest(
+            modelDirectory: URL(fileURLWithPath: "/nonexistent/model.gturbo"),
+            prompt: "hello")
+        var failure: AppInferenceError?
+        do {
+            for try await event in client.generate(request) {
+                if case .failed(let error, _) = event { failure = error }
+            }
+        } catch let error as AppInferenceError {
+            failure = failure ?? error
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
+        #expect(failure == .modelNotFound("/nonexistent/model.gturbo"))
     }
 
-    @Test func unloadWhenIdleIsSafe() async {
+    @Test func unloadWhenIdleIsSafe() async throws {
         let client = RealInferenceClient()
         await client.unload()
+
+        // Unloading an idle client must not corrupt the lifecycle: a
+        // subsequent load attempt still reports the normal validation states
+        // and fails fast on the missing directory.
+        var states: [AppModelLoadState] = []
+        let recorder = StateRecorder()
+        await #expect(throws: AppInferenceError.self) {
+            try await client.ensureLoaded(
+                modelDirectory: URL(fileURLWithPath: "/nonexistent/model.gturbo"),
+                maxContextTokens: 1024,
+                options: AppRuntimeOptions(),
+                forceLogitsHead: false,
+                onState: { recorder.append($0) })
+        }
+        states = recorder.snapshot()
+        #expect(states.first == .loading(.validatingDirectory))
+        #expect(states.last?.isFailed == true)
     }
 }
 

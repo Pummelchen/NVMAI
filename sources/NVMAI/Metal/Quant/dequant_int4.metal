@@ -68,9 +68,17 @@ kernel void embed_lookup_int4(
     constant uint&        token_id  [[buffer(4)]],
     constant uint&        D         [[buffer(5)]],
     constant float&       out_scale [[buffer(6)]],   // pass 1.0 to disable
+    constant uint&        vocab     [[buffer(7)]],   // [V] row count
     uint                  gid       [[thread_position_in_grid]]
 ) {
     if (gid >= D) return;
+    // OOB token guard: the CPU clamps routing token ids, but a clamped id can
+    // still land at the table edge; never index past the vocab rows. Zero
+    // embeddings keep the rest of the pipeline well-defined for OOB tokens.
+    if (token_id >= vocab) {
+        out[gid] = half(0.0f);
+        return;
+    }
     const uint groups_per_row = D / kGroupSize;
     device const uint8_t* row_q = table  + uint(token_id) * (D / 2u);
     device const bfloat*  row_s = scales + uint(token_id) * groups_per_row;

@@ -277,7 +277,7 @@ import NVMAIValidationSupport
             scale: fixture.scale)
 
         let cb = ctx.queue.makeCommandBuffer()!
-        prefill.encodeCausal(commandBuffer: cb,
+        try prefill.encodeCausal(commandBuffer: cb,
                              q: qBuf,
                              qOffset: qPrefix * MemoryLayout<Float16>.size,
                              k: kBuf,

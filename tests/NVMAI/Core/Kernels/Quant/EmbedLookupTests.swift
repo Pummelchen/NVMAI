@@ -4,7 +4,7 @@ import Metal
 @testable import NVMAI
 import NVMAIValidationSupport
 
-/// Validates the tied 4-bit embedding lookup used by Gemma 4.
+/// Validates the 4-bit embedding lookup kernel against the CPU reference.
 @Suite struct EmbedLookupTests {
 
     private struct Sizes {
@@ -53,16 +53,17 @@ import NVMAIValidationSupport
             Issue.record("alloc failed"); return
         }
         let token: UInt32 = 9
-        // sqrt(D) for the toy D=128 (5.65...). Mirrors the per-model sqrt(H)
-        // scale; the kernel treats it as a runtime float.
+        // sqrt(D) for the toy D=128 (5.65...). The kernel treats the scale as
+        // a runtime float; the Qwen runtime passes 1.0 (no sqrt scaling).
         let outScale = Float(Sizes.D).squareRoot()
 
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encode(commandBuffer: cb,
+        try kernel.encode(commandBuffer: cb,
                       table: tableBuf, scales: scalesBuf, biases: biasesBuf,
                       out: outBuf,
                       tokenId: token, d: UInt32(Sizes.D),
-                      outScale: outScale)
+                      outScale: outScale,
+                      vocab: UInt32(Sizes.V))
         cb.commit(); cb.waitUntilCompleted()
 
         let ref = EmbedLookupRef.applyInt4(
@@ -93,10 +94,11 @@ import NVMAIValidationSupport
         }
         let token: UInt32 = 2
         let cb = ctx.queue.makeCommandBuffer()!
-        kernel.encode(commandBuffer: cb,
+        try kernel.encode(commandBuffer: cb,
                       table: tableBuf, scales: scalesBuf, biases: biasesBuf,
                       out: outBuf,
-                      tokenId: token, d: UInt32(Sizes.D), outScale: 1.0)
+                      tokenId: token, d: UInt32(Sizes.D), outScale: 1.0,
+                      vocab: UInt32(Sizes.V))
         cb.commit(); cb.waitUntilCompleted()
 
         let ref = EmbedLookupRef.applyInt4(

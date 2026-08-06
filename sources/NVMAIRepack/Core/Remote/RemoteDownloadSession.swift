@@ -134,16 +134,40 @@ struct RemoteMetadataRedirectPolicy {
     mutating func request(proposedRequest: URLRequest) -> URLRequest? {
         redirectCount += 1
         guard redirectCount <= maximumRedirects,
-              proposedRequest.url?.scheme?.lowercased() == "https",
-              proposedRequest.url?.host?.lowercased() == sourceHost else {
+              proposedRequest.url?.scheme?.lowercased() == "https" else {
+            return nil
+        }
+        let host = proposedRequest.url?.host?.lowercased()
+        let isSameHost = host == sourceHost
+        // Redirect policy (shared with the ranged-GET path in
+        // RemoteRangeTransfer.swift): the HF `resolve/...` endpoint answers
+        // with a redirect to the object store for LFS-backed files, so both
+        // paths must accept the CDN host. Same-host redirects keep the
+        // Authorization header; once the host changes (e.g. to the CDN) it is
+        // dropped and never re-attached.
+        let isHFObjectStore = host.map(RemoteHFObjectStoreHosts.all.contains) ?? false
+        guard isSameHost || isHFObjectStore else {
             return nil
         }
         var redirected = proposedRequest
         redirected.httpMethod = originalMethod
         redirected.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         redirected.setValue(
-            originalAuthorization,
+            isSameHost ? originalAuthorization : nil,
             forHTTPHeaderField: "Authorization")
         return redirected
     }
+}
+
+/// Hosts that serve Hugging Face object-store content after a `/resolve/...`
+/// redirect. Both the metadata HEAD policy (RemoteDownloadSession.swift) and
+/// the ranged-GET policy (RemoteRangeTransfer.swift) treat redirects to these
+/// hosts as part of the normal resolve flow; the ranged-GET policy additionally
+/// follows any HTTPS object-store host, because the CDN fronting a given repo
+/// is not guaranteed to be one of these names.
+enum RemoteHFObjectStoreHosts {
+    static let all: Set<String> = [
+        "cdn-lfs.huggingface.co",
+        "cas-bridge.hf.co",
+    ]
 }

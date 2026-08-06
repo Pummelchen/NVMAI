@@ -48,14 +48,14 @@ struct StructuredOutputDiagnosticsTests {
 
     @Test func parserCausesAreFixedAndUnknownToolNameIsDiscarded() {
         #expect(StructuredOutputFailureCause.classify(
-            GemmaToolCallParserError.malformed) == .malformed)
+            ToolCallParserError.malformed) == .malformed)
         #expect(StructuredOutputFailureCause.classify(
-            GemmaToolCallParserError.oversized) == .oversized)
+            ToolCallParserError.oversized) == .oversized)
         #expect(StructuredOutputFailureCause.classify(
             UnexpectedError()) == .unexpected)
 
         let cause = StructuredOutputFailureCause.classify(
-            GemmaToolCallParserError.unknownTool("private-name"))
+            ToolCallParserError.unknownTool("private-name"))
         let reflected = String(reflecting: StructuredOutputFailure(
             kind: .decoderConsume,
             cause: cause,

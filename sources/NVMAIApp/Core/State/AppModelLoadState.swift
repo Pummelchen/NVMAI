@@ -1,10 +1,10 @@
 import Foundation
 
-public enum AppModelLoadPhase: Equatable, Sendable {
-    case validatingDirectory
-    case tokenizer
-    case verifyingWeights
-    case preparingRunner
+public enum AppModelLoadPhase: String, Equatable, Sendable {
+    case validatingDirectory = "validating-directory"
+    case tokenizer = "tokenizer"
+    case verifyingWeights = "verifying-weights"
+    case preparingRunner = "preparing-runner"
 
     public var label: String {
         switch self {

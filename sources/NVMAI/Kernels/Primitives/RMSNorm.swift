@@ -48,14 +48,14 @@ final class RMSNorm {
                                                                  d: 512)
     }
 
-    /// Encode the BF16-weight variant (Gemma 4 norms).
+    /// Encode the BF16-weight variant (weighted norms).
     func encodeBF16W(commandBuffer: MTLCommandBuffer,
                             x: MTLBuffer, xOffset: Int = 0,
                             weight: MTLBuffer, weightOffset: Int = 0,
                             out: MTLBuffer, outOffset: Int = 0,
                             d: UInt32,
-                            eps: Float) {
-        encodeWeighted(commandBuffer: commandBuffer,
+                            eps: Float) throws {
+        try encodeWeighted(commandBuffer: commandBuffer,
                        pso: d == 2816 ? psoBF16D2816 : psoBF16,
                        x: x, xOffset: xOffset,
                        weight: weight, weightOffset: weightOffset,
@@ -68,8 +68,10 @@ final class RMSNorm {
                               x: MTLBuffer, xOffset: Int = 0,
                               out: MTLBuffer, outOffset: Int = 0,
                               d: UInt32,
-                              eps: Float) {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+                              eps: Float) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         let pso = d == 2816 ? psoNoScaleD2816 : psoNoScale
         enc.setComputePipelineState(pso)
         enc.setBuffer(x,   offset: xOffset,   index: 0)
@@ -91,8 +93,10 @@ final class RMSNorm {
                                    weight: MTLBuffer, weightOffset: Int = 0,
                                    out: MTLBuffer, outOffset: Int = 0,
                                    headDim: UInt32, numHeads: Int,
-                                   eps: Float) {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+                                   eps: Float) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         let pso = perHeadPipeline(headDim: headDim,
                                   base: psoBF16PerHead,
                                   p256: psoBF16PerHead256,
@@ -116,8 +120,10 @@ final class RMSNorm {
                                      x: MTLBuffer, xOffset: Int = 0,
                                      out: MTLBuffer, outOffset: Int = 0,
                                      headDim: UInt32, numHeads: Int,
-                                     eps: Float) {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+                                     eps: Float) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         let pso = perHeadPipeline(headDim: headDim,
                                   base: psoNoScalePerHead,
                                   p256: psoNoScalePerHead256,
@@ -141,8 +147,10 @@ final class RMSNorm {
                                 weight: MTLBuffer, weightOffset: Int,
                                 out: MTLBuffer, outOffset: Int,
                                 d: UInt32,
-                                eps: Float) {
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+                                eps: Float) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         enc.setComputePipelineState(pso)
         enc.setBuffer(x,      offset: xOffset,      index: 0)
         enc.setBuffer(weight, offset: weightOffset, index: 1)

@@ -43,16 +43,18 @@ struct OpenAIValidationTests {
 
     @Test func wideIntegerToolArgumentsRoundTripExactly() async throws {
         let expected = "9007199254740993"
-        let parsed = try GemmaToolCallParser().parse(
-            "call:lookup{id:\(expected)}",
+        let parsed = try QwenToolCallParser().parse(
+            "\n<function=lookup>\n<parameter=id>\n\(expected)\n</parameter>\n</function>\n",
             allowedTools: ["lookup"],
             id: "call_0123456789abcdef01234567")
         #expect(parsed.argumentsJSON.contains(#""id":\#(expected)"#))
         let signedMinimum = String(Int64.min)
         let signedMaximum = String(Int64.max)
         let unsignedMaximum = String(UInt64.max)
-        let edges = try GemmaToolCallParser().parse(
-            "call:lookup{minimum:\(signedMinimum),maximum:\(signedMaximum),unsigned:\(unsignedMaximum)}",
+        let edges = try QwenToolCallParser().parse(
+            "\n<function=lookup>\n<parameter=minimum>\n\(signedMinimum)\n</parameter>\n"
+                + "<parameter=maximum>\n\(signedMaximum)\n</parameter>\n"
+                + "<parameter=unsigned>\n\(unsignedMaximum)\n</parameter>\n</function>\n",
             allowedTools: ["lookup"],
             id: "call_0123456789abcdef01234568")
         #expect(edges.arguments.objectValue?["minimum"] == .integer(.min))
@@ -65,14 +67,9 @@ struct OpenAIValidationTests {
         #expect(try JSONDecoder().decode(
             JSONValue.self,
             from: Data(encodedEdges.utf8)) == edges.arguments)
-        for malformed in ["+1", "01", "1.", ".1", "1e", "--1"] {
-            #expect(throws: GemmaToolCallParserError.self) {
-                try GemmaToolCallParser().parse(
-                    "call:lookup{id:\(malformed)}",
-                    allowedTools: ["lookup"],
-                    id: "call_0123456789abcdef01234570")
-            }
-        }
+        // The Qwen parser keeps non-JSON parameter values as raw strings
+        // (no strict numeric grammar); malformed-number rejection lives in
+        // QwenToolCallParserTests via the JSONValue decode path.
 
         let data = Data(#"""
         {
@@ -83,7 +80,8 @@ struct OpenAIValidationTests {
               "id":"call_0123456789abcdef01234567",
               "type":"function",
               "function":{"name":"lookup","arguments":"{\"id\":9007199254740993}"}
-            }]}
+            }]},
+            {"role":"tool","tool_call_id":"call_0123456789abcdef01234567","content":"ok"}
           ],
           "tools":[{
             "type":"function",
@@ -98,7 +96,7 @@ struct OpenAIValidationTests {
         let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
         let call = try #require(validated.messages[1].toolCalls.first)
         #expect(try call.arguments.encoded().contains(#""id":\#(expected)"#))
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let rendered = tokenizer.decode(
             try tokenizer.encodeToolChat(
                 messages: validated.messages,
@@ -106,6 +104,11 @@ struct OpenAIValidationTests {
             skipSpecialTokens: false)
         #expect(rendered.contains(expected))
 
+        // 18446744073709551615 (UInt64.max) cannot be represented exactly as
+        // an Int64 for the jinja tool renderer. The request shape is
+        // otherwise valid (the tool call IS answered by a tool result), so
+        // the rejection below is specifically about the unrepresentable
+        // number, not the S19 unresolved-tool-call check.
         let unrepresentableHistory = Data(#"""
         {
           "model":"m",
@@ -115,7 +118,8 @@ struct OpenAIValidationTests {
               "id":"call_0123456789abcdef01234569",
               "type":"function",
               "function":{"name":"lookup","arguments":"{\"id\":18446744073709551615}"}
-            }]}
+            }]},
+            {"role":"tool","tool_call_id":"call_0123456789abcdef01234569","content":"ok"}
           ],
           "tools":[{
             "type":"function",
@@ -157,16 +161,30 @@ struct OpenAIValidationTests {
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
         let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         _ = try tokenizer.encodeToolChat(
             messages: validated.messages,
             tools: validated.tools)
-        let parsed = try GemmaToolCallParser().parse(
-            #"call:lookup{$id:<|"|>item<|"|>,file-path:<|"|>/tmp/x<|"|>,nested:{child-key:7}}"#,
+        let parsed = try QwenToolCallParser().parse(
+            #"""
+            <function=lookup>
+            <parameter=$id>
+            item
+            </parameter>
+            <parameter=file-path>
+            /tmp/x
+            </parameter>
+            <parameter=nested>
+            {"child-key":7}
+            </parameter>
+            </function>
+            """#,
             allowedTools: ["lookup"],
             id: "call_0123456789abcdef01234567")
         #expect(parsed.arguments.objectValue?["$id"] == .string("item"))
         #expect(parsed.arguments.objectValue?["file-path"] == .string("/tmp/x"))
+        #expect(parsed.arguments.objectValue?["nested"]
+                == .object(["child-key": .integer(7)]))
     }
 
     @Test func ambiguousParameterKeysFailValidation() throws {
@@ -193,50 +211,6 @@ struct OpenAIValidationTests {
         #expect(throws: ServerRequestError.self) {
             try OpenAIRequestValidator.validate(request, modelID: "m")
         }
-    }
-}
-
-@Suite("Gemma tool calls")
-struct GemmaToolCallTests {
-    @Test func parsesNestedArgumentsAndGemmaQuotes() throws {
-        let parsed = try GemmaToolCallParser().parse(
-            #"call:read{path:<|"|>/tmp/ü"<|"|>,options:{lines:[1,2],exact:true}}"#,
-            allowedTools: ["read"],
-            id: "call_0123456789abcdef01234567")
-        #expect(parsed.name == "read")
-        #expect(parsed.argumentsJSON.contains(#""path":"/tmp/ü\"""#))
-        #expect(parsed.argumentsJSON.contains(#""exact":true"#))
-    }
-
-    @Test func unknownToolFailsClosed() {
-        #expect(throws: GemmaToolCallParserError.unknownTool("write")) {
-            try GemmaToolCallParser().parse(
-                "call:write{path:<|\"|>/tmp/x<|\"|>}",
-                allowedTools: ["read"],
-                id: "call_0123456789abcdef01234567")
-        }
-    }
-
-    @Test func parsesJSONUnicodeEscapesAndSurrogatePairs() throws {
-        let parsed = try GemmaToolCallParser().parse(
-            #"call:read{path:"\u00fc-\ud83c\udf33",note:"a\b\f"}"#,
-            allowedTools: ["read"],
-            id: "call_0123456789abcdef01234567")
-        #expect(parsed.argumentsJSON.contains(#""path":"ü-🌳""#))
-        #expect(parsed.argumentsJSON.contains(#""note":"a\b\f""#))
-    }
-
-    @Test func suppressesThoughtBlockAndExposesTextAfterChannelClose() async throws {
-        let tokenizer = try await GFTokenizer.load()
-        let decoder = StructuredAssistantDecoder(tokenizer: tokenizer, allowedTools: [])
-        #expect(try decoder.consume(tokenID: tokenizer.channelStartID, delta: "").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "thought").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "\n").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "private").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.channelEndID, delta: "").isEmpty)
-        #expect(try decoder.consume(tokenID: tokenizer.bosID, delta: "visible") == [
-            .content("visible"),
-        ])
     }
 }
 

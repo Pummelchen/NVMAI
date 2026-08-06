@@ -44,6 +44,12 @@ public struct Model {
         sharedTargetWeights?.embeddingBits ?? manifest.quant?.embedding.weightBits ?? 4
     }
     public var lmHeadWeightBits: Int {
+        // Fallback to the embedding slot: qwen36 keeps a separate lm_head, but
+        // the repacker quantizes it with the same layout as the embedding
+        // (padded to the same vocab rows). `validateRuntimeSchema` checks the
+        // lm_head tensor against the embedding slot for qwen36, so the
+        // fallback is only reachable when the validator already accepted the
+        // coupling.
         sharedTargetWeights?.lmHeadBits ?? manifest.quant?.embedding.weightBits ?? 4
     }
     public var attentionWeightBits: Int { manifest.quant?.attention.weightBits ?? 4 }
@@ -110,9 +116,8 @@ public struct Model {
         return try resident(name: "language_model.model.embed_tokens.weight")
     }
 
-    /// Gemma 4 ties lm_head to the embedding; Qwen 3.6 carries a separate
-    /// `lm_head` tensor. The transpose for the lm_head GEMV path is the
-    /// kernel's job, not the loader's.
+    /// Qwen 3.6 carries a separate `lm_head` tensor. The transpose for the
+    /// lm_head GEMV path is the kernel's job, not the loader's.
     public func lmHead() throws -> TensorView {
         if let sharedTargetWeights { return sharedTargetWeights.lmHead }
         if config.tieWordEmbeddings { return try embedding() }
@@ -131,18 +136,11 @@ public struct Model {
     public func oProj(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
     }
-    /// Gemma's writer emits `.router.proj.weight` (no `.mlp.` segment);
     /// Qwen's router is the source-named `.mlp.gate.weight`.
     public func router(layer L: Int) throws -> TensorView {
-        switch config.family {
-        case .gemma4:
-            return try resident(name: "language_model.model.layers.\(L).router.proj.weight")
-        case .qwen36, .qwen36MTP:
-            return try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
-        }
+        try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
     }
-    /// Shared-expert FFN. Gemma emits `.mlp.{gate,up,down}_proj.weight`
-    /// without a `.shared_expert.` segment; Qwen keeps the source's
+    /// Qwen's shared-expert FFN keeps the source's
     /// `.mlp.shared_expert.{gate,up,down}_proj.weight` names.
     public func sharedExpertGate(layer L: Int) throws -> TensorView {
         try resident(name: sharedExpertName("gate_proj", layer: L))
@@ -154,12 +152,7 @@ public struct Model {
         try resident(name: sharedExpertName("down_proj", layer: L))
     }
     private func sharedExpertName(_ proj: String, layer L: Int) -> String {
-        switch config.family {
-        case .gemma4:
-            return "language_model.model.layers.\(L).mlp.\(proj).weight"
-        case .qwen36, .qwen36MTP:
-            return "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
-        }
+        "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
     }
     /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
     /// 8-bit projection whose sigmoid multiplies the shared FFN output.
@@ -229,50 +222,6 @@ public struct Model {
     }
     public func kNorm(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).self_attn.k_norm.weight")
-    }
-
-    // MARK: - Feed-forward norms
-    //
-    // The Gemma 4 sandwich wraps two parallel FFN branches:
-    //   pre_feedforward_layernorm        -> dense MLP input
-    //   pre_feedforward_layernorm_2      -> routed expert input
-    //   post_feedforward_layernorm_1     -> dense MLP output
-    //   post_feedforward_layernorm_2     -> routed expert output
-    //   post_feedforward_layernorm       -> combined (h1+h2) output
-
-    public func preFFN(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).pre_feedforward_layernorm.weight")
-    }
-    public func preFFN2(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).pre_feedforward_layernorm_2.weight")
-    }
-    public func postFFN1(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).post_feedforward_layernorm_1.weight")
-    }
-    public func postFFN2(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).post_feedforward_layernorm_2.weight")
-    }
-    public func postFFN(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).post_feedforward_layernorm.weight")
-    }
-
-    // MARK: - Router auxiliaries
-    //
-    // `router.scale` is a per-feature multiplier on the router's input
-    // (post-RMSNorm), fused with 1/sqrt(hidden_size). `per_expert_scale` is
-    // applied to the top-k routing weights after softmax over top-k.
-
-    public func routerScale(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).router.scale")
-    }
-    public func routerPerExpertScale(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).router.per_expert_scale")
-    }
-
-    /// Per-layer scalar gain applied to the entire residual stream at the end
-    /// of the layer; shape `[1]`, BF16.
-    public func layerScalar(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).layer_scalar")
     }
 
     // MARK: - Gated-DeltaNet linear attention (Qwen 3.6)
@@ -345,6 +294,12 @@ public struct Model {
     public func routedExpert(layer L: Int, expert E: Int) throws -> TensorView {
         try ensureLayerOpened(L)
         let backend = streamersQueue.sync { streamersBox.streamers[L]! }
+        // The streamer is per-layer: `openLayerLocked(L)` bound it to layer
+        // L's file with `expertOffsets = layers[L].experts.map(\.offset)`, and
+        // `StreamLayout.expertOffset(layer: 0, ...)` is the branch that
+        // consults that per-layer offset table. Passing the actual layer here
+        // would select the dense cross-layer formula and mis-offset every
+        // expert on layers above 0 — layer 0 is intentional.
         let r = try backend.loadExpert(layer: 0, expert: E)
         return TensorView(
             buffer: r.buffer,
@@ -365,10 +320,26 @@ public struct Model {
 
     /// Best-effort overlap hook for prefill: starts the same lazy layer open on
     /// the model's streamer queue without waiting for the first expert fetch.
+    /// The open is retried synchronously by `ensureLayerOpened(_:)` before any
+    /// expert fetch on the layer, which rethrows the identical error — so a
+    /// failure here is never dropped end-to-end.
+    ///
+    /// `nonisolated(unsafe)` is required because `Model` is not formally
+    /// `Sendable`; the capture is safe because every mutable member
+    /// (`streamersBox`) is confined behind the serial `streamersQueue` and the
+    /// remaining members are immutable values.
     public func beginOpeningRoutedExpertStreamer(layer L: Int) {
         nonisolated(unsafe) let model = self
         streamersQueue.async {
-            try? model.openLayerLocked(L)
+            do {
+                try model.openLayerLocked(L)
+            } catch {
+                // Deferred: the synchronous `ensureLayerOpened(L)` that
+                // precedes every expert fetch on this layer performs the same
+                // idempotent open and rethrows this error to the prefill loop.
+                // Nothing is silently lost; the async path only overlaps the
+                // SHA-256 verification with the chunk's GPU work.
+            }
         }
     }
 
@@ -438,8 +409,8 @@ extension Model {
     /// files are verified lazily on first `routedExpert(...)` touch.
     public static func load(directoryURL: URL,
                             device: MTLDevice,
-                            expecting: ArchConfig = .gemma4_26B_A4B,
-                            streamingMode: ExpertStreamingMode = .pread(slotCount: 16),
+                            expecting: ArchConfig = .qwen36_35B_A3B,
+                            streamingMode: ExpertStreamingMode = .pread(slotCount: 32),
                             expertCachePolicy: ExpertCachePolicy = PreadExpertStreamer.cachePolicyDefault,
                             integrityPolicy: ModelIntegrityPolicy? = nil,
                             loadStats: UnsafeMutablePointer<ModelLoadStats>? = nil) throws -> Model {
@@ -546,16 +517,24 @@ extension Model {
                 actual: weightsSize)
         }
 
-        // SHA-256: weights via FD, layout via in-memory data
-        let eagerShaStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        try Sha256Verifier.verifyFile(fileDescriptor: weightsFD,
-                                      named: "model_weights.bin",
-                                      expectedHex: weightsEntry.sha256)
-        guard Sha256Verifier.hashData(layoutData).lowercased()
-                == layoutEntry.sha256.lowercased() else {
-            throw ModelError.checksumMismatch(file: "packed_experts/layout.json")
+        // SHA-256: weights via FD, layout via in-memory data. Under the
+        // size-checked trusted-receipt policy the installer already pinned
+        // these hashes at install time, so re-hashing the full weights file
+        // is skipped; the payload is instead warmed with F_RDADVISE so GPU
+        // first-touch does not fault on cold pages.
+        if resolvedIntegrityPolicy == .fullSha256 {
+            let eagerShaStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            try Sha256Verifier.verifyFile(fileDescriptor: weightsFD,
+                                          named: "model_weights.bin",
+                                          expectedHex: weightsEntry.sha256)
+            guard Sha256Verifier.hashData(layoutData).lowercased()
+                    == layoutEntry.sha256.lowercased() else {
+                throw ModelError.checksumMismatch(file: "packed_experts/layout.json")
+            }
+            stats.eagerSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - eagerShaStart
+        } else {
+            _ = RDAdvice.call(fd: weightsFD, offset: 0, byteCount: weightsSize)
         }
-        stats.eagerSha256Nanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - eagerShaStart
 
         // -- decode layout from NVMAIFormat wire codec
         let layout = try PackedExpertsLayoutReader.decode(data: layoutData,
@@ -660,96 +639,181 @@ extension Model {
             return value
         }
 
-        func dimensions(_ rows: Int, _ columns: Int, field: String) throws -> (UInt32, UInt32) {
-            guard let r = UInt32(exactly: rows), let c = UInt32(exactly: columns),
-                  r > 0, c > 0 else {
-                throw ModelError.indexCorrupt(detail: "\(field) has invalid dimensions")
+        func entry(_ name: String) throws -> ResidentIndexEntry {
+            guard let e = residentIndex.entries[name] else {
+                throw ModelError.tensorNotFound(name: name)
             }
-            return (r, c)
+            return e
         }
 
         func requireBF16(_ name: String, count: Int) throws {
-            // Skip validation for models with non-standard tensor layouts
-            return
+            let e = try entry(name)
+            guard e.dtype == 1 else {
+                throw ModelError.indexCorrupt(detail: "\(name) is not BF16")
+            }
+            // Trailing zero dims encode a lower-rank tensor (e.g. a [2048]
+            // vector is stored as shape (2048, 0, 0, 0)); treat them as 1.
+            let dims = [e.shape.0, e.shape.1, e.shape.2, e.shape.3]
+            let elements = dims.reduce(1) { $0 * ($1 == 0 ? 1 : Int($1)) }
+            guard elements == count else {
+                throw ModelError.tensorSizeMismatch(
+                    name: name, expected: UInt64(count), actual: UInt64(elements))
+            }
         }
 
-        func requireAffine(_ name: String, rows: Int, columns: Int, slot: ManifestQuantSlot) throws {
-            // Skip validation for models with non-standard tensor layouts
-            return
+        func requireAffine(_ name: String, rows: Int, columns: Int,
+                           slot: ManifestQuantSlot) throws {
+            let e = try entry(name)
+            guard columns % slot.groupSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "\(name) columns \(columns) not divisible by group size \(slot.groupSize)")
+            }
+            // Bit-packed affine weights: rows*cols*bits must pack into whole
+            // bytes (4-bit packs 2/byte, 6-bit packs across 32-bit words).
+            let elementBits = try checkedMultiply(
+                UInt64(rows) * UInt64(columns), UInt64(slot.weightBits),
+                field: name)
+            guard elementBits % 8 == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "\(name) \(slot.weightBits)-bit layout does not pack into whole bytes")
+            }
+            let weightBytes = elementBits / 8
+            let auxBytes = try checkedMultiply(
+                UInt64(rows) * UInt64(columns / slot.groupSize), 2, field: name)
+            guard e.dtype == 0,                       // U32-packed weights
+                  e.sizeBytes == weightBytes,
+                  e.scaleOffset > 0, e.scaleSize == auxBytes,
+                  e.biasOffset > 0, e.biasSize == auxBytes else {
+                throw ModelError.tensorSizeMismatch(
+                    name: name, expected: weightBytes, actual: e.sizeBytes)
+            }
         }
 
-        try requireAffine(
-            "language_model.model.embed_tokens.weight",
-            rows: config.vocabSize,
-            columns: config.hiddenSize,
-            slot: quant.embedding)
+        func affineSizes(rows: Int, columns: Int, slot: ManifestQuantSlot,
+                         field: String) throws -> (weight: UInt64, aux: UInt64, shape: (UInt32, UInt32)) {
+            guard columns % slot.groupSize == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "\(field) has an invalid quant layout (group \(slot.groupSize), \(slot.weightBits)-bit)")
+            }
+            let elementBits = try checkedMultiply(
+                UInt64(rows) * UInt64(columns), UInt64(slot.weightBits),
+                field: field)
+            guard elementBits % 8 == 0 else {
+                throw ModelError.indexCorrupt(
+                    detail: "\(field) \(slot.weightBits)-bit layout does not pack into whole bytes")
+            }
+            let weightBytes = elementBits / 8
+            let auxBytes = try checkedMultiply(
+                UInt64(rows) * UInt64(columns / slot.groupSize), 2, field: field)
+            return (weightBytes, auxBytes, (UInt32(rows), UInt32(columns)))
+        }
+
+        switch config.family {
+        case .qwen36:
+            try requireAffine(
+                "language_model.model.embed_tokens.weight",
+                rows: config.vocabSize,
+                columns: config.hiddenSize,
+                slot: quant.embedding)
+            // The untied lm_head is quantized with the embedding slot layout
+            // (padded to the same vocab rows). `Model.lmHeadWeightBits` falls
+            // back to that slot, so the coupling is validated here — the
+            // fallback is only reachable when this check already passed.
+            try requireAffine("language_model.lm_head.weight",
+                              rows: config.vocabSize,
+                              columns: config.hiddenSize,
+                              slot: quant.embedding)
+        case .qwen36MTP:
+            // The MTP sidecar shares the target's embedding and lm_head; it
+            // carries only the 2D->D projection and its two input norms.
+            try requireAffine("fc.weight",
+                              rows: config.hiddenSize,
+                              columns: 2 * config.hiddenSize,
+                              slot: quant.attention)
+            try requireBF16("pre_fc_norm_embedding.weight", count: config.hiddenSize)
+            try requireBF16("pre_fc_norm_hidden.weight", count: config.hiddenSize)
+        }
         try requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
 
-        // Skip layer-level validation for models with non-standard tensor layouts
-        // (e.g., Qwen3.6 MLX source uses fused linear attention tensors)
-        /*
+        // Qwen 3.6 schema, verified against the installed checkpoints:
+        // every layer carries the layer norms, the router and the gated
+        // shared expert; full-attention layers carry the gate-packed
+        // [query; gate] q_proj, and gated-DeltaNet layers carry the
+        // linear_attn bundle. The Qwen checkpoints keep no auxiliary
+        // sandwich/scale tensors.
         for layer in 0..<config.numLayers {
             let prefix = "language_model.model.layers.\(layer)"
-            let isFull = config.fullAttentionLayerMask[layer] != 0
-            let headDimension = isFull ? config.fullHeadDim : config.headDim
-            let kvHeads = isFull ? config.numFullKVHeads : config.numKVHeads
-            let queryDimension = try checkedIntMultiply(
-                config.numHeads, headDimension, field: "layer \(layer) query")
-            let kvDimension = try checkedIntMultiply(
-                kvHeads, headDimension, field: "layer \(layer) key/value")
+            try requireBF16("\(prefix).input_layernorm.weight", count: config.hiddenSize)
+            try requireBF16("\(prefix).post_attention_layernorm.weight", count: config.hiddenSize)
+            try requireAffine("\(prefix).mlp.gate.weight",
+                              rows: config.numExperts, columns: config.hiddenSize,
+                              slot: quant.router)
+            // The shared-expert scalar gate is quantized at the ROUTER's bit
+            // width (8-bit on the target checkpoint, 4-bit on the MTP
+            // sidecar), independent of the sharedExpert slot.
+            try requireAffine("\(prefix).mlp.shared_expert_gate.weight",
+                              rows: 1, columns: config.hiddenSize,
+                              slot: quant.router)
+            let shared = "\(prefix).mlp.shared_expert"
+            try requireAffine("\(shared).gate_proj.weight",
+                              rows: config.intermediateSize, columns: config.hiddenSize,
+                              slot: quant.sharedExpert)
+            try requireAffine("\(shared).up_proj.weight",
+                              rows: config.intermediateSize, columns: config.hiddenSize,
+                              slot: quant.sharedExpert)
+            try requireAffine("\(shared).down_proj.weight",
+                              rows: config.hiddenSize, columns: config.intermediateSize,
+                              slot: quant.sharedExpert)
 
-            for name in [
-                "input_layernorm.weight",
-                "post_attention_layernorm.weight",
-                "pre_feedforward_layernorm.weight",
-                "pre_feedforward_layernorm_2.weight",
-                "post_feedforward_layernorm_1.weight",
-                "post_feedforward_layernorm_2.weight",
-                "post_feedforward_layernorm.weight",
-                "router.scale",
-            ] {
-                try requireBF16("\(prefix).\(name)", count: config.hiddenSize)
-            }
-            try requireBF16("\(prefix).self_attn.q_norm.weight", count: headDimension)
-            try requireBF16("\(prefix).self_attn.k_norm.weight", count: headDimension)
-            try requireBF16("\(prefix).router.per_expert_scale", count: config.numExperts)
-            try requireBF16("\(prefix).layer_scalar", count: 1)
-
-            try requireAffine("\(prefix).self_attn.q_proj.weight",
-                              rows: queryDimension, columns: config.hiddenSize,
-                              slot: quant.attention)
-            try requireAffine("\(prefix).self_attn.k_proj.weight",
-                              rows: kvDimension, columns: config.hiddenSize,
-                              slot: quant.attention)
-            if !isFull {
+            if config.layerIsFull(layer) {
+                // Gate-packed [query ; gate] q_proj: 2 * heads * headDim rows.
+                let queryDimension = try checkedIntMultiply(
+                    2 * config.numHeads, config.fullHeadDim,
+                    field: "layer \(layer) query")
+                let kvDimension = try checkedIntMultiply(
+                    config.numFullKVHeads, config.fullHeadDim,
+                    field: "layer \(layer) key/value")
+                try requireBF16("\(prefix).self_attn.q_norm.weight",
+                                count: config.fullHeadDim)
+                try requireBF16("\(prefix).self_attn.k_norm.weight",
+                                count: config.fullHeadDim)
+                try requireAffine("\(prefix).self_attn.q_proj.weight",
+                                  rows: queryDimension, columns: config.hiddenSize,
+                                  slot: quant.attention)
+                try requireAffine("\(prefix).self_attn.k_proj.weight",
+                                  rows: kvDimension, columns: config.hiddenSize,
+                                  slot: quant.attention)
                 try requireAffine("\(prefix).self_attn.v_proj.weight",
                                   rows: kvDimension, columns: config.hiddenSize,
                                   slot: quant.attention)
+                try requireAffine("\(prefix).self_attn.o_proj.weight",
+                                  rows: config.hiddenSize,
+                                  columns: config.numHeads * config.fullHeadDim,
+                                  slot: quant.attention)
+            } else if config.layerIsLinear(layer) {
+                let la = config.linearAttention
+                try requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
+                                  rows: la.qkvDim, columns: config.hiddenSize,
+                                  slot: quant.attention)
+                try requireAffine("\(prefix).linear_attn.in_proj_z.weight",
+                                  rows: la.valueDim, columns: config.hiddenSize,
+                                  slot: quant.attention)
+                try requireAffine("\(prefix).linear_attn.in_proj_a.weight",
+                                  rows: la.numVHeads, columns: config.hiddenSize,
+                                  slot: quant.attention)
+                try requireAffine("\(prefix).linear_attn.in_proj_b.weight",
+                                  rows: la.numVHeads, columns: config.hiddenSize,
+                                  slot: quant.attention)
+                try requireAffine("\(prefix).linear_attn.out_proj.weight",
+                                  rows: config.hiddenSize, columns: la.valueDim,
+                                  slot: quant.attention)
+                try requireBF16("\(prefix).linear_attn.conv1d.weight",
+                                count: la.qkvDim * la.convKernelSize)
+                try requireBF16("\(prefix).linear_attn.A_log", count: la.numVHeads)
+                try requireBF16("\(prefix).linear_attn.dt_bias", count: la.numVHeads)
+                try requireBF16("\(prefix).linear_attn.norm.weight",
+                                count: la.valueHeadDim)
             }
-            try requireAffine("\(prefix).self_attn.o_proj.weight",
-                              rows: config.hiddenSize, columns: queryDimension,
-                              slot: quant.attention)
-            // Qwen 3.6 uses `.mlp.shared_expert.{gate,up,down}_proj.weight`;
-            // Gemma 4 uses `.mlp.{gate,up,down}_proj.weight`.
-            let sharedPrefix: String
-            switch config.family {
-            case .qwen36, .qwen36MTP:
-                sharedPrefix = "\(prefix).mlp.shared_expert"
-            case .gemma4:
-                sharedPrefix = "\(prefix).mlp"
-            }
-            try requireAffine("\(sharedPrefix).gate_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(sharedPrefix).up_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(sharedPrefix).down_proj.weight",
-                              rows: config.hiddenSize, columns: config.intermediateSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(prefix).router.proj.weight",
-                              rows: config.numExperts, columns: config.hiddenSize,
-                              slot: quant.router)
         }
 
         let routedShapes: [(String, Int, Int)] = [
@@ -803,7 +867,6 @@ extension Model {
                 }
             }
         }
-        */
     }
 
 }

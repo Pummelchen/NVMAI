@@ -1,3 +1,4 @@
+import Foundation
 import NVMAI
 
 public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
@@ -40,14 +41,22 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
     }
 
     public var menuLabel: String {
-        switch self {
-        case .fourK: "4K, Default"
-        case .eightK: "8K, +80 MB"
-        case .sixteenK: "16K, +240 MB"
-        case .thirtyTwoK: "32K, +560 MB"
-        case .sixtyFourK: "64K, +1.17 GB"
-        case .oneTwentyEightK: "128K, +2.42 GB"
-        case .twoFiftySixK: "256K, +4.92 GB"
+        // D20: derive the memory delta from the computed FP16 KV footprint
+        // (relative to the 4K baseline) so it cannot drift from the real
+        // per-token byte math.
+        let baseline = AppContextLengthOption.fourK.fp16KVBytes
+        guard fp16KVBytes >= baseline else { return shortLabel }
+        let delta = Int64(fp16KVBytes) - Int64(baseline)
+        guard delta > 0 else { return "\(shortLabel), Default" }
+        return "\(shortLabel), +\(Self.memoryDelta(delta))"
+    }
+
+    private static func memoryDelta(_ bytes: Int64) -> String {
+        let locale = Locale(identifier: "en_US_POSIX")
+        let mebibytes = Double(bytes) / 1_048_576
+        if mebibytes < 1_024 {
+            return String(format: "%.0f MB", locale: locale, mebibytes)
         }
+        return String(format: "%.2f GB", locale: locale, mebibytes / 1_024)
     }
 }

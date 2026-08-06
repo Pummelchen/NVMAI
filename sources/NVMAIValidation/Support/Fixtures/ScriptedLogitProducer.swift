@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import NVMAI
+import Synchronization
 
 /// Test `LogitProducer` that writes scripted logits, independent of the kernel
 /// stack. The `step` closure maps `(inputToken, callIndex)` to a logit spec, so
@@ -14,18 +15,27 @@ public final class ScriptedLogitProducer: LogitProducer, @unchecked Sendable {
 
     public let vocabSize: Int
     private let step: @Sendable (Int32, Int) -> Step
-    private var calls = 0
+    // `produce` may be invoked concurrently by the generation loop, so the
+    // call counter is lock-protected rather than relying on @unchecked
+    // Sendable for unsynchronized mutation. The stdlib `Mutex` is used
+    // instead of `NSLock` because the read happens in an `async` context.
+    private let callsLock = Mutex<Int>(0)
 
     public init(vocabSize: Int, step: @escaping @Sendable (Int32, Int) -> Step) {
         self.vocabSize = vocabSize
         self.step = step
     }
 
-    public func reset() { calls = 0 }
+    public func reset() {
+        callsLock.withLock { $0 = 0 }
+    }
 
     public func produce(token: Int32, position: Int, into logits: MTLBuffer) async throws {
-        let spec = step(token, calls)
-        calls += 1
+        let callIndex = callsLock.withLock { value -> Int in
+            defer { value += 1 }
+            return value
+        }
+        let spec = step(token, callIndex)
         let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocabSize)
         switch spec {
         case .argmax(let token):

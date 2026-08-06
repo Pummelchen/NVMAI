@@ -58,9 +58,9 @@ import Testing
 
         func draw(seed: UInt64,
                   temperature: Float = 1.0,
-                  topP: Float) -> (current: UInt32, candidate: UInt32) {
+                  topP: Float) throws -> (current: UInt32, candidate: UInt32) {
             let cb = context.queue.makeCommandBuffer()!
-            current.encode(commandBuffer: cb,
+            try current.encode(commandBuffer: cb,
                            probs: probs,
                            outToken: currentOutput,
                            v: UInt32(vocab),
@@ -68,7 +68,7 @@ import Testing
                            topK: 64,
                            topP: topP,
                            seed: seed)
-            candidate.encode(commandBuffer: cb,
+            try candidate.encode(commandBuffer: cb,
                              probs: probs,
                              outToken: candidateOutput,
                              temperature: temperature,
@@ -91,7 +91,7 @@ import Testing
 
         for temperature: Float in [0.7, 0.85, 1.0] {
             for seed: UInt64 in [1, 2, 0x1234_5678_9ABC_DEF0, UInt64.max] {
-                let result = rig.draw(seed: seed, temperature: temperature, topP: 0.95)
+                let result = try rig.draw(seed: seed, temperature: temperature, topP: 0.95)
                 #expect(result.candidate == result.current,
                         "temperature \(temperature), seed \(seed): candidate \(result.candidate), current \(result.current)")
             }
@@ -103,7 +103,7 @@ import Testing
         rig.write { _ in 1.0 }
 
         for seed in UInt64(1)...UInt64(8) {
-            let result = rig.draw(seed: seed, topP: 0.95)
+            let result = try rig.draw(seed: seed, topP: 0.95)
             #expect(result.candidate == result.current,
                     "seed \(seed): candidate \(result.candidate), current \(result.current)")
             #expect(result.candidate < 64)
@@ -119,7 +119,7 @@ import Testing
         // The previous Top-K-renormalize-then-Top-P order kept only 61.
         var sawLastThree = false
         for seed in UInt64(1)...UInt64(256) {
-            let result = rig.draw(seed: seed, topP: 0.95)
+            let result = try rig.draw(seed: seed, topP: 0.95)
             #expect(result.candidate == result.current)
             #expect(result.candidate < 64)
             if result.candidate >= 61 { sawLastThree = true }

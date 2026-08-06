@@ -1,11 +1,11 @@
 import Foundation
 import Metal
 
-/// Per-projection 8-bit affine weights for the Gemma 4 shared (dense) MLP.
+/// Per-projection 8-bit affine weights for the shared (dense) MLP.
 ///
-/// The Gemma 4 26B-A4B manifest stores `mlp.gate/up/down_proj.weight` at 8-bit
-/// MLX affine (group=64, BF16 scale + BF16 bias). Shapes:
-///   gate: [F=2112, D=2816]   up:   [F=2112, D=2816]   down: [D=2816, F=2112]
+/// The manifest stores `mlp.gate/up/down_proj.weight` at 8-bit MLX affine
+/// (group=64, BF16 scale + BF16 bias). Shapes:
+///   gate: [F, D]   up:   [F, D]   down: [D, F]
 public struct SharedExpertProjection {
     public let weights: MTLBuffer
     public let scales:  MTLBuffer
@@ -44,9 +44,9 @@ enum SharedExpertInt8Error: Error, CustomStringConvertible {
     }
 }
 
-/// Standalone 8-bit dense MLP — the "shared expert" branch of Gemma 4's
-/// parallel MoE. Runs on the same hidden as the routed
-/// branch, in parallel; their outputs are summed downstream.
+/// Standalone 8-bit dense MLP — the "shared expert" branch of the parallel
+/// MoE. Runs on the same hidden as the routed branch, in parallel; their
+/// outputs are summed downstream.
 ///
 ///     y = down(gelu_pytorch_tanh(gate(x)) * up(x))
 ///
@@ -169,7 +169,7 @@ final class SharedExpertInt8 {
             throw SharedExpertInt8Error.scratchTooSmall(
                 "y offset \(yOffset) + needed \(outputBytes) exceeds length \(y.length)")
         }
-        int8.encode(commandBuffer: cb,
+        try int8.encode(commandBuffer: cb,
                     weights: down.weights, weightsOffset: down.weightsOffset,
                     scales:  down.scales,  scalesOffset:  down.scalesOffset,
                     biases:  down.biases,  biasesOffset:  down.biasesOffset,

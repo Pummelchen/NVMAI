@@ -8,8 +8,9 @@ final class LMHeadChainInt4 {
     private static let rowSummaryStride = 2
 
     /// Shape this instance compiles a specialized head pipeline for. Taken
-    /// from the loaded model so both Gemma 4 (2816/262144) and Qwen 3.6
-    /// (2048/248320) get constant-folded loop bounds.
+    /// from the loaded model so Qwen 3.6 (2048/248320) gets constant-folded
+    /// loop bounds (the legacy default maxD=2816/maxVocab=262144 covers the
+    /// original decoder shapes).
     private let specializedD: UInt32
     private let specializedVocab: UInt32
 
@@ -69,7 +70,7 @@ final class LMHeadChainInt4 {
                             outToken: MTLBuffer,
                             d: UInt32,
                             vocab: UInt32,
-                            rmsEps: Float = 1e-6) {
+                            rmsEps: Float = 1e-6) throws {
         precondition(Int(d) <= maxD, "d=\(d) exceeds wrapper maxD=\(maxD)")
         precondition(Int(vocab) <= maxVocab,
                      "vocab=\(vocab) exceeds wrapper maxVocab=\(maxVocab)")
@@ -81,7 +82,7 @@ final class LMHeadChainInt4 {
 
         let rowGroups = (Int(vocab) + Self.rowsPerThreadgroup - 1)
             / Self.rowsPerThreadgroup
-        rms.encodeBF16W(commandBuffer: commandBuffer,
+        try rms.encodeBF16W(commandBuffer: commandBuffer,
                         x: hidden,
                         xOffset: hiddenOffset,
                         weight: normWeight,
@@ -90,39 +91,41 @@ final class LMHeadChainInt4 {
                         d: d,
                         eps: rmsEps)
 
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            let specialized = d == specializedD && vocab == specializedVocab
-            encoder.setComputePipelineState(specialized ? rowGreedySpecialized : rowGreedy)
-            encoder.setBuffer(xNormedBuffer, offset: 0, index: 0)
-            encoder.setBuffer(weights, offset: weightsOffset, index: 1)
-            encoder.setBuffer(scales, offset: scalesOffset, index: 2)
-            encoder.setBuffer(biases, offset: biasesOffset, index: 3)
-            encoder.setBuffer(rowSummariesBuffer, offset: 0, index: 4)
-            var dValue = d
-            var vocabValue = vocab
-            encoder.setBytes(&dValue, length: MemoryLayout<UInt32>.size, index: 5)
-            encoder.setBytes(&vocabValue, length: MemoryLayout<UInt32>.size, index: 6)
-
-            let threadgroupSize = MTLSize(
-                width: 32 * Self.rowsPerThreadgroup,
-                height: 1,
-                depth: 1)
-            encoder.dispatchThreadgroups(
-                MTLSize(width: rowGroups, height: 1, depth: 1),
-                threadsPerThreadgroup: threadgroupSize)
-            encoder.endEncoding()
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        let specialized = d == specializedD && vocab == specializedVocab
+        encoder.setComputePipelineState(specialized ? rowGreedySpecialized : rowGreedy)
+        encoder.setBuffer(xNormedBuffer, offset: 0, index: 0)
+        encoder.setBuffer(weights, offset: weightsOffset, index: 1)
+        encoder.setBuffer(scales, offset: scalesOffset, index: 2)
+        encoder.setBuffer(biases, offset: biasesOffset, index: 3)
+        encoder.setBuffer(rowSummariesBuffer, offset: 0, index: 4)
+        var dValue = d
+        var vocabValue = vocab
+        encoder.setBytes(&dValue, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&vocabValue, length: MemoryLayout<UInt32>.size, index: 6)
 
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(rowReducer)
-            encoder.setBuffer(rowSummariesBuffer, offset: 0, index: 0)
-            encoder.setBuffer(outToken, offset: 0, index: 1)
-            var rowGroupCount = UInt32(rowGroups)
-            encoder.setBytes(&rowGroupCount, length: MemoryLayout<UInt32>.size, index: 2)
+        let threadgroupSize = MTLSize(
+            width: 32 * Self.rowsPerThreadgroup,
+            height: 1,
+            depth: 1)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rowGroups, height: 1, depth: 1),
+            threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
 
-            let threadgroupSize = MTLSize(width: 256, height: 1, depth: 1)
-            encoder.dispatchThreads(threadgroupSize, threadsPerThreadgroup: threadgroupSize)
-            encoder.endEncoding()
+        guard let reducer = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
         }
+        reducer.setComputePipelineState(rowReducer)
+        reducer.setBuffer(rowSummariesBuffer, offset: 0, index: 0)
+        reducer.setBuffer(outToken, offset: 0, index: 1)
+        var rowGroupCount = UInt32(rowGroups)
+        reducer.setBytes(&rowGroupCount, length: MemoryLayout<UInt32>.size, index: 2)
+
+        let reducerSize = MTLSize(width: 256, height: 1, depth: 1)
+        reducer.dispatchThreads(reducerSize, threadsPerThreadgroup: reducerSize)
+        reducer.endEncoding()
     }
 }

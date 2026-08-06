@@ -121,10 +121,21 @@ final class Attention {
 	                                                options: .storageModeShared),
 	              let o = context.device.makeBuffer(length: md * Self.maxHeadDim * MemoryLayout<Float>.size,
 	                                                options: .storageModeShared) else {
-            throw MetalError.missingFunction("attention split-KV scratch")
+            throw MetalError.bufferAllocationFailed("attention split-KV scratch")
         }
         self.mPartial = m; self.dPartial = d; self.oPartial = o
+        self.splitStateLock = NSLock()
+        self.splitInFlight = false
     }
+
+    // K15: the split-KV partial scratch (mPartial/dPartial/oPartial) is shared
+    // instance state written by pass 1 and read by pass 2. The runtime encodes
+    // attention strictly serially — one layer at a time, one command buffer —
+    // so no two encodeSplit calls may be in flight. Guard that contract at
+    // runtime: a reentrant encodeSplit would corrupt pass-1 state and is a
+    // programming error, so it throws loudly instead of silently corrupting.
+    private let splitStateLock: NSLock
+    private var splitInFlight: Bool
 
     /// Number of K/V chunks for a range of `effLen` positions — the split
     /// factor used by the production split path.
@@ -160,8 +171,7 @@ final class Attention {
     /// Sliding-window attention. `window` caps the K/V positions to the most
     /// recent `window` entries (`[max(0, seqLen-window), seqLen)`).
     /// `scale` defaults to `rsqrt(head_dim)` for generic callers;
-    /// Gemma 4 callers pass 1.0 because the model's configured attention scale
-    /// is 1.0.
+    /// callers with a configured attention scale pass it explicitly.
     func encodeSWA(commandBuffer: MTLCommandBuffer,
                           q: MTLBuffer, qOffset: Int = 0,
                           k: MTLBuffer, kOffset: Int = 0,
@@ -173,7 +183,7 @@ final class Attention {
                           seqLen: UInt32,
                           window: UInt32,
                           scale: Float? = nil,
-                          ringCapacity: UInt32 = 0) {
+                          ringCapacity: UInt32 = 0) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -181,7 +191,7 @@ final class Attention {
         let sc = scale ?? Self.defaultScale(headDim: headDim)
         let kvStart = seqLen > window ? seqLen - window : 0
 
-        encodeSplit(commandBuffer: commandBuffer,
+        try encodeSplit(commandBuffer: commandBuffer,
                     q: q, qOffset: qOffset, k: k, kOffset: kOffset,
                     v: v, vOffset: vOffset, out: out, outOffset: outOffset,
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
@@ -190,9 +200,8 @@ final class Attention {
                     ringCapacity: ringCapacity)
     }
 
-    /// Full attention. Gemma 4 reuses the raw K projection as raw V input, but
-    /// separate normalization and RoPE make the cache streams distinct here.
-    /// `scale` mirrors `encodeSWA`.
+    /// Full attention. Separate normalization and RoPE make the cache streams
+    /// distinct here. `scale` mirrors `encodeSWA`.
     func encodeFull(commandBuffer: MTLCommandBuffer,
                            q: MTLBuffer, qOffset: Int = 0,
                            k: MTLBuffer, kOffset: Int = 0,
@@ -202,7 +211,7 @@ final class Attention {
                            numQHeads: UInt32,
                            numKVHeads: UInt32,
                            seqLen: UInt32,
-                           scale: Float? = nil) {
+                           scale: Float? = nil) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -211,7 +220,7 @@ final class Attention {
         let sc = scale ?? Self.defaultScale(headDim: headDim)
 
 
-        encodeSplit(commandBuffer: commandBuffer,
+        try encodeSplit(commandBuffer: commandBuffer,
                     q: q, qOffset: qOffset, k: k, kOffset: kOffset,
                     v: v, vOffset: vOffset, out: out, outOffset: outOffset,
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
@@ -233,13 +242,26 @@ final class Attention {
                              headDim: UInt32, numQHeads: UInt32, numKVHeads: UInt32,
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
-                             ringCapacity: UInt32 = 0) {
+                             ringCapacity: UInt32 = 0) throws {
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
         precondition(Int(headDim) <= Self.maxHeadDim,
                      "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
         precondition(ringCapacity == 0 || preferGQASWA,
                      "FP16 KV ring is only valid for SWA attention")
+        splitStateLock.lock()
+        let reentered = splitInFlight
+        splitInFlight = true
+        splitStateLock.unlock()
+        defer {
+            splitStateLock.lock()
+            splitInFlight = false
+            splitStateLock.unlock()
+        }
+        guard !reentered else {
+            throw MetalError.invalidState(
+                "encodeSplit re-entered while the previous split-KV pass was in flight; attention must encode serially per layer")
+        }
         let geometry = Self.splitGeometry(numQHeads: numQHeads,
                                           numKVHeads: numKVHeads,
                                           seqLen: seqLen,
@@ -256,7 +278,9 @@ final class Attention {
                                          ringCapacity: ringCapacity)
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
-        guard let p1 = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let p1 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         p1.setComputePipelineState(partialPSO)
         p1.setBuffer(q, offset: qOffset, index: 0)
         p1.setBuffer(k, offset: kOffset, index: 1)
@@ -279,7 +303,9 @@ final class Attention {
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
         p1.endEncoding()
 
-        guard let p2 = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let p2 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         let combinePSO = combinePipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
@@ -300,8 +326,8 @@ final class Attention {
     }
 
     /// `1 / sqrt(head_dim)` — the classic transformer scaling. Used as the
-    /// default for non-Gemma callers (and for the existing tests that pre-date
-    /// the runtime scale arg).
+    /// default for callers without a configured attention scale (and for the
+    /// existing tests that pre-date the runtime scale arg).
     static func defaultScale(headDim: UInt32) -> Float {
         Float(1.0) / Float(headDim).squareRoot()
     }

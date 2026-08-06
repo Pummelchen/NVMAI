@@ -59,7 +59,7 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for row in 0..<rows {
-            scalar.encodeDefaultNeox(commandBuffer: cb,
+            try scalar.encodeDefaultNeox(commandBuffer: cb,
                                      data: ref,
                                      dataOffset: row * rowStride * MemoryLayout<Float16>.size,
                                      position: UInt32(startPosition + row),
@@ -68,7 +68,7 @@ import NVMAIValidationSupport
                                      numTokens: 1,
                                      theta: theta)
         }
-        block.encodeDefaultNeox(commandBuffer: cb,
+        try block.encodeDefaultNeox(commandBuffer: cb,
                                 data: candidate,
                                 startPosition: UInt32(startPosition),
                                 queryCount: UInt32(rows),
@@ -118,7 +118,7 @@ import NVMAIValidationSupport
 
         let cb = ctx.queue.makeCommandBuffer()!
         for row in 0..<rows {
-            scalar.encodeProportionalNeox(commandBuffer: cb,
+            try scalar.encodeProportionalNeox(commandBuffer: cb,
                                           data: ref,
                                           dataOffset: row * rowStride * MemoryLayout<Float16>.size,
                                           position: UInt32(startPosition + row),
@@ -128,7 +128,7 @@ import NVMAIValidationSupport
                                           numTokens: 1,
                                           theta: theta)
         }
-        block.encodeProportionalNeox(commandBuffer: cb,
+        try block.encodeProportionalNeox(commandBuffer: cb,
                                      data: candidate,
                                      startPosition: UInt32(startPosition),
                                      queryCount: UInt32(rows),

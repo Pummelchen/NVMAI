@@ -4,11 +4,14 @@ import SwiftUI
 
 struct StatusHUDView: View {
     let model: AppModel
+    // D25: named layout constant for the leading inset that clears the
+    // window's traffic-light buttons under the hidden title bar.
+    private static let hudLeadingPadding: CGFloat = 84
 
     var body: some View {
         strip
             .padding(.top, 10)
-            .padding(.leading, 84)
+            .padding(.leading, Self.hudLeadingPadding)
             .padding(.trailing, 20)
     }
 

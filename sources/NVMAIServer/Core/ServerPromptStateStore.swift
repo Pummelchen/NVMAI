@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import NVMAI
+import Synchronization
 
 struct ServerPromptCacheStorageConfiguration: Sendable, Equatable {
     let memoryLimitBytes: Int
@@ -39,7 +40,14 @@ enum ServerPromptStateStoreError: Error, CustomStringConvertible {
     }
 }
 
-final class ServerPromptStateStore {
+/// Persistent + in-memory backing for published prompt-cache entries.
+///
+/// Concurrency model: the store is shared between the session actor (restore,
+/// remove, contains) and the detached save tasks. All in-memory bookkeeping is
+/// guarded by `state`; all disk writes are serialized on `diskQueue` so
+/// concurrent saves (a later generation's snapshot while an earlier write is
+/// still in flight) never interleave file operations or clobber each other.
+final class ServerPromptStateStore: @unchecked Sendable {
     private struct DiskMetadata: Codable {
         static let currentVersion = 1
 
@@ -60,18 +68,31 @@ final class ServerPromptStateStore {
     private static let payloadName = "state.bin"
     private static let maximumMetadataBytes = 16 * 1_048_576
 
+    /// Hard ceiling for one snapshot capture (S2). A snapshot above this is
+    /// never allocated, bounding the multi-GiB capture + write cost regardless
+    /// of a large configured disk budget (default 8 GiB).
+    static let maximumCaptureBytes = 4 * 1_048_576 * 1_048_576
+
+    private struct State {
+        var memory: [UUID: InferenceStateSnapshot] = [:]
+        var memoryLRU: [UUID] = []
+        var memoryBytes = 0
+        var disk: [UUID: DiskRecord] = [:]
+        var diskLRU: [UUID] = []
+        var diskBytes = 0
+    }
+
     private let configuration: ServerPromptCacheStorageConfiguration
     private let fileManager: FileManager
-    private var memory: [UUID: InferenceStateSnapshot] = [:]
-    private var memoryLRU: [UUID] = []
-    private var memoryBytes = 0
-    private var disk: [UUID: DiskRecord] = [:]
-    private var diskLRU: [UUID] = []
-    private var diskBytes = 0
+    private let state = Mutex(State())
+    private let diskQueue = DispatchQueue(
+        label: "nvmai.prompt-state-store.disk",
+        qos: .utility)
 
     var maximumSnapshotBytes: Int {
-        max(configuration.memoryLimitBytes,
-            configuration.diskDirectory == nil ? 0 : configuration.diskLimitBytes)
+        min(max(configuration.memoryLimitBytes,
+                configuration.diskDirectory == nil ? 0 : configuration.diskLimitBytes),
+            Self.maximumCaptureBytes)
     }
 
     init(configuration: ServerPromptCacheStorageConfiguration,
@@ -90,9 +111,11 @@ final class ServerPromptStateStore {
     }
 
     func loadEntries(domain: ServerPromptCacheDomain) -> [ServerPromptCacheEntry] {
-        disk.removeAll(keepingCapacity: true)
-        diskLRU.removeAll(keepingCapacity: true)
-        diskBytes = 0
+        state.withLock { state in
+            state.disk.removeAll(keepingCapacity: true)
+            state.diskLRU.removeAll(keepingCapacity: true)
+            state.diskBytes = 0
+        }
         guard let root = configuration.diskDirectory,
               configuration.diskLimitBytes > 0 else { return [] }
         let keys: Set<URLResourceKey> = [
@@ -145,22 +168,38 @@ final class ServerPromptStateStore {
         }
 
         loaded.sort { $0.modificationDate < $1.modificationDate }
-        for record in loaded {
-            let id = record.metadata.entry.id
-            disk[id] = record
-            diskLRU.append(id)
-            diskBytes += record.metadata.descriptor.payloadBytes
+        state.withLock { state in
+            for record in loaded {
+                let id = record.metadata.entry.id
+                state.disk[id] = record
+                state.diskLRU.append(id)
+                state.diskBytes += record.metadata.descriptor.payloadBytes
+            }
         }
         _ = evictDiskIfNeeded()
-        return diskLRU.compactMap {
-            guard let entry = disk[$0]?.metadata.entry,
-                  entry.domain == domain else { return nil }
-            return entry
+        return state.withLock { state in
+            state.diskLRU.compactMap {
+                guard let entry = state.disk[$0]?.metadata.entry,
+                      entry.domain == domain else { return nil }
+                return entry
+            }
         }
     }
 
+    /// Persist a snapshot. Async: the write (SHA-256 + state.bin +
+    /// metadata.json) runs on the store's serial disk queue, never on the
+    /// caller's actor, so a multi-GiB write does not stall the session.
     func save(entry: ServerPromptCacheEntry,
-              snapshot: InferenceStateSnapshot) -> ServerPromptStateSaveResult {
+              snapshot: InferenceStateSnapshot) async -> ServerPromptStateSaveResult {
+        await withCheckedContinuation { continuation in
+            diskQueue.async { [self] in
+                continuation.resume(returning: saveSync(entry: entry, snapshot: snapshot))
+            }
+        }
+    }
+
+    private func saveSync(entry: ServerPromptCacheEntry,
+                          snapshot: InferenceStateSnapshot) -> ServerPromptStateSaveResult {
         precondition(entry.kvPosition == snapshot.descriptor.position)
         var unbacked: [UUID] = []
         var diskError: String?
@@ -189,16 +228,22 @@ final class ServerPromptStateStore {
             unbacked.append(entry.id)
         }
 
+        let bytes = state.withLock { state in (state.memoryBytes, state.diskBytes) }
         return ServerPromptStateSaveResult(
             unbackedEntryIDs: unbacked,
             diskError: diskError,
-            memoryBytes: memoryBytes,
-            diskBytes: diskBytes)
+            memoryBytes: bytes.0,
+            diskBytes: bytes.1)
     }
 
     func restore(entryID: UUID,
-                 into runner: RealForwardRunner) throws -> String {
-        let loaded = try loadSnapshot(entryID: entryID)
+                 into runner: RealForwardRunner) async throws -> String {
+        // S3: the disk read + SHA-256 verification run off the caller's actor
+        // (detached task, awaited here); only the Metal-buffer restore stays on
+        // the actor.
+        let loaded = try await Task.detached(priority: .userInitiated) { [self] in
+            try loadSnapshot(entryID: entryID)
+        }.value
         do {
             try runner.restoreInferenceState(loaded.snapshot)
             return loaded.tier
@@ -211,23 +256,19 @@ final class ServerPromptStateStore {
     func loadSnapshot(
         entryID: UUID
     ) throws -> (snapshot: InferenceStateSnapshot, tier: String) {
-        if let snapshot = memory[entryID] {
+        if let snapshot = state.withLock({ $0.memory[entryID] }) {
             touchMemory(entryID)
             touchDisk(entryID)
             return (snapshot, "ram")
         }
-        guard let record = disk[entryID] else {
+        guard let record = state.withLock({ $0.disk[entryID] }) else {
             throw ServerPromptStateStoreError.missing(entryID)
         }
         do {
-            let payload = try Data(contentsOf: record.payload, options: [.mappedIfSafe])
-            guard payload.count == record.metadata.descriptor.payloadBytes else {
-                throw ServerPromptStateStoreError.corrupt(entryID, "payload size mismatch")
-            }
-            let digest = Self.sha256(payload)
-            guard digest == record.metadata.payloadSHA256 else {
-                throw ServerPromptStateStoreError.corrupt(entryID, "SHA-256 mismatch")
-            }
+            // S3: stream the payload in bounded chunks, verifying the SHA-256
+            // while copying (single pass over the file) — never materialize a
+            // second full copy just to hash it.
+            let payload = try readPayloadVerifying(record: record, entryID: entryID)
             let snapshot = InferenceStateSnapshot(
                 descriptor: record.metadata.descriptor,
                 payload: payload)
@@ -244,73 +285,118 @@ final class ServerPromptStateStore {
         }
     }
 
+    private func readPayloadVerifying(
+        record: DiskRecord,
+        entryID: UUID
+    ) throws -> Data {
+        let expected = record.metadata.descriptor.payloadBytes
+        let handle = try FileHandle(forReadingFrom: record.payload)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        var payload = Data()
+        payload.reserveCapacity(expected)
+        while true {
+            guard let chunk = try handle.read(upToCount: 1_048_576),
+                  !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+            payload.append(chunk)
+        }
+        guard payload.count == expected else {
+            throw ServerPromptStateStoreError.corrupt(entryID, "payload size mismatch")
+        }
+        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        guard digest == record.metadata.payloadSHA256 else {
+            throw ServerPromptStateStoreError.corrupt(entryID, "SHA-256 mismatch")
+        }
+        return payload
+    }
+
     func contains(_ entryID: UUID) -> Bool {
-        memory[entryID] != nil || disk[entryID] != nil
+        state.withLock { $0.memory[entryID] != nil || $0.disk[entryID] != nil }
     }
 
     func remove(entryIDs: some Sequence<UUID>) {
-        for id in entryIDs {
-            if let snapshot = memory.removeValue(forKey: id) {
-                memoryBytes -= snapshot.payload.count
+        state.withLock { state in
+            for id in entryIDs {
+                if let snapshot = state.memory.removeValue(forKey: id) {
+                    state.memoryBytes -= snapshot.payload.count
+                }
+                state.memoryLRU.removeAll { $0 == id }
+                if let record = state.disk.removeValue(forKey: id) {
+                    state.diskBytes -= record.metadata.descriptor.payloadBytes
+                    try? fileManager.removeItem(at: record.directory)
+                }
+                state.diskLRU.removeAll { $0 == id }
             }
-            memoryLRU.removeAll { $0 == id }
-            if let record = disk.removeValue(forKey: id) {
-                diskBytes -= record.metadata.descriptor.payloadBytes
-                try? fileManager.removeItem(at: record.directory)
-            }
-            diskLRU.removeAll { $0 == id }
         }
     }
 
     private func insertMemory(_ snapshot: InferenceStateSnapshot, id: UUID) {
-        if let previous = memory.updateValue(snapshot, forKey: id) {
-            memoryBytes -= previous.payload.count
+        state.withLock { state in
+            if let previous = state.memory.updateValue(snapshot, forKey: id) {
+                state.memoryBytes -= previous.payload.count
+            }
+            state.memoryBytes += snapshot.payload.count
         }
-        memoryBytes += snapshot.payload.count
         touchMemory(id)
     }
 
     private func touchMemory(_ id: UUID) {
-        memoryLRU.removeAll { $0 == id }
-        memoryLRU.append(id)
+        state.withLock { state in
+            state.memoryLRU.removeAll { $0 == id }
+            state.memoryLRU.append(id)
+        }
     }
 
     private func touchDisk(_ id: UUID) {
-        guard var record = disk[id] else { return }
-        record.modificationDate = Date()
-        disk[id] = record
-        diskLRU.removeAll { $0 == id }
-        diskLRU.append(id)
-        try? fileManager.setAttributes(
-            [.modificationDate: record.modificationDate],
-            ofItemAtPath: record.directory.path)
+        let record = state.withLock { state -> DiskRecord? in
+            guard var record = state.disk[id] else { return nil }
+            record.modificationDate = Date()
+            state.disk[id] = record
+            state.diskLRU.removeAll { $0 == id }
+            state.diskLRU.append(id)
+            return record
+        }
+        guard let record else { return }
+        // S34: the mtime only feeds cross-restart LRU ordering; update it on
+        // the background disk queue so the caller's actor never blocks on
+        // setAttributes.
+        let date = record.modificationDate
+        let path = record.directory.path
+        diskQueue.async { [self] in
+            try? self.fileManager.setAttributes([.modificationDate: date], ofItemAtPath: path)
+        }
     }
 
     private func evictMemoryIfNeeded() -> [UUID] {
-        var evicted: [UUID] = []
-        while memoryBytes > configuration.memoryLimitBytes,
-              let id = memoryLRU.first {
-            memoryLRU.removeFirst()
-            if let snapshot = memory.removeValue(forKey: id) {
-                memoryBytes -= snapshot.payload.count
-                evicted.append(id)
+        state.withLock { state -> [UUID] in
+            var evicted: [UUID] = []
+            while state.memoryBytes > configuration.memoryLimitBytes,
+                  let id = state.memoryLRU.first {
+                state.memoryLRU.removeFirst()
+                if let snapshot = state.memory.removeValue(forKey: id) {
+                    state.memoryBytes -= snapshot.payload.count
+                    evicted.append(id)
+                }
             }
+            return evicted
         }
-        return evicted
     }
 
     private func evictDiskIfNeeded() -> [UUID] {
-        var evicted: [UUID] = []
-        while diskBytes > configuration.diskLimitBytes,
-              let id = diskLRU.first {
-            diskLRU.removeFirst()
-            if let record = disk.removeValue(forKey: id) {
-                diskBytes -= record.metadata.descriptor.payloadBytes
-                try? fileManager.removeItem(at: record.directory)
-                evicted.append(id)
+        state.withLock { state -> [UUID] in
+            var evicted: [UUID] = []
+            while state.diskBytes > configuration.diskLimitBytes,
+                  let id = state.diskLRU.first {
+                state.diskLRU.removeFirst()
+                if let record = state.disk.removeValue(forKey: id) {
+                    state.diskBytes -= record.metadata.descriptor.payloadBytes
+                    try? fileManager.removeItem(at: record.directory)
+                    evicted.append(id)
+                }
             }
+            return evicted
         }
-        return evicted
     }
 
     private func writeDisk(entry: ServerPromptCacheEntry,
@@ -342,20 +428,37 @@ final class ServerPromptStateStore {
             try fileManager.setAttributes(
                 [.posixPermissions: 0o600],
                 ofItemAtPath: metadataURL.path)
+            // S23: never remove the live directory before the replacement is
+            // in place. Swap via renames: move the old directory aside, move
+            // the new one into place, then drop the backup. If the swap fails,
+            // restore the old directory so the previously persisted record
+            // stays loadable instead of being orphaned.
             if fileManager.fileExists(atPath: finalDirectory.path) {
-                try fileManager.removeItem(at: finalDirectory)
+                let backupDirectory = root.appendingPathComponent(
+                    ".bak-\(id.uuidString.lowercased())-\(UUID().uuidString.lowercased())")
+                try fileManager.moveItem(at: finalDirectory, to: backupDirectory)
+                do {
+                    try fileManager.moveItem(at: temporaryDirectory, to: finalDirectory)
+                    try? fileManager.removeItem(at: backupDirectory)
+                } catch {
+                    try? fileManager.moveItem(at: backupDirectory, to: finalDirectory)
+                    throw error
+                }
+            } else {
+                try fileManager.moveItem(at: temporaryDirectory, to: finalDirectory)
             }
-            try fileManager.moveItem(at: temporaryDirectory, to: finalDirectory)
-            if let previous = disk[id] {
-                diskBytes -= previous.metadata.descriptor.payloadBytes
+            state.withLock { state in
+                if let previous = state.disk[id] {
+                    state.diskBytes -= previous.metadata.descriptor.payloadBytes
+                }
+                let record = DiskRecord(
+                    metadata: metadata,
+                    directory: finalDirectory,
+                    payload: finalDirectory.appendingPathComponent(Self.payloadName),
+                    modificationDate: Date())
+                state.disk[id] = record
+                state.diskBytes += snapshot.payload.count
             }
-            let record = DiskRecord(
-                metadata: metadata,
-                directory: finalDirectory,
-                payload: finalDirectory.appendingPathComponent(Self.payloadName),
-                modificationDate: Date())
-            disk[id] = record
-            diskBytes += snapshot.payload.count
             touchDisk(id)
         } catch {
             try? fileManager.removeItem(at: temporaryDirectory)

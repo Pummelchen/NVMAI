@@ -34,7 +34,7 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
-                expertCacheSlots: Int = 16,
+                expertCacheSlots: Int = 32,
                 rdadvise: String = "off",
                 prefillChunk: PrefillChunkChoice? = nil) {
         self.model = model
@@ -79,7 +79,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 
 extension Args {
     public static let usage = """
-    NVMAICLI — Gemma 4 26B-A4B / Qwen3.6 35B-A3B text generation
+    NVMAICLI — Qwen3.6 35B-A3B text generation
 
     usage: NVMAICLI --model <dir> (--prompt <string> | --messages-file <path>) [options]
 
@@ -124,7 +124,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
-        var expertCacheSlots = 16
+        var expertCacheSlots = 32
         var rdadvise = "off"
         var prefillChunk: PrefillChunkChoice?
 
@@ -189,7 +189,7 @@ extension Args {
             case "--expert-cache-slots":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value),
-                      [8, 16, 24, 32].contains(parsed) else {
+                      [8, 16, 24, 32, 64].contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 expertCacheSlots = parsed

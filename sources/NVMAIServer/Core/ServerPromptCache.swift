@@ -54,8 +54,6 @@ struct ServerPromptCache: Sendable {
         self.entries = Array(entries.suffix(maximumEntries))
     }
 
-    var entry: ServerPromptCacheEntry? { entries.last }
-
     mutating func invalidate() {
         entries.removeAll(keepingCapacity: true)
     }
@@ -163,7 +161,10 @@ struct ServerPromptCache: Sendable {
             return nil
         }
 
-        if renderedPromptIDs.count > entry.kvPosition,
+        // S12: direct prefix hit. `>=` (not `>`) so an identical-prompt
+        // replay whose render is exactly the entry's KV-backed prefix also
+        // hits; the caller restores the entry state without extending it.
+        if renderedPromptIDs.count >= entry.kvPosition,
            renderedPromptIDs.prefix(entry.kvPosition)
             .elementsEqual(entry.kvBackedTokenIDs) {
             return (renderedPromptIDs, entry.kvPosition)
@@ -216,18 +217,37 @@ struct ServerPromptCache: Sendable {
         continuation: [GFTokenizer.Message],
         tokenizer: GFTokenizer
     ) -> (effective: [Int32], cached: Int)? {
-        guard continuation.count == 1,
-              continuation[0].role == .user,
-              let content = continuation[0].content,
-              continuation[0].toolCalls.isEmpty,
-              continuation[0].toolCallID == nil,
+        // S13: support multi-turn continuations by matching on the trailing
+        // user message. The whole tail after the cached assistant turn is
+        // re-encoded with the same text-only ChatML template used to render
+        // the original prompt, so the prefill reproduces the request's render
+        // byte-for-byte. Kept conservative: the tail must be plain text-only
+        // turns (no tool calls/results or tool ids, which the text template
+        // cannot represent) and must end in a user message so the generation
+        // suffix applies.
+        guard let last = continuation.last,
+              last.role == .user,
+              continuation.allSatisfy({
+                  $0.role != .tool && $0.toolCallID == nil && $0.toolCalls.isEmpty
+              }),
               entry.assistantTurn.rawStopReason == .endOfTurn
-                || entry.assistantTurn.rawStopReason == .maxTokens else {
+                || entry.assistantTurn.rawStopReason == .maxTokens,
+              let renderedTail = try? tokenizer.applyChatTemplate(continuation)
+        else {
             return nil
         }
-        var bridge = tokenizer.encodeTextContinuation(userContent: content)
+        // The bridge begins with the cached turn's closing <|im_end|>, then
+        // the rendered tail (which includes the generation suffix).
+        var bridge = [tokenizer.endOfTurnID]
+            + tokenizer.encode("\n" + renderedTail, addBOS: false)
         if entry.assistantTurn.rawStopReason == .maxTokens {
-            bridge = entry.uncommittedBoundaryTokenIDs + bridge
+            // S14: the uncommitted boundary token (the last generated token,
+            // never committed to KV) must be replayed first — but apply the
+            // same first-token dedup as the endOfTurn branch so a bridge that
+            // already begins with the boundary token is not doubled.
+            if bridge.first != entry.uncommittedBoundaryTokenIDs.first {
+                bridge = entry.uncommittedBoundaryTokenIDs + bridge
+            }
         } else if bridge.first != entry.uncommittedBoundaryTokenIDs.first {
             return nil
         }

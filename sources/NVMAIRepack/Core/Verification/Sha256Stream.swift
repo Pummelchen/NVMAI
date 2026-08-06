@@ -39,21 +39,34 @@ struct Sha256Stream {
         guard tileBytes > 0 else {
             throw RepackError.configurationInvalid(detail: "SHA-256 tile size must be positive")
         }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_size >= 0 else {
+            throw RepackError.fileStatFailed(path: displayPath, errno: errno)
+        }
+        let expectedBytes = UInt64(st.st_size)
         if noCache { _ = fcntl(fd, F_NOCACHE, 1) }
         var hasher = Sha256Stream()
         let buf = UnsafeMutableRawBufferPointer.allocate(byteCount: tileBytes, alignment: 16_384)
         defer { buf.deallocate() }
-        var off: off_t = 0
-        while true {
-            let got = pread(fd, buf.baseAddress, tileBytes, off)
+        var total: UInt64 = 0
+        while total < expectedBytes {
+            let want = Int(min(UInt64(tileBytes), expectedBytes - total))
+            errno = 0
+            let got = pread(fd, buf.baseAddress, want, off_t(total))
             if got < 0, errno == EINTR { continue }
             if got < 0 {
                 throw RepackError.preadShort(path: displayPath,
-                                             expected: tileBytes, got: 0, errno: errno)
+                                             expected: want, got: 0, errno: errno)
             }
-            if got == 0 { break }
+            guard got > 0 else {
+                // EOF before the fstat size: the file shrank mid-hash. Report
+                // the actual short-read count (0) instead of silently hashing
+                // a truncated prefix.
+                throw RepackError.preadShort(path: displayPath,
+                                             expected: want, got: 0, errno: errno)
+            }
             hasher.update(UnsafeRawBufferPointer(start: buf.baseAddress, count: got))
-            off += off_t(got)
+            total += UInt64(got)
         }
         return hasher.finalizeHexString()
     }

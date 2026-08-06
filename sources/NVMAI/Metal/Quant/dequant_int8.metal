@@ -19,7 +19,7 @@ constant uint FC_INT8_M [[function_constant(70)]];
 constant uint FC_INT8_N [[function_constant(71)]];
 constant bool FC_INT8_USE_FC [[function_constant(72)]];
 constant uint FC_SHARED_INT8_ROWS_PER_TG [[function_constant(73)]];
-// Unset/false = gelu_pytorch_tanh (Gemma), true = silu (Qwen 3.6 SwiGLU).
+// Unset/false = gelu_pytorch_tanh, true = silu (Qwen 3.6 SwiGLU).
 constant bool FC_SHARED_INT8_ACT_SILU [[function_constant(74)]];
 constant constexpr float kInt8GeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kInt8GeluCubicCoeff  = 0.044715f;

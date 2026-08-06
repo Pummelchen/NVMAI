@@ -29,15 +29,24 @@ struct NVMAIMacApp: App {
     @State private var model: AppModel
 
     init() {
-        let client: DecodeServiceInferenceClient
+        let client: any AppInferenceClient
+        var launchError: AppInferenceError?
         do {
             client = try DecodeServiceInferenceClient()
         } catch {
-            fatalError("Cannot create decode service client: \(error)")
+            // D4: never crash at launch. Fall back to a client that fails
+            // every operation with the recorded error and surface it in the
+            // UI so the user can recover.
+            let error = AppInferenceError.unknown(
+                "Cannot create decode service client: \(error)")
+            launchError = error
+            client = UnavailableInferenceClient(failure: error)
         }
-        _model = State(initialValue: AppModel(
-            client: client,
-            settingsPersistenceEnabled: true))
+        let model = AppModel(client: client, settingsPersistenceEnabled: true)
+        if let launchError {
+            model.error = launchError
+        }
+        _model = State(initialValue: model)
     }
 
     var body: some Scene {

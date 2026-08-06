@@ -2,11 +2,10 @@ import Foundation
 import Metal
 
 /// Model family discriminator. Selects the tensor-name contract, the layer
-/// graph shape (norm sandwich vs plain pre-norm), and family-specific kernel
-/// behavior. Stored in `manifest.json -> arch.family`; absent means Gemma 4
-/// (the format's original architecture).
+/// graph shape, and family-specific kernel behavior. Stored in
+/// `manifest.json -> arch.family`; absent means the Qwen 3.6 baseline
+/// (NVMAI is Qwen-only).
 public enum ModelFamily: String, Sendable, Equatable {
-    case gemma4 = "gemma4"
     case qwen36 = "qwen36"
     case qwen36MTP = "qwen36_mtp"
 }
@@ -69,30 +68,29 @@ public struct ArchConfig: Sendable, Equatable {
     public let fullAttentionLayerMask: [UInt8]
     public let hiddenActivation: String
 
-    // Family-dependent extensions. Defaults describe Gemma 4 so that legacy
-    // manifests (which omit them) validate unchanged.
+    // Family-dependent extensions. Defaults describe the Qwen 3.6 baseline so
+    // that manifests which omit them validate unchanged.
     public let family: ModelFamily
     /// Full-attention q_proj emits `2 * numHeads * fullHeadDim` rows: per-head
     /// [query ; gate] halves. Attention output is multiplied by sigmoid(gate)
     /// before o_proj.
     public let attnOutputGate: Bool
-    /// Softmax scale for full attention. Gemma 4 uses 1.0.
+    /// Softmax scale for full attention (Qwen 3.6 uses 0.0625 = 256^-0.5).
     public let attentionScale: Double
-    /// Embedding lookup is multiplied by sqrt(hiddenSize) (Gemma) or not (Qwen).
+    /// Embedding lookup is multiplied by sqrt(hiddenSize). False for Qwen 3.6.
     public let embeddingScaledBySqrtHidden: Bool
-    /// Router has `router.scale` (input multiplier) and `per_expert_scale`
-    /// tensors (Gemma). False: plain quantized linear router with renormalized
-    /// top-k softmax weights and no auxiliary scale tensors.
+    /// Router carries `router.scale` (input multiplier) and `per_expert_scale`
+    /// tensors. False (Qwen 3.6): plain quantized linear router with
+    /// renormalized top-k softmax weights and no auxiliary scale tensors.
     public let routerScaled: Bool
-    /// Gemma's dual-branch FFN sandwich: pre/post feedforward norms plus a
-    /// per-layer residual scalar. False = plain pre-norm residual block.
+    /// Dual-branch FFN sandwich: pre/post feedforward norms plus a per-layer
+    /// residual scalar. False (Qwen 3.6) = plain pre-norm residual block.
     public let ffnSandwichNorms: Bool
-    /// Shared expert output is gated by sigmoid(shared_expert_gate(x)) (Qwen).
+    /// Shared expert output is gated by sigmoid(shared_expert_gate(x)).
     public let sharedExpertGated: Bool
-    /// Partial RoPE convention. False (Gemma): pairs (i, headDim/2 + i) for
-    /// i < rotatedPairs with frequency divisor = headDim. True (Qwen/NeoX
-    /// sub-dim): rotation confined to the first `rotaryDim` elements, pairing
-    /// (i, rotaryDim/2 + i), frequency divisor = rotaryDim.
+    /// Partial RoPE convention. True (Qwen/NeoX sub-dim): rotation confined to
+    /// the first `rotaryDim` elements, pairing (i, rotaryDim/2 + i), frequency
+    /// divisor = rotaryDim.
     public let ropeNeoxSubdim: Bool
     /// Gated-DeltaNet dimensions for layers with mask value 2.
     public let linearAttention: LinearAttentionConfig
@@ -119,14 +117,14 @@ public struct ArchConfig: Sendable, Equatable {
         attentionKEqV: Bool,
         fullAttentionLayerMask: [UInt8],
         hiddenActivation: String,
-        family: ModelFamily = .gemma4,
-        attnOutputGate: Bool = false,
-        attentionScale: Double = 1.0,
-        embeddingScaledBySqrtHidden: Bool = true,
-        routerScaled: Bool = true,
-        ffnSandwichNorms: Bool = true,
-        sharedExpertGated: Bool = false,
-        ropeNeoxSubdim: Bool = false,
+        family: ModelFamily = .qwen36,
+        attnOutputGate: Bool = true,
+        attentionScale: Double = 0.0625,
+        embeddingScaledBySqrtHidden: Bool = false,
+        routerScaled: Bool = false,
+        ffnSandwichNorms: Bool = false,
+        sharedExpertGated: Bool = true,
+        ropeNeoxSubdim: Bool = true,
         linearAttention: LinearAttentionConfig = .none
     ) {
         self.hiddenSize = hiddenSize
@@ -159,39 +157,6 @@ public struct ArchConfig: Sendable, Equatable {
         self.sharedExpertGated = sharedExpertGated
         self.ropeNeoxSubdim = ropeNeoxSubdim
         self.linearAttention = linearAttention
-    }
-
-    /// Canonical Gemma 4 26B-A4B baseline, checked against the installed
-    /// model manifest.
-    /// `intermediateSize = 2112` is the shared-expert FFN width (3 × moe).
-    public static let gemma4_26B_A4B = ArchConfig(
-        hiddenSize: 2816,
-        intermediateSize: 2112,
-        moeIntermediateSize: 704,
-        numHeads: 16,
-        numKVHeads: 8,
-        numFullKVHeads: 2,
-        headDim: 256,
-        fullHeadDim: 512,
-        vocabSize: 262144,
-        slidingWindow: 1024,
-        finalLogitSoftcap: 30.0,
-        ropeTheta: 10_000.0,
-        fullRopeTheta: 1_000_000.0,
-        partialRotaryFactor: 0.25,
-        numLayers: 30,
-        numExperts: 128,
-        topKExperts: 8,
-        tieWordEmbeddings: true,
-        attentionKEqV: true,
-        fullAttentionLayerMask: Self.gemma4LayerMask(),
-        hiddenActivation: "gelu_pytorch_tanh"
-    )
-
-    private static func gemma4LayerMask() -> [UInt8] {
-        var mask = [UInt8](repeating: 0, count: 30)
-        for i in stride(from: 5, to: 30, by: 6) { mask[i] = 1 }
-        return mask
     }
 
     /// Canonical Qwen3.6-35B-A3B baseline: a 40-layer hybrid of 30
@@ -282,7 +247,6 @@ public struct ArchConfig: Sendable, Equatable {
 
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
-        .gemma4: .gemma4_26B_A4B,
         .qwen36: .qwen36_35B_A3B,
         .qwen36MTP: .qwen36MTP,
     ]
@@ -331,6 +295,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case unsupportedVersion(major: Int, minor: Int)
     case unknownFlag(name: String)
     case archMismatch(field: String, expected: String, actual: String)
+    case unsupportedArchitecture(detail: String)
     case expertStrideNotPageAligned(stride: UInt64, pageSize: Int)
     case missingFile(name: String)
     case checksumMismatch(file: String)
@@ -340,6 +305,14 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case indexCorrupt(detail: String)
     case posixFailed(call: String, errno: Int32)
     case trustedReceiptInvalid(detail: String)
+    case expertCacheUnplaceable(detail: String)
+    /// A Metal command buffer reported `.error`; the GPU work it carried
+    /// (decode layer, head, or routed-expert pass) did not complete.
+    case commandBufferFailed(detail: String)
+    /// A runtime invariant the code believes is impossible was violated
+    /// (arch/kernel mismatch, pipeline state corruption). Thrown instead of
+    /// trapping so generation fails loudly without crashing the process.
+    case internalInconsistency(detail: String)
 
     public var description: String {
         switch self {
@@ -353,6 +326,8 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "manifest.flags contains unknown key \"\(n)\""
         case .archMismatch(let field, let exp, let act):
             return "manifest.arch.\(field) = \(act); expected \(exp)"
+        case .unsupportedArchitecture(let detail):
+            return "unsupported architecture: \(detail)"
         case .expertStrideNotPageAligned(let s, let p):
             return "expertStride \(s) is not a multiple of page size \(p)"
         case .missingFile(let n):
@@ -371,6 +346,12 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "\(c) failed with errno \(e)"
         case .trustedReceiptInvalid(let detail):
             return "trusted install receipt invalid: \(detail)"
+        case .expertCacheUnplaceable(let detail):
+            return "expert cache cannot place requested experts: \(detail)"
+        case .commandBufferFailed(let detail):
+            return "Metal command buffer failed: \(detail)"
+        case .internalInconsistency(let detail):
+            return "internal inconsistency: \(detail)"
         }
     }
 }

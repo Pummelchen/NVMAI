@@ -14,7 +14,9 @@ enum Safetensors {
                                         fileSize: UInt64,
                                         headerBytes data: Data) throws -> Header {
         let headerSize = UInt64(data.count)
-        if headerSize > maxHeaderBytes || headerSize > fileSize - 8 {
+        // The 8-byte size prefix must fit inside the file before we can
+        // subtract it (underflows when fileSize < 8).
+        if fileSize < 8 || headerSize > maxHeaderBytes || headerSize > fileSize - 8 {
             throw RepackError.safetensorsHeaderTooLarge(path: path, size: headerSize)
         }
         let rawObj = try JSONSerialization.jsonObject(with: data, options: [])
@@ -49,7 +51,14 @@ enum Safetensors {
             }
             let shapeU64: [UInt64] = try shape.map { e in
                 if let n = e as? NSNumber { return n.uint64Value }
-                if let n = e as? Int { return UInt64(n) }
+                if let n = e as? Int {
+                    guard n >= 0 else {
+                        throw RepackError.safetensorsHeaderInvalid(
+                            path: path,
+                            detail: "entry for \(name) has a negative shape entry")
+                    }
+                    return UInt64(n)
+                }
                 throw RepackError.safetensorsHeaderInvalid(path: path,
                                                            detail: "entry for \(name) has non-integer shape entry")
             }
@@ -60,16 +69,31 @@ enum Safetensors {
                 throw RepackError.safetensorsHeaderInvalid(path: path,
                                                            detail: "entry for \(name) has bad data_offsets")
             }
-            let abs = payloadBase + begin
+            // Checked arithmetic: begin/end come from remote-controlled JSON,
+            // so every combination is validated instead of relying on wrap
+            // or trap semantics.
+            guard begin <= end else {
+                throw RepackError.safetensorsHeaderInvalid(
+                    path: path, detail: "entry for \(name) has inverted data_offsets")
+            }
+            let (abs, baseOverflow) = payloadBase.addingReportingOverflow(begin)
+            guard !baseOverflow, abs <= fileSize else {
+                throw RepackError.safetensorsTensorOutOfRange(
+                    path: path, name: name, end: abs, fileSize: fileSize)
+            }
             let size = end - begin
-            let endAbs = abs + size
-            if endAbs > fileSize {
-                throw RepackError.safetensorsTensorOutOfRange(path: path, name: name,
-                                                              end: endAbs, fileSize: fileSize)
+            let (endAbs, rangeOverflow) = abs.addingReportingOverflow(size)
+            if rangeOverflow || endAbs > fileSize {
+                throw RepackError.safetensorsTensorOutOfRange(
+                    path: path, name: name, end: endAbs, fileSize: fileSize)
             }
             let elemBytes = UInt64(dtype.elementBytes)
-            let elements = shapeU64.reduce(UInt64(1), *)
-            if elements * elemBytes != size {
+            let (elements, elementsOverflow) = shapeU64.reduce((UInt64(1), false)) {
+                let (product, overflow) = $0.0.multipliedReportingOverflow(by: $1)
+                return (product, overflow || $0.1)
+            }
+            let (bytes, bytesOverflow) = elements.multipliedReportingOverflow(by: elemBytes)
+            if elementsOverflow || bytesOverflow || bytes != size {
                 throw RepackError.shapeMismatch(name: name,
                                                 detail: "shape product \(elements)*\(elemBytes) != size \(size)")
             }

@@ -27,6 +27,11 @@ public final class InstructionTranscriptDocumentController {
     public private(set) var assistantRange = NSRange(location: 0, length: 0)
     private var prefillPlaceholderRange: NSRange?
     private var prefillDotCount = 0
+    /// The response text last rendered through the markdown renderer. The full
+    /// transcript is only re-parsed when this differs from the incoming
+    /// response, so repeated terminal synchronize calls do not re-render
+    /// unchanged content (D17).
+    private var lastRenderedResponse: String?
 
     private let renderer: ResponseMarkdownRenderer
 
@@ -68,7 +73,6 @@ public final class InstructionTranscriptDocumentController {
         isTerminal: Bool,
         showsPrefillPlaceholder: Bool = false
     ) -> UpdateResult {
-        let responseChanged = response != self.response
         let displaysPrefillPlaceholder = Self.shouldRunPrefillAnimation(
             response: response,
             isTerminal: isTerminal,
@@ -88,8 +92,12 @@ public final class InstructionTranscriptDocumentController {
                 response: response,
                 showsPrefillPlaceholder: displaysPrefillPlaceholder)
             mutation = .rebuilt
-        } else if response.count > self.response.count {
-            let delta = String(response.dropFirst(self.response.count))
+        } else if (response as NSString).length > (self.response as NSString).length {
+            // D31: count in NSString units consistently for both the prefix
+            // and the appended range so multi-codepoint graphemes cannot
+            // desync the attributed-string range from the delta.
+            let oldLength = (self.response as NSString).length
+            let delta = (response as NSString).substring(from: oldLength)
             storage.append(NSAttributedString(
                 string: delta,
                 attributes: Self.responseAttributes()))
@@ -101,10 +109,14 @@ public final class InstructionTranscriptDocumentController {
         self.response = response
         self.showsPrefillPlaceholder = displaysPrefillPlaceholder
 
-        if isTerminal && (!isFinalized || responseChanged) {
+        // D17: render the markdown form of the full transcript only when the
+        // visible content actually changed since the last render; otherwise a
+        // terminal re-synchronize would re-parse the entire transcript.
+        if isTerminal && response != lastRenderedResponse {
             let rendered = renderer.render(response).attributedString
             storage.replaceCharacters(in: assistantRange, with: rendered)
             assistantRange.length = rendered.length
+            lastRenderedResponse = response
             isFinalized = true
             mutation = .finalized
         } else if !isTerminal {
@@ -159,6 +171,7 @@ public final class InstructionTranscriptDocumentController {
         assistantRange.length = (response as NSString).length
         prefillDotCount = 0
         prefillPlaceholderRange = nil
+        lastRenderedResponse = nil
         if showsPrefillPlaceholder {
             let placeholder = NSAttributedString(
                 string: Self.prefillPlaceholder(dotCount: prefillDotCount),

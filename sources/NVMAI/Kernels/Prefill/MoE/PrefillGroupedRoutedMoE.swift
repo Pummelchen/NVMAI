@@ -389,6 +389,16 @@ final class PrefillGroupedRoutedMoE {
         routes: PrefillMoEGroupedRoutes
     ) throws -> PrefillGroupedRoutedMoEStreamedMetadataBuffers {
         let bytes = routes.sortedPairs.count * MemoryLayout<PrefillTokenExpertPair>.stride
+        // K13: sortedPairs can be empty (zero routed pairs for the chunk).
+        // withUnsafeBufferPointer on an empty array yields a nil baseAddress,
+        // so guard the empty case and hand out a zero-length buffer instead of
+        // force-unwrapping. The batched kernels guard on pair_count == 0.
+        guard !routes.sortedPairs.isEmpty else {
+            guard let empty = device.makeBuffer(length: 0, options: .storageModeShared) else {
+                throw PrefillGroupedRoutedMoEError.allocationFailed("prefill sorted route pairs")
+            }
+            return PrefillGroupedRoutedMoEStreamedMetadataBuffers(sortedPairs: empty)
+        }
         guard let sortedPairs = routes.sortedPairs.withUnsafeBufferPointer({ ptr in
             device.makeBuffer(bytes: ptr.baseAddress!,
                               length: bytes,
@@ -414,7 +424,7 @@ final class PrefillGroupedRoutedMoE {
                                       argumentBuffer: PrefillStreamedTileArgumentBuffer,
                                       binding: PrefillStreamedTileBinding,
                                       params: PrefillGroupedRoutedMoEStreamedParams,
-                                      pairMicrobatchRows: Int = 32) -> Int {
+                                      pairMicrobatchRows: Int = 32) throws -> Int {
         guard params.pairCount > 0,
               params.liveExpertCount == UInt32(binding.views.count),
               pairMicrobatchRows > 0 else { return 0 }
@@ -425,50 +435,52 @@ final class PrefillGroupedRoutedMoE {
             p.pairStart = params.pairStart + consumed
             p.pairCount = min(UInt32(pairMicrobatchRows), params.pairCount - consumed)
 
-            if let enc = commandBuffer.makeComputeCommandEncoder() {
-                enc.setComputePipelineState(batchedPhase1PSO)
-                enc.setBuffer(hidden, offset: hiddenOffset, index: PrefillGroupedRoutedMoEBufferIndex.hidden)
-                enc.setBuffer(sortedPairs, offset: sortedPairsOffset, index: PrefillGroupedRoutedMoEBufferIndex.sortedPairs)
-                enc.setBuffer(gateUpActScratch, offset: gateUpActScratchOffset,
-                              index: PrefillGroupedRoutedMoEBufferIndex.gateUpActScratch)
-                enc.setBuffer(argumentBuffer.buffer, offset: 0,
-                              index: PrefillGroupedRoutedMoEBufferIndex.expertArgumentState)
-                enc.setBytes(&p,
-                             length: MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.stride,
-                             index: PrefillGroupedRoutedMoEBufferIndex.params)
-                for view in binding.views {
-                    enc.useResource(view.buffer, usage: .read)
-                }
-                enc.dispatchThreads(MTLSize(width: Int(p.routedIntermediate),
-                                            height: Int(p.pairCount),
-                                            depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
-                enc.endEncoding()
+            guard let enc1 = commandBuffer.makeComputeCommandEncoder() else {
+                throw MetalError.commandEncoderFailed
             }
+            enc1.setComputePipelineState(batchedPhase1PSO)
+            enc1.setBuffer(hidden, offset: hiddenOffset, index: PrefillGroupedRoutedMoEBufferIndex.hidden)
+            enc1.setBuffer(sortedPairs, offset: sortedPairsOffset, index: PrefillGroupedRoutedMoEBufferIndex.sortedPairs)
+            enc1.setBuffer(gateUpActScratch, offset: gateUpActScratchOffset,
+                          index: PrefillGroupedRoutedMoEBufferIndex.gateUpActScratch)
+            enc1.setBuffer(argumentBuffer.buffer, offset: 0,
+                          index: PrefillGroupedRoutedMoEBufferIndex.expertArgumentState)
+            enc1.setBytes(&p,
+                         length: MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.stride,
+                         index: PrefillGroupedRoutedMoEBufferIndex.params)
+            for view in binding.views {
+                enc1.useResource(view.buffer, usage: .read)
+            }
+            enc1.dispatchThreads(MTLSize(width: Int(p.routedIntermediate),
+                                        height: Int(p.pairCount),
+                                        depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            enc1.endEncoding()
 
-            if let enc = commandBuffer.makeComputeCommandEncoder() {
-                enc.setComputePipelineState(batchedDownPSO)
-                enc.setBuffer(sortedPairs, offset: sortedPairsOffset, index: PrefillGroupedRoutedMoEBufferIndex.sortedPairs)
-                enc.setBuffer(routePartials, offset: routePartialsOffset,
-                              index: PrefillGroupedRoutedMoEBufferIndex.routePartials)
-                enc.setBuffer(gateUpActScratch, offset: gateUpActScratchOffset,
-                              index: PrefillGroupedRoutedMoEBufferIndex.gateUpActScratch)
-                enc.setBuffer(downScratch, offset: downScratchOffset,
-                              index: PrefillGroupedRoutedMoEBufferIndex.downScratch)
-                enc.setBuffer(argumentBuffer.buffer, offset: 0,
-                              index: PrefillGroupedRoutedMoEBufferIndex.expertArgumentState)
-                enc.setBytes(&p,
-                             length: MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.stride,
-                             index: PrefillGroupedRoutedMoEBufferIndex.params)
-                for view in binding.views {
-                    enc.useResource(view.buffer, usage: .read)
-                }
-                enc.dispatchThreads(MTLSize(width: Int(p.d),
-                                            height: Int(p.pairCount),
-                                            depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
-                enc.endEncoding()
+            guard let enc2 = commandBuffer.makeComputeCommandEncoder() else {
+                throw MetalError.commandEncoderFailed
             }
+            enc2.setComputePipelineState(batchedDownPSO)
+            enc2.setBuffer(sortedPairs, offset: sortedPairsOffset, index: PrefillGroupedRoutedMoEBufferIndex.sortedPairs)
+            enc2.setBuffer(routePartials, offset: routePartialsOffset,
+                          index: PrefillGroupedRoutedMoEBufferIndex.routePartials)
+            enc2.setBuffer(gateUpActScratch, offset: gateUpActScratchOffset,
+                          index: PrefillGroupedRoutedMoEBufferIndex.gateUpActScratch)
+            enc2.setBuffer(downScratch, offset: downScratchOffset,
+                          index: PrefillGroupedRoutedMoEBufferIndex.downScratch)
+            enc2.setBuffer(argumentBuffer.buffer, offset: 0,
+                          index: PrefillGroupedRoutedMoEBufferIndex.expertArgumentState)
+            enc2.setBytes(&p,
+                         length: MemoryLayout<PrefillGroupedRoutedMoEStreamedParams>.stride,
+                         index: PrefillGroupedRoutedMoEBufferIndex.params)
+            for view in binding.views {
+                enc2.useResource(view.buffer, usage: .read)
+            }
+            enc2.dispatchThreads(MTLSize(width: Int(p.d),
+                                        height: Int(p.pairCount),
+                                        depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            enc2.endEncoding()
 
             consumed += p.pairCount
             microbatchCount += 1

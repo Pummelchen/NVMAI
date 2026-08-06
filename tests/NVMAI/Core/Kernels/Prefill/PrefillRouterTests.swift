@@ -30,7 +30,7 @@ import NVMAIValidationSupport
         #expect(pairs.map { Float($0.weight) } == weights.map { Float($0) })
     }
 
-    @Test func blockGemma4RouterMatchesRepeatedScalarRows() throws {
+    @Test func blockRouterMatchesRepeatedScalarRows() throws {
         var rng = SplitMix64(seed: 0x9A7E_2026)
         let rows = 3
         let hiddenStride = Self.d + 13
@@ -71,7 +71,7 @@ import NVMAIValidationSupport
             Issue.record("Failed to make command buffer")
             return
         }
-        prefill.encodeGemma4Block(commandBuffer: cb,
+        try prefill.encodeBlock(commandBuffer: cb,
                                   weights: buffers.weights,
                                   scales: buffers.scales,
                                   biases: buffers.biases,
@@ -100,7 +100,7 @@ import NVMAIValidationSupport
                                     used: Self.d)
     }
 
-    @Test func blockGemma4RouterNearTieMatchesScalarPath() throws {
+    @Test func blockRouterNearTieMatchesScalarPath() throws {
         let weights = Self.makeNearTieWeights()
         let hidden = [Float16](repeating: 1, count: Self.d)
         let effectiveScale = [Float](repeating: 1, count: Self.d)
@@ -123,7 +123,7 @@ import NVMAIValidationSupport
             Issue.record("Failed to make command buffer")
             return
         }
-        prefill.encodeGemma4Block(commandBuffer: cb,
+        try prefill.encodeBlock(commandBuffer: cb,
                                   weights: buffers.weights,
                                   scales: buffers.scales,
                                   biases: buffers.biases,
@@ -213,7 +213,7 @@ import NVMAIValidationSupport
               let cb = ctx.queue.makeCommandBuffer() else {
             throw RouterTestError.allocationFailed
         }
-        moe.encodeRouterGemma4(commandBuffer: cb,
+        try moe.encodeRouter(commandBuffer: cb,
                                weights: buffers.weights,
                                scales: buffers.scales,
                                biases: buffers.biases,

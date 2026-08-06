@@ -76,7 +76,11 @@ enum IndexLoader {
         var seen = Set<String>()
         var shards: [String] = []
         for k in weightMap.keys.sorted() {
-            let shard = weightMap[k]!
+            guard let shard = weightMap[k] else {
+                throw RepackError.indexJsonInvalid(
+                    path: indexPath,
+                    detail: "weight_map entry for \(k) is missing")
+            }
             if !seen.contains(shard) { seen.insert(shard); shards.append(shard) }
         }
 

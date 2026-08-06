@@ -5,9 +5,9 @@ import Metal
 import NVMAIValidationSupport
 
 /// Qwen 3.6 runtime integration: runner construction against the qwen toy
-/// fixture (no Gemma sandwich tensors present — init must not touch them),
-/// decode and chunked-prefill smoke over the hybrid linear/full layer graph,
-/// and the KV-cache + GDN-state reset interplay.
+/// fixture (no auxiliary sandwich/scale tensors present — init must not touch
+/// them), decode and chunked-prefill smoke over the hybrid linear/full layer
+/// graph, and the KV-cache + GDN-state reset interplay.
 @Suite struct QwenRunnerTests {
 
     private func makeRunner(weightBits: Int = 4) throws -> (URL, MetalContext, RealForwardRunner) {
@@ -15,7 +15,7 @@ import NVMAIValidationSupport
         let ctx = try MetalContext()
         let model = try Model.load(directoryURL: dir,
                                    device: ctx.device,
-                                   expecting: .qwen36Toy())
+                                   expecting: .qwenToy())
         let runner = try RealForwardRunner(model: model,
                                            context: ctx,
                                            maxContext: 64)
@@ -100,10 +100,10 @@ import NVMAIValidationSupport
     }
 
     /// (a) Runner init with the qwen arch: GDN kernels, state manager, and
-    /// ones router-scale buffers must construct without touching the Gemma
-    /// sandwich tensors (the fixture does not contain them — any access
-    /// would throw `tensorNotFound`).
-    @Test func runnerInit_qwenToy_doesNotTouchSandwichTensors() throws {
+    /// the int8 router/gate buffers must construct without touching any
+    /// auxiliary sandwich/scale tensors (the fixture does not contain them —
+    /// any access would throw `tensorNotFound`).
+    @Test func runnerInit_qwenToy_doesNotTouchAuxTensors() throws {
         let (dir, _, runner) = try makeRunner()
         defer { try? FileManager.default.removeItem(at: dir) }
         #expect(runner.maxContext == 64)
@@ -135,7 +135,7 @@ import NVMAIValidationSupport
 
     /// Chunked prefill smoke: one chunk through the qwen prefill path
     /// (batched GDN projections + conv tail carry, packed q_proj split,
-    /// sub-dim RoPE, no V norm, ones router scales, residual-add tail),
+    /// sub-dim RoPE, no V norm, affine router scales, residual-add tail),
     /// then a decode continuation on top of the prefilled state.
     @Test func prefillChunkedSmoke_thenDecodeContinuation() async throws {
         let (dir, ctx, runner) = try makeRunner()
@@ -247,7 +247,7 @@ import NVMAIValidationSupport
     /// linear layers carry no per-token KV storage, full layers are linear
     /// append-only, and reset() returns both to the empty-context state.
     @Test func kvManagerAndGdnState_resetInterplay() throws {
-        let cfg = ArchConfig.qwen36Toy()
+        let cfg = ArchConfig.qwenToy()
         let ctx = try MetalContext()
         let kv = try KVCacheManager(device: ctx.device,
                                     config: cfg,
@@ -294,10 +294,10 @@ import NVMAIValidationSupport
     }
 
     /// Prefill scratch layout: the qwen shape must size the packed q_proj /
-    /// split-gate / GDN buffers; the Gemma production shape must be
-    /// unchanged (all qwen extensions zero-sized).
-    @Test func prefillScratchLayout_qwenAndGemmaSizes() {
-        let qwen = PrefillChunkScratchLayout(config: .qwen36Toy(), chunkTokens: 32)
+    /// split-gate / GDN buffers; the MTP sidecar shape differs (no linear
+    /// layers, no GDN buffers, but still gated attention output).
+    @Test func prefillScratchLayout_qwenAndMtpSizes() {
+        let qwen = PrefillChunkScratchLayout(config: .qwenToy(), chunkTokens: 32)
         // max(packed q_proj 2*4*32, gdn qkvDim 256) = 256.
         #expect(qwen.qProjElementsPerToken == 256)
         #expect(qwen.attnGateElementsPerToken == 4 * 32)
@@ -308,12 +308,13 @@ import NVMAIValidationSupport
         #expect(qwen.qElements == 32 * 256)
         #expect(qwen.attentionOutputElements == 32 * 4 * 32)
 
-        let gemma = PrefillChunkScratchLayout(config: .gemma4_26B_A4B, chunkTokens: 128)
-        #expect(gemma.qProjElementsPerToken == gemma.maxQElementsPerToken)
-        #expect(gemma.attnGateElementsPerToken == 0)
-        #expect(gemma.gdnQKVDim == 0)
-        #expect(gemma.gdnValueDim == 0)
-        #expect(gemma.sharedScalarGateElements == 0)
-        #expect(gemma.qElements == 128 * gemma.maxQElementsPerToken)
+        let mtp = PrefillChunkScratchLayout(config: .qwen36MTP, chunkTokens: 128)
+        // Gate-packed q_proj with no linear layers: 2x the per-head rows.
+        #expect(mtp.qProjElementsPerToken == 2 * mtp.maxQElementsPerToken)
+        #expect(mtp.attnGateElementsPerToken == mtp.maxQElementsPerToken)
+        #expect(mtp.gdnQKVDim == 0)
+        #expect(mtp.gdnValueDim == 0)
+        #expect(mtp.sharedScalarGateElements == 1)
+        #expect(mtp.qElements == 128 * 2 * mtp.maxQElementsPerToken)
     }
 }

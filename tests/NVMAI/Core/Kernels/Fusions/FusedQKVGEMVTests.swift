@@ -70,22 +70,22 @@ import NVMAIValidationSupport
             Issue.record("Failed to allocate command buffer")
             return
         }
-        gemv.encode(commandBuffer: cb,
+        try gemv.encode(commandBuffer: cb,
                     weights: qW, weightsOffset: weightOffset,
                     scales: qS, biases: qB,
                     x: xBuf, y: qLegacy,
                     m: UInt32(qRows), n: UInt32(n))
-        gemv.encode(commandBuffer: cb,
+        try gemv.encode(commandBuffer: cb,
                     weights: kW, weightsOffset: weightOffset,
                     scales: kS, biases: kB,
                     x: xBuf, y: kLegacy,
                     m: UInt32(kvRows), n: UInt32(n))
-        gemv.encode(commandBuffer: cb,
+        try gemv.encode(commandBuffer: cb,
                     weights: vW, weightsOffset: weightOffset,
                     scales: vS, biases: vB,
                     x: xBuf, y: vLegacy,
                     m: UInt32(kvRows), n: UInt32(n))
-        fused.encode(commandBuffer: cb,
+        try fused.encode(commandBuffer: cb,
                      qWeights: qW, qWeightsOffset: weightOffset,
                      qScales: qS, qBiases: qB,
                      kWeights: kW, kWeightsOffset: weightOffset,

@@ -23,7 +23,7 @@ import NVMAIValidationSupport
             Issue.record("Failed to allocate Metal resources")
             return []
         }
-        kernel.encode(commandBuffer: cmd,
+        try kernel.encode(commandBuffer: cmd,
                       logits: inBuf, probs: outBuf,
                       v: UInt32(v), softcap: softcap)
         cmd.commit()

@@ -49,8 +49,21 @@ struct PackedExpertsLayout: Sendable {
     let layers: [LayerLayout]
 
     /// Resolve `(layer, expert)` -> `ExpertEntry`. O(1).
-    func expert(layer: Int, expert: Int) -> ExpertEntry {
-        return layers[layer].experts[expert]
+    ///
+    /// K22: bounds-checked — a bare `layers[layer].experts[expert]` would
+    /// crash with an opaque index-out-of-range; a descriptive error makes
+    /// corrupt layouts diagnosable.
+    func expert(layer: Int, expert: Int) throws -> ExpertEntry {
+        guard layers.indices.contains(layer) else {
+            throw ModelError.indexCorrupt(
+                detail: "expert layout has \(layers.count) layers; layer \(layer) is out of range")
+        }
+        let layerLayout = layers[layer]
+        guard layerLayout.experts.indices.contains(expert) else {
+            throw ModelError.indexCorrupt(
+                detail: "layer \(layer) has \(layerLayout.experts.count) experts; expert \(expert) is out of range")
+        }
+        return layerLayout.experts[expert]
     }
 }
 

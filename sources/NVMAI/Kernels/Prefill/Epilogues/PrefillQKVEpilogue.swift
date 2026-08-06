@@ -32,7 +32,7 @@ final class PrefillQKVEpilogue {
                                  kvTokenStrideElements: UInt32,
                                  theta: Float,
                                  rotaryDim: UInt32,
-                                 eps: Float) {
+                                 eps: Float) throws {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(headDim > 0 && headDim % 2 == 0, "headDim must be positive and even")
         precondition(numQHeads > 0, "numQHeads must be positive")
@@ -44,7 +44,7 @@ final class PrefillQKVEpilogue {
         precondition(kvTokenStrideElements >= numKVHeads * headDim,
                      "KV token stride is too small")
 
-        perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
+        try perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
                                 x: q,
                                 xOffset: qOffset,
                                 weight: qWeight,
@@ -56,7 +56,7 @@ final class PrefillQKVEpilogue {
                                 numHeads: numQHeads,
                                 tokenStrideElements: qTokenStrideElements,
                                 eps: eps)
-        perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
+        try perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
                                 x: k,
                                 xOffset: kOffset,
                                 weight: kWeight,
@@ -68,7 +68,7 @@ final class PrefillQKVEpilogue {
                                 numHeads: numKVHeads,
                                 tokenStrideElements: kvTokenStrideElements,
                                 eps: eps)
-        rope.encodeNeoxSubdim(commandBuffer: commandBuffer,
+        try rope.encodeNeoxSubdim(commandBuffer: commandBuffer,
                               data: q,
                               dataOffset: qOffset,
                               startPosition: startPosition,
@@ -78,7 +78,7 @@ final class PrefillQKVEpilogue {
                               rotaryDim: rotaryDim,
                               tokenStrideElements: qTokenStrideElements,
                               theta: theta)
-        rope.encodeNeoxSubdim(commandBuffer: commandBuffer,
+        try rope.encodeNeoxSubdim(commandBuffer: commandBuffer,
                               data: k,
                               dataOffset: kOffset,
                               startPosition: startPosition,
@@ -110,7 +110,7 @@ final class PrefillQKVEpilogue {
                        kvTokenStrideElements: UInt32,
                        theta: Float,
                        rotatedPairs: UInt32,
-                       eps: Float) {
+                       eps: Float) throws {
         precondition(queryCount > 0, "queryCount must be positive")
         precondition(headDim > 0 && headDim % 2 == 0, "headDim must be positive and even")
         precondition(numQHeads > 0, "numQHeads must be positive")
@@ -122,7 +122,7 @@ final class PrefillQKVEpilogue {
         precondition(kvTokenStrideElements >= numKVHeads * headDim,
                      "KV token stride is too small")
 
-        perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
+        try perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
                                 x: q,
                                 xOffset: qOffset,
                                 weight: qWeight,
@@ -134,7 +134,7 @@ final class PrefillQKVEpilogue {
                                 numHeads: numQHeads,
                                 tokenStrideElements: qTokenStrideElements,
                                 eps: eps)
-        perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
+        try perHeadNorm.encodeBF16W(commandBuffer: commandBuffer,
                                 x: k,
                                 xOffset: kOffset,
                                 weight: kWeight,
@@ -146,7 +146,7 @@ final class PrefillQKVEpilogue {
                                 numHeads: numKVHeads,
                                 tokenStrideElements: kvTokenStrideElements,
                                 eps: eps)
-        perHeadNorm.encodeNoScale(commandBuffer: commandBuffer,
+        try perHeadNorm.encodeNoScale(commandBuffer: commandBuffer,
                                   x: v,
                                   xOffset: vOffset,
                                   out: v,
@@ -158,7 +158,7 @@ final class PrefillQKVEpilogue {
                                   eps: eps)
 
         if rotatedPairs * 2 == headDim {
-            rope.encodeDefaultNeox(commandBuffer: commandBuffer,
+            try rope.encodeDefaultNeox(commandBuffer: commandBuffer,
                                    data: q,
                                    dataOffset: qOffset,
                                    startPosition: startPosition,
@@ -167,7 +167,7 @@ final class PrefillQKVEpilogue {
                                    numHeads: numQHeads,
                                    tokenStrideElements: qTokenStrideElements,
                                    theta: theta)
-            rope.encodeDefaultNeox(commandBuffer: commandBuffer,
+            try rope.encodeDefaultNeox(commandBuffer: commandBuffer,
                                    data: k,
                                    dataOffset: kOffset,
                                    startPosition: startPosition,
@@ -177,7 +177,7 @@ final class PrefillQKVEpilogue {
                                    tokenStrideElements: kvTokenStrideElements,
                                    theta: theta)
         } else {
-            rope.encodeProportionalNeox(commandBuffer: commandBuffer,
+            try rope.encodeProportionalNeox(commandBuffer: commandBuffer,
                                         data: q,
                                         dataOffset: qOffset,
                                         startPosition: startPosition,
@@ -187,7 +187,7 @@ final class PrefillQKVEpilogue {
                                         rotatedPairs: rotatedPairs,
                                         tokenStrideElements: qTokenStrideElements,
                                         theta: theta)
-            rope.encodeProportionalNeox(commandBuffer: commandBuffer,
+            try rope.encodeProportionalNeox(commandBuffer: commandBuffer,
                                         data: k,
                                         dataOffset: kOffset,
                                         startPosition: startPosition,

@@ -40,14 +40,14 @@ final class PrefillFinalRowHeadInt4 {
                              logitsOffset: Int = 0,
                              d: UInt32,
                              vocab: UInt32,
-                             rmsEps: Float) {
+                             rmsEps: Float) throws {
         precondition(row >= 0, "row must be non-negative")
         precondition(rowStrideElements >= Int(d), "row stride must cover d")
         precondition(Int(d) <= maxD, "d=\(d) exceeds maxD=\(maxD)")
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "d must be a multiple of \(Quantization.groupSize)")
         let hiddenOffset = (row * rowStrideElements) * MemoryLayout<Float16>.size
-        rms.encodeBF16W(commandBuffer: commandBuffer,
+        try rms.encodeBF16W(commandBuffer: commandBuffer,
                         x: hiddenBlock,
                         xOffset: hiddenOffset,
                         weight: normWeight,
@@ -56,7 +56,7 @@ final class PrefillFinalRowHeadInt4 {
                         d: d,
                         eps: rmsEps)
         if let affine {
-            affine.encode(commandBuffer: commandBuffer,
+            try affine.encode(commandBuffer: commandBuffer,
                           weights: weights,
                           weightsOffset: weightsOffset,
                           scales: scales,
@@ -69,7 +69,13 @@ final class PrefillFinalRowHeadInt4 {
                           m: vocab,
                           n: d)
         } else {
-            int4!.encode(commandBuffer: commandBuffer,
+            // K20: int4 is nil exactly when affine is non-nil (weightBits != 4),
+            // so this branch implies int4 is present; assert instead of force
+            // unwrapping so a future init change fails with a clear message.
+            guard let int4 else {
+                preconditionFailure("PrefillFinalRowHeadInt4 has neither affine nor int4 GEMV (weightBits init contract broken)")
+            }
+            try int4.encode(commandBuffer: commandBuffer,
                          weights: weights,
                          weightsOffset: weightsOffset,
                          scales: scales,

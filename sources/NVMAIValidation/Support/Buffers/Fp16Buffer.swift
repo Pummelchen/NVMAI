@@ -6,8 +6,12 @@ public enum Fp16Buffer {
     public static func make(_ device: MTLDevice, values: [Float]) -> MTLBuffer? {
         let halves = values.map { Float16($0) }
         return halves.withUnsafeBufferPointer { ptr in
-            device.makeBuffer(
-                bytes: ptr.baseAddress!,
+            guard let base = ptr.baseAddress else {
+                // Empty input: a zero-length buffer is still a valid handle.
+                return device.makeBuffer(length: 0, options: .storageModeShared)
+            }
+            return device.makeBuffer(
+                bytes: base,
                 length: halves.count * MemoryLayout<Float16>.size,
                 options: .storageModeShared
             )
@@ -16,8 +20,11 @@ public enum Fp16Buffer {
 
     public static func make(_ device: MTLDevice, halves: [Float16]) -> MTLBuffer? {
         halves.withUnsafeBufferPointer { ptr in
-            device.makeBuffer(
-                bytes: ptr.baseAddress!,
+            guard let base = ptr.baseAddress else {
+                return device.makeBuffer(length: 0, options: .storageModeShared)
+            }
+            return device.makeBuffer(
+                bytes: base,
                 length: halves.count * MemoryLayout<Float16>.size,
                 options: .storageModeShared
             )

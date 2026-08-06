@@ -12,18 +12,30 @@ import Tokenizers
 ///    a non-byte-fallback token follows). For us this matters at `flush()`.
 ///
 /// Strategy:
-///   - During `push(_:)` we decode the longest prefix of accumulated IDs that
-///     does NOT end with byte-fallback tokens, then emit the delta vs. previously
-///     emitted text. Any trailing byte-fallback IDs are held back.
-///   - During `flush()` we decode the stable prefix as above AND manually
-///     assemble the trailing byte-fallback bytes into a UTF-8 string. This
-///     recovers text the library would otherwise drop on a sequence-ending
-///     codepoint.
+///   - During `push(_:)` we decode the newly appended stable IDs (a rolling
+///     prefix — never the whole history, R7) and emit the delta vs. the
+///     previously emitted text. Any trailing byte-fallback IDs are held back.
+///   - During `flush()` we append the stable prefix text AND manually assemble
+///     the trailing byte-fallback bytes into a UTF-8 string, replacing invalid
+///     sequences losslessly. This recovers text the library would otherwise
+///     drop on a sequence-ending codepoint.
+///
+/// The decoder is prefix-stable for the Qwen ChatML fixture: byte-level BPE
+/// maps every token id to a fixed string and the configured decoder
+/// (`clean_up_tokenization_spaces = false`) concatenates without rewriting, so
+/// `decode(prefix + new) == decode(prefix) + decode(new)`. The rolling
+/// accumulation therefore reproduces the full-history decode exactly.
 struct GFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
     @usableFromInline var stableIDs: [Int] = []
     @usableFromInline var trailingByteIDs: [Int] = []
     @usableFromInline var emitted: String = ""
+    /// Number of `stableIDs` already folded into `decodedText`.
+    @usableFromInline var decodedPrefixCount = 0
+    /// Rolling decode of `stableIDs[..<decodedPrefixCount]` (plus committed
+    /// byte-fallback ids). Built incrementally so `push` never re-decodes the
+    /// full history (R7).
+    @usableFromInline var decodedText: String = ""
 
     init(tokenizer: GFTokenizer) {
         self.tokenizer = tokenizer.tokenizer
@@ -43,15 +55,17 @@ struct GFDetokenizer {
         }
         stableIDs.append(tokenID)
 
-        let current = tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        return commitDelta(current)
+        // Decode only the newly appended ids (which always end with a
+        // non-byte-fallback token, so the decoder commits every byte) and
+        // append to the rolling text.
+        let segment = Array(stableIDs[decodedPrefixCount...])
+        decodedText += tokenizer.decode(tokens: segment, skipSpecialTokens: true)
+        decodedPrefixCount = stableIDs.count
+        return commitDelta(decodedText)
     }
 
     mutating func flush() -> String {
-        let stableText = stableIDs.isEmpty
-            ? ""
-            : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-
+        let stableText = decodedText
         let trailingText = assembleByteFallback(trailingByteIDs)
         let fullText = stableText + trailingText
         return commitDelta(fullText)
@@ -59,21 +73,20 @@ struct GFDetokenizer {
 
     @usableFromInline
     mutating func commitDelta(_ current: String) -> String {
-        // A combining mark can extend the last emitted grapheme, so compare the
-        // append-only prefix without using Character boundaries.
+        // `emitted` is the leading `emittedUTF8Count` bytes of `current`
+        // whenever the decoder is prefix-stable (it is for the Qwen ChatML
+        // fixture; see the type doc). Track the boundary instead of rescanning
+        // the whole emitted string each token (R7).
         let currentUTF8 = current.utf8
-        var boundary = currentUTF8.startIndex
-        for byte in emitted.utf8 {
-            guard boundary != currentUTF8.endIndex,
-                  currentUTF8[boundary] == byte else {
-                // Decoder altered the prefix — extremely rare in append-only streams.
-                // Resync rather than emit garbage; the user-visible loss is bounded
-                // to whatever was retokenized.
-                emitted = current
-                return ""
-            }
-            currentUTF8.formIndex(after: &boundary)
+        let emittedCount = emitted.utf8.count
+        guard currentUTF8.count >= emittedCount else {
+            // Decoder rewrote the prefix (or produced a shorter string) —
+            // resync rather than emit garbage.
+            emitted = current
+            return ""
         }
+        let boundary = currentUTF8.index(currentUTF8.startIndex,
+                                         offsetBy: emittedCount)
         let delta = String(current[boundary...])
         emitted = current
         return delta
@@ -94,7 +107,11 @@ struct GFDetokenizer {
             else { continue }
             bytes.append(byte)
         }
-        return String(bytes: bytes, encoding: .utf8) ?? ""
+        // Never fails: invalid/split trailing byte sequences are replaced with
+        // U+FFFD instead of silently dropped (R13). The stable prefix already
+        // committed everything decodable, so this only affects a genuinely
+        // truncated final codepoint.
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     @usableFromInline

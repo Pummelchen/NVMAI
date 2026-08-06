@@ -16,7 +16,7 @@ struct ServerPromptCacheTests {
         templateSHA256: "template")
 
     @Test func textContinuationUsesActualGeneratedHistoryAndOnlyPrefillsSuffix() async throws {
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
         ])
@@ -62,7 +62,7 @@ struct ServerPromptCacheTests {
     }
 
     @Test func mismatchedLineageDomainAndUnsafeStopsMiss() async throws {
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
         ])
@@ -72,7 +72,7 @@ struct ServerPromptCacheTests {
         var cache = ServerPromptCache()
 
         for reason in [StopReason.stopString, .eos] {
-            cache.publish(
+            let publication = cache.publish(
                 domain: domain,
                 request: initial,
                 content: "answer",
@@ -82,7 +82,9 @@ struct ServerPromptCacheTests {
                     kvBacked: prompt,
                     boundary: tokenizer.eosID,
                     reason: reason))
-            #expect(cache.entry == nil)
+            // Unsafe stop reasons must not publish a cacheable entry
+            // (S17). `publish` returns nil when the entry is rejected.
+            #expect(publication == nil)
         }
 
         cache.publish(
@@ -111,7 +113,7 @@ struct ServerPromptCacheTests {
     }
 
     @Test func tailCompletedStopStringDoesNotPublishPrefix() async throws {
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
         ])
@@ -124,7 +126,7 @@ struct ServerPromptCacheTests {
         #expect(matcher.isStopped)
 
         var cache = ServerPromptCache()
-        cache.publish(
+        let publication = cache.publish(
             domain: domain,
             request: initial,
             content: "answer ",
@@ -135,11 +137,13 @@ struct ServerPromptCacheTests {
                 boundary: tokenizer.endOfTurnID,
                 reason: .endOfTurn),
             stopStringFiltered: matcher.isStopped)
-        #expect(cache.entry == nil)
+        // A stop-string-filtered tail must not be published as a cacheable
+        // entry: the cached KV would resume from a partial stop string (S17).
+        #expect(publication == nil)
     }
 
     @Test func multiPrefixChoosesLongestExactPrefixAndUsesLRUEviction() async throws {
-        let tokenizer = try await GFTokenizer.load()
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
         let initial = request(messages: [
             GFTokenizer.Message(role: .user, content: "first"),
         ])
@@ -190,6 +194,45 @@ struct ServerPromptCacheTests {
         let newest = try #require(newestPublication)
         #expect(newest.evictedEntryIDs == [short.entry.id])
         #expect(cache.entries.map(\.id) == [long.entry.id, newest.entry.id])
+    }
+
+    /// An identical-prompt replay of a published entry reports the ENTIRE
+    /// prompt as cached (`cachedPromptTokens == rendered.count`): at the
+    /// session layer (S12) that leaves nothing to prefill, which is what
+    /// "a prompt-cache hit short-circuits prefill" means. The end-to-end
+    /// resume-path half of that contract lives inside `ServerModelSession`
+    /// (its private init and hardcoded production-arch load make it
+    /// untestable with the synthetic toy); this pins the cache layer's half.
+    @Test func identicalReplayReportsEntirePromptAsCached() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let initial = request(messages: [
+            GFTokenizer.Message(role: .user, content: "first"),
+        ])
+        let prompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(initial.messages),
+            addBOS: false)
+        var cache = ServerPromptCache()
+        let publication = cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: prompt,
+                kvBacked: prompt,
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+        let entry = try #require(publication)
+
+        let match = cache.match(
+            domain: domain,
+            request: initial,
+            renderedPromptIDs: prompt,
+            tokenizer: tokenizer)
+        #expect(match == .hit(
+            entryID: entry.entry.id,
+            effectivePromptIDs: prompt,
+            cachedPromptTokens: prompt.count))
     }
 
     private func request(

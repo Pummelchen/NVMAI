@@ -1,5 +1,28 @@
 import Foundation
 
+public struct ParsedToolCall: Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let arguments: JSONValue
+    public let argumentsJSON: String
+
+    public init(id: String,
+                name: String,
+                arguments: JSONValue,
+                argumentsJSON: String) {
+        self.id = id
+        self.name = name
+        self.arguments = arguments
+        self.argumentsJSON = argumentsJSON
+    }
+}
+
+public enum ToolCallParserError: Error, Equatable {
+    case malformed
+    case unknownTool(String)
+    case oversized
+}
+
 /// Parses the Qwen ChatML tool-call body — the text BETWEEN the `<tool_call>`
 /// and `</tool_call>` special tokens:
 ///
@@ -87,8 +110,20 @@ public struct QwenToolCallParser: Sendable {
         body = body[body.index(after: close)...]
         guard body.first == "\n" else { throw ToolCallParserError.malformed }
         body.removeFirst()
-        // VALUE runs to the newline before `</parameter>`; the newline that
-        // opened it may double as that closer for an empty value.
+        // The template writes string arguments unquoted and non-strings via
+        // `tojson | safe`, so `\n</parameter>\n` can appear inside a value in
+        // two forms:
+        //   - as literal JSON escapes (`\n` = backslash + n) inside a tojson
+        //     value — these are NOT real newlines, so scanning for a REAL
+        //     newline before `</parameter>` skips them and they stay in the
+        //     value;
+        //   - as a genuine newline + `</parameter>` + newline inside a raw
+        //     multi-line string value. The template never escapes those, so
+        //     the FIRST newline-delimited `</parameter>` is by definition the
+        //     terminator — values are terminated by a NEWLINE followed by
+        //     `</parameter>`, and a value whose text happens to contain that
+        //     sequence is inherently ambiguous. Taking the first occurrence is
+        //     the safe, template-faithful choice (R12).
         guard let closeRange = body.range(of: "\n</parameter>\n")
                 ?? emptyValueCloseRange(body) else {
             throw ToolCallParserError.malformed

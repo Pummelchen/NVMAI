@@ -19,33 +19,18 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
     }
 }
 
-/// Chat framing dialect, resolved from the loaded tokenizer's special tokens.
+/// Tokenizer wrapper for the Qwen 3.6 ChatML model family.
 ///
-/// `.chatml` is detected by the presence of the `<|im_end|>` special token
-/// (Qwen-style ChatML); everything else uses the Gemma 4 contract.
-public enum ChatDialect: String, Sendable {
-    case gemma
-    case chatml
-}
-
-/// Tokenizer wrapper for the supported model families (Gemma 4 and ChatML/Qwen).
-///
-/// Prefers tokenizer sidecars in a completed `.gturbo/tokenizer/` directory,
-/// then falls back to the IT variant's Hugging Face Hub tokenizer cache. Exposes
-/// typed accessors for the IDs the generator actually needs (BOS / EOS / pad /
-/// end-of-turn) and adapts encode/decode to Int32 to match the buffer types
-/// kernels consume.
+/// Loads tokenizer sidecars in a completed `.gturbo/tokenizer/` directory.
+/// Exposes typed accessors for the IDs the generator actually needs (BOS / EOS /
+/// pad / end-of-turn) and adapts encode/decode to Int32 to match the buffer
+/// types kernels consume.
 ///
 /// NVMAI owns the minimal chat framing because the upstream
 /// `tokenizer_config.json` has no `chat_template`. Literal control-token text in
 /// user content is accepted as a trusted-input research-runtime limitation.
 public struct GFTokenizer: @unchecked Sendable {
-    public static let modelID = "google/gemma-4-26B-A4B-it"
-    public static let chatTemplateIdentity = "gemma4-it-text-no-tools-v1"
-    public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
-
-    public let dialect: ChatDialect
-    /// Nominal BOS. For ChatML this is `<|endoftext|>` (the config's unused
+    /// Nominal BOS. This is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.
     public let bosID: Int32
     public let eosID: Int32
@@ -55,26 +40,23 @@ public struct GFTokenizer: @unchecked Sendable {
     public let toolCallEndID: Int32
     public let toolResponseID: Int32
     public let toolResponseEndID: Int32
-    /// For ChatML these alias the `<think>` / `</think>` markers, the dialect's
-    /// closest analog of Gemma's hidden-channel delimiters.
+    /// Alias of the `<think>` / `</think>` markers.
     public let channelStartID: Int32
     public let channelEndID: Int32
-    /// ChatML `<think>` / `</think>` special-token IDs; nil for Gemma.
+    /// ChatML `<think>` / `</think>` special-token IDs.
     public let thinkStartID: Int32?
     public let thinkEndID: Int32?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
 
-    /// BOS actually prepended by `encode(_:addBOS:)`; nil for dialects that
-    /// never use a BOS prefix (ChatML).
-    private let bosPrefixID: Int32?
+    /// Generation-prompt suffix appended after the last message: derived from
+    /// the tokenizer's bundled `chat_template.jinja`
+    /// (`add_generation_prompt` with thinking disabled) when available,
+    /// falling back to the pinned constant otherwise (R6).
+    private let generationSuffix: String
 
     @usableFromInline
     let tokenizer: any Tokenizer
-
-    public static func load() async throws -> GFTokenizer {
-        try await GFTokenizerLoadCoordinator.shared.load(.pretrained(modelID))
-    }
 
     public static func load(from folder: URL) async throws -> GFTokenizer {
         try await GFTokenizerLoadCoordinator.shared.load(.local(folder.standardizedFileURL.path))
@@ -82,10 +64,10 @@ public struct GFTokenizer: @unchecked Sendable {
 
     public static func load(forModelDirectory modelDirectory: URL,
                             environment: [String: String] = ProcessInfo.processInfo.environment) async throws -> GFTokenizer {
-        if let folder = tokenizerFolder(forModelDirectory: modelDirectory, environment: environment) {
-            return try await load(from: folder)
+        guard let folder = tokenizerFolder(forModelDirectory: modelDirectory, environment: environment) else {
+            throw GFTokenizerError.missingToolTemplate
         }
-        return try await load()
+        return try await load(from: folder)
     }
 
     public static func tokenizerFolder(forModelDirectory modelDirectory: URL,
@@ -105,11 +87,6 @@ public struct GFTokenizer: @unchecked Sendable {
         return hasTokenizerJSON(in: overrideURL, fileManager: fileManager) ? overrideURL : nil
     }
 
-    static func loadUncached(pretrained modelID: String = Self.modelID) async throws -> GFTokenizer {
-        let underlying = try await AutoTokenizer.from(pretrained: modelID)
-        return try GFTokenizer(tokenizer: underlying)
-    }
-
     static func loadUncached(from folder: URL) async throws -> GFTokenizer {
         let underlying = try await AutoTokenizer.from(modelFolder: folder)
         return try GFTokenizer(tokenizer: underlying)
@@ -122,15 +99,8 @@ public struct GFTokenizer: @unchecked Sendable {
     public init(tokenizer: any Tokenizer) throws {
         self.tokenizer = tokenizer
 
-        let dialect: ChatDialect =
-            Self.specialTokenID(tokenizer, Self.imEndMark) != nil ? .chatml : .gemma
-        let resolved = dialect == .chatml
-            ? try Self.resolveChatMLTokens(tokenizer)
-            : try Self.resolveGemmaTokens(tokenizer)
-
-        self.dialect = dialect
+        let resolved = try Self.resolveChatMLTokens(tokenizer)
         self.bosID = resolved.bosID
-        self.bosPrefixID = resolved.bosPrefixID
         self.eosID = resolved.eosID
         self.padID = resolved.padID
         self.endOfTurnID = resolved.endOfTurnID
@@ -144,11 +114,11 @@ public struct GFTokenizer: @unchecked Sendable {
         self.thinkEndID = resolved.thinkEndID
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
+        self.generationSuffix = Self.deriveGenerationSuffix(tokenizer)
     }
 
     private struct ResolvedSpecialTokens {
         let bosID: Int32
-        let bosPrefixID: Int32?
         let eosID: Int32
         let padID: Int32
         let endOfTurnID: Int32
@@ -164,55 +134,31 @@ public struct GFTokenizer: @unchecked Sendable {
         let vocabSize: Int
     }
 
-    private static func resolveGemmaTokens(
-        _ tokenizer: any Tokenizer
-    ) throws -> ResolvedSpecialTokens {
-        guard let bos = tokenizer.bosTokenId else {
-            throw GFTokenizerError.missingSpecialToken("<bos>")
-        }
-        guard let eos = tokenizer.eosTokenId else {
-            throw GFTokenizerError.missingSpecialToken("<eos>")
-        }
-        guard let pad = tokenizer.convertTokenToId("<pad>") else {
-            throw GFTokenizerError.missingSpecialToken("<pad>")
-        }
-        guard let eot = tokenizer.convertTokenToId("<turn|>") else {
-            throw GFTokenizerError.missingSpecialToken("<turn|>")
-        }
-        guard let toolResponse = tokenizer.convertTokenToId("<|tool_response>") else {
-            throw GFTokenizerError.missingSpecialToken("<|tool_response>")
-        }
-        guard let toolCallStart = tokenizer.convertTokenToId("<|tool_call>"),
-              let toolCallEnd = tokenizer.convertTokenToId("<tool_call|>"),
-              let toolResponseEnd = tokenizer.convertTokenToId("<tool_response|>"),
-              let channelStart = tokenizer.convertTokenToId("<|channel>"),
-              let channelEnd = tokenizer.convertTokenToId("<channel|>") else {
-            throw GFTokenizerError.missingSpecialToken("Gemma tool/channel markers")
-        }
-        return ResolvedSpecialTokens(
-            bosID: Int32(bos),
-            bosPrefixID: Int32(bos),
-            eosID: Int32(eos),
-            padID: Int32(pad),
-            endOfTurnID: Int32(eot),
-            toolCallStartID: Int32(toolCallStart),
-            toolCallEndID: Int32(toolCallEnd),
-            toolResponseID: Int32(toolResponse),
-            toolResponseEndID: Int32(toolResponseEnd),
-            channelStartID: Int32(channelStart),
-            channelEndID: Int32(channelEnd),
-            thinkStartID: nil,
-            thinkEndID: nil,
-            stopTokenIDs: [Int32(eos), Int32(eot), Int32(toolResponse)],
-            vocabSize: 262_144)
-    }
-
     /// Resolves a token string to its ID, rejecting the unk-token fallback
     /// some tokenizers substitute for out-of-vocabulary strings.
     private static func specialTokenID(_ tokenizer: any Tokenizer, _ token: String) -> Int? {
         guard let id = tokenizer.convertTokenToId(token),
               tokenizer.convertIdToToken(id) == token else { return nil }
         return id
+    }
+
+    /// The model's padded embedding/lm_head row count. The tokenizer's own
+    /// vocab (248 077 for Qwen) is smaller; logits buffers and the
+    /// embedding/lm_head are sized to the padded rows, and `vocabSize`
+    /// reports at least this many.
+    private static let paddedLogitsVocabSize = 248_320
+
+    /// Derive the tokenizer's actual vocab by probing `convertIdToToken` for
+    /// the first invalid id. Standard vocab files keep ids dense from 0, so
+    /// the first nil is the vocab count. Bounded so a pathological tokenizer
+    /// cannot make init scan forever; nil means "no reliable derivation".
+    private static func derivedVocabSize(_ tokenizer: any Tokenizer) -> Int? {
+        // 2,097,152 — far above any shipping vocab.
+        let upperBound = 1 << 21
+        for id in 0..<upperBound where tokenizer.convertIdToToken(id) == nil {
+            return id
+        }
+        return nil
     }
 
     private static func resolveChatMLTokens(
@@ -237,7 +183,6 @@ public struct GFTokenizer: @unchecked Sendable {
         let thinkEnd = try id("</think>")
         return ResolvedSpecialTokens(
             bosID: endOfText,
-            bosPrefixID: nil,
             eosID: endOfText,
             padID: endOfText,
             endOfTurnID: imEnd,
@@ -250,22 +195,18 @@ public struct GFTokenizer: @unchecked Sendable {
             thinkStartID: thinkStart,
             thinkEndID: thinkEnd,
             stopTokenIDs: [imEnd, endOfText],
-            // The model's padded embedding/lm_head row count, not the
-            // tokenizer's actual vocab (248 077) — logits buffers use this.
-            vocabSize: 248_320)
+            // At least the model's padded embedding/lm_head rows; larger when
+            // the tokenizer's own vocab (derived from `convertIdToToken`)
+            // exceeds them.
+            vocabSize: max(Self.derivedVocabSize(tokenizer) ?? 0,
+                           Self.paddedLogitsVocabSize))
     }
 
-    /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
+    /// Encode UTF-8 text to token IDs.
     ///
-    /// The library's `addSpecialTokens: true` flag is a no-op for the Gemma 4 IT
-    /// tokenizer (its config has `add_bos_token = false`; BOS is expected to come
-    /// from the chat template). We prepend manually so the kernel-facing API stays
-    /// the same regardless of upstream defaults. ChatML has no BOS, so `addBOS`
-    /// is a no-op for that dialect.
+    /// ChatML has no BOS, so `addBOS` is a no-op; BOS is never prepended.
     public func encode(_ text: String, addBOS: Bool = true) -> [Int32] {
-        let base = tokenizer.encode(text: text, addSpecialTokens: false).map(Int32.init)
-        guard addBOS, let bosPrefixID else { return base }
-        return [bosPrefixID] + base
+        tokenizer.encode(text: text, addSpecialTokens: false).map(Int32.init)
     }
 
     /// Decode token IDs to text. `skipSpecialTokens` strips BOS/EOS/turn markers from the output.
@@ -333,38 +274,58 @@ public struct GFTokenizer: @unchecked Sendable {
     /// Text-only, no-tool rendering of the pinned checkpoint's bundled
     /// `chat_template.jinja`, with thinking disabled. Keeping this narrow makes
     /// unsupported tool/media behavior explicit instead of approximating it.
-    private static let turnOpen    = "<|turn>"
-    private static let turnClose   = "<turn|>"
-    private static let bosMark     = "<bos>"
     private static let imStartMark = "<|im_start|>"
     private static let imEndMark   = "<|im_end|>"
     /// Generation prompt with thinking disabled, matching the Jinja template's
-    /// `add_generation_prompt` + `enable_thinking=false` branch.
-    private static let chatMLGenerationSuffix =
+    /// `add_generation_prompt` + `enable_thinking=false` branch. Used only
+    /// when the tokenizer has no chat template or template rendering fails
+    /// (R6); `generationSuffix` carries the template-derived value otherwise.
+    private static let fallbackChatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-    public func applyChatTemplate(_ messages: [Message]) throws -> String {
-        switch dialect {
-        case .gemma: return try gemmaChatTemplate(messages)
-        case .chatml: return try chatMLChatTemplate(messages)
+    /// Derive the generation-prompt suffix from the tokenizer's bundled
+    /// `chat_template.jinja` (`add_generation_prompt` with thinking disabled),
+    /// falling back to the pinned constant when no template is available or
+    /// rendering fails. The probe renders one empty user turn both with and
+    /// without the generation prompt; the generation prompt is appended after
+    /// the message loop, so the suffix is the token-level difference between
+    /// the two renders.
+    private static func deriveGenerationSuffix(_ tokenizer: any Tokenizer) -> String {
+        guard tokenizer.hasChatTemplate else {
+            return Self.fallbackChatMLGenerationSuffix
+        }
+        let probe: [Tokenizers.Message] = [["role": "user", "content": ""]]
+        do {
+            let withPrompt = try tokenizer.applyChatTemplate(
+                messages: probe,
+                chatTemplate: nil,
+                addGenerationPrompt: true,
+                truncation: false,
+                maxLength: nil,
+                tools: [],
+                additionalContext: ["enable_thinking": false])
+            let withoutPrompt = try tokenizer.applyChatTemplate(
+                messages: probe,
+                chatTemplate: nil,
+                addGenerationPrompt: false,
+                truncation: false,
+                maxLength: nil,
+                tools: [],
+                additionalContext: ["enable_thinking": false])
+            guard withPrompt.count > withoutPrompt.count else {
+                return Self.fallbackChatMLGenerationSuffix
+            }
+            // The generation prompt is appended after the message loop, so the
+            // with-prompt render is the without-prompt render plus the suffix.
+            let suffixIDs = Array(withPrompt[withoutPrompt.count...])
+            return tokenizer.decode(tokens: suffixIDs, skipSpecialTokens: false)
+        } catch {
+            return Self.fallbackChatMLGenerationSuffix
         }
     }
 
-    private func gemmaChatTemplate(_ messages: [Message]) throws -> String {
-        var s = Self.bosMark
-        for (index, message) in messages.enumerated() {
-            guard let rawContent = message.content else {
-                throw GFTokenizerError.invalidChatTemplate("text-only messages require content")
-            }
-            let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
-            if message.role == .system && index != 0 {
-                throw GFTokenizerError.invalidChatTemplate("system message must be first")
-            }
-            let role = message.role == .assistant ? "model" : message.role.rawValue
-            s += Self.turnOpen + role + "\n" + content + Self.turnClose + "\n"
-        }
-        s += Self.turnOpen + "model\n<|channel>thought\n<channel|>"
-        return s
+    public func applyChatTemplate(_ messages: [Message]) throws -> String {
+        try chatMLChatTemplate(messages)
     }
 
     private func chatMLChatTemplate(_ messages: [Message]) throws -> String {
@@ -373,13 +334,16 @@ public struct GFTokenizer: @unchecked Sendable {
             guard let rawContent = message.content else {
                 throw GFTokenizerError.invalidChatTemplate("text-only messages require content")
             }
+            // The bundled Jinja template trims every message's rendered
+            // content (`render_content(...)|trim`); the manual renderer
+            // mirrors that exactly so both paths agree byte-for-byte.
             let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.role == .system && index != 0 {
                 throw GFTokenizerError.invalidChatTemplate("system message must be first")
             }
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }
-        s += Self.chatMLGenerationSuffix
+        s += generationSuffix
         return s
     }
 
@@ -431,19 +395,13 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     public func encodeTextContinuation(userContent: String) -> [Int32] {
+        // The template trims user content (`render_content(...)|trim`), so the
+        // continuation bridge mirrors it; see `chatMLChatTemplate`.
         let content = userContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch dialect {
-        case .gemma:
-            return [endOfTurnID] + encode(
-                "\n\(Self.turnOpen)user\n\(content)\(Self.turnClose)\n"
-                    + "\(Self.turnOpen)model\n<|channel>thought\n<channel|>",
-                addBOS: false)
-        case .chatml:
-            return [endOfTurnID] + encode(
-                "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
-                    + Self.chatMLGenerationSuffix,
-                addBOS: false)
-        }
+        return [endOfTurnID] + encode(
+            "\n\(Self.imStartMark)user\n\(content)\(Self.imEndMark)\n"
+                + generationSuffix,
+            addBOS: false)
     }
 
     public func encodeToolResultContinuation(
@@ -455,49 +413,13 @@ public struct GFTokenizer: @unchecked Sendable {
         // The ChatML template's `<think>` stripping depends on each assistant
         // turn's position relative to the last user query, so a re-rendered
         // prefix is not guaranteed to be a token prefix of the full render.
-        // Callers (ServerPromptCache) fall back to prefix matching.
-        guard dialect == .gemma else {
-            throw GFTokenizerError.unsupportedForDialect("tool-result KV continuation")
-        }
-        let prefix = try encodeToolChat(
-            messages: cachedMessages + [assistant],
-            tools: tools)
-        let full = try encodeToolChat(messages: incomingMessages, tools: tools)
-        let callCount = assistant.toolCalls.count
-        let starts = prefix.indices.filter { prefix[$0] == toolCallStartID }
-        guard callCount > 0, starts.count >= callCount,
-              let callEnd = prefix.lastIndex(of: toolCallEndID) else {
-            throw GFTokenizerError.invalidChatTemplate(
-                "cached assistant tool-call boundary is missing")
-        }
-        let callStart = starts[starts.count - callCount]
-        let callSequence = Array(prefix[callStart...callEnd])
-        let matches = full.subsequenceStartIndices(matching: callSequence)
-        guard matches.count == 1 else {
-            throw GFTokenizerError.invalidChatTemplate(
-                "cached assistant tool-call boundary is ambiguous")
-        }
-        let suffixStart = matches[0] + callSequence.count
-        let suffix = Array(full[suffixStart...])
-        guard suffix.first == toolResponseID else {
-            throw GFTokenizerError.invalidChatTemplate(
-                "tool-result continuation does not begin at the KV boundary")
-        }
-        return suffix
-    }
-}
-
-private extension Array where Element: Equatable {
-    func subsequenceStartIndices(matching needle: [Element]) -> [Int] {
-        guard !needle.isEmpty, needle.count <= count else { return [] }
-        return indices.dropLast(needle.count - 1).filter { start in
-            self[start..<(start + needle.count)].elementsEqual(needle)
-        }
+        // Callers (ServerPromptCache) fall back to prefix matching; the
+        // tool-result KV continuation is unsupported for ChatML.
+        throw GFTokenizerError.unsupportedForDialect("tool-result KV continuation")
     }
 }
 
 private enum GFTokenizerLoadSource: Hashable {
-    case pretrained(String)
     case local(String)
 }
 
@@ -515,8 +437,6 @@ private actor GFTokenizerLoadCoordinator {
         // share the task result instead of owning its cancellation.
         let task = Task.detached(priority: .userInitiated) { () throws -> GFTokenizer in
             switch source {
-            case .pretrained(let modelID):
-                return try await GFTokenizer.loadUncached(pretrained: modelID)
             case .local(let path):
                 return try await GFTokenizer.loadUncached(from: URL(fileURLWithPath: path))
             }

@@ -103,10 +103,16 @@ public enum RangeCopyPlanner {
             expectedOutputs: expectedOutputs)
         let downloaded = coalesced.reduce(UInt64(0)) { $0 + $1.size }
         let copied = copies.reduce(UInt64(0)) { $0 + $1.size }
+        let (gapBytes, gapUnderflow) = downloaded.subtractingReportingOverflow(copied)
+        guard !gapUnderflow else {
+            throw RepackError.configurationInvalid(
+                detail: "coalesced payload \(downloaded) is smaller than the "
+                    + "planned copies \(copied)")
+        }
         return RangeCopyPlan(scalarCopies: copies,
                              coalescedCopies: coalesced,
                              remoteBytesToDownload: downloaded,
-                             remoteGapBytesDownloaded: downloaded - copied,
+                             remoteGapBytesDownloaded: gapBytes,
                              canonicalFingerprint: fingerprint,
                              residentIndexSha256: indexSha,
                              expectedOutputs: expectedOutputs)
@@ -117,6 +123,11 @@ public enum RangeCopyPlanner {
         guard rangeChunkBytes > 0 else {
             throw RepackError.configurationInvalid(detail: "rangeChunkBytes must be positive")
         }
+        // Bridging exists to fold adjacent tensors of the same shard into one
+        // request. The discarded span between them is capped at an eighth of
+        // the chunk budget (at least 64 KiB): any larger gap would make most
+        // of the request wasted bytes, so the copies are split instead.
+        let maxBridgedGapBytes = max(UInt64(rangeChunkBytes) / 8, 64 * 1024)
         let sorted = splitLargeCopies(copies, rangeChunkBytes: rangeChunkBytes).sorted {
             if $0.shardID != $1.shardID { return $0.shardID < $1.shardID }
             return $0.sourceOffset < $1.sourceOffset
@@ -147,7 +158,11 @@ public enum RangeCopyPlanner {
             }
             let proposedStart = currentStart
             let proposedEnd = max(currentEnd, copyEnd)
+            let gap = copy.sourceOffset > currentEnd
+                ? copy.sourceOffset - currentEnd
+                : 0
             let canMerge = currentShard == copy.shardID
+                && gap <= maxBridgedGapBytes
                 && proposedEnd >= proposedStart
                 && proposedEnd - proposedStart <= UInt64(rangeChunkBytes)
             if canMerge {
@@ -162,9 +177,12 @@ public enum RangeCopyPlanner {
             }
         }
         flush()
-        return out.enumerated().map { index, copy in
+        return out.map { copy in
+            // Range ids derive from the shard and source offset rather than
+            // enumeration order, so they survive plan changes: a range whose
+            // (shard, offset) is unchanged keeps its id across repacks.
             CoalescedRangeCopy(
-                id: String(format: "range-%08d", index),
+                id: "range-\(copy.shardID)-\(copy.sourceOffset)",
                 shardID: copy.shardID,
                 sourceOffset: copy.sourceOffset,
                 size: copy.size,

@@ -22,11 +22,8 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
         }
     }
 
-    deinit {
-        output.closeFile()
-    }
-
-    func next(matching requestID: UUID) async throws -> DecodeServiceEvent {
+    func next(matching requestID: UUID, timeout: TimeInterval) async throws
+        -> DecodeServiceEvent {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<DecodeServiceEvent, Error>) in
             Task.detached(priority: .userInitiated) { [weak self] in
                 guard let self else {
@@ -34,7 +31,7 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
                     return
                 }
                 do {
-                    let event = try self.waitForEvent(matching: requestID)
+                    let event = try self.waitForEvent(matching: requestID, timeout: timeout)
                     continuation.resume(returning: event)
                 } catch {
                     continuation.resume(throwing: error)
@@ -57,19 +54,28 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
             state.withLock { $0.terminalError = error }
             eventSignal.signal()
         }
+        // The reader thread owns the file handle: close it here, on the
+        // reader, after the blocking read returned (EOF or error) — never from
+        // deinit while a read may be in flight (D18).
+        output.closeFile()
     }
 
-    private func waitForEvent(matching requestID: UUID) throws -> DecodeServiceEvent {
+    private func waitForEvent(matching requestID: UUID,
+                              timeout: TimeInterval) throws -> DecodeServiceEvent {
         // First check: event already available?
         if let event = dequeueEvent(for: requestID) {
             return event
         }
 
-        // Block until an event arrives or an error occurs.
-        // The loop continues while pending[requestID] is empty AND no error exists.
+        // Block until an event arrives, a terminal error occurs, or the
+        // timeout elapses. The loop continues while pending[requestID] is
+        // empty AND no error exists AND the deadline has not passed.
+        let deadline = DispatchTime.now() + timeout
         while state.withLock({ $0.pending[requestID]?.isEmpty != false }),
               state.withLock({ $0.terminalError == nil }) {
-            _ = eventSignal.wait(timeout: .distantFuture)
+            if eventSignal.wait(timeout: deadline) == .timedOut {
+                break
+            }
         }
 
         // Try dequeue again after signal
@@ -77,20 +83,23 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
             return event
         }
 
-        // No event — throw terminal error or unexpectedEOF
-        throw state.withLock({ $0.terminalError }) ?? DecodeFrameError.unexpectedEOF
+        // No event — throw terminal error, or a clear timeout error.
+        throw state.withLock({ $0.terminalError }) ?? DecodeFrameError.timedOut
     }
 
     private func dequeueEvent(for requestID: UUID) -> DecodeServiceEvent? {
-        if var events = state.withLock({ $0.pending[requestID] }), !events.isEmpty {
-            let event = events.removeFirst()
-            if events.isEmpty {
-                _ = state.withLock { $0.pending.removeValue(forKey: requestID); true }
-            } else {
-                _ = state.withLock { $0.pending[requestID] = events; true }
-            }
-            return event
+        guard var events = state.withLock({ $0.pending[requestID] }),
+              !events.isEmpty else {
+            return nil
         }
-        return nil
+        let event = events.removeFirst()
+        state.withLock { current in
+            if events.isEmpty {
+                current.pending.removeValue(forKey: requestID)
+            } else {
+                current.pending[requestID] = events
+            }
+        }
+        return event
     }
 }

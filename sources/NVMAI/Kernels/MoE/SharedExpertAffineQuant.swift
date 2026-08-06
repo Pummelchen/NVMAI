@@ -34,8 +34,8 @@ final class SharedExpertAffineQuant {
         }
         func project(_ p: SharedExpertProjection, _ input: MTLBuffer,
                      _ inputOffset: Int, _ output: MTLBuffer,
-                     _ outputOffset: Int) {
-            gemv.encode(commandBuffer: cb,
+                     _ outputOffset: Int) throws {
+            try gemv.encode(commandBuffer: cb,
                         weights: p.weights, weightsOffset: p.weightsOffset,
                         scales: p.scales, scalesOffset: p.scalesOffset,
                         biases: p.biases, biasesOffset: p.biasesOffset,
@@ -43,19 +43,20 @@ final class SharedExpertAffineQuant {
                         y: output, yOffset: outputOffset,
                         m: p.rows, n: p.cols)
         }
-        project(gate, x, xOffset, scratchGate, scratchGateOffset)
-        project(up, x, xOffset, scratchUp, scratchUpOffset)
-        if let encoder = cb.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(activationPSO)
-            encoder.setBuffer(scratchGate, offset: scratchGateOffset, index: 0)
-            encoder.setBuffer(scratchUp, offset: scratchUpOffset, index: 1)
-            encoder.setBuffer(scratchAct, offset: scratchActOffset, index: 2)
-            var count = gate.rows
-            encoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
-            encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: min(256, activationPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
-            encoder.endEncoding()
+        try project(gate, x, xOffset, scratchGate, scratchGateOffset)
+        try project(up, x, xOffset, scratchUp, scratchUpOffset)
+        guard let encoder = cb.makeComputeCommandEncoder() else {
+            throw SharedExpertError.dimensionMismatch("encoder alloc failed")
         }
-        project(down, scratchAct, scratchActOffset, y, yOffset)
+        encoder.setComputePipelineState(activationPSO)
+        encoder.setBuffer(scratchGate, offset: scratchGateOffset, index: 0)
+        encoder.setBuffer(scratchUp, offset: scratchUpOffset, index: 1)
+        encoder.setBuffer(scratchAct, offset: scratchActOffset, index: 2)
+        var count = gate.rows
+        encoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: min(256, activationPSO.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+        encoder.endEncoding()
+        try project(down, scratchAct, scratchActOffset, y, yOffset)
     }
 }

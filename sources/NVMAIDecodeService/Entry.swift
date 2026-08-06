@@ -25,12 +25,19 @@ import NVMAIDecodeProtocol
 
         let client = RealInferenceClient()
         let commands = DecodeCommandQueue()
+        let session = ServiceSession()
+        let memorySampler = AppMemorySampler()
         let input = Thread {
             do {
                 while true {
                     let command = try DecodeFrameCodec.read(
                         DecodeServiceCommand.self, from: handles.input)
-                    if case .cancel = command { client.cancel() }
+                    // D7: cancellation is targeted by generation ID and handled
+                    // here so it lands promptly while the main loop is busy in a
+                    // generation or load.
+                    if case .cancel(let id) = command {
+                        handleCancel(id, client: client, session: session)
+                    }
                     commands.append(command)
                     if case .shutdown = command { break }
                 }
@@ -48,34 +55,89 @@ import NVMAIDecodeProtocol
             switch command {
             case .load(let request):
                 let directory = URL(fileURLWithPath: request.modelPath)
-                do {
-                    let options = try appRuntimeOptions(request.runtimeOptions)
-                    try await client.ensureLoaded(
-                        modelDirectory: directory,
-                        maxContextTokens: request.maxContextTokens,
-                        options: options,
-                        forceLogitsHead: request.forceLogitsHead) { _ in }
+                let started = Date()
+                // D5: the load runs in a cancellable task so an incoming
+                // `.cancel` can abort it on the service side. Progress phases
+                // are streamed to the app (D10); the task also emits a
+                // heartbeat so the app-side load-phase timeout never fires
+                // during a long verification.
+                let loadTask = Task { () -> LoadOutcome in
+                    let progress = LoadPhaseReporter()
+                    let heartbeat = Task {
+                        while !Task.isCancelled {
+                            try? await Task.sleep(for: .seconds(10))
+                            guard !Task.isCancelled, let phase = progress.phaseLabel else {
+                                continue
+                            }
+                            writeBestEffort(DecodeServiceEvent(
+                                kind: .loading, generationID: request.requestID,
+                                loadPhase: phase), to: handles.output)
+                        }
+                    }
+                    defer { heartbeat.cancel() }
+                    do {
+                        let options = try appRuntimeOptions(request.runtimeOptions)
+                        try Task.checkCancellation()
+                        try await client.ensureLoaded(
+                            modelDirectory: directory,
+                            maxContextTokens: request.maxContextTokens,
+                            options: options,
+                            forceLogitsHead: request.forceLogitsHead) { state in
+                            switch state {
+                            case .loading(let phase):
+                                progress.phaseLabel = phase.label
+                                writeBestEffort(DecodeServiceEvent(
+                                    kind: .loading, generationID: request.requestID,
+                                    loadPhase: phase.label), to: handles.output)
+                            case .ready, .failed, .notLoaded, .cancelling, .unloading:
+                                break
+                            }
+                        }
+                        try Task.checkCancellation()
+                        return .success(Date().timeIntervalSince(started))
+                    } catch is CancellationError {
+                        return .cancelled
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+                session.loadTask = loadTask
+                switch await loadTask.value {
+                case .success(let loadSeconds):
                     modelDirectory = directory
                     loadedOptions = request.runtimeOptions
-                    let memory = AppMemorySampler().sample()
-                    try write(DecodeServiceEvent(
+                    let memory = memorySampler.sample()
+                    writeBestEffort(DecodeServiceEvent(
                         kind: .ready, generationID: request.requestID,
+                        loadSeconds: loadSeconds,
                         currentMemoryBytes: memory, peakMemoryBytes: memory),
                         to: handles.output)
-                } catch {
-                    try? write(DecodeServiceEvent(
+                case .cancelled:
+                    // D11: a cancelled load must not leave stale session state.
+                    modelDirectory = nil
+                    loadedOptions = nil
+                    writeBestEffort(DecodeServiceEvent(
+                        kind: .failed, generationID: request.requestID,
+                        error: "model load cancelled"), to: handles.output)
+                case .failure(let error):
+                    // D11: clear stale state and emit a `failed` event so the
+                    // app resets its load state.
+                    modelDirectory = nil
+                    loadedOptions = nil
+                    writeBestEffort(DecodeServiceEvent(
                         kind: .failed, generationID: request.requestID,
                         error: "\(error)"), to: handles.output)
                 }
+                session.loadTask = nil
             case .generate(let request):
                 guard let modelDirectory else {
-                    try? write(DecodeServiceEvent(
+                    writeBestEffort(DecodeServiceEvent(
                         kind: .failed, generationID: request.generationID,
                         error: "model is not loaded"), to: handles.output)
                     continue
                 }
                 guard request.runtimeOptions == loadedOptions else {
-                    try? write(DecodeServiceEvent(
+                    writeBestEffort(DecodeServiceEvent(
                         kind: .failed, generationID: request.generationID,
                         error: "generation runtime options do not match the loaded session"),
                         to: handles.output)
@@ -95,6 +157,7 @@ import NVMAIDecodeProtocol
                 writer.qualityOfService = .userInitiated
                 writer.start()
 
+                session.activeGenerationID = request.generationID
                 do {
                     let options = try appRuntimeOptions(request.runtimeOptions)
                     let generation = AppGenerationRequest(
@@ -111,24 +174,81 @@ import NVMAIDecodeProtocol
                 } catch {
                     outbox.finish(error: error)
                 }
+                session.activeGenerationID = nil
                 await withCheckedContinuation { continuation in
                     DispatchQueue.global(qos: .userInitiated).async {
                         writerFinished.wait()
                         continuation.resume()
                     }
                 }
-            case .cancel:
-                break
+            case .cancel(let id):
+                // Re-affirm the cancel once the current operation completes: a
+                // `.cancel` that arrived before the load task was registered is
+                // applied here (the input thread already handled the prompt
+                // case).
+                handleCancel(id, client: client, session: session)
             case .unload(let requestID):
                 await client.unload()
                 modelDirectory = nil
                 loadedOptions = nil
-                try? write(DecodeServiceEvent(
+                writeBestEffort(DecodeServiceEvent(
                     kind: .unloaded, generationID: requestID), to: handles.output)
             case .shutdown:
                 await client.unload()
                 return
             }
+        }
+    }
+
+    // MARK: - Session state shared between the input thread and the main loop
+
+    private enum LoadOutcome {
+        case success(Double)
+        case cancelled
+        case failure(Error)
+    }
+
+    private final class LoadPhaseReporter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _phaseLabel: String?
+
+        var phaseLabel: String? {
+            get { lock.lock(); defer { lock.unlock() }; return _phaseLabel }
+            set { lock.lock(); _phaseLabel = newValue; lock.unlock() }
+        }
+    }
+
+    private final class ServiceSession: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _activeGenerationID: UUID?
+        private var _loadTask: Task<LoadOutcome, Never>?
+
+        var activeGenerationID: UUID? {
+            get { lock.lock(); defer { lock.unlock() }; return _activeGenerationID }
+            set { lock.lock(); _activeGenerationID = newValue; lock.unlock() }
+        }
+
+        var loadTask: Task<LoadOutcome, Never>? {
+            get { lock.lock(); defer { lock.unlock() }; return _loadTask }
+            set { lock.lock(); _loadTask = newValue; lock.unlock() }
+        }
+    }
+
+    /// D7: cancel the generation whose ID matches, or — for an untargeted
+    /// cancel — the active generation, or the in-flight load when no
+    /// generation is running.
+    private static func handleCancel(_ id: UUID?,
+                                     client: RealInferenceClient,
+                                     session: ServiceSession) {
+        if let id {
+            if session.activeGenerationID == id {
+                client.cancel()
+            }
+        } else {
+            if session.activeGenerationID != nil {
+                client.cancel()
+            }
+            session.loadTask?.cancel()
         }
     }
 
@@ -141,9 +261,16 @@ import NVMAIDecodeProtocol
         }
     }
 
-    private static func write(_ event: DecodeServiceEvent,
-                              to handle: FileHandle) throws {
-        try handle.write(contentsOf: DecodeFrameCodec.encode(event))
+    /// Serializes every frame written by the main loop, the load heartbeat,
+    /// and the load-phase progress callback so two concurrent writers can
+    /// never interleave bytes of a single frame on the socket.
+    private static let outputLock = NSLock()
+
+    private static func writeBestEffort(_ event: DecodeServiceEvent,
+                                        to handle: FileHandle) {
+        outputLock.lock()
+        defer { outputLock.unlock() }
+        try? handle.write(contentsOf: DecodeFrameCodec.encode(event))
     }
 
     private static func appRuntimeOptions(_ options: DecodeRuntimeOptions) throws

@@ -72,7 +72,7 @@ extension PreadExpertStreamerTests {
 
     _ = try streamer.loadExpertsCached(experts: [0])
     let experts = [0, 1, 2]
-    let plan = streamer.planExpertsCached(experts: experts)
+    let plan = try streamer.planExpertsCached(experts: experts)
 
     #expect(plan.hits == 1)
     #expect(plan.misses.map { experts[$0] } == [1, 2])
@@ -93,7 +93,7 @@ extension PreadExpertStreamerTests {
 
     _ = try streamer.loadExpertsCached(experts: [0])
     let experts = [0, 1, 2]
-    let plan = streamer.planExpertsCached(experts: experts)
+    let plan = try streamer.planExpertsCached(experts: experts)
     let reserved = streamer.expertCachePlanBuffers(plan)
 
     let hitBytes = Self.bytes(of: reserved[0].buffer, offset: 0, count: Self.expertStride)
@@ -115,7 +115,7 @@ extension PreadExpertStreamerTests {
       layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
 
     let warmed = try streamer.loadExpertsCached(experts: [0, 1])
-    let plan = streamer.planExpertsCached(
+    let plan = try streamer.planExpertsCached(
       experts: [0, 2],
       avoidingSlots: [0, 1])
 

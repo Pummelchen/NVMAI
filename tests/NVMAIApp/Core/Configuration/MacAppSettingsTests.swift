@@ -4,7 +4,7 @@ import Testing
 
 @Suite struct MacAppSettingsTests {
     @Test func settingsFileLivesBesideModelDirectory() {
-        let model = URL(fileURLWithPath: "/tmp/NVMAI/gemma4.gturbo",
+        let model = URL(fileURLWithPath: "/tmp/NVMAI/qwen36.gturbo",
                         isDirectory: true)
         #expect(MacAppSettingsFileStore.fileURL(forModelDirectory: model).path
             == "/tmp/NVMAI/mac-app-settings.json")
@@ -13,7 +13,7 @@ import Testing
     @Test func missingFileCreatesReadableDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
 
         let settings = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: model)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
@@ -29,7 +29,7 @@ import Testing
     @Test func malformedFileIsReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         try Data("not json".utf8).write(to: fileURL)
 
@@ -45,7 +45,7 @@ import Testing
     @Test func invalidValuesAreReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
         let invalid = MacAppSettings(contextTokens: 123)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         try JSONEncoder().encode(invalid).write(to: fileURL)
@@ -113,7 +113,7 @@ import Testing
     @Test func invalidNewlineShortcutIsReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let model = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         let invalid = Data("""
         {
@@ -140,7 +140,7 @@ import Testing
     @Test func appModelLoadsAndSavesPersistedSettings() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
         try FileManager.default.createDirectory(
             at: modelDirectory,
             withIntermediateDirectories: true)
@@ -195,7 +195,7 @@ import Testing
     @Test func newlineShortcutPersistsImmediately() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
             settingsPersistenceEnabled: true)
@@ -211,7 +211,7 @@ import Testing
     @Test func showPromptExamplesPersistsImmediately() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("qwen36.gturbo", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
             settingsPersistenceEnabled: true)

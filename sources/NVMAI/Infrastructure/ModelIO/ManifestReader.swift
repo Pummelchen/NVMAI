@@ -127,8 +127,8 @@ public enum ManifestReader {
         let directory = try GTurboModelDirectory(rootURL: directoryURL)
         let data = try directory.readMetadata("manifest.json", maxBytes: 4 * 1024 * 1024)
         let wire = try JSONDecoder().decode(GTurboManifestV1.self, from: data)
-        // Determine family from hiddenActivation which is unique per family.
-        // gemma4 uses "gelu_pytorch_tanh", qwen36 uses "silu".
+        // Qwen 3.6 uses "silu". Any other activation is unsupported (NVMAI is
+        // Qwen-only).
         let family: ModelFamily
         switch wire.arch.hiddenActivation {
         case "silu":
@@ -139,7 +139,8 @@ public enum ManifestReader {
                 family = .qwen36
             }
         default:
-            family = .gemma4
+            throw ModelError.unsupportedArchitecture(
+                detail: "hiddenActivation=\(wire.arch.hiddenActivation)")
         }
         return family
     }
@@ -153,8 +154,8 @@ public enum ManifestReader {
         try validateArch(m.arch, expected: expected)
         if let quant = m.quant {
             try validateQuant(quant, family: expected.family)
-        } else if expected.numLayers == ArchConfig.gemma4_26B_A4B.numLayers,
-                  expected.hiddenSize == ArchConfig.gemma4_26B_A4B.hiddenSize {
+        } else if expected.numLayers == ArchConfig.qwen36_35B_A3B.numLayers,
+                  expected.hiddenSize == ArchConfig.qwen36_35B_A3B.hiddenSize {
             throw ModelError.indexCorrupt(detail: "manifest.quant is required for the production architecture")
         }
         for f in requiredFiles {
@@ -172,12 +173,12 @@ public enum ManifestReader {
     }
 
     private static func validateQuant(_ quant: ManifestQuant,
-                                      family: ModelFamily = .gemma4) throws {
+                                      family: ModelFamily) throws {
         let allowedRouterBits: Set<Int>
         switch family {
         case .qwen36MTP:
             allowedRouterBits = [4, 8]
-        default:
+        case .qwen36:
             allowedRouterBits = [8]
         }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [

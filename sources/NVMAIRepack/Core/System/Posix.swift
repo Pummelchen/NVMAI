@@ -28,7 +28,9 @@ public enum Posix {
     }
 
     public static func openCreateRW(_ path: String) throws -> Int32 {
-        let fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0o644)
+        // 0600: model, partial and temp files are never shared with other
+        // users of the machine.
+        let fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0o600)
         if fd < 0 { throw RepackError.fileOpenFailed(path: path, errno: errno) }
         return fd
     }
@@ -232,6 +234,10 @@ public enum Posix {
             throw RepackError.fileStatFailed(path: path, errno: errno == 0 ? EINVAL : errno)
         }
         let size = try fileSize(fd: fd, path: path)
+        // Cap the allocation up front, then verify the read actually filled
+        // the buffer: the fstat size is only a hint for the buffer, and a
+        // truncated file must surface as a short read rather than silent
+        // zero-padding.
         guard size <= maximumBytes, size <= UInt64(Int.max) else {
             throw RepackError.installStateCorrupt(
                 path: path,
@@ -241,6 +247,14 @@ public enum Posix {
         try data.withUnsafeMutableBytes { raw in
             guard let base = raw.baseAddress, !raw.isEmpty else { return }
             try preadAll(fd: fd, path: path, buf: base, count: raw.count, offset: 0)
+        }
+        // After-the-read verification: preadAll fills `raw.count` bytes or
+        // throws, so a mismatch here means the file shrank between fstat and
+        // the read — report the actual byte count instead of returning a
+        // short buffer as if it were the whole file.
+        guard data.count == Int(size) else {
+            throw RepackError.preadShort(
+                path: path, expected: Int(size), got: data.count, errno: 0)
         }
         return data
     }
@@ -268,63 +282,5 @@ public enum Posix {
         return descriptorInfo.st_dev == pathInfo.st_dev
             && descriptorInfo.st_ino == pathInfo.st_ino
             && pathInfo.st_mode & S_IFMT == S_IFREG
-    }
-
-    public static func adviseDontNeed(fd: Int32, offset: UInt64, length: Int) {
-        // posix_fadvise isn't available on Darwin. Use fcntl F_RDADVISE / F_NOCACHE
-        // for similar hints; here we use F_NOCACHE on the fd as a coarse hint.
-        // For per-range eviction we rely on madvise(MADV_DONTNEED) when the
-        // range is mapped (handled in MmapHandle).
-        _ = fd; _ = offset; _ = length
-    }
-}
-
-/// Owns one MAP_PRIVATE, PROT_READ mapping of a file. Pages fault in on access
-/// and can be evicted via `adviseDontNeed`. Designed for one shard at a time.
-public final class MmapHandle {
-    public let path: String
-    public let fd: Int32
-    public let base: UnsafeRawPointer
-    public let length: Int
-
-    public init(path: String) throws {
-        self.path = path
-        self.fd = try Posix.openRead(path)
-        var st = stat()
-        if fstat(fd, &st) != 0 {
-            close(fd)
-            throw RepackError.fileStatFailed(path: path, errno: errno)
-        }
-        let len = Int(st.st_size)
-        guard let raw = mmap(nil, len, PROT_READ, MAP_PRIVATE, fd, 0),
-              raw != MAP_FAILED else {
-            close(fd)
-            throw RepackError.mmapFailed(path: path, errno: errno)
-        }
-        self.base = UnsafeRawPointer(raw)
-        self.length = len
-        _ = posix_madvise(raw, len, POSIX_MADV_SEQUENTIAL)
-    }
-
-    deinit {
-        munmap(UnsafeMutableRawPointer(mutating: base), length)
-        close(fd)
-    }
-
-    public func slice(at offset: UInt64, count: Int) -> UnsafeRawBufferPointer {
-        UnsafeRawBufferPointer(start: base.advanced(by: Int(offset)), count: count)
-    }
-
-    /// madvise(MADV_DONTNEED) on a region. Alignment is rounded outward so we
-    /// only touch whole pages — the kernel ignores partial-page requests.
-    public func adviseDontNeed(offset: UInt64, count: Int) {
-        let page = UInt64(Posix.pageSize)
-        let start = (offset / page) * page
-        let endRaw = offset + UInt64(count)
-        let end = ((endRaw + page - 1) / page) * page
-        if end <= start { return }
-        let len = Int(end - start)
-        let addr = UnsafeMutableRawPointer(mutating: base.advanced(by: Int(start)))
-        _ = posix_madvise(addr, len, POSIX_MADV_DONTNEED)
     }
 }

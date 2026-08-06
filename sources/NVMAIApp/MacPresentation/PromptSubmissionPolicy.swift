@@ -15,9 +15,17 @@ public enum PromptSubmissionPolicy {
         hasMarkedText: Bool,
         isRepeat: Bool = false
     ) -> PromptSubmissionDecision {
-        guard newlineShortcut == .shiftReturn else { return .deferToEditor }
-
         let nativeModifiers: EventModifiers = [.command, .shift, .option, .control]
+
+        // D27: Command+Return is the generate shortcut. When the generate
+        // action is unavailable the button is disabled, the shortcut does not
+        // fire, and the keypress reaches the editor — consume it rather than
+        // letting TextEditor insert a newline.
+        if modifiers.contains(.command), !canRun {
+            return .consume
+        }
+
+        guard newlineShortcut == .shiftReturn else { return .deferToEditor }
         guard modifiers.intersection(nativeModifiers).isEmpty else {
             return .deferToEditor
         }

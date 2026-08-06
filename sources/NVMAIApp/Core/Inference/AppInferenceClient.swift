@@ -13,6 +13,14 @@ public protocol AppModelLifecycleClient: AnyObject, AppInferenceClient {
                       options: AppRuntimeOptions, forceLogitsHead: Bool,
                       onState: @escaping @Sendable (AppModelLoadState) -> Void) async throws
     func unload() async
+    /// Aborts an in-flight service-side load. The default implementation is a
+    /// no-op: in-process clients stop their load through app-side task
+    /// cancellation.
+    func cancelLoad()
+}
+
+public extension AppModelLifecycleClient {
+    func cancelLoad() {}
 }
 
 public protocol AppInferenceMemoryReporting: AnyObject {

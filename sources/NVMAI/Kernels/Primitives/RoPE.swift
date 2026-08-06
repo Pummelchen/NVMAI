@@ -1,6 +1,6 @@
 import Metal
 
-/// NeoX RoPE variants used by Gemma 4 and Qwen 3.6 attention.
+/// NeoX RoPE variants used by Qwen 3.6 attention.
 final class RoPE {
     private let defaultNeox: MTLComputePipelineState
     private let proportionalNeox: MTLComputePipelineState
@@ -36,10 +36,12 @@ final class RoPE {
                           numHeads: UInt32,
                           rotaryDim: UInt32,
                           numTokens: UInt32 = 1,
-                          theta: Float) {
+                          theta: Float) throws {
         precondition(rotaryDim.isMultiple(of: 2), "rotary_dim must be even")
         precondition(rotaryDim <= headDim, "rotary_dim must not exceed head_dim")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(neoxSubdim)
         encoder.setBuffer(data, offset: dataOffset, index: 0)
         var positionValue = position
@@ -67,9 +69,11 @@ final class RoPE {
                                   headDim: UInt32,
                                   numHeads: UInt32,
                                   numTokens: UInt32 = 1,
-                                  theta: Float = 10_000.0) {
+                                  theta: Float = 10_000.0) throws {
         precondition(headDim.isMultiple(of: 2), "head_dim must be even")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         let pipeline = defaultPipeline(headDim: headDim, numHeads: numHeads)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(data, offset: dataOffset, index: 0)
@@ -97,11 +101,13 @@ final class RoPE {
                                        numHeads: UInt32,
                                        rotatedPairs: UInt32,
                                        numTokens: UInt32 = 1,
-                                       theta: Float = 1_000_000.0) {
+                                       theta: Float = 1_000_000.0) throws {
         precondition(headDim.isMultiple(of: 2), "head_dim must be even")
         precondition(rotatedPairs * 2 <= headDim,
                      "rotatedPairs * 2 must not exceed head_dim")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         let pipeline = proportionalPipeline(
             headDim: headDim,
             numHeads: numHeads,
@@ -118,9 +124,13 @@ final class RoPE {
         encoder.setBytes(&numHeadsValue, length: MemoryLayout<UInt32>.size, index: 3)
         encoder.setBytes(&thetaValue, length: MemoryLayout<Float>.size, index: 4)
         encoder.setBytes(&rotatedPairsValue, length: MemoryLayout<UInt32>.size, index: 5)
+        // K4: dispatch the active pair count, not headDim/2. The kernel guards
+        // `pair >= active_pairs` so the old headDim/2 dispatch was only
+        // wasteful, not wrong — dispatching the true count keeps the guard
+        // meaningful and avoids launching idle threads.
         dispatch(encoder: encoder,
                  pipeline: pipeline,
-                 pairs: Int(headDim) / 2,
+                 pairs: Int(rotatedPairs),
                  heads: Int(numHeads),
                  tokens: Int(numTokens))
         encoder.endEncoding()

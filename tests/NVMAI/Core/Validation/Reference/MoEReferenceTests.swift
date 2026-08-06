@@ -6,7 +6,7 @@ import NVMAIValidationSupport
 @Suite struct MoEReferenceTests {
     @Test("gelu_pytorch_tanh matches scalar definition")
     func geluConstantsCorrect() {
-        // Compare against the literal Gemma 4 / PyTorch reference points.
+        // Compare against the literal PyTorch reference points.
         let y = MoeRef.geluTanh([0.0, 1.0, -1.0, 2.0])
         #expect(abs(y[0]) < 1e-7, "y(0)=\(y[0])")
         let expectedAt1: Float = 0.5 * (1 + Foundation.tanh(0.7978845608028654 * (1 + 0.044715)))

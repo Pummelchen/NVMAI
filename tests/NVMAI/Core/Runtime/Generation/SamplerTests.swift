@@ -43,12 +43,12 @@ import NVMAIValidationSupport
 
         @discardableResult
         func draw(_ values: [Float], config: GenerationConfig,
-                  position: Int = 0, history: [Int32] = []) -> (id: UInt32, path: SamplePath) {
+                  position: Int = 0, history: [Int32] = []) throws -> (id: UInt32, path: SamplePath) {
             writeLogits(values)
             let cmd = ctx.queue.makeCommandBuffer()!
-            let path = sampler.sample(commandBuffer: cmd, logits: logits, probs: probs,
-                                      history: history, config: config,
-                                      position: position, outToken: outToken)
+            let path = try sampler.sample(commandBuffer: cmd, logits: logits, probs: probs,
+                                          history: history, config: config,
+                                          position: position, outToken: outToken)
             cmd.commit(); cmd.waitUntilCompleted()
             return (outToken.contents().load(as: UInt32.self), path)
         }
@@ -59,7 +59,7 @@ import NVMAIValidationSupport
         let rig = try Rig(vocab: v)
         var logits = [Float](repeating: 0.1, count: v)
         logits[1337] = 9.0
-        let (id, path) = rig.draw(logits, config: GenerationConfig(temperature: 0))
+        let (id, path) = try rig.draw(logits, config: GenerationConfig(temperature: 0))
         #expect(id == 1337, "got \(id)")
         #expect(path == .greedyGPU)
     }
@@ -70,10 +70,10 @@ import NVMAIValidationSupport
         var rng = SeedTree(0x51A7_1005).key("sampler-position-determinism")
         let logits = (0..<v).map { _ in rng.uniform(-2, 2) }
         let cfg = GenerationConfig(temperature: 1.0, seed: 42)
-        let a = rig.draw(logits, config: cfg, position: 3).id
-        let b = rig.draw(logits, config: cfg, position: 3).id
+        let a = try rig.draw(logits, config: cfg, position: 3).id
+        let b = try rig.draw(logits, config: cfg, position: 3).id
         #expect(a == b, "same seed+position gave \(a) vs \(b)")
-        #expect(rig.draw(logits, config: cfg, position: 0).path == .gpuSampled)
+        #expect(try rig.draw(logits, config: cfg, position: 0).path == .gpuSampled)
     }
 
     @Test func seeded_reproducibleAcrossPositions() throws {
@@ -82,13 +82,13 @@ import NVMAIValidationSupport
         var rng = SeedTree(0x51A7_1006).key("sampler-position-replay")
         let logits = (0..<v).map { _ in rng.uniform(-2, 2) }
         let cfg = GenerationConfig(temperature: 1.0, seed: 42)
-        let run1 = (0..<5).map { rig.draw(logits, config: cfg, position: $0).id }
-        let run2 = (0..<5).map { rig.draw(logits, config: cfg, position: $0).id }
+        let run1 = try (0..<5).map { try rig.draw(logits, config: cfg, position: $0).id }
+        let run2 = try (0..<5).map { try rig.draw(logits, config: cfg, position: $0).id }
         #expect(run1 == run2, "seed=42 not reproducible: \(run1) vs \(run2)")
 
         // A different seed should diverge on at least one position.
         let cfg43 = GenerationConfig(temperature: 1.0, seed: 43)
-        let run3 = (0..<5).map { rig.draw(logits, config: cfg43, position: $0).id }
+        let run3 = try (0..<5).map { try rig.draw(logits, config: cfg43, position: $0).id }
         #expect(run3 != run1, "seed 42 and 43 produced identical sequences")
     }
 
@@ -101,7 +101,7 @@ import NVMAIValidationSupport
         let topSet = Set(top.map { UInt32($0) })
         for t in 0..<32 {
             let cfg = GenerationConfig(temperature: 1.0, topK: 4, seed: UInt64(t) &+ 1)
-            let id = rig.draw(logits, config: cfg, position: t).id
+            let id = try rig.draw(logits, config: cfg, position: t).id
             #expect(topSet.contains(id), "trial \(t): id=\(id) outside top-4")
         }
     }
@@ -116,7 +116,7 @@ import NVMAIValidationSupport
         let nucleus: Set<UInt32> = [7, 42]
         for t in 0..<32 {
             let cfg = GenerationConfig(temperature: 1.0, topP: 0.9, seed: UInt64(t) &+ 1)
-            let id = rig.draw(logits, config: cfg, position: t).id
+            let id = try rig.draw(logits, config: cfg, position: t).id
             #expect(nucleus.contains(id), "trial \(t): id=\(id) outside nucleus")
         }
     }
@@ -134,7 +134,7 @@ import NVMAIValidationSupport
         let trials = 200
         for t in 0..<trials {
             let cfg = GenerationConfig(temperature: 1.0, repetitionPenalty: 2.0, seed: UInt64(t) &+ 1)
-            let (id, path) = rig.draw(logits, config: cfg, position: t, history: history)
+            let (id, path) = try rig.draw(logits, config: cfg, position: t, history: history)
             #expect(path == .hostPenalty)
             if id == 5 { count5 += 1 }
         }
@@ -144,11 +144,11 @@ import NVMAIValidationSupport
         #expect(Double(count5) < 0.5 * uniformExpect, "id 5 chosen \(count5) times (uniform≈\(uniformExpect))")
     }
 
-    /// Saturated-logit suppression: real Gemma 4 raw logits reach the
-    /// hundreds, deep in softcap-tanh saturation. The penalty must act on the
-    /// post-softcap value — applied to the raw logit it moves the capped
-    /// result by ~nothing and the penalty silently no-ops (the repetition-loop
-    /// regression this pins).
+    /// Saturated-logit suppression: raw logits deep in softcap-tanh
+    /// saturation must still respond to the repetition penalty. The penalty
+    /// acts on the post-softcap value — applied to the raw logit it moves the
+    /// capped result by ~nothing and the penalty silently no-ops (the
+    /// repetition-loop regression this pins).
     @Test func repetitionPenalty_bitesOnSaturatedLogits() throws {
         let v = 64
         let rig = try Rig(vocab: v)
@@ -161,7 +161,7 @@ import NVMAIValidationSupport
         let trials = 64
         for t in 0..<trials {
             let cfg = GenerationConfig(temperature: 1.0, repetitionPenalty: 1.3, seed: UInt64(t) &+ 1)
-            let (id, path) = rig.draw(logits, config: cfg, position: t, history: history)
+            let (id, path) = try rig.draw(logits, config: cfg, position: t, history: history)
             #expect(path == .hostPenalty)
             if id == 5 { count5 += 1 }
         }
@@ -185,7 +185,7 @@ import NVMAIValidationSupport
         let trials = 1600
         for t in 0..<trials {
             let cfg = GenerationConfig(temperature: 2.0, topK: v, seed: UInt64(t) &+ 1)
-            let raw = rig.draw(logits, config: cfg, position: t).id
+            let raw = try rig.draw(logits, config: cfg, position: t).id
             let id = Int(raw)
             guard id >= 0 && id < v else { Issue.record("id \(raw) (0x\(String(raw, radix: 16))) out of range v=\(v)"); continue }
             counts[id] += 1

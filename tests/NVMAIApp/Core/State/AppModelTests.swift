@@ -156,10 +156,8 @@ import Testing
         model.maxNewTokensOverride = 4
         model.run()
 
-        for _ in 0..<200 where model.isRunning {
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
-
+        let reachedIdle = await waitUntil { !model.isRunning }
+        #expect(reachedIdle, "run did not reach idle within the wait budget")
         #expect(!model.isRunning)
         #expect(model.outputText.contains("alpha beta"))
         #expect(model.diagnostics != nil)
@@ -180,7 +178,8 @@ import Testing
         #expect(model.outputConversationPlainText == "You:\noriginal prompt")
 
         model.promptText = "edited prompt"
-        await waitForIdle(model)
+        let reachedIdle = await waitUntil { !model.isRunning }
+        #expect(reachedIdle, "run did not reach idle within the wait budget")
 
         #expect(model.outputPromptText == "original prompt")
         #expect(model.outputResponsePlainText == "answer")
@@ -215,14 +214,13 @@ import Testing
         model.maxNewTokensOverride = 10
         model.run()
 
-        for _ in 0..<200 where model.liveTokenCount == 0 {
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
-
+        let producedToken = await waitUntil { model.liveTokenCount > 0 }
+        #expect(producedToken, "no token was produced within the wait budget")
         #expect(model.liveTokenCount > 0)
         model.cancel()
         #expect(model.isCancellationPending)
-        await waitForIdle(model)
+        let reachedIdle = await waitUntil { !model.isRunning }
+        #expect(reachedIdle, "cancellation did not reach idle within the wait budget")
 
         #expect(!model.isRunning)
         #expect(!model.isCancellationPending)
@@ -249,13 +247,12 @@ import Testing
         model.promptText = "prefill prompt"
         model.run()
 
-        for _ in 0..<200 where model.livePrefillDone == 0 {
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
-
+        let prefillStarted = await waitUntil { model.livePrefillDone > 0 }
+        #expect(prefillStarted, "prefill did not start within the wait budget")
         #expect(model.outputPromptText == "prefill prompt")
         model.cancel()
-        await waitForIdle(model)
+        let reachedIdle = await waitUntil { !model.isRunning }
+        #expect(reachedIdle, "cancellation did not reach idle within the wait budget")
 
         #expect(!model.isRunning)
         #expect(model.outputPromptText == "prefill prompt")
@@ -275,7 +272,8 @@ import Testing
         model.promptText = "fail"
 
         model.run()
-        await waitForIdle(model)
+        let reachedIdle = await waitUntil { !model.isRunning }
+        #expect(reachedIdle, "run did not reach idle within the wait budget")
 
         #expect(model.error?.userMessage == "synthetic failure")
         #expect(model.diagnostics?.stopReason == .failed)
@@ -317,10 +315,17 @@ import Testing
         return model
     }
 
+    /// Polls `condition` for up to the wait budget (2 s), sleeping 5 ms
+    /// between checks. Returns whether the condition became true. Tests must
+    /// assert on the return value so a hung run fails loudly instead of
+    /// silently asserting on stale state after the poll expires.
     @MainActor
-    private func waitForIdle(_ model: AppModel) async {
-        for _ in 0..<200 where model.isRunning {
+    private func waitUntil(timeoutNanos: UInt64 = 2_000_000_000,
+                           _ condition: () -> Bool) async -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanos
+        while !condition() && DispatchTime.now().uptimeNanoseconds < deadline {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+        return condition()
     }
 }

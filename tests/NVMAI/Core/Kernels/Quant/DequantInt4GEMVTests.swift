@@ -82,7 +82,7 @@ import NVMAIValidationSupport
         guard let cmd = ctx.queue.makeCommandBuffer() else {
             Issue.record("Failed to make command buffer"); return
         }
-        kernel.encode(commandBuffer: cmd,
+        try kernel.encode(commandBuffer: cmd,
                       weights: wBuf, weightsOffset: weightByteOffset,
                       scales: sBuf, biases: bBuf,
                       x: xBuf, y: yBuf,

@@ -23,8 +23,8 @@ final class DequantInt4GEMV {
     private let specializedPipelines: [Shape: MTLComputePipelineState]
     private let specializedTwoRowPipelines: [Shape: MTLComputePipelineState]
 
-    /// `additionalShapes` compiles extra constant-folded variants for a
-    /// non-Gemma model's decode shapes. Measured: an unspecialized
+    /// `additionalShapes` compiles extra constant-folded variants for
+    /// Qwen 3.6's decode shapes. Measured: an unspecialized
     /// 4096x2048 GEMV runs at 102 GB/s, the specialized one at 141 GB/s.
     init(context: MetalContext,
          additionalShapes: [(m: Int, n: Int)] = []) throws {
@@ -75,14 +75,16 @@ final class DequantInt4GEMV {
                 y: MTLBuffer,
                 yOffset: Int = 0,
                 m: UInt32,
-                n: UInt32) {
+                n: UInt32) throws {
         precondition(n % UInt32(Quantization.groupSize) == 0,
                      "N must be a multiple of \(Quantization.groupSize)")
         // The kernel reads packed weights through a `ushort*`; the repacker
         // guarantees two-byte sub-tensor alignment but not four-byte alignment.
         precondition(weightsOffset % 2 == 0,
                      "dequant_int4_gemv_simd needs a 2-aligned weightsOffset, got \(weightsOffset)")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(
             specializedPipelines[Shape(m: m, n: n)] ?? pipeline)
         encoder.setBuffer(weights, offset: weightsOffset, index: 0)
@@ -114,26 +116,17 @@ final class DequantInt4GEMV {
                        biases: MTLBuffer, biasesOffset: Int = 0,
                        x: MTLBuffer, xOffset: Int = 0,
                        y: MTLBuffer, yOffset: Int = 0,
-                       m: UInt32, n: UInt32) {
+                       m: UInt32, n: UInt32) throws {
         precondition(n % UInt32(Quantization.groupSize) == 0)
         precondition(weightsOffset % 2 == 0)
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.setComputePipelineState(
-            specializedTwoRowPipelines[Shape(m: m, n: n)] ?? twoRowPipeline)
-        encoder.setBuffer(weights, offset: weightsOffset, index: 0)
-        encoder.setBuffer(scales, offset: scalesOffset, index: 1)
-        encoder.setBuffer(biases, offset: biasesOffset, index: 2)
-        encoder.setBuffer(x, offset: xOffset, index: 3)
-        encoder.setBuffer(y, offset: yOffset, index: 4)
-        var mValue = m
-        var nValue = n
-        encoder.setBytes(&mValue, length: MemoryLayout<UInt32>.size, index: 5)
-        encoder.setBytes(&nValue, length: MemoryLayout<UInt32>.size, index: 6)
-        encoder.dispatchThreadgroups(
-            MTLSize(width: (Int(m) + Self.rowsPerThreadgroup - 1)
-                / Self.rowsPerThreadgroup, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(
-                width: 32 * Self.rowsPerThreadgroup, height: 1, depth: 1))
-        encoder.endEncoding()
+        try encodeTwoRowsShared(
+            commandBuffer: commandBuffer,
+            pipeline: specializedTwoRowPipelines[Shape(m: m, n: n)] ?? twoRowPipeline,
+            weights: weights, weightsOffset: weightsOffset,
+            scales: scales, scalesOffset: scalesOffset,
+            biases: biases, biasesOffset: biasesOffset,
+            x: x, xOffset: xOffset,
+            y: y, yOffset: yOffset,
+            m: m, n: n)
     }
 }

@@ -8,7 +8,6 @@ using namespace mpp::tensor_ops;
 
 constant constexpr uint kPrefillGroupSize = 64;
 constant constexpr uint kPrefillRmsMaxSimdGroups = 8;
-constant constexpr uint kPrefillPostMaxD = 4096;
 constant constexpr uint kPrefillRouterMaxExperts = 256;
 constant constexpr uint kPrefillRouterMaxTopK = 64;
 constant constexpr uint kPrefillAttentionMaxSimdGroups = 16;
@@ -16,7 +15,7 @@ constant constexpr uint kPrefillMaxTileExperts = 16;
 constant constexpr float kPrefillGeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kPrefillGeluCubicCoeff = 0.044715f;
 constant uint FC_PREFILL_KV_RING_CAP [[function_constant(76)]];
-// Unset/false = gelu_pytorch_tanh (Gemma), true = silu (Qwen 3.6 SwiGLU).
+// Unset/false = gelu_pytorch_tanh, true = silu (Qwen 3.6 SwiGLU).
 constant bool FC_PREFILL_ACT_SILU [[function_constant(77)]];
 // Packed affine weight width for chunked embedding, projections, and routed
 // experts. Leaving it unset preserves the original INT4 specialization.
@@ -66,6 +65,7 @@ kernel void prefill_embed_lookup_affine_block(
     constant uint&        T         [[buffer(5)]],
     constant uint&        D         [[buffer(6)]],
     constant float&       out_scale [[buffer(7)]],
+    constant uint&        vocab     [[buffer(8)]],
     uint2                 gid       [[thread_position_in_grid]]
 ) {
     const uint d = gid.x;
@@ -73,6 +73,13 @@ kernel void prefill_embed_lookup_affine_block(
     if (t >= T || d >= D) return;
 
     const uint token = tokens[t];
+    // OOB token guard: the CPU clamps routed token ids, but a clamped id can
+    // still land at the table edge; never index past the vocab rows. Zero
+    // embeddings keep the prefill pipeline well-defined for OOB tokens.
+    if (token >= vocab) {
+        out[t * D + d] = half(0.0f);
+        return;
+    }
     const uint groups_per_row = D / kPrefillGroupSize;
     const uint bits = prefill_affine_bits();
     const uint row_bytes = D * bits / 8u;
@@ -207,164 +214,6 @@ void prefill_rmsnorm_no_scale_perhead_block(
 
     for (uint i = lid; i < head_dim; i += lsize) {
         yh[i] = half(float(xh[i]) * inv);
-    }
-}
-
-[[kernel, max_total_threads_per_threadgroup(256)]]
-void prefill_post_attn_setup_block(
-    device       half*   hidden                [[buffer(0)]],
-    device const half*   attn                  [[buffer(1)]],
-    device       half*   dense_x               [[buffer(2)]],
-    device       half*   routed_x              [[buffer(3)]],
-    device       half*   router_x              [[buffer(4)]],
-    device const bfloat* w_post_attn           [[buffer(5)]],
-    device const bfloat* w_pre_ffn             [[buffer(6)]],
-    device const bfloat* w_pre_ffn2            [[buffer(7)]],
-    constant uint&       T                     [[buffer(8)]],
-    constant uint&       D                     [[buffer(9)]],
-    constant uint&       hidden_stride_elems   [[buffer(10)]],
-    constant uint&       attn_stride_elems     [[buffer(11)]],
-    constant uint&       dense_stride_elems    [[buffer(12)]],
-    constant uint&       routed_stride_elems   [[buffer(13)]],
-    constant uint&       router_stride_elems   [[buffer(14)]],
-    constant float&      rms_eps               [[buffer(15)]],
-    uint                 row                   [[threadgroup_position_in_grid]],
-    uint                 lid                   [[thread_position_in_threadgroup]],
-    uint                 lsize                 [[threads_per_threadgroup]],
-    uint                 lane                  [[thread_index_in_simdgroup]],
-    uint                 sg                    [[simdgroup_index_in_threadgroup]],
-    uint                 sgs                   [[simdgroups_per_threadgroup]]
-) {
-    if (row >= T || D > kPrefillPostMaxD) return;
-
-    threadgroup half attn_norm_tg[kPrefillPostMaxD];
-    threadgroup half hidden_tg[kPrefillPostMaxD];
-    threadgroup float partial[kPrefillRmsMaxSimdGroups];
-
-    device half* hidden_row = hidden + row * hidden_stride_elems;
-    device const half* attn_row = attn + row * attn_stride_elems;
-    device half* dense_row = dense_x + row * dense_stride_elems;
-    device half* routed_row = routed_x + row * routed_stride_elems;
-    device half* router_row = router_x + row * router_stride_elems;
-
-    const float attn_inv = prefill_rms_block_inv(attn_row, D, rms_eps,
-                                                 lid, lsize, lane, sg, sgs,
-                                                 partial);
-    for (uint i = lid; i < D; i += lsize) {
-        attn_norm_tg[i] = half(float(attn_row[i]) * attn_inv * float(w_post_attn[i]));
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    float acc = 0.0f;
-    for (uint i = lid; i < D; i += lsize) {
-        half h = half(float(hidden_row[i]) + float(attn_norm_tg[i]));
-        hidden_tg[i] = h;
-        hidden_row[i] = h;
-        float hf = float(h);
-        acc = fma(hf, hf, acc);
-    }
-    acc = simd_sum(acc);
-    if (lane == 0) {
-        partial[sg] = acc;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    if (sg == 0) {
-        float sum = (lane < sgs) ? partial[lane] : 0.0f;
-        sum = simd_sum(sum);
-        if (lane == 0) {
-            partial[0] = rsqrt(sum / float(D) + rms_eps);
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const float hidden_inv = partial[0];
-    for (uint i = lid; i < D; i += lsize) {
-        const float h = float(hidden_tg[i]) * hidden_inv;
-        dense_row[i] = half(h * float(w_pre_ffn[i]));
-        routed_row[i] = half(h * float(w_pre_ffn2[i]));
-        router_row[i] = half(h);
-    }
-}
-
-[[kernel, max_total_threads_per_threadgroup(256)]]
-void prefill_layer_tail_block(
-    device const half*   h2                    [[buffer(0)]],
-    device const half*   h1                    [[buffer(1)]],
-    device       half*   hidden                [[buffer(2)]],
-    device const bfloat* w_postffn2            [[buffer(3)]],
-    device const bfloat* w_postffn             [[buffer(4)]],
-    constant uint&       T                     [[buffer(5)]],
-    constant uint&       D                     [[buffer(6)]],
-    constant uint&       h2_stride_elems       [[buffer(7)]],
-    constant uint&       h1_stride_elems       [[buffer(8)]],
-    constant uint&       hidden_stride_elems   [[buffer(9)]],
-    constant float&      rms_eps               [[buffer(10)]],
-    constant float&      layer_scalar          [[buffer(11)]],
-    uint                 row                   [[threadgroup_position_in_grid]],
-    uint                 lid                   [[thread_position_in_threadgroup]],
-    uint                 lsize                 [[threads_per_threadgroup]],
-    uint                 lane                  [[thread_index_in_simdgroup]],
-    uint                 sg                    [[simdgroup_index_in_threadgroup]],
-    uint                 sgs                   [[simdgroups_per_threadgroup]]
-) {
-    if (row >= T || D > kPrefillPostMaxD) return;
-
-    threadgroup half tmp_tg[kPrefillPostMaxD];
-    threadgroup half h12_tg[kPrefillPostMaxD];
-    threadgroup float partial[kPrefillRmsMaxSimdGroups];
-
-    device const half* h2_row = h2 + row * h2_stride_elems;
-    device const half* h1_row = h1 + row * h1_stride_elems;
-    device half* hidden_row = hidden + row * hidden_stride_elems;
-
-    const float inv_h2 = prefill_rms_block_inv(h2_row, D, rms_eps,
-                                               lid, lsize, lane, sg, sgs,
-                                               partial);
-    for (uint i = lid; i < D; i += lsize) {
-        tmp_tg[i] = half(float(h2_row[i]) * inv_h2 * float(w_postffn2[i]));
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (uint i = lid; i < D; i += lsize) {
-        h12_tg[i] = h1_row[i] + tmp_tg[i];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    float acc = 0.0f;
-    for (uint i = lid; i < D; i += lsize) {
-        float v = float(h12_tg[i]);
-        acc = fma(v, v, acc);
-    }
-    acc = simd_sum(acc);
-    if (lane == 0) {
-        partial[sg] = acc;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    if (sg == 0) {
-        float sum = (lane < sgs) ? partial[lane] : 0.0f;
-        sum = simd_sum(sum);
-        if (lane == 0) {
-            partial[0] = rsqrt(sum / float(D) + rms_eps);
-        }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    const float inv_h12 = partial[0];
-    for (uint i = lid; i < D; i += lsize) {
-        tmp_tg[i] = half(float(h12_tg[i]) * inv_h12 * float(w_postffn[i]));
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (uint i = lid; i < D; i += lsize) {
-        hidden_row[i] = hidden_row[i] + tmp_tg[i];
-    }
-    threadgroup_barrier(mem_flags::mem_device);
-
-    const half h_scale = half(layer_scalar);
-    for (uint i = lid; i < D; i += lsize) {
-        hidden_row[i] = hidden_row[i] * h_scale;
     }
 }
 
@@ -521,7 +370,7 @@ static inline float prefill_moe_int4_gemv_row_tg(
     return acc;
 }
 
-kernel void prefill_router_gemma4_block(
+kernel void prefill_router_block(
     device const uint8_t* W                [[buffer(0)]],
     device const bfloat*  scales           [[buffer(1)]],
     device const bfloat*  biases           [[buffer(2)]],
@@ -679,8 +528,10 @@ kernel void prefill_grouped_routed_moe_batched_phase1(
     const float up = prefill_moe_affine_gemv_row_dev(up_W, up_s, up_b, x, f, p.D);
     const uint row_elements = p.pair_count * p.F;
     const uint index = pair_local * p.F + f;
-    gate_up_act_scratch[index] = half(gate);
-    gate_up_act_scratch[row_elements + index] = half(up);
+    // Only the activated third region is ever read: batched_down consumes
+    // `gate_up_act_scratch + 2 * pair_count * F`. The raw gate/up halves were
+    // dead traffic — skip those stores (the layout offset stays so the
+    // reader's math is unchanged).
     gate_up_act_scratch[2u * row_elements + index] =
         half(prefill_hidden_activation(gate) * up);
 }
@@ -890,20 +741,6 @@ static inline float prefill_attention_tg_sum(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     return partial[0];
-}
-
-static inline float prefill_attention_tg_sum_single_bank(
-    float value,
-    uint lane,
-    uint simd_group,
-    uint simdgroups,
-    threadgroup float* partial
-) {
-    const float result = prefill_attention_tg_sum(
-        value, lane, simd_group, simdgroups, partial);
-    // A single scratch bank needs an explicit reader-to-next-writer edge.
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return result;
 }
 
 [[kernel, max_total_threads_per_threadgroup(512)]]

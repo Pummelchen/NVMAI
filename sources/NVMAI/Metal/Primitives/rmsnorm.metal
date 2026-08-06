@@ -63,9 +63,9 @@ static inline float rms_block_inv(
     return partial[0];
 }
 
-// Gemma 4 RMS norms ship as BF16 weight vectors (all 30 layers' input /
-// post-attn / pre-FFN / post-FFN norms, plus q/k_norm). Math is identical to
-// the no-scale form below, with a learned weight applied after normalization.
+// RMS norms ship as BF16 weight vectors (input / post-attn / pre-FFN /
+// post-FFN norms, plus q/k_norm). Math is identical to the no-scale form
+// below, with a learned weight applied after normalization.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void rmsnorm_bf16w(
     device const half*   x          [[buffer(0)]],   // [D] FP16
@@ -92,11 +92,12 @@ void rmsnorm_bf16w(
     }
 }
 
-// Gemma 4 applies q_norm/k_norm
-// (BF16 weight, shared across heads) and v_norm (no-scale) to each attention
-// head independently. These kernels process all heads in one dispatch, with
-// one threadgroup per head, avoiding a chain of tiny serialized encoders.
-// Math is identical to the single-row kernels applied per head.
+// q_norm/k_norm
+// (BF16 weight, shared across heads) and v_norm (no-scale) apply to each
+// attention head independently. These kernels process all heads in one
+// dispatch, with one threadgroup per head, avoiding a chain of tiny
+// serialized encoders. Math is identical to the single-row kernels applied
+// per head.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void rmsnorm_bf16w_perhead(
     device const half*   x          [[buffer(0)]],   // [numHeads * headDim] FP16
@@ -148,7 +149,7 @@ void rmsnorm_no_scale_perhead(
     }
 }
 
-// Gemma 4 v_norm and the MoE router's internal norm are no-scale RMSNorm:
+// v_norm and the MoE router's internal norm are no-scale RMSNorm:
 // y[i] = x[i] * rsqrt(mean(x^2) + eps). There is no resident weight tensor.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void rmsnorm_no_scale(

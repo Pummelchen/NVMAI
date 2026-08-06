@@ -4,6 +4,10 @@ import SwiftUI
 
 struct GenerateControl: View {
     let model: AppModel
+    /// Single submission path shared with the composer's key-press handler
+    /// (D29): both the button and the Return shortcut route through the same
+    /// action.
+    let onSubmit: () -> Void
     private let controlHeight: CGFloat = 34
 
     var body: some View {
@@ -16,7 +20,7 @@ struct GenerateControl: View {
 
     private var generateButton: some View {
         Button {
-            model.run()
+            onSubmit()
         } label: {
             Label("Generate", systemImage: "arrow.up")
                 .font(.callout.weight(.semibold))

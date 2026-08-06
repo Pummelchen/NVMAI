@@ -7,9 +7,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let mtpMemoryMiB: Int
     public let port: Int
     /// Explicit --model-id value; nil defers to the loaded model's family
-    /// default (gemma-4-26b-a4b-it or qwen3.6-35b-a3b).
+    /// default (qwen3.6-35b-a3b).
     public let modelIDOverride: String?
-    public var modelID: String { modelIDOverride ?? "gemma-4-26b-a4b-it" }
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
@@ -28,8 +27,7 @@ public struct ServerArguments: Equatable, Sendable {
                              (default 384).
       --port <1...65535>     Loopback port (default 8080).
       --model-id <id>        API model identifier (default derived from the
-                             installed model: gemma-4-26b-a4b-it or
-                             qwen3.6-35b-a3b).
+                             installed model: qwen3.6-35b-a3b).
       --max-context <tokens> 4096, 8192, 16384, 32768, 65536, 131072, or 262144
                              (default 262144).
       --queue-limit <count>  Maximum queued requests (default 4).

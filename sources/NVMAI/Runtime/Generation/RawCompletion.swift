@@ -42,7 +42,7 @@ public struct RawCompletionScratch: @unchecked Sendable {
     let outToken: MTLBuffer
     let sampler: Sampler
 
-    public init(context: MetalContext, vocab: Int, logitSoftcap: Float = 30.0) throws {
+    public init(context: MetalContext, vocab: Int, logitSoftcap: Float = 0.0) throws {
         guard let logits = context.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
                                                      options: .storageModeShared),
               let probs = context.device.makeBuffer(length: vocab * MemoryLayout<Float16>.size,
@@ -133,11 +133,20 @@ public func runRawCompletion(producer: any LogitProducer,
     var history = Array(promptIds.prefix(cachedPromptTokens))
     history.reserveCapacity(promptIds.count + config.maxNewTokens)
 
-    if let context = producer as? any ContextWindowReporting,
-       promptIds.count + config.maxNewTokens > context.maxContext {
-        throw GeneratorError.contextOverflow(prompt: promptIds.count,
-                                             maxNew: config.maxNewTokens,
-                                             maxContext: context.maxContext)
+    if let context = producer as? any ContextWindowReporting {
+        // A resume already occupies `cachedPromptTokens` KV rows, so only the
+        // uncached prompt plus the response is new work — it must fit the
+        // remaining capacity. Algebraically this is the final-KV-position
+        // bound (`promptIds.count + maxNewTokens <= maxContext`); written in
+        // remaining-capacity form so near-maxContext continuations are not
+        // over-rejected (R9).
+        let newRows = (promptIds.count - cachedPromptTokens) + config.maxNewTokens
+        let remainingCapacity = context.maxContext - cachedPromptTokens
+        if newRows > remainingCapacity {
+            throw GeneratorError.contextOverflow(prompt: promptIds.count,
+                                                 maxNew: config.maxNewTokens,
+                                                 maxContext: context.maxContext)
+        }
     }
     switch start {
     case .reset:
@@ -187,6 +196,9 @@ public func runRawCompletion(producer: any LogitProducer,
 
     let decodeStart = Date()
     let prefillSeconds = decodeStart.timeIntervalSince(prefillStart)
+    // The scratch sampler persists across generations; its incremental
+    // repetition-penalty history is per-generation (R25).
+    scratch.sampler.resetPenaltyHistory()
     var stopMatcher = StreamingStopMatcher(stops: config.stopStrings)
     var generated = 0
     var reason: StopReason = .maxTokens
@@ -235,7 +247,13 @@ public func runRawCompletion(producer: any LogitProducer,
         if hitStopString || hitMax {
             let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
             if !tail.isEmpty { onProgress(.tail(tail)) }
-            reason = hitStopString ? .stopString : .maxTokens
+            if hitStopString {
+                // A configured stop string truncates output; the caller's
+                // external stop signal reports `.external` instead (R35).
+                reason = stopMatcher.isStopped ? .stopString : .external
+            } else {
+                reason = .maxTokens
+            }
             break
         }
 
@@ -301,6 +319,10 @@ private func runStreamingMTPCompletion(
             let item = pending.removeFirst()
             boundary = item.token
             generated += 1
+            // Mirrors the scalar loop: `uncommitted` holds the last emitted
+            // token iff advance has not yet committed it to the target KV
+            // (R10). A token reported backed by the batch is already in the
+            // KV, so it never sits uncommitted.
             uncommitted = item.backed ? [] : [item.token]
 
             if tokenizer.stopTokenIDs.contains(item.token)
@@ -319,14 +341,21 @@ private func runStreamingMTPCompletion(
             if hitStop || hitMax {
                 let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
                 if !tail.isEmpty { onProgress(.tail(tail)) }
-                reason = hitStop ? .stopString : .maxTokens
+                if hitStop {
+                    reason = stopMatcher.isStopped ? .stopString : .external
+                } else {
+                    reason = .maxTokens
+                }
                 break decodeLoop
             }
         }
 
-        // The uncommitted boundary becomes target-KV-backed inside advance.
-        backedHistory.append(boundary)
+        // The boundary is reported backed only after the advance that commits
+        // it to the target KV succeeds (R10): "reported backed" strictly means
+        // "committed by a completed advance", so the final boundary token is
+        // always accounted for in `kvBackedTokenIDs`.
         let batch = try await decoder.advance(boundaryToken: boundary)
+        backedHistory.append(boundary)
         pending = batch.tokenIDs.enumerated().map { index, token in
             (token, index < batch.backedPrefixCount)
         }
@@ -353,9 +382,9 @@ private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
     guard let cb = context.queue.makeCommandBuffer() else {
         throw ModelError.residentBufferWrapFailed
     }
-    scratch.sampler.sample(commandBuffer: cb, logits: scratch.logits, probs: scratch.probs,
-                           history: history, config: config, position: position,
-                           outToken: scratch.outToken)
+    try scratch.sampler.sample(commandBuffer: cb, logits: scratch.logits, probs: scratch.probs,
+                               history: history, config: config, position: position,
+                               outToken: scratch.outToken)
     cb.commit(); cb.waitUntilCompleted()
     return Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
 }

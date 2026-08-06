@@ -2,34 +2,38 @@ import Foundation
 import Testing
 @testable import NVMAI
 
-/// First run downloads the Gemma 4 IT tokenizer (~32 MB) from Hugging Face
-/// Hub to `~/.cache/huggingface/`. Subsequent runs are offline.
+/// ChatML (Qwen) tokenizer coverage against the synthetic fixture: the same
+/// byte-level BPE vocab and Qwen3.6 special-token IDs the model ships, loaded
+/// from the local `ChatMLTokenizer` fixture (offline, no downloads).
 @Suite("Tokenizer")
 struct TokenizerTests {
     let tok: GFTokenizer
 
     init() async throws {
-        self.tok = try await GFTokenizer.load()
+        self.tok = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
     }
 
     // MARK: - Special tokens
 
-    @Test("Special token IDs are distinct and within vocab")
-    func specialTokensDistinct() {
+    @Test("Special token IDs are within vocab and follow ChatML semantics")
+    func specialTokensWithinVocab() {
         let ids: [Int32] = [tok.bosID, tok.eosID, tok.padID, tok.endOfTurnID]
-        #expect(Set(ids).count == 4, "expected 4 distinct special token IDs, got \(ids)")
         for id in ids {
             #expect(id >= 0)
             #expect(id < Int32(tok.vocabSize))
         }
+        // ChatML: <|endoftext|> doubles as BOS/EOS/PAD; <|im_end|> is the
+        // turn marker.
+        #expect(tok.bosID == tok.eosID)
+        #expect(tok.padID == tok.eosID)
+        #expect(tok.endOfTurnID != tok.eosID)
     }
 
-    @Test("Stop-token set covers EOS, end-of-turn, and tool response")
+    @Test("Stop-token set covers im_end and endoftext")
     func stopTokens() {
         #expect(tok.stopTokenIDs.contains(tok.eosID))
         #expect(tok.stopTokenIDs.contains(tok.endOfTurnID))
-        #expect(tok.stopTokenIDs.contains(tok.toolResponseID))
-        #expect(tok.stopTokenIDs.count == 3)
+        #expect(tok.stopTokenIDs.count == 2)
     }
 
     // MARK: - Encode / decode
@@ -57,28 +61,24 @@ struct TokenizerTests {
         #expect(tok.decode(ids) == text)
     }
 
-    @Test("BOS is added when requested and absent otherwise")
-    func bosPrepend() {
+    @Test("ChatML never prepends a BOS")
+    func bosNeverPrepended() {
         let withBOS = tok.encode("x", addBOS: true)
         let without = tok.encode("x", addBOS: false)
-        #expect(withBOS.first == tok.bosID)
-        #expect(without.first != tok.bosID)
-        #expect(withBOS.count == without.count + 1)
-        #expect(Array(withBOS.dropFirst()) == without)
+        #expect(withBOS == without)
     }
 
-    @Test("Empty string encodes to BOS-only or empty")
+    @Test("Empty string encodes to empty with or without BOS")
     func encodeEmpty() {
         let none = tok.encode("", addBOS: false)
         #expect(none.isEmpty)
-        let bos = tok.encode("", addBOS: true)
-        #expect(bos == [tok.bosID])
+        let withBOS = tok.encode("", addBOS: true)
+        #expect(withBOS.isEmpty)
     }
 
     @Test("Decoding strips special tokens when requested")
     func decodeStripsSpecial() {
         let ids = tok.encode("hi", addBOS: true)
-        #expect(ids.first == tok.bosID)
         let withoutSpecial = tok.decode(ids, skipSpecialTokens: true)
         #expect(withoutSpecial == "hi")
     }
@@ -148,9 +148,8 @@ struct TokenizerTests {
         #expect(detok.flush() == "")
     }
 
-    @Test("Single-token push works for in-vocab characters")
-    func streamingSingleToken() {
-        // "漢字" is a single in-vocab token (verified empirically).
+    @Test("Multi-byte characters stream reassemble through the detokenizer")
+    func streamingMultibyteCharacters() {
         var detok = GFDetokenizer(tokenizer: tok)
         let ids = tok.encode("漢字", addBOS: false)
         var assembled = ""

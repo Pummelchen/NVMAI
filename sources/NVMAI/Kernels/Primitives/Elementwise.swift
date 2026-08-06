@@ -3,7 +3,7 @@ import Metal
 
 /// Small elementwise kernels used by the Qwen 3.6 layer graph: the
 /// full-attention output gate, the shared-expert scalar gate, and the plain
-/// pre-norm residual add (architectures without Gemma's fused sandwich tail).
+/// pre-norm residual add (architectures without a fused sandwich tail).
 final class Elementwise {
     private let sigmoidGateMulPSO: MTLComputePipelineState
     private let sigmoidScalarMulPSO: MTLComputePipelineState
@@ -22,33 +22,40 @@ final class Elementwise {
     /// packed [H, 2D] per-head [query ; gate] → q [H, D], gate [H, D].
     /// `rows` > 1 processes consecutive token rows (packed stride 2*H*D,
     /// output strides H*D).
+    ///
+    /// K5: all rows are dispatched from ONE encoder (a per-row dispatch loop
+    /// with per-row buffer offsets) instead of creating one encoder per row.
     func encodeSplitQGate(commandBuffer: MTLCommandBuffer,
                           packed: MTLBuffer, packedOffset: Int = 0,
                           q: MTLBuffer, qOffset: Int = 0,
                           gate: MTLBuffer, gateOffset: Int = 0,
-                          heads: Int, dim: Int, rows: Int = 1) {
+                          heads: Int, dim: Int, rows: Int = 1) throws {
         let rowElems = heads * dim
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(splitQGatePSO)
+        var headCount = UInt32(heads)
+        var headDim = UInt32(dim)
+        encoder.setBytes(&headCount, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&headDim, length: MemoryLayout<UInt32>.size, index: 4)
         for row in 0..<rows {
-            guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-            encoder.setComputePipelineState(splitQGatePSO)
             encoder.setBuffer(packed, offset: packedOffset + row * 2 * rowElems * 2, index: 0)
             encoder.setBuffer(q, offset: qOffset + row * rowElems * 2, index: 1)
             encoder.setBuffer(gate, offset: gateOffset + row * rowElems * 2, index: 2)
-            var headCount = UInt32(heads)
-            var headDim = UInt32(dim)
-            encoder.setBytes(&headCount, length: MemoryLayout<UInt32>.size, index: 3)
-            encoder.setBytes(&headDim, length: MemoryLayout<UInt32>.size, index: 4)
             dispatch(encoder, pipeline: splitQGatePSO, threads: rowElems)
-            encoder.endEncoding()
         }
+        encoder.endEncoding()
     }
 
     /// out[i] *= sigmoid(gate[i])
     func encodeSigmoidGateMul(commandBuffer: MTLCommandBuffer,
                               out: MTLBuffer, outOffset: Int = 0,
                               gate: MTLBuffer, gateOffset: Int = 0,
-                              count: Int) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+                              count: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(sigmoidGateMulPSO)
         encoder.setBuffer(out, offset: outOffset, index: 0)
         encoder.setBuffer(gate, offset: gateOffset, index: 1)
@@ -62,8 +69,10 @@ final class Elementwise {
     func encodeSigmoidScalarMul(commandBuffer: MTLCommandBuffer,
                                 y: MTLBuffer, yOffset: Int = 0,
                                 gate: MTLBuffer, gateOffset: Int = 0,
-                                count: Int) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+                                count: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(sigmoidScalarMulPSO)
         encoder.setBuffer(y, offset: yOffset, index: 0)
         encoder.setBuffer(gate, offset: gateOffset, index: 1)
@@ -77,8 +86,10 @@ final class Elementwise {
     func encodeResidualAdd(commandBuffer: MTLCommandBuffer,
                            hidden: MTLBuffer, hiddenOffset: Int = 0,
                            delta: MTLBuffer, deltaOffset: Int = 0,
-                           count: Int) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+                           count: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(residualAddPSO)
         encoder.setBuffer(hidden, offset: hiddenOffset, index: 0)
         encoder.setBuffer(delta, offset: deltaOffset, index: 1)
@@ -93,8 +104,10 @@ final class Elementwise {
                           rhs: MTLBuffer,
                           out: MTLBuffer,
                           rows: Int,
-                          dim: Int) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+                          dim: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         encoder.setComputePipelineState(concatRowsPSO)
         encoder.setBuffer(lhs, offset: 0, index: 0)
         encoder.setBuffer(rhs, offset: 0, index: 1)

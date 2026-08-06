@@ -2,6 +2,10 @@ import Foundation
 
 @MainActor
 enum MetricFormat {
+    // D26: fixed POSIX locale so decimal separators and grouping do not vary
+    // with the user's region settings.
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+
     private static let memoryFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .memory
@@ -19,8 +23,10 @@ enum MetricFormat {
 
     static func seconds(_ value: Double?) -> String {
         guard let value else { return "\u{2014}" }
-        if value < 1 { return String(format: "%.0f ms", value * 1000) }
-        return String(format: "%.2f s", value)
+        if value < 1 {
+            return String(format: "%.0f ms", locale: posixLocale, value * 1000)
+        }
+        return String(format: "%.2f s", locale: posixLocale, value)
     }
 
     static func milliseconds(_ value: Double?) -> String {
@@ -29,11 +35,11 @@ enum MetricFormat {
     }
 
     static func rate(_ value: Double) -> String {
-        String(format: "%.1f", value)
+        String(format: "%.1f", locale: posixLocale, value)
     }
 
     static func percent(_ value: Double) -> String {
-        String(format: "%.1f%%", value)
+        String(format: "%.1f%%", locale: posixLocale, value)
     }
 
     static func perToken(_ value: Double) -> String {

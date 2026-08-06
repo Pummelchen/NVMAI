@@ -51,14 +51,16 @@ final class FusedQKVGEMV {
                        vOut: MTLBuffer, vOutOffset: Int = 0,
                        qRows: UInt32,
                        kvRows: UInt32,
-                       n: UInt32) {
+                       n: UInt32) throws {
         precondition(n % UInt32(Quantization.groupSize) == 0,
                      "N must be a multiple of \(Quantization.groupSize)")
         precondition(qWeightsOffset % 2 == 0 &&
                      kWeightsOffset % 2 == 0 &&
                      vWeightsOffset % 2 == 0,
                      "FusedQKVGEMV needs 2-aligned weights offsets")
-        guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
         let shape = Shape(qRows: qRows, kvRows: kvRows, n: n)
         enc.setComputePipelineState(specializedPSOs[shape] ?? pso)
         enc.setBuffer(qWeights, offset: qWeightsOffset, index: 0)

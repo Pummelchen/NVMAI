@@ -210,12 +210,21 @@ public struct OpenAIModelList: Codable, Equatable, Sendable {
     public struct Model: Codable, Equatable, Sendable {
         public let id: String
         public let object: String
-        public let created: Int
+        /// Model creation time. Omitted when unknown rather than lying with a
+        /// fabricated epoch (S30).
+        public let created: Int?
         public let ownedBy: String
 
         enum CodingKeys: String, CodingKey {
             case id, object, created
             case ownedBy = "owned_by"
+        }
+
+        public init(id: String, object: String, created: Int?, ownedBy: String) {
+            self.id = id
+            self.object = object
+            self.created = created
+            self.ownedBy = ownedBy
         }
     }
 
@@ -237,7 +246,8 @@ public enum ServerRequestError: Error, Equatable, Sendable {
                                 param: "model", code: "model_not_found")
         case .queueFull:
             OpenAIErrorEnvelope(message: "generation queue is full",
-                                code: "queue_full")
+                                code: "queue_full",
+                                type: "rate_limit_error")
         }
     }
 }
@@ -268,7 +278,8 @@ public struct ValidatedChatRequest: Sendable {
 public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
-                                dialect: ChatDialect = .gemma) throws -> ValidatedChatRequest {
+                                maxContext: Int = RuntimeConfiguration
+                                    .supportedContextTokens.max() ?? 262_144) throws -> ValidatedChatRequest {
         guard request.model == modelID else { throw ServerRequestError.unknownModel }
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
@@ -285,6 +296,17 @@ public enum OpenAIRequestValidator {
         guard request.parallelToolCalls != false else {
             throw invalid("parallel_tool_calls=false is not supported",
                           "parallel_tool_calls", "unsupported_value")
+        }
+        // S17: include_usage is a streaming option; silently ignoring it on a
+        // non-stream request hides a client bug.
+        if request.streamOptions?.includeUsage == true, request.stream != true {
+            throw invalid("stream_options.include_usage requires stream=true",
+                          "stream_options", "invalid_value")
+        }
+        // S16: OpenAI forbids setting both bounds in one request.
+        guard request.maxCompletionTokens == nil || request.maxTokens == nil else {
+            throw invalid("max_tokens and max_completion_tokens cannot both be set",
+                          "max_tokens", "invalid_value")
         }
 
         let temperature = request.temperature ?? 0.6
@@ -312,12 +334,31 @@ public enum OpenAIRequestValidator {
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
                           "invalid_value")
         }
-        let upperBound = RuntimeConfiguration.supportedContextTokens.max() ?? 262_144
-        let cappedMaximum = min(maximum, upperBound)
+        // S11: validate against the session's configured context window, not
+        // the hard architectural ceiling.
+        let cappedMaximum = min(maximum, maxContext)
         guard cappedMaximum == maximum else {
-            throw invalid("maximum completion tokens exceeds model context window (\(upperBound))",
+            throw invalid("maximum completion tokens exceeds the configured context window (\(maxContext))",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
                           "value_too_large")
+        }
+
+        // S18: stop strings must be non-empty, unique, and bounded.
+        let stopValues = request.stop?.values ?? []
+        var stopStrings: [String] = []
+        if !stopValues.isEmpty {
+            guard stopValues.allSatisfy({ !$0.isEmpty }) else {
+                throw invalid("stop strings must not be empty", "stop", "invalid_value")
+            }
+            guard stopValues.count <= 4 else {
+                throw invalid("at most 4 stop strings are supported", "stop", "value_too_large")
+            }
+            let totalLength = stopValues.reduce(0) { $0 + $1.utf8.count }
+            guard totalLength <= 256 else {
+                throw invalid("stop strings must total at most 256 bytes", "stop", "value_too_large")
+            }
+            var seen: Set<String> = []
+            stopStrings = stopValues.filter { seen.insert($0).inserted }
         }
 
         let includeTools: Bool
@@ -329,22 +370,28 @@ public enum OpenAIRequestValidator {
         case .some(.string("required")):
             throw invalid("tool_choice=required is not supported",
                           "tool_choice", "unsupported_value")
+        case .some(.bool(true)):
+            // Legacy boolean form of "auto" (S31).
+            includeTools = true
+        case .some(.bool(false)):
+            // Legacy boolean form of "none" (S31).
+            includeTools = false
         default:
             throw invalid("named tool choices are not supported",
                           "tool_choice", "unsupported_value")
         }
 
         let tools = try (includeTools ? request.tools ?? [] : []).map {
-            try validateTool($0, dialect: dialect)
+            try validateTool($0)
         }
-        let messages = try validateMessages(request.messages, dialect: dialect)
+        let messages = try validateMessages(request.messages)
         let config = GenerationConfig(maxNewTokens: maximum,
                                       temperature: temperature,
                                       topK: topK,
                                       topP: topP,
                                       repetitionPenalty: repetitionPenalty,
                                       seed: request.seed,
-                                      stopStrings: request.stop?.values ?? [])
+                                      stopStrings: stopStrings)
         return ValidatedChatRequest(messages: messages,
                                     tools: tools,
                                     stream: request.stream ?? false,
@@ -353,8 +400,7 @@ public enum OpenAIRequestValidator {
                                     maximumCompletionTokens: maximum)
     }
 
-    private static func validateTool(_ tool: OpenAITool,
-                                     dialect: ChatDialect) throws -> GFTokenizer.FunctionDefinition {
+    private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {
         guard tool.type == "function" else {
             throw invalid("only function tools are supported", "tools", "unsupported_tool")
         }
@@ -367,9 +413,8 @@ public enum OpenAIRequestValidator {
             throw invalid("tool parameters must be an object schema",
                           "tools", "invalid_tool_schema")
         }
-        try validateSchemaKeys(tool.function.parameters, dialect: dialect)
-        let parameters = try GemmaToolSchema.adapted(
-            tool.function.parameters, toolName: name)
+        try validateSchemaKeys(tool.function.parameters)
+        let parameters = tool.function.parameters
         guard (try? parameters.jinjaSendableValue()) != nil else {
             throw invalid("tool schema contains a number that cannot be represented exactly",
                           "tools", "invalid_tool_schema")
@@ -379,8 +424,7 @@ public enum OpenAIRequestValidator {
                                               parameters: parameters)
     }
 
-    private static func validateSchemaKeys(_ schema: JSONValue,
-                                           dialect: ChatDialect) throws {
+    private static func validateSchemaKeys(_ schema: JSONValue) throws {
         switch schema {
         case .object(let object):
             for (schemaKey, value) in object {
@@ -389,33 +433,25 @@ public enum OpenAIRequestValidator {
                         throw invalid("tool schema properties must be an object",
                                       "tools", "invalid_tool_schema")
                     }
-                    for (key, definition) in definitions {
-                        // Gemma's tool-call DSL cannot round-trip arbitrary
-                        // parameter names; ChatML tool calls are free-form.
-                        guard dialect == .chatml
-                                || GemmaToolCallParser.isRepresentableObjectKey(key) else {
-                            throw invalid(
-                                "tool parameter names may contain only letters, numbers, _, -, ., and $",
-                                "tools",
-                                "invalid_tool_schema")
-                        }
-                        try validateSchemaKeys(definition, dialect: dialect)
+                    for (_, definition) in definitions {
+                        // ChatML tool-call parameter names are free-form;
+                        // only the schema structure itself is validated.
+                        try validateSchemaKeys(definition)
                     }
                 } else {
-                    try validateSchemaKeys(value, dialect: dialect)
+                    try validateSchemaKeys(value)
                 }
             }
         case .array(let values):
             for value in values {
-                try validateSchemaKeys(value, dialect: dialect)
+                try validateSchemaKeys(value)
             }
         default:
             break
         }
     }
 
-    private static func validateMessages(_ input: [OpenAIChatMessage],
-                                         dialect: ChatDialect) throws -> [GFTokenizer.Message] {
+    private static func validateMessages(_ input: [OpenAIChatMessage]) throws -> [GFTokenizer.Message] {
         guard !input.isEmpty else {
             throw invalid("messages must not be empty", "messages", "invalid_message")
         }
@@ -455,9 +491,7 @@ public enum OpenAIRequestValidator {
                     throw invalid("historical tool arguments must be a JSON object",
                                   "messages", "invalid_tool_arguments")
                 }
-                guard dialect == .chatml
-                        || (try? arguments.gemmaToolArgumentBody()) != nil,
-                      (try? arguments.jinjaSendableValue()) != nil else {
+                guard (try? arguments.jinjaSendableValue()) != nil else {
                     throw invalid(
                         "historical tool arguments cannot be represented exactly",
                         "messages",
@@ -487,6 +521,13 @@ public enum OpenAIRequestValidator {
                                               toolCalls: calls,
                                               toolCallID: message.toolCallID,
                                               name: message.name))
+        }
+        // S19: a conversation that ends with an assistant tool call that is
+        // never answered by a tool result would resume from an unanswerable
+        // state; reject it instead of generating tool-response markup.
+        if knownCalls.contains(where: { !$0.value.resolved }) {
+            throw invalid("conversation ends with an unresolved tool call",
+                          "messages", "invalid_tool_call")
         }
         return result
     }

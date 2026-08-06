@@ -38,7 +38,7 @@ struct PromptComposerView: View {
                     hasMarkedText: promptHasMarkedText,
                     isRepeat: keyPress.phase.contains(.repeat)) {
                 case .submit:
-                    model.run()
+                    submit()
                     return .handled
                 case .consume:
                     return .handled
@@ -73,8 +73,14 @@ struct PromptComposerView: View {
             promptTips
             Spacer()
             clearAction
-            GenerateControl(model: model)
+            GenerateControl(model: model, onSubmit: submit)
         }
+    }
+
+    /// Single submission path (D29): the Return key-press handler and the
+    /// Generate button both route through here.
+    private func submit() {
+        model.run()
     }
 
     private var promptTips: some View {

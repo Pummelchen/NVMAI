@@ -87,11 +87,59 @@ public final class InstallLock: @unchecked Sendable {
                     path: paths.lockFile,
                     detail: "lock path was replaced during acquisition")
             }
+            // Close the validate-then-use TOCTOU window for the state paths:
+            // re-open each present entry with O_NOFOLLOW and validate the
+            // opened descriptor's type, instead of trusting the earlier lstat.
+            try verifyOpenedEntry(path: paths.partialDirectory,
+                                  allowedKinds: [.directory])
+            try verifyOpenedEntry(path: paths.checkpointFile,
+                                  allowedKinds: [.regular])
             return InstallLock(paths: paths, descriptor: descriptor)
         } catch {
             _ = flock(descriptor, LOCK_UN)
             close(descriptor)
             throw error
+        }
+    }
+
+    /// Opens `path` with O_NOFOLLOW and confirms the descriptor is one of the
+    /// allowed kinds. Absent entries pass (they may be created later under the
+    /// lock); a symlink or wrong-typed entry fails the open.
+    private static func verifyOpenedEntry(path: String,
+                                          allowedKinds: Set<Posix.EntryKind>) throws {
+        let kind = try Posix.entryKind(path)
+        if kind == .absent { return }
+        guard allowedKinds.contains(kind) else {
+            throw RepackError.installPathUnsafe(
+                path: path,
+                detail: "unexpected \(kind) entry")
+        }
+        var info = stat()
+        switch kind {
+        case .directory:
+            let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0, fstat(fd, &info) == 0,
+                  (info.st_mode & S_IFMT) == S_IFDIR else {
+                if fd >= 0 { close(fd) }
+                throw RepackError.installPathUnsafe(
+                    path: path,
+                    detail: "entry was replaced by a non-directory before it could be used")
+            }
+            close(fd)
+        case .regular:
+            let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0, fstat(fd, &info) == 0,
+                  (info.st_mode & S_IFMT) == S_IFREG else {
+                if fd >= 0 { close(fd) }
+                throw RepackError.installPathUnsafe(
+                    path: path,
+                    detail: "entry was replaced by a non-regular file before it could be used")
+            }
+            close(fd)
+        default:
+            throw RepackError.installPathUnsafe(
+                path: path,
+                detail: "unexpected \(kind) entry")
         }
     }
 }

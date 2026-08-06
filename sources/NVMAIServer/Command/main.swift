@@ -35,8 +35,7 @@ do {
     let server = NVMAIHTTPServer(
         modelID: modelID,
         queueLimit: arguments.queueLimit,
-        backend: backend,
-        chatDialect: backend.chatDialect)
+        backend: backend)
     _ = try await server.start(port: arguments.port)
     let diskCache = backend.promptCacheMode == .off
         ? "off" : arguments.promptCacheDiskDirectory ?? "off"

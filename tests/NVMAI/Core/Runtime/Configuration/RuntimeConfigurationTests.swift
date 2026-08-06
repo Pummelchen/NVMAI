@@ -9,8 +9,15 @@ import Testing
             == RuntimeConfiguration.maximumContextTokens)
     }
 
-    @Test func productionDefaultsAreStable() {
-        let runtime = RuntimeConfiguration.production
+    @Test func productionDefaultsAreStable() throws {
+        let runtime = try RuntimeConfiguration(
+            expertCacheSlots: 16,
+            expertCachePolicy: .lfu,
+            rdadvisePolicy: .off,
+            prefillEnabled: true,
+            prefillChunkTokens: 128,
+            prefillAttentionPath: .fullTensorOps2DPreferred,
+            forceLogitsHead: false)
         #expect(runtime.fp16RingEnabled)
         #expect(runtime.expertCacheSlots == 16)
         #expect(runtime.expertCachePolicy == .lfu)
@@ -22,8 +29,8 @@ import Testing
         #expect(runtime.headPath == .fusedRows)
     }
 
-    @Test func retainedControlsReachTypedRuntime() {
-        let runtime = RuntimeConfiguration(
+    @Test func retainedControlsReachTypedRuntime() throws {
+        let runtime = try RuntimeConfiguration(
             expertCacheSlots: 32,
             expertCachePolicy: .lru,
             rdadvisePolicy: .adaptive,
@@ -40,8 +47,8 @@ import Testing
     }
 
     @Test(arguments: [32, 64, 128, 256, 512, 1_024, 2_048, 4_096])
-    func productionPrefillSupportsPublicChunkSizes(_ chunkTokens: Int) {
-        let runtime = RuntimeConfiguration(prefillChunkTokens: chunkTokens)
+    func productionPrefillSupportsPublicChunkSizes(_ chunkTokens: Int) throws {
+        let runtime = try RuntimeConfiguration(prefillChunkTokens: chunkTokens)
         #expect(runtime.prefillConfig.mode == .chunked)
         #expect(runtime.prefillConfig.chunkTokens == chunkTokens)
     }

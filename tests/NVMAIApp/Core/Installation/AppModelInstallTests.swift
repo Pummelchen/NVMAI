@@ -76,22 +76,23 @@ import NVMAIRepackCore
   }
 
   @MainActor
-  @Test func defaultInstallDescriptorMatchesPinnedAudit() {
-    let descriptor = AppModelInstallDescriptor.default
-    #expect(descriptor.displayName == "Gemma 4 26B-A4B IT 4-bit")
-    #expect(descriptor.repoID == "mlx-community/gemma-4-26b-a4b-it-4bit")
-    #expect(descriptor.revision == "0d77464eeb233a2da68ebf9d7dc4edaac7db956d")
-    #expect(descriptor.sourceIndexSHA256 == "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13")
-    #expect(descriptor.approximateDownloadBytes == 14_620_479_420)
-    #expect(descriptor.installedBytes == 14_291_921_884)
-    #expect(descriptor.requiredFreeBytes == 15_432_772_572)
+  @Test func qwen36DescriptorMatchesPinnedAudit() {
+    let descriptor = AppModelInstallDescriptor.qwen36
+    #expect(descriptor.displayName == "Qwen3.6 35B-A3B 4-bit")
+    #expect(descriptor.repoID == "mlx-community/Qwen3.6-35B-A3B-4bit")
+    #expect(descriptor.revision == "38740b847e4cb78f352aba30aa41c76e08e6eb46")
+    #expect(descriptor.sourceIndexSHA256 == "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea")
+    #expect(descriptor.approximateDownloadBytes == 19_529_025_048)
+    #expect(descriptor.installedBytes == 19_546_491_213)
+    #expect(descriptor.requiredFreeBytes
+            == descriptor.installedBytes + descriptor.rangeStagingBytes + descriptor.reserveBytes)
   }
 
   @Test func qwenQuantDescriptorsArePinnedAndDistinct() {
     #expect(AppModelInstallDescriptor.qwen36.installDirectoryName == "qwen36.gturbo")
     #expect(AppModelInstallDescriptor.qwen36_6bit.installDirectoryName == "qwen36-6bit.gturbo")
     #expect(AppModelInstallDescriptor.qwen36_8bit.installDirectoryName == "qwen36-8bit.gturbo")
-    #expect(Set(AppModelInstallDescriptor.all.map(\.sourceIndexSHA256)).count == 4)
+    #expect(Set(AppModelInstallDescriptor.all.map(\.sourceIndexSHA256)).count == 3)
     #expect(AppModelInstallDescriptor.qwen36_6bit.repoID.hasSuffix("-6bit"))
     #expect(AppModelInstallDescriptor.qwen36_8bit.repoID.hasSuffix("-8bit"))
   }
@@ -237,7 +238,7 @@ import NVMAIRepackCore
 
   @MainActor
   @Test func invalidSavedDownloadsRemainDiscardOnly() throws {
-    let descriptor = AppModelInstallDescriptor.default
+    let descriptor = AppModelInstallDescriptor.qwen36
     for incompatible in [false, true] {
       let directory = temporaryInstallPath(
         incompatible ? "incompatible-checkpoint" : "corrupt-checkpoint")

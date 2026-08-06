@@ -1,6 +1,20 @@
 import Foundation
 import Metal
 
+enum MPPPrefillInt4QMMError: Error, CustomStringConvertible {
+    case pipelineUnavailable(reason: String)
+    case invalidArguments(String)
+
+    public var description: String {
+        switch self {
+        case .pipelineUnavailable(let reason):
+            return "MPP prefill QMM path unavailable: \(reason)"
+        case .invalidArguments(let detail):
+            return "MPP prefill QMM invalid arguments: \(detail)"
+        }
+    }
+}
+
 final class MPPPrefillInt4QMM {
     enum Path: String, Sendable {
         case affineThreadgroupF16 = "affine-threadgroup-f16"
@@ -12,6 +26,9 @@ final class MPPPrefillInt4QMM {
     static let tileK = Quantization.groupSize
 
     private var pipeline: MTLComputePipelineState?
+    /// K6: the compile failure reason, recorded once at init so an explicit
+    /// MPP request can throw the real cause instead of silently degrading.
+    private let unavailableReason: String
 
     init(context: MetalContext, weightBits: Int = 4) {
         precondition([4, 6, 8].contains(weightBits))
@@ -24,8 +41,13 @@ final class MPPPrefillInt4QMM {
                 name: "mpp_prefill_affine_threadgroup_f16",
                 constantValues: constants)
             self.pipeline = try context.device.makeComputePipelineState(function: function)
+            self.unavailableReason = ""
         } catch {
+            // Capability probe: this path is optional on non-Apple10 hardware,
+            // so init stays non-throwing. Record the reason so a later
+            // explicit request can throw it (K6).
             self.pipeline = nil
+            self.unavailableReason = "\(error)"
         }
     }
 
@@ -33,6 +55,10 @@ final class MPPPrefillInt4QMM {
         pipeline != nil
     }
 
+    /// `required: true` makes an unavailable path a thrown error instead of a
+    /// silent `.unavailable` fallback — use it when the caller explicitly
+    /// requests the MPP path. Auto-selected callers keep `required: false`
+    /// and check the returned `Path`.
     @discardableResult
     func encode(commandBuffer: MTLCommandBuffer,
                        weights: MTLBuffer, weightsOffset: Int = 0,
@@ -42,7 +68,8 @@ final class MPPPrefillInt4QMM {
                        y: MTLBuffer, yOffset: Int = 0,
                        m: Int,
                        n: Int,
-                       k: Int) -> Path {
+                       k: Int,
+                       required: Bool = false) throws -> Path {
         guard m > 0,
               n > 0,
               k > 0,
@@ -51,9 +78,24 @@ final class MPPPrefillInt4QMM {
               scalesOffset.isMultiple(of: MemoryLayout<UInt16>.stride),
               biasesOffset.isMultiple(of: MemoryLayout<UInt16>.stride),
               xOffset.isMultiple(of: MemoryLayout<Float16>.stride),
-              yOffset.isMultiple(of: MemoryLayout<Float16>.stride),
-              let pipeline,
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+              yOffset.isMultiple(of: MemoryLayout<Float16>.stride) else {
+            if required {
+                throw MPPPrefillInt4QMMError.invalidArguments(
+                    "m=\(m) n=\(n) k=\(k) offsets \(weightsOffset)/\(scalesOffset)/\(biasesOffset)/\(xOffset)/\(yOffset)")
+            }
+            return .unavailable
+        }
+        guard let pipeline else {
+            if required {
+                throw MPPPrefillInt4QMMError.pipelineUnavailable(
+                    reason: unavailableReason.isEmpty
+                        ? "MPP pipeline failed to compile"
+                        : unavailableReason)
+            }
+            return .unavailable
+        }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            if required { throw MetalError.commandEncoderFailed }
             return .unavailable
         }
 
