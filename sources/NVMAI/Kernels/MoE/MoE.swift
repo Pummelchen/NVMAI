@@ -252,9 +252,11 @@ final class MoE {
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        // Phase-1 uses 16 rows per threadgroup (threadgroup-staged x), so the
+        // dispatch is (topK*f)/16 groups of 512 threads.
         encoder.dispatchThreadgroups(
-            MTLSize(width: (Int(topK * f) + 7) / 8, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            MTLSize(width: (Int(topK * f) + 15) / 16, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
         encoder.endEncoding()
     }
 
@@ -299,9 +301,10 @@ final class MoE {
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBuffer(activeSlots, offset: 0, index: 7)
         encoder.setBytes(&active, length: MemoryLayout<UInt32>.stride, index: 8)
+        // Phase-1 uses 16 rows per threadgroup (threadgroup-staged x).
         encoder.dispatchThreadgroups(
-            MTLSize(width: (Int(activeCount * f) + 7) / 8, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            MTLSize(width: (Int(activeCount * f) + 15) / 16, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
         encoder.endEncoding()
     }
 
