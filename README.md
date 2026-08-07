@@ -109,11 +109,12 @@ What changed in 2.0:
   ~56%, and the decode routedCB span drops 14.4 -> 9.24 ms/token
   (byte-identical output verified).
 
-Corrected per-token decode budget (warm, 512-token essay):
+Corrected per-token decode budget (warm, 512-token essay, post phase-1
+rewrite):
 
 | Stage | ms/token |
 | --- | --- |
-| GPU total | 50.5 (attention 22.2, routed MoE 14.4, head 6.3, tail 4.5, shared expert 3.1) |
+| GPU total | ~45.3 (attention 22.2, routed MoE 9.24, head 6.3, tail 4.5, shared expert 3.1) |
 | Expert pread (GPU idle) | ~28 |
 | RDADVISE (GPU idle) | 3.6 |
 | Pipeline gaps + encodes | ~14 |
@@ -125,16 +126,26 @@ Findings that bound the next v2 work:
   overlap the MoE (residual dependency); the shared-expert + phase-1-hit
   overlap (~3.1 ms/token) is already in. The plausible variants were
   bounded: blob gate/up-vs-down split <=3%, next-layer prefetch -36%.
-- **The routed MoE phase-1/2 kernels run at ~34% of peak bandwidth** —
-  after attention, the largest kernel target (extend NVMAIBench to the MoE
-  GEMV family).
+- **Attention kernel battleground is closed for the known tricks:** the
+  GDN in_proj GEMV (the dominant 11.3 ms/token of the attention block)
+  measures ~70% of peak in isolation — 16 rows/threadgroup is neutral and
+  the threadgroup-staged-x trick that won the MoE phase-1 regresses it
+  (~28%, the activation is already L2-cached). The remaining attention
+  cost is the small-memory GDN extras (conv/qk-norm/delta/gated-norm) and
+  their launch overhead, bounded by the earlier fusion experiments as lost.
+- **Shared-expert-on-CPU is bounded:** its GPU time (3.1 ms/token) already
+  sits inside the ~28 ms/token pread window, so relocating it to the CPU
+  would not change the decode wall.
 - **Greedy output is bit-deterministic across fresh processes**, verified
   by the new content-delta harness (the earlier apparent variance was the
   A/B script hashing the raw SSE envelope, not the content).
 
 Reproduce: `benchmark/nvmai_slots_ab.py` (slot/pin A/B),
 `benchmark/nvmai_overlap_measure.py` (stage splits + per-role GPU spans),
-`benchmark/nvmai_determinism_ab.py`. Full measurement history:
+`benchmark/nvmai_determinism_ab.py`. Kernel micro-benchmarks (isolated GB/s
+for the QKV, MoE phase-1/2, and GDN in-proj families): `.build/release/
+NVMAIBench` with `baseline` / `moe_phase1[_xsh16]` / `moe_phase2` / `moe` /
+`gdn_inproj[_xsh8|_r16|_xsh16]`. Full measurement history:
 [Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey).
 
 ## Performance — long generations (code-generation style)
