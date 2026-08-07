@@ -17,8 +17,8 @@ PROMPT = "Write a detailed essay about the history of computing."
 
 def run(mode):
     env = dict(os.environ)
-    if mode == "parallel":
-        env["NVMAI_PARALLEL_IO"] = "1"
+    if mode == "serial":
+        env["NVMAI_PARALLEL_IO"] = "0"
     env["NVMAI_RUNNER_STATS"] = "1"
     log_path = f"/tmp/ioab_{mode}.log"
     log = open(log_path, "w")
