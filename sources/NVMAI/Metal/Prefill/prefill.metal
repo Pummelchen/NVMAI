@@ -334,42 +334,6 @@ static inline float prefill_moe_affine_gemv_row_dev(
     return acc;
 }
 
-static inline float prefill_moe_int4_gemv_row_tg(
-    device const uint8_t* W,
-    device const bfloat* S,
-    device const bfloat* B,
-    threadgroup const half* x,
-    uint row,
-    uint N
-) {
-    const uint groups = N / kPrefillGroupSize;
-    const uint row_bytes = N / 2u;
-    device const uint8_t* W_row = W + row * row_bytes;
-    device const bfloat* s_row = S + row * groups;
-    device const bfloat* b_row = B + row * groups;
-
-    float acc = 0.0f;
-    for (uint g = 0; g < groups; ++g) {
-        const float scale = float(s_row[g]);
-        const float bias = float(b_row[g]);
-        device const uint8_t* Wg = W_row + g * (kPrefillGroupSize / 2u);
-        threadgroup const half* xg = x + g * kPrefillGroupSize;
-        float dot_qx = 0.0f;
-        float sum_x = 0.0f;
-        for (uint k = 0; k < kPrefillGroupSize / 2u; ++k) {
-            const uint8_t packed = Wg[k];
-            const float x0 = float(xg[2u * k]);
-            const float x1 = float(xg[2u * k + 1u]);
-            dot_qx = fma(float(uint(packed & 0x0Fu)), x0, dot_qx);
-            dot_qx = fma(float(uint(packed >> 4)), x1, dot_qx);
-            sum_x += x0 + x1;
-        }
-        acc = fma(scale, dot_qx, acc);
-        acc = fma(bias, sum_x, acc);
-    }
-    return acc;
-}
-
 kernel void prefill_router_block(
     device const uint8_t* W                [[buffer(0)]],
     device const bfloat*  scales           [[buffer(1)]],

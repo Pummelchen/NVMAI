@@ -70,7 +70,6 @@ void logit_softcap_softmax(
     threadgroup float partial_d[kLogitMaxSimdGroups];
     threadgroup float final_m;
     threadgroup float final_inv_d;
-
     // -log-of-zero sentinel: any real logit beats this on the first compare.
     float m = -INFINITY;
     float d = 0.0f;
@@ -101,6 +100,11 @@ void logit_softcap_softmax(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // -- Cross-SIMD merge in SIMD-group 0. Up to kLogitMaxSimdGroups partials.
+    // Defaults first (threadgroup 0, lane 0 overwrites below); this silences
+    // the sometimes-uninitialized diagnostic without changing the math —
+    // SIMD group 0 always exists in every dispatched threadgroup.
+    final_m     = -INFINITY;
+    final_inv_d = 0.0f;
     if (simd_group_id == 0) {
         float mp = (simd_lane_id < simdgroups) ? partial_m[simd_lane_id] : -INFINITY;
         float dp = (simd_lane_id < simdgroups) ? partial_d[simd_lane_id] : 0.0f;

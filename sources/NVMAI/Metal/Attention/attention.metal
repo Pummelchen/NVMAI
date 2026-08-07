@@ -33,8 +33,6 @@ constant constexpr uint kAttnThreads      = 256;
 // kAttnMaxSimdGroups must cover kAttnThreads / 32 = 8.
 constant constexpr uint kAttnMaxSimdGroups = 8;
 constant constexpr uint kAttnMaxQPerKV     = 2;
-constant constexpr uint kAttnMaxFullQPerKV = 8;
-constant constexpr uint kAttnFullQPerThreadgroup = 2;
 // Largest head_dim we run with (full-attention layers). SWA uses 256 — the
 // kernel still allocates the 512-slot scratch but only touches the live half.
 constant constexpr uint kAttnMaxHeadDim   = 512;
