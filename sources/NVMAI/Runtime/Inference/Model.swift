@@ -442,29 +442,34 @@ extension Model {
 
         // -- optional trusted-receipt validation
         let receipt: VerifiedInstallReceipt?
+        var trustedReceiptUsable = false
         if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let receiptFD: Int32
             do {
-                receiptFD = try modelDirectory.openFile(
+                let receiptFD = try modelDirectory.openFile(
                     VerifiedInstallReceiptReader.fileName)
-            } catch ModelError.missingFile {
-                throw ModelError.trustedReceiptInvalid(
-                    detail: "\(VerifiedInstallReceiptReader.fileName) is missing")
+                defer { close(receiptFD) }
+                let receiptData = try modelDirectory.readMetadata(
+                    fileDescriptor: receiptFD,
+                    relativePath: VerifiedInstallReceiptReader.fileName,
+                    maxBytes: VerifiedInstallReceiptReader.defaultMaxBytes)
+                let loadedReceipt = try JSONDecoder().decode(
+                    VerifiedInstallReceipt.self, from: receiptData)
+                try VerifiedInstallReceiptReader.validateManifestBinding(
+                    loadedReceipt,
+                    directoryURL: directoryURL,
+                    manifestSha256: manifestSha)
+                stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
+                receipt = loadedReceipt
+                trustedReceiptUsable = true
+            } catch {
+                // A receipt that cannot be validated (for example, the model
+                // directory was moved after install so the recorded path no
+                // longer matches) is not a hard error: fall back to full
+                // SHA-256 verification of the payload below.
+                receipt = nil
+                trustedReceiptUsable = false
             }
-            defer { close(receiptFD) }
-            let receiptData = try modelDirectory.readMetadata(
-                fileDescriptor: receiptFD,
-                relativePath: VerifiedInstallReceiptReader.fileName,
-                maxBytes: VerifiedInstallReceiptReader.defaultMaxBytes)
-            let loadedReceipt = try JSONDecoder().decode(
-                VerifiedInstallReceipt.self, from: receiptData)
-            try VerifiedInstallReceiptReader.validateManifestBinding(
-                loadedReceipt,
-                directoryURL: directoryURL,
-                manifestSha256: manifestSha)
-            stats.receiptValidationNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - receiptStart
-            receipt = loadedReceipt
         } else {
             receipt = nil
         }
@@ -517,12 +522,13 @@ extension Model {
                 actual: weightsSize)
         }
 
-        // SHA-256: weights via FD, layout via in-memory data. Under the
-        // size-checked trusted-receipt policy the installer already pinned
-        // these hashes at install time, so re-hashing the full weights file
-        // is skipped; the payload is instead warmed with F_RDADVISE so GPU
-        // first-touch does not fault on cold pages.
-        if resolvedIntegrityPolicy == .fullSha256 {
+        // SHA-256: weights via FD, layout via in-memory data. Under a usable
+        // trusted-receipt policy the installer already pinned these hashes at
+        // install time, so re-hashing the full weights file is skipped; the
+        // payload is instead warmed with F_RDADVISE so GPU first-touch does
+        // not fault on cold pages. A receipt that failed to validate falls
+        // back to the full hash here.
+        if resolvedIntegrityPolicy == .fullSha256 || !trustedReceiptUsable {
             let eagerShaStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try Sha256Verifier.verifyFile(fileDescriptor: weightsFD,
                                           named: "model_weights.bin",
@@ -539,7 +545,7 @@ extension Model {
         // -- decode layout from NVMAIFormat wire codec
         let layout = try PackedExpertsLayoutReader.decode(data: layoutData,
                                                           manifest: manifest)
-        if resolvedIntegrityPolicy == .sizeCheckTrustedReceipt {
+        if trustedReceiptUsable {
             let receiptStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try validateTrustedReceiptLayerLayout(modelDirectory: modelDirectory,
                                                   manifest: manifest,
