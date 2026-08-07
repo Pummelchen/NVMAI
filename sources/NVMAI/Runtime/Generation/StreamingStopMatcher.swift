@@ -58,10 +58,11 @@ public struct StreamingStopMatcher: Sendable {
     /// The Character boundary at or after `text.utf8.count - retainingLastBytes`.
     /// Rounding up (never splitting a multibyte sequence) keeps the retained
     /// pending suffix valid UTF-8; the few extra bytes simply stay pending for
-    /// the next push.
+    /// the next push. With nothing retained the boundary is the end of the
+    /// text, so the whole pending buffer is emitted and reset.
     private func utf8Boundary(_ text: String, retainingLastBytes: Int) -> String.Index {
         let utf8 = text.utf8
-        guard retainingLastBytes > 0 else { return text.startIndex }
+        guard retainingLastBytes > 0 else { return text.endIndex }
         let target = utf8.index(utf8.startIndex,
                                 offsetBy: utf8.count - retainingLastBytes)
         // A UTF-8 continuation byte has top bits 10xxxxxx. Walk forward to the

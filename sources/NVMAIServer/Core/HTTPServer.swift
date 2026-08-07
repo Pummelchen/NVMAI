@@ -875,10 +875,14 @@ private final class SSEOutbox: @unchecked Sendable {
     }
 
     private func push(_ frame: Data) {
-        frames.append(frame)
         if let continuation = pendingDrain {
+            // Hand the frame directly to the awaiting drainer; do NOT also
+            // append it to frames, or the drainer's next() would remove and
+            // deliver the same frame a second time.
             pendingDrain = nil
             continuation.resume(returning: frame)
+        } else {
+            frames.append(frame)
         }
     }
 
