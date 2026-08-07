@@ -379,6 +379,8 @@ private struct RunnerCounterSnapshot {
     let rdadvise: UInt64
     let rdadviseCalls: UInt64
     let rdadviseBytes: UInt64
+    let wait: UInt64
+    let body: UInt64
 }
 
 public actor ServerModelSession: ServerInferenceBackend {
@@ -450,7 +452,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
-            rdadvisePolicy: loadRuntime.rdadvisePolicy,
+            rdadvisePolicy: ProcessInfo.processInfo.environment["NVMAI_RDADVISE_POLICY"]
+                .map(RDAdvicePolicyMode.parse)
+                ?? loadRuntime.rdadvisePolicy,
             prefillChunkTokens: requestedPrefillChunkTokens
                 ?? (model.config.family == .qwen36
                     ? RuntimeConfiguration.qwenLongPrefillChunkTokens
@@ -588,7 +592,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             headFused: runner.totalHeadFusedNanos,
             rdadvise: runner.totalRDAdviseNanos,
             rdadviseCalls: runner.totalRDAdviseCalls,
-            rdadviseBytes: runner.totalRDAdviseBytes)
+            rdadviseBytes: runner.totalRDAdviseBytes,
+            wait: runner.totalWaitNanos,
+            body: runner.totalBodyNanos)
         runner.resetKernelGPUTimings()
         var completed = false
         defer {
@@ -826,14 +832,17 @@ public actor ServerModelSession: ServerInferenceBackend {
             let head = ms(runner.totalHeadNanos, runnerSnapshot.head)
             let headFused = ms(runner.totalHeadFusedNanos, runnerSnapshot.headFused)
             let rdadvise = ms(runner.totalRDAdviseNanos, runnerSnapshot.rdadvise)
+            let wait = ms(runner.totalWaitNanos, runnerSnapshot.wait)
+            let body = ms(runner.totalBodyNanos, runnerSnapshot.body)
             let calls = runner.totalRDAdviseCalls - runnerSnapshot.rdadviseCalls
             let bytes = Double(runner.totalRDAdviseBytes - runnerSnapshot.rdadviseBytes)
                 / 1_048_576
             print(String(
                 format: "NVMAI runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
                     + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
+                    + "wait_ms=%.3f body_ms=%.3f "
                     + "rdadvise_calls=%llu rdadvise_mib=%.1f",
-                cb1, io, cb2, head, headFused, rdadvise, calls, bytes))
+                cb1, io, cb2, head, headFused, rdadvise, wait, body, calls, bytes))
         }
         if ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
             let tokens = max(1, result.newTokens)

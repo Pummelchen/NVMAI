@@ -892,6 +892,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
     public private(set) var totalHeadFusedNanos: UInt64 = 0
+    // Overlap-analysis counters (NVMAI_RUNNER_STATS): the per-layer wall spent
+    // waiting on the attention+router command buffer (covers the previous
+    // layer's routed CB plus this layer's cb1 on the GPU) and the per-layer
+    // loop-body wall. body = cb1 + wait + readback/plan + rdadvise + io + cb2.
+    public private(set) var totalWaitNanos: UInt64 = 0
+    public private(set) var totalBodyNanos: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
     public private(set) var totalRDAdviseNanos: UInt64 = 0
@@ -2208,20 +2214,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         /// Drain a routed layer's command buffers, surfacing any `.error`
         /// (R1/R2): the routed-CB failure must fail the generation rather than
-        /// print-and-continue into silently corrupt output.
+        /// print-and-continue into silently corrupt output. The per-layer call
+        /// (waitIfNeeded: false) runs right after the next layer's tailCB
+        /// wait, so the routed CBs have completed on the GPU and their spans
+        /// are valid — recording them here (not only in the waitIfNeeded
+        /// drain) makes NVMAI_KERNEL_STATS cover every layer instead of just
+        /// the final layer of each token.
         func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
                                         waitIfNeeded: Bool) throws {
             if waitIfNeeded {
                 if let sharedCB = pending.sharedCB {
                     try waitForCompletion(sharedCB)
-                    recordKernelGPU(role: "shared_expert", sharedCB)
                 }
                 if let phase1HitCB = pending.phase1HitCB {
                     try waitForCompletion(phase1HitCB)
-                    recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
                 }
                 try waitForCompletion(pending.cb)
-                recordKernelGPU(role: "moe_phase1_2_routed", pending.cb)
             } else if let err = pending.cb.error {
                 throw ModelError.commandBufferFailed(
                     detail: "routed layer command buffer: \(err)")
@@ -2234,6 +2242,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 throw ModelError.commandBufferFailed(
                     detail: "routed phase-1 hit command buffer: \(err)")
             }
+            if let sharedCB = pending.sharedCB {
+                recordKernelGPU(role: "shared_expert", sharedCB)
+            }
+            if let phase1HitCB = pending.phase1HitCB {
+                recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
+            }
+            recordKernelGPU(role: "moe_phase1_2_routed", pending.cb)
             totalCb2Nanos &+= pending.encodeAndCommitNanos
         }
 
@@ -2271,6 +2286,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let embedCB { recordKernelGPU(role: "embed", embedCB) }
 
         for L in 0..<cfg.numLayers {
+            let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let isLinear = cfg.layerIsLinear(L)
             let isFull = cfg.fullAttentionLayerMask[L] == 1
             let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
@@ -2448,7 +2464,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             recordKernelGPU(role: "attn_tail_router", tailCB)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+            totalWaitNanos &+= waitNanos
+            var prevRoutedUs: Double = 0
             if let pending = pendingRoutedCommand {
+                prevRoutedUs = (pending.cb.gpuEndTime - pending.cb.gpuStartTime) * 1_000_000
                 try finishPendingRoutedCommand(pending, waitIfNeeded: false)
                 pendingRoutedCommand = nil
             }
@@ -2689,6 +2708,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 sharedCB: sharedCB,
                 phase1HitCB: phase1HitCB,
                 encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+            totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
+            if ProcessInfo.processInfo.environment["NVMAI_LAYER_TRACE"] != nil,
+               position < 3 || position % 16 == 0 {
+                let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let attnUs = (attnCB.gpuEndTime - attnCB.gpuStartTime) * 1_000_000
+                let tailUs = (tailCB.gpuEndTime - tailCB.gpuStartTime) * 1_000_000
+                print("NVMAI layer pos=\(position) L=\(L) "
+                    + "body_us=\((now - tBodyStart) / 1000) "
+                    + "wait_us=\(waitNanos / 1000) io_us=\(layerIo / 1000) "
+                    + "cb1_us=\((tWait - tCb1Start) / 1000) "
+                    + "cb2_us=\((now - tCb2Start) / 1000) "
+                    + "gpu_attn_us=\(Int(attnUs)) gpu_tail_us=\(Int(tailUs)) "
+                    + "gpu_routed_us=\(Int(prevRoutedUs))")
+            }
             continue
         }
         if let pending = pendingRoutedCommand {
