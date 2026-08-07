@@ -83,6 +83,22 @@ repetitive prose (high expert-cache locality) and ~9.9 on this coding prompt,
 which routes through a more diverse expert set. Reproduce with
 `benchmark/nvmai_longgen.py`.
 
+### Throughput envelope (4-bit, 512-token greedy)
+
+The rate is a function of expert-cache locality — how repetitively the
+routing reuses experts:
+
+| Workload | Decode | Locality |
+| --- | --- | --- |
+| Coding (diverse routing) | ~9.9 tok/s | low |
+| Essay prose | ~12.4 tok/s | medium |
+| Counting 1-1000 | ~13.4 tok/s | high |
+| **Digit cycles (peak)** | **~16.0 tok/s** | maximal |
+
+16 tok/s is the measured peak for maximally repetitive text (the expert
+preads nearly vanish); realistic code-generation sits at ~10 tok/s. Reproduce
+with `benchmark/nvmai_maxthroughput.py`.
+
 ## 2×2 Precise Benchmark Results (Aug 2026)
 
 Measured on M3 24 GB with 12 independent prompts (128-token max generations).
