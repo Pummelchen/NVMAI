@@ -95,8 +95,12 @@ Measured on M3 24 GB (32 cache slots, unpinned, pre-phase-1 kernels).
 | Decode, 512-token greedy essay | ~12.8 tok/s (fresh host, parallel pread fills) |
 | Routed MoE phase-1 GPU | 14.4 ms/token |
 | Long-gen 512-token, code-gen | 4-bit **9.9** / 6-bit 4.9 / 8-bit 4.1 tok/s |
-| Throughput envelope (512-token, by workload) | 4-bit 15.9 / 13.4 / 11.2 / 8.0; 6-bit 6.0 / 5.9 / 5.8 / 4.7; 8-bit 5.4 / 5.2 / 4.4 / 3.8 tok/s (digit / count / essay / coding) |
-| 2×2 cache × MTP matrix (12-prompt footer) | 4-bit 7.69 / 7.39 / 5.95; 6-bit 4.33 / 4.37 / 2.72; 8-bit 3.81 / 3.78 / 3.09 tok/s (cache-off × MTP-off / cache-on × MTP-off / cache-off × MTP-on) |
+| Throughput envelope (digit / count / essay / coding), 4-bit | 15.9 / 13.4 / 11.2 / 8.0 tok/s |
+| Throughput envelope (digit / count / essay / coding), 6-bit | 6.0 / 5.9 / 5.8 / 4.7 tok/s |
+| Throughput envelope (digit / count / essay / coding), 8-bit | 5.4 / 5.2 / 4.4 / 3.8 tok/s |
+| 2×2 cache × MTP matrix (off×off / on×off / off×on), 4-bit | 7.69 / 7.39 / 5.95 tok/s |
+| 2×2 cache × MTP matrix (off×off / on×off / off×on), 6-bit | 4.33 / 4.37 / 2.72 tok/s |
+| 2×2 cache × MTP matrix (off×off / on×off / off×on), 8-bit | 3.81 / 3.78 / 3.09 tok/s |
 
 ## Documentation
 
