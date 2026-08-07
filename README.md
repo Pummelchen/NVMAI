@@ -16,18 +16,7 @@ The foundational Qwen 3.6 35B-A3B integration came from
 authored by [NeelM0906](https://github.com/NeelM0906). That work added the Qwen
 hybrid layer graph, gated-DeltaNet kernels and state, ChatML tokenization, tool
 call parsing, model repacking, product integration, and the original 4-bit
-runtime support. NVMAI merged that contribution and extends it with the work
-listed below.
-
-## Features
-
-The full feature list and the additions over the upstream fork live on the
-[wiki Features page](https://github.com/Pummelchen/NVMAI/wiki/Features).
-Highlights: native Swift 6 + Metal inference (no MLX/llama.cpp), 4/6/8-bit
-Qwen 3.6 35B-A3B with SSD-streaming experts, a Mac app / CLI / OpenAI-compatible
-server, multi-prefix state reuse, native MTP speculative decode, and the
-measured Apple Silicon tuning (parallel pread fills, 64-slot expert cache +
-resident pin, per-kernel GPU diagnostics).
+runtime support. NVMAI merges that contribution and extends it further.
 
 ## Benchmark — NVMAI 2.0
 
