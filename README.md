@@ -87,6 +87,15 @@ streaming, decode speed computed only from requests with ≥0.5s decode time.
 > is **~12.8 tok/s** with the parallel pread fills (see the wiki
 > [Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey)
 > for the full measurement history).
+>
+> **Why these numbers look lower than older README stats:** the earlier
+> client-measured rates (~10 tok/s) were inflated by a server bug that
+> buffered the whole SSE response (client decode_time collapsed to ~0; the
+> old result JSONs contain rates like 51,150 tok/s). The rates below are the
+> server's own footer (`decode_tok_s`) on 12 short prompts (2-53 tokens
+> each), where per-request overhead is large; the same build decodes long
+> generations at ~12.8 tok/s. Same-methodology before/after the parallel
+> pread fills: 9.98 -> 12.80 tok/s (+28%).
 
 | Config | Cache | MTP | **4-bit** | **6-bit** | **8-bit** |
 |--------|-------|-----|-----------|-----------|-----------|
