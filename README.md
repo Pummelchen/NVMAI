@@ -46,6 +46,11 @@ listed below.
   fetch is single-flight, so the cache-miss fills run concurrently on a
   mostly-idle machine — measured +28% decode on the 4-bit M3 (9.98 -> 12.80
   tok/s on 512-token generations). Disable with `NVMAI_PARALLEL_IO=0`.
+- Expert-cache default 64 slots/layer (~4 GB) with the resident weights
+  pinned via mlock at load: measured +10% decode over the 32-slot default
+  on the 4-bit M3 (interleaved A/B); up to 128 slots/layer configurable
+  for larger hosts. The pin is required — a bigger cache alone evicts the
+  file-backed attention weights. Opt out of the pin with `NVMAI_NO_PIN=1`.
 - Per-kernel GPU diagnostics: `NVMAI_KERNEL_STATS=1` logs each decode
   command buffer's GPU span by role (attention block vs router vs head vs
   MoE) in the server footer, and `NVMAI_RUNNER_STATS=1` adds the per-token
@@ -64,6 +69,68 @@ listed below.
 | Prompt reuse | Added exact multi-prefix live/RAM/SSD inference-state caching with compatibility checks, atomic persistence, bounded LRU eviction, integrity validation, and cache-usage reporting. |
 | Native MTP | Added a pinned tensor-only MTP sidecar repacker, shared 4/6/8-bit target embedding/head binding, 4-bit router support, 32-row streaming draft prefill, two-token target verification, bounded draft KV, acceptance metrics, and KV/Gated-DeltaNet rollback. |
 | Validation | Added higher-bit kernel/runtime tests, state-snapshot tests, persistent-cache tests, and the reproducible coding-agent stress benchmark. |
+
+## NVMAI 2.0 — measured decode improvements (Aug 2026)
+
+Measured on the same M3 24 GB with the 4-bit checkpoint, current 2.0 build
+(64 expert-cache slots + pinned resident weights). Every comparison below
+is an interleaved A/B on the same host, so the deltas control for host
+state; absolute rates depend on host state (a fresh host measured ~12.8
+tok/s on the 1.0 build, later sessions drifted to ~10.5).
+
+| Configuration | Decode (256-token greedy essay, warm) |
+| --- | --- |
+| NVMAI 1.0 (32 slots/layer, unpinned) | ~10.5 tok/s session baseline |
+| 1.0 + resident pin (32 slots) | 10.82 / 10.52 tok/s |
+| **NVMAI 2.0 (64 slots + pin)** | **11.70 / 11.77 tok/s (+10% interleaved)** |
+
+What changed in 2.0:
+
+- **Expert-cache slots default 32 -> 64 per layer (~4 GB of RAM).** The
+  corrected stage accounting showed the miss-pread window (~28 ms/token of
+  GPU idle) is on the decode critical path, so the miss volume matters:
+  at 64 slots the pread wall drops ~30% (io_ms 25.5 -> 18.1) and decode
+  gains ~10% interleaved.
+- **Resident weights are pinned with mlock at load (default on;
+  `NVMAI_NO_PIN=1` opts out).** A bigger cache alone is nearly neutral
+  (+1.4%): the extra allocation evicts the file-backed attention weights
+  from the page cache and the GPU faults them back from disk. The pin
+  removes that penalty; it is neutral at 32 slots but required at 64.
+- **The full 8 GB budget (128 slots/layer) measured net -6% even pinned**
+  on this 24 GB host — the 8 GB allocation's memory pressure persists
+  (wait +20 ms/token). 96/128 slots remain accepted for larger hosts.
+- **Measurement tooling corrected:** `NVMAI_KERNEL_STATS` was undersampling
+  the MoE command buffers 40x (only the final layer of each token was
+  recorded); the routed MoE is 14.4 ms/token of GPU, not 0.33. The stage
+  accounting now closes exactly.
+
+Corrected per-token decode budget (warm, 512-token essay):
+
+| Stage | ms/token |
+| --- | --- |
+| GPU total | 50.5 (attention 22.2, routed MoE 14.4, head 6.3, tail 4.5, shared expert 3.1) |
+| Expert pread (GPU idle) | ~28 |
+| RDADVISE (GPU idle) | 3.6 |
+| Pipeline gaps + encodes | ~14 |
+
+Findings that bound the next v2 work:
+
+- **GPU/IO overlap is exhausted:** the routed MoE cannot overlap the pread
+  (it consumes the pread's data) and the next layer's attention cannot
+  overlap the MoE (residual dependency); the shared-expert + phase-1-hit
+  overlap (~3.1 ms/token) is already in. The plausible variants were
+  bounded: blob gate/up-vs-down split <=3%, next-layer prefetch -36%.
+- **The routed MoE phase-1/2 kernels run at ~34% of peak bandwidth** —
+  after attention, the largest kernel target (extend NVMAIBench to the MoE
+  GEMV family).
+- **Greedy output is bit-deterministic across fresh processes**, verified
+  by the new content-delta harness (the earlier apparent variance was the
+  A/B script hashing the raw SSE envelope, not the content).
+
+Reproduce: `benchmark/nvmai_slots_ab.py` (slot/pin A/B),
+`benchmark/nvmai_overlap_measure.py` (stage splits + per-role GPU spans),
+`benchmark/nvmai_determinism_ab.py`. Full measurement history:
+[Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey).
 
 ## Performance — long generations (code-generation style)
 
