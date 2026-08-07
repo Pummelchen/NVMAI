@@ -8,6 +8,7 @@ import http.client
 import json
 import os
 import subprocess
+import sys
 import time
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -23,10 +24,18 @@ PROMPTS = [
 
 
 def main():
-    log_path = "/tmp/maxtput3.log"
+    models = sys.argv[1:] or [os.path.join(BASE, "models", "qwen36.gturbo")]
+    for model in models:
+        label = "4bit" if "6bit" not in model and "8bit" not in model else (
+            "6bit" if "6bit" in model else "8bit")
+        run_quant(model, label)
+
+
+def run_quant(model, label):
+    log_path = f"/tmp/maxtput_{label}.log"
     log = open(log_path, "w")
     proc = subprocess.Popen(
-        [BIN, "--port", str(PORT), "--model", MODEL, "--prompt-cache-mode", "off"],
+        [BIN, "--port", str(PORT), "--model", model, "--prompt-cache-mode", "off"],
         stdout=log, stderr=subprocess.STDOUT)
     start = time.time()
     while time.time() - start < 120:
@@ -58,11 +67,10 @@ def main():
         conn.close()
 
     for _, prompt in PROMPTS:
-        request(prompt)
+        request(prompt)  # warmup
         time.sleep(0.3)
-        for _ in range(2):
-            request(prompt)
-            time.sleep(0.3)
+        request(prompt)  # measured
+        time.sleep(0.3)
 
     proc.terminate()
     try:
@@ -80,13 +88,12 @@ def main():
                 cts.append(int(line.split("completion=")[1].split()[0]))
 
     idx = 0
-    for label, _ in PROMPTS:
-        r = rates[idx:idx + 3]
-        c = cts[idx:idx + 3]
-        measured = r[1:]
-        print(f"{label}: mean={sum(measured) / len(measured):.2f} "
-              f"rates={[f'{x:.2f}' for x in r]} ct={c}", flush=True)
-        idx += 3
+    for pname, _ in PROMPTS:
+        r = rates[idx:idx + 2]
+        c = cts[idx:idx + 2]
+        print(f"{label} {pname}: measured={r[1]:.2f} (warmup {r[0]:.2f}) "
+              f"ct={c}", flush=True)
+        idx += 2
 
 
 if __name__ == "__main__":

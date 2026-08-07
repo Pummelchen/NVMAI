@@ -83,21 +83,41 @@ repetitive prose (high expert-cache locality) and ~9.9 on this coding prompt,
 which routes through a more diverse expert set. Reproduce with
 `benchmark/nvmai_longgen.py`.
 
-### Throughput envelope (4-bit, 512-token greedy)
+### Throughput envelope (512-token greedy, by workload locality)
 
-The rate is a function of expert-cache locality — how repetitively the
-routing reuses experts:
+The decode rate is a function of expert-cache locality: the more
+repetitively the routing reuses the same experts, the fewer expert preads
+run and the faster decode goes. The four workloads below rank from
+maximally repetitive (digit cycles — the measured peak) to diverse
+(coding). At higher quantizations the weight-read cost dominates, so the
+envelope flattens. Reproduce with `benchmark/nvmai_maxthroughput.py`.
+
+#### 4-bit
 
 | Workload | Decode | Locality |
 | --- | --- | --- |
-| Coding (diverse routing) | ~9.9 tok/s | low |
-| Essay prose | ~12.4 tok/s | medium |
-| Counting 1-1000 | ~13.4 tok/s | high |
-| **Digit cycles (peak)** | **~16.0 tok/s** | maximal |
+| **Digit cycles (peak)** | **15.9 tok/s** | maximal |
+| Counting 1-1000 | 13.4 tok/s | high |
+| Essay prose | 11.2 tok/s | medium |
+| Coding (diverse routing) | 8.0 tok/s | low |
 
-16 tok/s is the measured peak for maximally repetitive text (the expert
-preads nearly vanish); realistic code-generation sits at ~10 tok/s. Reproduce
-with `benchmark/nvmai_maxthroughput.py`.
+#### 6-bit
+
+| Workload | Decode | Locality |
+| --- | --- | --- |
+| **Digit cycles** | **6.0 tok/s** | maximal |
+| Essay prose | 5.9 tok/s | medium |
+| Counting 1-1000 | 5.8 tok/s | high |
+| Coding | 4.7 tok/s | low |
+
+#### 8-bit
+
+| Workload | Decode | Locality |
+| --- | --- | --- |
+| **Counting 1-1000** | **5.4 tok/s** | high |
+| Digit cycles | 5.2 tok/s | maximal |
+| Essay prose | 4.4 tok/s | medium |
+| Coding | 3.8 tok/s | low |
 
 ## 2×2 Precise Benchmark Results (Aug 2026)
 
