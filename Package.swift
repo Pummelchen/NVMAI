@@ -14,6 +14,7 @@ let package = Package(
         .executable(name: "NVMAIMac", targets: ["NVMAIMac"]),
         .executable(name: "NVMAIDecodeService", targets: ["NVMAIDecodeService"]),
         .executable(name: "NVMAIServer", targets: ["NVMAIServer"]),
+        .executable(name: "NVMAIBench", targets: ["NVMAIBench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -92,6 +93,11 @@ let package = Package(
             name: "NVMAIServer",
             dependencies: ["NVMAIServerCore"],
             path: "sources/NVMAIServer/Command"
+        ),
+        .executableTarget(
+            name: "NVMAIBench",
+            dependencies: ["NVMAI"],
+            path: "sources/NVMAIBench"
         ),
         .executableTarget(
             name: "NVMAIMac",

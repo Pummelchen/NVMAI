@@ -327,3 +327,332 @@ kernel void dequant_int4_qkv_gemv_simd(
     dequant_int4_gemv_simd_body(W, scales, biases, x, y, M, NN,
                                 1u, local_row, 0u, lane);
 }
+
+// ---------------------------------------------------------------------------
+// Micro-benchmark variants (NVMAIBench): same buffer contract and dispatch as
+// dequant_int4_qkv_gemv_simd, so the achieved bandwidth can be compared
+// directly. `bandwidth` preserves the loads but drops the dequant ALU (tests
+// whether the dequant math is the limiter); `unroll2` issues two independent
+// weight loads per iteration (tests memory-level parallelism / latency
+// hiding).
+
+kernel void dequant_int4_qkv_gemv_simd_bandwidth(
+    device const uint8_t* qW      [[buffer(0)]],
+    device const bfloat*  qScales [[buffer(1)]],
+    device const bfloat*  qBiases [[buffer(2)]],
+    device const uint8_t* kW      [[buffer(3)]],
+    device const bfloat*  kScales [[buffer(4)]],
+    device const bfloat*  kBiases [[buffer(5)]],
+    device const uint8_t* vW      [[buffer(6)]],
+    device const bfloat*  vScales [[buffer(7)]],
+    device const bfloat*  vBiases [[buffer(8)]],
+    device const half*    x       [[buffer(9)]],
+    device half*          qY      [[buffer(10)]],
+    device half*          kY      [[buffer(11)]],
+    device half*          vY      [[buffer(12)]],
+    constant uint&        Mq      [[buffer(13)]],
+    constant uint&        Mkv     [[buffer(14)]],
+    constant uint&        N       [[buffer(15)]],
+    uint                  tg_idx  [[threadgroup_position_in_grid]],
+    uint                  sg_idx  [[simdgroup_index_in_threadgroup]],
+    uint                  lane    [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint QQ = int4_qkv_fc_mq(Mq);
+    const uint KK = int4_qkv_fc_mkv(Mkv);
+    const uint NN = int4_qkv_fc_n(N);
+    const uint global_row = tg_idx * rows_per_tg + sg_idx;
+    const uint total_rows = QQ + 2u * KK;
+    if (global_row >= total_rows) { return; }
+
+    device const uint8_t* W;
+    device half* y;
+    uint local_row;
+    uint M;
+    if (global_row < QQ) {
+        W = qW; y = qY; local_row = global_row; M = QQ;
+    } else if (global_row < QQ + KK) {
+        W = kW; y = kY; local_row = global_row - QQ; M = KK;
+    } else {
+        W = vW; y = vY; local_row = global_row - QQ - KK; M = KK;
+    }
+    if (local_row >= M) { return; }
+    const uint row_bytes = NN / 2;
+    device const uint8_t* W_row = W + uint(local_row) * row_bytes;
+
+    float acc = 0.0f;
+    const uint n_groups = NN / kGroupSize;
+    const uint full_blocks = n_groups / 4;
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        // Preserve the loads; skip the dequant math (raw-sum accumulator).
+        const uint w4 = *((device const uint*)(W_row + byte_base));
+        const uint elem = byte_base * 2u;
+        const half4 xa = *((device const half4*)(x + elem));
+        const half4 xb = *((device const half4*)(x + elem + 4u));
+        acc += float(w4 & 0xFFu) + float(xa.x) + float(xa.y)
+            + float(xa.z) + float(xa.w) + float(xb.x) + float(xb.y)
+            + float(xb.z) + float(xb.w);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        y[local_row] = half(acc);
+    }
+}
+
+kernel void dequant_int4_qkv_gemv_simd_unroll2(
+    device const uint8_t* qW      [[buffer(0)]],
+    device const bfloat*  qScales [[buffer(1)]],
+    device const bfloat*  qBiases [[buffer(2)]],
+    device const uint8_t* kW      [[buffer(3)]],
+    device const bfloat*  kScales [[buffer(4)]],
+    device const bfloat*  kBiases [[buffer(5)]],
+    device const uint8_t* vW      [[buffer(6)]],
+    device const bfloat*  vScales [[buffer(7)]],
+    device const bfloat*  vBiases [[buffer(8)]],
+    device const half*    x       [[buffer(9)]],
+    device half*          qY      [[buffer(10)]],
+    device half*          kY      [[buffer(11)]],
+    device half*          vY      [[buffer(12)]],
+    constant uint&        Mq      [[buffer(13)]],
+    constant uint&        Mkv     [[buffer(14)]],
+    constant uint&        N       [[buffer(15)]],
+    uint                  tg_idx  [[threadgroup_position_in_grid]],
+    uint                  sg_idx  [[simdgroup_index_in_threadgroup]],
+    uint                  lane    [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint QQ = int4_qkv_fc_mq(Mq);
+    const uint KK = int4_qkv_fc_mkv(Mkv);
+    const uint NN = int4_qkv_fc_n(N);
+    const uint global_row = tg_idx * rows_per_tg + sg_idx;
+    const uint total_rows = QQ + 2u * KK;
+    if (global_row >= total_rows) { return; }
+
+    device const uint8_t* W;
+    device const bfloat* scales;
+    device const bfloat* biases;
+    device half* y;
+    uint local_row;
+    uint M;
+    if (global_row < QQ) {
+        W = qW; scales = qScales; biases = qBiases; y = qY;
+        local_row = global_row; M = QQ;
+    } else if (global_row < QQ + KK) {
+        W = kW; scales = kScales; biases = kBiases; y = kY;
+        local_row = global_row - QQ; M = KK;
+    } else {
+        W = vW; scales = vScales; biases = vBiases; y = vY;
+        local_row = global_row - QQ - KK; M = KK;
+    }
+    if (local_row >= M) { return; }
+    const uint n_groups = NN / kGroupSize;
+    const uint row_bytes = NN / 2;
+    device const uint8_t* W_row = W + uint(local_row) * row_bytes;
+    device const bfloat* s_row = scales + uint(local_row) * n_groups;
+    device const bfloat* b_row = biases + uint(local_row) * n_groups;
+
+    float acc = 0.0f;
+    const uint full_blocks = n_groups / 4;
+    const uint paired = full_blocks - (full_blocks % 2u);
+    for (uint blk = 0; blk < paired; blk += 2u) {
+        const uint base_a = blk * 128u + lane * 4u;
+        const uint base_b = base_a + 128u;
+        // Two independent weight loads before the ALU chains (latency hiding).
+        const uint w4a = *((device const uint*)(W_row + base_a));
+        const uint w4b = *((device const uint*)(W_row + base_b));
+        const uint elem_a = base_a * 2u;
+        const uint elem_b = base_b * 2u;
+        const half4 xa = *((device const half4*)(x + elem_a));
+        const half4 xb = *((device const half4*)(x + elem_a + 4u));
+        const half4 xc = *((device const half4*)(x + elem_b));
+        const half4 xd = *((device const half4*)(x + elem_b + 4u));
+        const uint ga = blk * 4u + (lane >> 3);
+        const float sa = float(s_row[ga]);
+        const float ba = float(b_row[ga]);
+        const uint gb = ga + 4u;
+        const float sb = float(s_row[gb]);
+        const float bb = float(b_row[gb]);
+        const uint b0 = w4a & 0xFFu, b1 = (w4a >> 8) & 0xFFu;
+        const uint b2 = (w4a >> 16) & 0xFFu, b3 = (w4a >> 24) & 0xFFu;
+        const uint c0 = w4b & 0xFFu, c1 = (w4b >> 8) & 0xFFu;
+        const uint c2 = (w4b >> 16) & 0xFFu, c3 = (w4b >> 24) & 0xFFu;
+        const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
+        const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
+        const float f0 = float(xc.x), f1 = float(xc.y), f2 = float(xc.z), f3 = float(xc.w);
+        const float f4 = float(xd.x), f5 = float(xd.y), f6 = float(xd.z), f7 = float(xd.w);
+        float dot = 0.0f;
+        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
+        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
+        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
+        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
+        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        acc = fma(sa, dot, acc);
+        acc = fma(ba, sum, acc);
+        dot = 0.0f;
+        dot = fma(float(c0 & 0x0Fu), f0, dot); dot = fma(float(c0 >> 4), f1, dot);
+        dot = fma(float(c1 & 0x0Fu), f2, dot); dot = fma(float(c1 >> 4), f3, dot);
+        dot = fma(float(c2 & 0x0Fu), f4, dot); dot = fma(float(c2 >> 4), f5, dot);
+        dot = fma(float(c3 & 0x0Fu), f6, dot); dot = fma(float(c3 >> 4), f7, dot);
+        const float sum2 = f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7;
+        acc = fma(sb, dot, acc);
+        acc = fma(bb, sum2, acc);
+    }
+    for (uint blk = paired; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        const uint w4 = *((device const uint*)(W_row + byte_base));
+        const uint g = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 2u;
+        const half4 xa = *((device const half4*)(x + elem));
+        const half4 xb = *((device const half4*)(x + elem + 4u));
+        const uint b0 = w4 & 0xFFu, b1 = (w4 >> 8) & 0xFFu;
+        const uint b2 = (w4 >> 16) & 0xFFu, b3 = (w4 >> 24) & 0xFFu;
+        const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
+        const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
+        float dot = 0.0f;
+        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
+        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
+        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
+        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
+        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        y[local_row] = half(acc);
+    }
+}
+
+// unroll2 + half-precision block dots: the 8-element dot products accumulate
+// in `half` (the GPU's fp16 ALU is wider and avoids the per-element fp32
+// converts), the affine s/b and the cross-block accumulator stay in float.
+kernel void dequant_int4_qkv_gemv_simd_unroll2_half(
+    device const uint8_t* qW      [[buffer(0)]],
+    device const bfloat*  qScales [[buffer(1)]],
+    device const bfloat*  qBiases [[buffer(2)]],
+    device const uint8_t* kW      [[buffer(3)]],
+    device const bfloat*  kScales [[buffer(4)]],
+    device const bfloat*  kBiases [[buffer(5)]],
+    device const uint8_t* vW      [[buffer(6)]],
+    device const bfloat*  vScales [[buffer(7)]],
+    device const bfloat*  vBiases [[buffer(8)]],
+    device const half*    x       [[buffer(9)]],
+    device half*          qY      [[buffer(10)]],
+    device half*          kY      [[buffer(11)]],
+    device half*          vY      [[buffer(12)]],
+    constant uint&        Mq      [[buffer(13)]],
+    constant uint&        Mkv     [[buffer(14)]],
+    constant uint&        N       [[buffer(15)]],
+    uint                  tg_idx  [[threadgroup_position_in_grid]],
+    uint                  sg_idx  [[simdgroup_index_in_threadgroup]],
+    uint                  lane    [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint QQ = int4_qkv_fc_mq(Mq);
+    const uint KK = int4_qkv_fc_mkv(Mkv);
+    const uint NN = int4_qkv_fc_n(N);
+    const uint global_row = tg_idx * rows_per_tg + sg_idx;
+    const uint total_rows = QQ + 2u * KK;
+    if (global_row >= total_rows) { return; }
+
+    device const uint8_t* W;
+    device const bfloat* scales;
+    device const bfloat* biases;
+    device half* y;
+    uint local_row;
+    uint M;
+    if (global_row < QQ) {
+        W = qW; scales = qScales; biases = qBiases; y = qY;
+        local_row = global_row; M = QQ;
+    } else if (global_row < QQ + KK) {
+        W = kW; scales = kScales; biases = kBiases; y = kY;
+        local_row = global_row - QQ; M = KK;
+    } else {
+        W = vW; scales = vScales; biases = vBiases; y = vY;
+        local_row = global_row - QQ - KK; M = KK;
+    }
+    if (local_row >= M) { return; }
+    const uint n_groups = NN / kGroupSize;
+    const uint row_bytes = NN / 2;
+    device const uint8_t* W_row = W + uint(local_row) * row_bytes;
+    device const bfloat* s_row = scales + uint(local_row) * n_groups;
+    device const bfloat* b_row = biases + uint(local_row) * n_groups;
+
+    float acc = 0.0f;
+    const uint full_blocks = n_groups / 4;
+    const uint paired = full_blocks - (full_blocks % 2u);
+    for (uint blk = 0; blk < paired; blk += 2u) {
+        const uint base_a = blk * 128u + lane * 4u;
+        const uint base_b = base_a + 128u;
+        const uint w4a = *((device const uint*)(W_row + base_a));
+        const uint w4b = *((device const uint*)(W_row + base_b));
+        const uint elem_a = base_a * 2u;
+        const uint elem_b = base_b * 2u;
+        const half4 xa = *((device const half4*)(x + elem_a));
+        const half4 xb = *((device const half4*)(x + elem_a + 4u));
+        const half4 xc = *((device const half4*)(x + elem_b));
+        const half4 xd = *((device const half4*)(x + elem_b + 4u));
+        const uint ga = blk * 4u + (lane >> 3);
+        const float sa = float(s_row[ga]);
+        const float ba = float(b_row[ga]);
+        const uint gb = ga + 4u;
+        const float sb = float(s_row[gb]);
+        const float bb = float(b_row[gb]);
+        const uchar4 na = as_type<uchar4>(w4a);
+        const uchar4 nb = as_type<uchar4>(w4b);
+        const half hdot_a = fma(half(na.x & 0x0Fu), xa.x,
+                          fma(half(na.x >> 4), xa.y,
+                          fma(half(na.y & 0x0Fu), xa.z,
+                          fma(half(na.y >> 4), xa.w,
+                          fma(half(na.z & 0x0Fu), xb.x,
+                          fma(half(na.z >> 4), xb.y,
+                          fma(half(na.w & 0x0Fu), xb.z,
+                              half(na.w >> 4) * xb.w)))))));
+        const half hdot_b = fma(half(nb.x & 0x0Fu), xc.x,
+                          fma(half(nb.x >> 4), xc.y,
+                          fma(half(nb.y & 0x0Fu), xc.z,
+                          fma(half(nb.y >> 4), xc.w,
+                          fma(half(nb.z & 0x0Fu), xd.x,
+                          fma(half(nb.z >> 4), xd.y,
+                          fma(half(nb.w & 0x0Fu), xd.z,
+                              half(nb.w >> 4) * xd.w)))))));
+        const half hsum_a = (xa.x + xa.y) + (xa.z + xa.w)
+                          + (xb.x + xb.y) + (xb.z + xb.w);
+        const half hsum_b = (xc.x + xc.y) + (xc.z + xc.w)
+                          + (xd.x + xd.y) + (xd.z + xd.w);
+        acc = fma(sa, float(hdot_a), acc);
+        acc = fma(ba, float(hsum_a), acc);
+        acc = fma(sb, float(hdot_b), acc);
+        acc = fma(bb, float(hsum_b), acc);
+    }
+    for (uint blk = paired; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        const uint w4 = *((device const uint*)(W_row + byte_base));
+        const uint g = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 2u;
+        const half4 xa = *((device const half4*)(x + elem));
+        const half4 xb = *((device const half4*)(x + elem + 4u));
+        const uchar4 na = as_type<uchar4>(w4);
+        const half hdot = fma(half(na.x & 0x0Fu), xa.x,
+                        fma(half(na.x >> 4), xa.y,
+                        fma(half(na.y & 0x0Fu), xa.z,
+                        fma(half(na.y >> 4), xa.w,
+                        fma(half(na.z & 0x0Fu), xb.x,
+                        fma(half(na.z >> 4), xb.y,
+                        fma(half(na.w & 0x0Fu), xb.z,
+                            half(na.w >> 4) * xb.w)))))));
+        const half hsum = (xa.x + xa.y) + (xa.z + xa.w)
+                        + (xb.x + xb.y) + (xb.z + xb.w);
+        acc = fma(s, float(hdot), acc);
+        acc = fma(b, float(hsum), acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        y[local_row] = half(acc);
+    }
+}
