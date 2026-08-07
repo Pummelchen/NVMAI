@@ -51,11 +51,7 @@ slots + resident pin + MoE phase-1 rewrite). Full measurement history:
 
 ## Documentation
 
-- [Wiki home](https://github.com/Pummelchen/NVMAI/wiki)
-- [OpenAI-compatible server](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server)
-- [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls)
-- [System design](https://github.com/Pummelchen/NVMAI/wiki/System-Design)
-- [Benchmarks and protocol](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
+- [Wiki](https://github.com/Pummelchen/NVMAI/wiki)
 
 NVMAI remains text-only. The server binds to `127.0.0.1` without authentication
 or TLS and must not be exposed through a proxy or tunnel.
