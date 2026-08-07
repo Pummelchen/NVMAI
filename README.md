@@ -42,6 +42,14 @@ listed below.
   and defaults to a strict 384 MiB incremental memory budget.
 - Apple Silicon prefill controls up to 4,096 tokens per chunk, with the
   Qwen default set to 4,096 from measurements on the base M3.
+- Parallel expert pread fills across the idle CPU cores: the decode's expert
+  fetch is single-flight, so the cache-miss fills run concurrently on a
+  mostly-idle machine — measured +28% decode on the 4-bit M3 (9.98 -> 12.80
+  tok/s on 512-token generations). Disable with `NVMAI_PARALLEL_IO=0`.
+- Per-kernel GPU diagnostics: `NVMAI_KERNEL_STATS=1` logs each decode
+  command buffer's GPU span by role (attention block vs router vs head vs
+  MoE) in the server footer, and `NVMAI_RUNNER_STATS=1` adds the per-token
+  stage split (cb1/IO/cb2/head/rdadvise).
 - Apple M1-M5 target compatibility; the benchmark below was performed on M3.
 
 ## What NVMAI added
@@ -69,11 +77,16 @@ streaming, decode speed computed only from requests with ≥0.5s decode time.
 > enabled — it re-ran the cache-off × MTP-on configuration and is marked
 > invalid. In addition, all published runs used unique one-shot prompts, so
 > `cached_tokens` was 0 everywhere and the multi-prefix cache dimension was
-> not measured. `benchmark/nvmai_benchmark.py` has been corrected (replayable
-> warm sends that verify cache hits, PID-managed servers, answer
-> verification) and the matrix is being regenerated; treat the cache column
-> and the ON × ON row below as unmeasured until the regenerated numbers are
-> published.
+> not measured. The corrected harness (`benchmark/nvmai_benchmark.py`) has
+> since regenerated the matrix on the 4-bit M3 with footer-derived decode
+> rates, per-cell temperature, answer verification, and a multi-turn
+> continuation probe: cache-off 6.45 tok/s, cache-on 6.66 tok/s (replay
+> misses by design, continuation hits 38 KV tokens), MTP 4.47 tok/s at 81%
+> acceptance — MTP confirmed ~31% slower. The table below is the original
+> client-measured record; the current 4-bit decode on long generations is
+> **~12.8 tok/s** with the parallel pread fills (see the wiki
+> [Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey)
+> for the full measurement history).
 
 | Config | Cache | MTP | **4-bit** | **6-bit** | **8-bit** |
 |--------|-------|-----|-----------|-----------|-----------|
