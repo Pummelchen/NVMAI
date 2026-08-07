@@ -78,13 +78,13 @@ slots + resident pin + MoE phase-1 rewrite). Full measurement history:
 
 | Stat | Value |
 | --- | --- |
-| Decode, 256-token greedy essay (interleaved A/B, warm) | **11.70 / 11.77 tok/s** (64 slots + pin) |
-| — reference: 32 slots + pin | 10.82 / 10.52 tok/s (+10%) |
-| Decode, 512-token greedy essay | ~10.5 tok/s |
-| Routed MoE phase-1 GPU | 9.24 ms/token |
-| Long-gen 512-token (code-gen), 4/6/8-bit | NA — not re-run |
-| Throughput envelope (digit / count / essay / coding) | NA — not re-run |
-| 2×2 cache × MTP matrix | NA — not re-run |
+| Decode, 256-token greedy essay (interleaved A/B) | **11.91 / 11.45 tok/s** (64 slots + pin) |
+| — reference: 32 slots + pin | 10.76 / 10.19 tok/s (+11.5%) |
+| Decode, 512-token greedy essay | 14.37 tok/s |
+| Routed MoE phase-1 GPU | 10.60 ms/token |
+| Long-gen 512-token (code-gen) | 4-bit 7.32 / 6-bit 4.54 / 8-bit 3.66 tok/s |
+| Throughput envelope (digit / count / essay / coding) | 4-bit 14.48 / 11.34 / 9.33 / 8.05; 6-bit 6.63 / 6.21 / 6.00 / 5.04; 8-bit 5.56 / 5.33 / 4.90 / 3.90 tok/s |
+| 2×2 cache × MTP matrix (off×off / on×off / off×on) | 4-bit 9.58 / 11.17 / 6.77; 6-bit 4.44 / 4.34 / 4.12; 8-bit 3.19 / 3.55 / 3.15 tok/s |
 
 ## Benchmark — NVMAI 1.0
 
