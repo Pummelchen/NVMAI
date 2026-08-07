@@ -414,6 +414,28 @@ struct NVMAIBench {
             kernelName2, constants: [],
             maxTotalThreadsPerThreadgroup: rowsPerTG * 32)
 
+        // Full GDN decode chain (gdn_chain): in_proj + conv + qk_norm +
+        // delta-step + gated_norm in one command buffer, mirroring the
+        // decode's linear-attention block. Measures the extras' cost.
+        let chain = kernelName == "gdn_chain"
+        let convPSO = try context.pipeline("gdn_conv_mix_decode")
+        let qkNormPSO = try context.pipeline(
+            "gdn_qk_norm",
+            constants: [MetalFunctionConstant(index: 95, value: .uint32(128))])
+        let deltaPSO = try context.pipeline("gdn_delta_step_decode")
+        let gatedNormPSO = try context.pipeline(
+            "gdn_gated_norm",
+            constants: [MetalFunctionConstant(index: 95, value: .uint32(128))])
+        let convTail = makeBuffer(3 * Int(qkvRows), 0x44)          // [K-1, qkvDim] halfs
+        let convW = makeBuffer(Int(qkvRows) * 4 * 2, 0x55)         // [qkvDim, K] bfloat
+        let convOut = makeBuffer(Int(qkvRows) * 2, 0)
+        let aLog = makeBuffer(Int(abRows) * 2, 0x60)
+        let dtBias = makeBuffer(Int(abRows) * 2, 0x60)
+        let state = makeBuffer(Int(abRows) * 128 * 128 * 4, 0)     // FP32 [Hv, Dv, Dk]
+        let deltaY = makeBuffer(Int(zRows) * 2, 0)
+        let gatedW = makeBuffer(Int(zRows) * 2, 0x66)
+        let gatedOut = makeBuffer(Int(zRows) * 2, 0)
+
         let totalRows = Int(qkvRows + zRows + 2 * abRows)
         let bytes = UInt64(Int(qkvRows) * Int(N) / 2 + Int(zRows) * Int(N) / 2
                            + 2 * Int(abRows) * Int(N) / 2)
@@ -449,9 +471,65 @@ struct NVMAIBench {
         enc.setBytes(&abVar, length: MemoryLayout<UInt32>.size, index: 19)
         enc.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 20)
         for _ in 0..<iterations {
+            enc.setComputePipelineState(pso)
             enc.dispatchThreadgroups(
                 MTLSize(width: (totalRows + rowsPerTG - 1) / rowsPerTG, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(width: rowsPerTG * 32, height: 1, depth: 1))
+            if chain {
+                // conv: tail(0) qkv(1) convW(2) out(3) channels(4) taps(5)
+                enc.setComputePipelineState(convPSO)
+                enc.setBuffer(convTail, offset: 0, index: 0)
+                enc.setBuffer(qkvY, offset: 0, index: 1)
+                enc.setBuffer(convW, offset: 0, index: 2)
+                enc.setBuffer(convOut, offset: 0, index: 3)
+                var ch = qkvRows
+                var taps: UInt32 = 4
+                enc.setBytes(&ch, length: MemoryLayout<UInt32>.size, index: 4)
+                enc.setBytes(&taps, length: MemoryLayout<UInt32>.size, index: 5)
+                enc.dispatchThreads(MTLSize(width: Int(ch), height: 1, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                // qk_norm: convOut(0) kHeads(1) keyDim(2) rowStride(3)
+                enc.setComputePipelineState(qkNormPSO)
+                enc.setBuffer(convOut, offset: 0, index: 0)
+                var kHeads: UInt32 = 16
+                var keyDim: UInt32 = 128
+                var rowStride = qkvRows
+                enc.setBytes(&kHeads, length: MemoryLayout<UInt32>.size, index: 1)
+                enc.setBytes(&keyDim, length: MemoryLayout<UInt32>.size, index: 2)
+                enc.setBytes(&rowStride, length: MemoryLayout<UInt32>.size, index: 3)
+                enc.dispatchThreadgroups(
+                    MTLSize(width: 2 * 16, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                // delta: convOut(0) aProj(1) bProj(2) aLog(3) dtBias(4) state(5) y(6) dims 7-10
+                enc.setComputePipelineState(deltaPSO)
+                enc.setBuffer(convOut, offset: 0, index: 0)
+                enc.setBuffer(aY, offset: 0, index: 1)
+                enc.setBuffer(bY, offset: 0, index: 2)
+                enc.setBuffer(aLog, offset: 0, index: 3)
+                enc.setBuffer(dtBias, offset: 0, index: 4)
+                enc.setBuffer(state, offset: 0, index: 5)
+                enc.setBuffer(deltaY, offset: 0, index: 6)
+                var vHeads: UInt32 = 32
+                var vDim: UInt32 = 128
+                enc.setBytes(&kHeads, length: MemoryLayout<UInt32>.size, index: 7)
+                enc.setBytes(&vHeads, length: MemoryLayout<UInt32>.size, index: 8)
+                enc.setBytes(&keyDim, length: MemoryLayout<UInt32>.size, index: 9)
+                enc.setBytes(&vDim, length: MemoryLayout<UInt32>.size, index: 10)
+                enc.dispatchThreadgroups(
+                    MTLSize(width: Int(vHeads), height: Int(vDim) / 4, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 4, depth: 1))
+                // gated_norm: y(0) z(1) weight(2) out(3) vHeads(4) valueDim(5)
+                enc.setComputePipelineState(gatedNormPSO)
+                enc.setBuffer(deltaY, offset: 0, index: 0)
+                enc.setBuffer(zY, offset: 0, index: 1)
+                enc.setBuffer(gatedW, offset: 0, index: 2)
+                enc.setBuffer(gatedOut, offset: 0, index: 3)
+                enc.setBytes(&vHeads, length: MemoryLayout<UInt32>.size, index: 4)
+                enc.setBytes(&vDim, length: MemoryLayout<UInt32>.size, index: 5)
+                enc.dispatchThreadgroups(
+                    MTLSize(width: Int(vHeads), height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+            }
         }
         enc.endEncoding()
         cb.commit()
