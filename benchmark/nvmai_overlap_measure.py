@@ -12,7 +12,8 @@ import sys
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "qwen36.gturbo")
+MODEL = os.environ.get("NVMAI_BENCH_MODEL",
+                       os.path.join(BASE, "models", "qwen36.gturbo"))
 PORT = 8111
 PROMPT = "Write a detailed essay about the history of computing."
 MAX_TOKENS = int(sys.argv[1]) if len(sys.argv) > 1 else 512

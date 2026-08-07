@@ -14,7 +14,8 @@ import time
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "qwen36.gturbo")
+MODEL = os.environ.get("NVMAI_BENCH_MODEL",
+                       os.path.join(BASE, "models", "qwen36.gturbo"))
 PORT = 8115
 PROMPT = "Write a detailed essay about the history of computing."
 MAX_TOKENS = int(os.environ.get("NVMAI_AB_TOKENS", "512"))

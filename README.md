@@ -40,6 +40,10 @@ pin + MoE phase-1 rewrite). Full measurement history:
 
 | Stat | Value |
 | --- | --- |
+| Decode, 256-token greedy essay (interleaved A/B) | **7.55 / 7.34 tok/s** (64 slots + pin) |
+| — reference: 32 slots + pin | 6.20 / 6.68 tok/s (+15.5%) |
+| Decode, 512-token greedy essay | 7.26 tok/s |
+| Routed MoE phase-1 GPU | 20.34 ms/token |
 | Long-gen 512-token (code-gen) | 4.54 tok/s |
 | Throughput envelope (digit / count / essay / coding) | 6.63 / 6.21 / 6.00 / 5.04 tok/s |
 | 2×2 cache × MTP matrix (off×off / on×off / off×on) | 4.44 / 4.34 / 4.12 tok/s |
@@ -48,6 +52,10 @@ pin + MoE phase-1 rewrite). Full measurement history:
 
 | Stat | Value |
 | --- | --- |
+| Decode, 256-token greedy essay (interleaved A/B) | **6.66 / 6.44 tok/s** (64 slots + pin) |
+| — reference: 32 slots + pin | 5.46 / 5.74 tok/s (+17%) |
+| Decode, 512-token greedy essay | 5.84 tok/s |
+| Routed MoE phase-1 GPU | 16.81 ms/token |
 | Long-gen 512-token (code-gen) | 3.66 tok/s |
 | Throughput envelope (digit / count / essay / coding) | 5.56 / 5.33 / 4.90 / 3.90 tok/s |
 | 2×2 cache × MTP matrix (off×off / on×off / off×on) | 3.19 / 3.55 / 3.15 tok/s |
