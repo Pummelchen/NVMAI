@@ -33,9 +33,37 @@ jobs:
             exit 1
           fi
       - name: Run serial tests
-        # `swift test` (Scripts/test.sh) implicitly performs its own DEBUG
-        # build, which also produces the `.build/debug/NVMAIRepack` binary
-        # that RepackCLITests spawns — no separate debug build step is needed.
-        run: Scripts/test.sh
+        # `swift test` implicitly performs its own DEBUG build, which also
+        # produces the `.build/debug/NVMAIRepack` binary that RepackCLITests
+        # spawns — no separate debug build step is needed.
+        run: swift test --no-parallel
       - name: Check Markdown links
-        run: ruby Scripts/check_markdown_links.rb
+        run: |
+          ruby - <<'RUBY'
+          require 'set'
+          Encoding.default_external = Encoding::UTF_8
+          Encoding.default_internal = Encoding::UTF_8
+          root = ENV.fetch('GITHUB_WORKSPACE', Dir.pwd)
+          failures = 0
+          checked = 0
+          Dir.glob(File.join(root, '**', '*.md')).sort.each do |file|
+            next if file.include?('/.build/') || file.include?('/.qwen/')
+            dir = File.dirname(file)
+            File.readlines(file).each_with_index do |line, index|
+              line.scan(/\[[^\]]*\]\(([^)]+)\)/) do |match|
+                target = match[0].strip
+                next if target.empty?
+                next if target.start_with?('http://', 'https://', '#', 'mailto:')
+                target = target.split('#').first.to_s.gsub('%20', ' ')
+                next if target.empty?
+                path = File.expand_path(target, dir)
+                checked += 1
+                next if File.exist?(path)
+                puts "#{file.delete_prefix(root + '/')}:#{index + 1}: broken link '#{target}'"
+                failures += 1
+              end
+            end
+          end
+          puts "Checked #{checked} local link(s); #{failures} broken."
+          exit(failures.zero? ? 0 : 1)
+          RUBY
