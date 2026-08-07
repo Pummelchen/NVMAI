@@ -124,7 +124,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
-        var expertCacheSlots = 32
+        var expertCacheSlots = 64
         var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
 

@@ -442,15 +442,18 @@ public actor ServerModelSession: ServerInferenceBackend {
         let tokenizer = try await GFTokenizer.load(from: tokenizerFolder)
         let context = try MetalContext()
         let loadRuntime = try RuntimeConfiguration(forceLogitsHead: true)
+        let slotOverride = ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_SLOTS"]
+            .flatMap(Int.init)
+        let loadSlots = slotOverride ?? loadRuntime.expertCacheSlots
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
             expecting: .qwen36_35B_A3B,
-            streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
+            streamingMode: .pread(slotCount: loadSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .resolved(directoryURL: modelDirectory))
         let runtime = try RuntimeConfiguration(
-            expertCacheSlots: loadRuntime.expertCacheSlots,
+            expertCacheSlots: loadSlots,
             expertCachePolicy: loadRuntime.expertCachePolicy,
             rdadvisePolicy: ProcessInfo.processInfo.environment["NVMAI_RDADVISE_POLICY"]
                 .map(RDAdvicePolicyMode.parse)
