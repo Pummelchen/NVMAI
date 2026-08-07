@@ -103,6 +103,11 @@ What changed in 2.0:
   the MoE command buffers 40x (only the final layer of each token was
   recorded); the routed MoE is 14.4 ms/token of GPU, not 0.33. The stage
   accounting now closes exactly.
+- **Routed MoE phase-1 kernel rewrite:** NVMAIBench isolated the phase-1
+  gate/up GEMV at 38% of peak bandwidth (vs phase-2's 72%); 16 rows per
+  threadgroup with the activation staged in threadgroup memory lifts it to
+  ~56%, and the decode routedCB span drops 14.4 -> 9.24 ms/token
+  (byte-identical output verified).
 
 Corrected per-token decode budget (warm, 512-token essay):
 
