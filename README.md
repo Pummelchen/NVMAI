@@ -40,8 +40,8 @@ listed below.
   a reusable 4-bit one-layer sidecar shares the target embedding/head, streams
   only top-8 draft experts, verifies two tokens through batched target prefill,
   and defaults to a strict 384 MiB incremental memory budget.
-- Apple Silicon prefill controls up to 4,096 tokens per chunk, with a 1,024-token
-  Qwen default selected from measurements on the base M3.
+- Apple Silicon prefill controls up to 4,096 tokens per chunk, with the
+  Qwen default set to 4,096 from measurements on the base M3.
 - Apple M1-M5 target compatibility; the benchmark below was performed on M3.
 
 ## What NVMAI added
