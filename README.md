@@ -78,35 +78,44 @@ streaming, decode speed computed only from requests with ≥0.5s decode time.
 > invalid. In addition, all published runs used unique one-shot prompts, so
 > `cached_tokens` was 0 everywhere and the multi-prefix cache dimension was
 > not measured. The corrected harness (`benchmark/nvmai_benchmark.py`) has
-> since regenerated the matrix on the 4-bit M3 with footer-derived decode
-> rates, per-cell temperature, answer verification, and a multi-turn
-> continuation probe: cache-off 6.45 tok/s, cache-on 6.66 tok/s (replay
-> misses by design, continuation hits 38 KV tokens), MTP 4.47 tok/s at 81%
-> acceptance — MTP confirmed ~31% slower. The table below is the original
-> client-measured record; the current 4-bit decode on long generations is
-> **~12.8 tok/s** with the parallel pread fills (see the wiki
+> since regenerated the matrix across all three quantizations with
+> footer-derived decode rates, per-cell temperature, answer verification,
+> and a multi-turn continuation probe — the table below is the current
+> result (4-bit: 7.69/7.39/5.95, 6-bit: 4.33/4.37/2.72, 8-bit: 3.81/3.78/3.09
+> tok/s; MTP confirmed slower at every quant; the cache probe hits on
+> continuation in every cell). The current 4-bit decode on long generations
+> is **~12.8 tok/s** with the parallel pread fills (see the wiki
 > [Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey)
 > for the full measurement history).
 
 | Config | Cache | MTP | **4-bit** | **6-bit** | **8-bit** |
 |--------|-------|-----|-----------|-----------|-----------|
-| OFF × OFF | off | off | **10.17 tok/s** | 6.96 tok/s | 5.83 tok/s |
-| ON × OFF | multi-prefix | off | **10.19 tok/s** | 6.38 tok/s | 5.77 tok/s |
-| OFF × ON | off | on | **10.21 tok/s** | 6.16 tok/s | 5.92 tok/s |
-| ~~ON × ON~~ | — | — | ~~8.62~~ | ~~5.68~~ | ~~6.02~~ |
+| OFF × OFF | off | off | **7.69 tok/s** | 4.33 tok/s | 3.81 tok/s |
+| ON × OFF | multi-prefix | off | **7.39 tok/s** | 4.37 tok/s | 3.78 tok/s |
+| OFF × ON | off | on | **5.95 tok/s** | 2.72 tok/s | 3.09 tok/s |
+| ~~ON × ON~~ | — | — | — | — | — |
 
 ### Key Findings
 
-1. **4-bit is the fastest quantization** at ~10 tok/s across all configs.
-   Consistent decode performance with minimal overhead variation.
+1. **4-bit is the fastest quantization** at ~7.4-7.7 tok/s across configs
+   (footer-derived decode rates on the 12-prompt matrix). Decode on longer
+   generations is ~12.8 tok/s with the parallel pread fills.
 
-2. **6-bit trades ~30% speed for better quality** at ~6-7 tok/s. Notable
-   degradation with MTP on (6.16 tok/s vs 6.96 tok/s OFF × OFF).
+2. **6-bit trades ~45% speed for better quality** at ~4.3-4.4 tok/s. The
+   MTP penalty is largest here (2.72 tok/s, -37%): the 4-bit draft sidecar
+   is least aligned with a 6-bit target.
 
-3. **8-bit matches 6-bit** at ~5-6 tok/s for cache-only configs.
+3. **8-bit is slower still** at ~3.8 tok/s for cache configs; the MTP
+   penalty is the smallest of the three (-19%).
 
-4. **MTP ON** reduces decode speed across all quantizations. The one-layer
+4. **MTP ON reduces decode speed at every quantization** (7.69 -> 5.95,
+   4.33 -> 2.72, 3.81 -> 3.09 tok/s at 75-81% acceptance). The one-layer
    draft sidecar adds overhead that cannot overcome the 40-layer MoE cost.
+
+5. **The multi-prefix cache hits on multi-turn continuation** (38/47/47 KV
+   tokens restored in the probe across quants) but identical-prompt replay
+   misses by design — the KV prefix runs through the generated assistant
+   turn. Cache saves prefill/TTFT, not per-token decode.
 
 ## Documentation
 
