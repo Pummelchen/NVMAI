@@ -12,7 +12,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
-                rdadvisePolicy: String = "off",
+                rdadvisePolicy: String = "default",
                 modelVerification: String = "full-sha256") {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy

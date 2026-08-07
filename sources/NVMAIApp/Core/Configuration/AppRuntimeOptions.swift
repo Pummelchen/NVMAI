@@ -65,7 +65,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
-                rdadvisePolicy: AppRDAdvicePolicy = .off,
+                rdadvisePolicy: AppRDAdvicePolicy = .default,
                 modelVerification: AppModelVerification = .fullSha256) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy

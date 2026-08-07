@@ -54,7 +54,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     public init(expertCacheSlots: Int = 32,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
-                rdadvisePolicy: RDAdvicePolicyMode = .off,
+                rdadvisePolicy: RDAdvicePolicyMode = .default,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,

@@ -35,7 +35,7 @@ public struct Args: Equatable, Sendable {
                 stops: [String] = [],
                 quiet: Bool = false,
                 expertCacheSlots: Int = 32,
-                rdadvise: String = "off",
+                rdadvise: String = "default",
                 prefillChunk: PrefillChunkChoice? = nil) {
         self.model = model
         self.prompt = prompt
@@ -125,7 +125,7 @@ extension Args {
         var stops: [String] = []
         var quiet = false
         var expertCacheSlots = 32
-        var rdadvise = "off"
+        var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
 
         var index = 0
