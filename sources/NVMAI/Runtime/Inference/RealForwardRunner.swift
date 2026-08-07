@@ -945,7 +945,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             .sorted { $0.millis > $1.millis }
     }
 
-
     private func shouldSkipRDAdvice(position: Int,
                                     requestedMisses: Int,
                                     estimatedBytes: UInt64,
@@ -2288,26 +2287,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 (onesPerExpertScale!, 0)
 
             let tCb1Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            // Everything up to and including the router runs in a single CB:
-            // the only reason to break is the CPU readback of router indices
-            // needed to issue I/O for the routed-expert blobs.
-            guard let cb = ctx.queue.makeCommandBuffer() else {
+            // Attention+router split into measured sub-command-buffers
+            // (NVMAI_KERNEL_STATS): attnCB = input norm + QKV + epilogue
+            // (or the linear/gated attention), softmaxCB = the softmax
+            // attention pass on full layers, tailCB = O-proj + residual +
+            // post-norm + router. Same queue, same order, one wait on the
+            // last CB; only the router readback forces the barrier.
+            guard let attnCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
-            try rms.encodeBF16W(commandBuffer: cb,
+            try rms.encodeBF16W(commandBuffer: attnCB,
                             x: hidden,
                             weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
                             out: normed,
                             d: D, eps: eps)
+            var softmaxCB: MTLCommandBuffer?
+            guard let tailCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
 
             if isLinear {
                 // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
                 // fixed-size recurrent state updated in place.
-                try encodeLinearAttentionDecode(cb, layer: L)
+                try encodeLinearAttentionDecode(attnCB, layer: L)
             } else if cfg.attnOutputGate {
                 // Qwen full attention: packed [query ; gate] q_proj, real
                 // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.
-                try encodeGatedFullAttentionDecode(cb, layer: L,
+                try encodeGatedFullAttentionDecode(attnCB, layer: L,
                                                    position: position,
                                                    seqLen: seqLen)
             } else {
@@ -2322,7 +2328,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let qNorm = try model.qNorm(layer: L)
                 let kNorm = try model.kNorm(layer: L)
 
-                try fusedQKVGEMV.encode(commandBuffer: cb,
+                try fusedQKVGEMV.encode(commandBuffer: attnCB,
                                     qWeights: q.buffer, qWeightsOffset: Int(q.offset),
                                     qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
                                     qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
@@ -2343,7 +2349,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 let rotated = isFull
                     ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
                     : UInt32(headDimL / 2)
-                try fusedQKVEpilogue.encode(commandBuffer: cb,
+                try fusedQKVEpilogue.encode(commandBuffer: attnCB,
                                         q: qScratch,
                                         k: kSlot.buffer,
                                         kOffset: kSlot.offset,
@@ -2365,8 +2371,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     throw ModelError.internalInconsistency(
                         detail: "FP16 attention requires an FP16 KV cache")
                 }
+                guard let attentionCB = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                softmaxCB = attentionCB
                 if isFull {
-                    try attention.encodeFull(commandBuffer: cb,
+                    try attention.encodeFull(commandBuffer: attentionCB,
                                          q: qScratch,
                                          k: kSlot.buffer, kOffset: 0,
                                          v: vSlot.buffer, vOffset: 0,
@@ -2381,7 +2391,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
                         ? UInt32(ringCapacity)
                         : 0
-                    try attention.encodeSWA(commandBuffer: cb,
+                    try attention.encodeSWA(commandBuffer: attentionCB,
                                         q: qScratch,
                                         k: kSlot.buffer, kOffset: 0,
                                         v: vSlot.buffer, vOffset: 0,
@@ -2394,7 +2404,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                         scale: Float(cfg.attentionScale),
                                         ringCapacity: activeRingCapacity)
                 }
-                try int4.encode(commandBuffer: cb,
+                try int4.encode(commandBuffer: tailCB,
                             weights: o.buffer, weightsOffset: Int(o.offset),
                             scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
                             biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
@@ -2404,18 +2414,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // Plain pre-norm residual block: hidden += attention branch,
             // then one post-attention norm feeds router, shared expert,
             // and routed phase 1 (routedX doubles as moeX).
-            try elementwise!.encodeResidualAdd(commandBuffer: cb,
+            try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
                                            hidden: hidden,
                                            delta: oOut,
                                            count: cfg.hiddenSize)
-            try rms.encodeBF16W(commandBuffer: cb,
+            try rms.encodeBF16W(commandBuffer: tailCB,
                             x: hidden,
                             weight: postAttn.buffer,
                             weightOffset: Int(postAttn.offset),
                             out: routedX,
                             d: D, eps: eps)
 
-            try moe.encodeRouter(commandBuffer: cb,
+            try moe.encodeRouter(commandBuffer: tailCB,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                 scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
                 biases:  routerW.buffer, biasesOffset:  Int(routerW.biasOffset),
@@ -2425,10 +2435,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 perExpertScaleOffset: perExpertScale.offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
-            cb.commit()
+            attnCB.commit()
+            if let attentionCB = softmaxCB {
+                attentionCB.commit()
+            }
+            tailCB.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            try waitForCompletion(cb)
-            recordKernelGPU(role: "attn_router", cb)
+            try waitForCompletion(tailCB)
+            recordKernelGPU(role: "attn_norm_qkv", attnCB)
+            if let attentionCB = softmaxCB {
+                recordKernelGPU(role: "attn_softmax", attentionCB)
+            }
+            recordKernelGPU(role: "attn_tail_router", tailCB)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             if let pending = pendingRoutedCommand {
                 try finishPendingRoutedCommand(pending, waitIfNeeded: false)
