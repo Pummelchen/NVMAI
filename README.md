@@ -65,6 +65,24 @@ listed below.
 | Native MTP | Added a pinned tensor-only MTP sidecar repacker, shared 4/6/8-bit target embedding/head binding, 4-bit router support, 32-row streaming draft prefill, two-token target verification, bounded draft KV, acceptance metrics, and KV/Gated-DeltaNet rollback. |
 | Validation | Added higher-bit kernel/runtime tests, state-snapshot tests, persistent-cache tests, and the reproducible coding-agent stress benchmark. |
 
+## Performance — long generations (code-generation style)
+
+Measured on M3 24 GB, current build (parallel pread fills + SSE fix). A
+512-token greedy completion from a coding prompt (Levenshtein + closest-match
+functions), server-footer decode rate, 3 runs per quant after a discarded
+warmup:
+
+| Quantization | Decode |
+| --- | --- |
+| **4-bit** | **9.9 tok/s** (9.76 / 10.16 / 9.88) |
+| 6-bit | 4.9 tok/s (4.90 / 4.91 / 4.90) |
+| 8-bit | 4.1 tok/s (4.10 / 4.13 / 4.11) |
+
+Decode rate is workload-dependent: the same 4-bit build does ~12.8 tok/s on
+repetitive prose (high expert-cache locality) and ~9.9 on this coding prompt,
+which routes through a more diverse expert set. Reproduce with
+`benchmark/nvmai_longgen.py`.
+
 ## 2×2 Precise Benchmark Results (Aug 2026)
 
 Measured on M3 24 GB with 12 independent prompts (128-token max generations).
