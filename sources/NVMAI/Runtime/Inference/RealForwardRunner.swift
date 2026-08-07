@@ -908,6 +908,44 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         totalRDAdviseSkipped &+= UInt64(result.skipped)
     }
 
+    // MARK: - Per-command-buffer GPU timing (NVMAI_KERNEL_STATS)
+
+    /// One command buffer's GPU span for a named kernel role. The decode path
+    /// is synchronous (commit + wait), so `gpuStartTime`/`gpuEndTime` are
+    /// valid right after completion and cost nothing to read.
+    private struct KernelGPUTiming {
+        let role: String
+        let start: TimeInterval
+        let end: TimeInterval
+    }
+    private var kernelGPUTimings: [KernelGPUTiming] = []
+    private let kernelGPUTimingsEnabled =
+        ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil
+
+    public func resetKernelGPUTimings() {
+        kernelGPUTimings.removeAll(keepingCapacity: true)
+    }
+
+    func recordKernelGPU(role: String, _ cb: MTLCommandBuffer) {
+        guard kernelGPUTimingsEnabled, cb.gpuEndTime > 0 else { return }
+        kernelGPUTimings.append(
+            KernelGPUTiming(role: role, start: cb.gpuStartTime, end: cb.gpuEndTime))
+    }
+
+    /// Aggregated per-role GPU milliseconds for the current generation,
+    /// largest first.
+    public func kernelGPUTimingSummary() -> [(role: String, millis: Double, count: Int)] {
+        var acc: [String: (millis: Double, count: Int)] = [:]
+        for t in kernelGPUTimings {
+            let millis = (t.end - t.start) * 1000
+            acc[t.role, default: (0, 0)].millis += millis
+            acc[t.role]!.count += 1
+        }
+        return acc.map { (role: $0.key, millis: $0.value.millis, count: $0.value.count) }
+            .sorted { $0.millis > $1.millis }
+    }
+
+
     private func shouldSkipRDAdvice(position: Int,
                                     requestedMisses: Int,
                                     estimatedBytes: UInt64,
@@ -2177,11 +2215,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if waitIfNeeded {
                 if let sharedCB = pending.sharedCB {
                     try waitForCompletion(sharedCB)
+                    recordKernelGPU(role: "shared_expert", sharedCB)
                 }
                 if let phase1HitCB = pending.phase1HitCB {
                     try waitForCompletion(phase1HitCB)
+                    recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
                 }
                 try waitForCompletion(pending.cb)
+                recordKernelGPU(role: "moe_phase1_2_routed", pending.cb)
             } else if let err = pending.cb.error {
                 throw ModelError.commandBufferFailed(
                     detail: "routed layer command buffer: \(err)")
@@ -2228,6 +2269,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         guard embedCB != nil else {
             throw ModelError.residentBufferWrapFailed
         }
+        if let embedCB { recordKernelGPU(role: "embed", embedCB) }
 
         for L in 0..<cfg.numLayers {
             let isLinear = cfg.layerIsLinear(L)
@@ -2386,6 +2428,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             cb.commit()
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try waitForCompletion(cb)
+            recordKernelGPU(role: "attn_router", cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
             if let pending = pendingRoutedCommand {
                 try finishPendingRoutedCommand(pending, waitIfNeeded: false)
@@ -2667,16 +2710,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
             let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             if useFusedHeadForThisToken {
-                _ = try runSync(gFusionHead)
+                if let headCB = try runSync(gFusionHead) {
+                    recordKernelGPU(role: "head_fused", headCB)
+                }
                 totalHeadFusedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
                 lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
             } else {
-                guard try runSync({ cb in
+                guard let headCB = try runSync({ cb in
                     try gFinalNorm(cb)
                     try gLmHead(cb)
-                }) != nil else {
+                }) else {
                     throw ModelError.residentBufferWrapFailed
                 }
+                recordKernelGPU(role: "head_logits", headCB)
                 totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
             }
         }
