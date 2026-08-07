@@ -19,6 +19,7 @@ import NVMAI
 /// Usage: NVMAIBench [kernelName] [iterations]
 ///   qkv family: baseline (default), bandwidth, unroll2, ulong2
 ///   moe family: moe_phase1, moe_phase2, moe
+///   gdn family: gdn_inproj (baseline), gdn_inproj_xsh, gdn_inproj_r16
 @main
 struct NVMAIBench {
     /// Shader-side `ExpertOffsets` mirror: 9 packed UInt32 in the same order.
@@ -43,6 +44,11 @@ struct NVMAIBench {
         let context = try MetalContext()
         let device = context.device
         print("device: \(device.name)")
+
+        if kernelName.hasPrefix("gdn") {
+            try runGDN(kernelName: kernelName, iterations: iterations, context: context)
+            return
+        }
 
         if kernelName.hasPrefix("moe") {
             try runMoE(kernelName: kernelName, iterations: iterations, context: context)
@@ -344,5 +350,125 @@ struct NVMAIBench {
             + "efficiency=\(String(format: "%.0f", gbPerSec / theoretical * 100))% of ~100 GB/s peak "
             + "acts_fnv=\(String(format: "%08x", hash)) y_fnv=\(String(format: "%08x", yHash)) "
             + "acts_sample=\(sample)")
+    }
+
+    /// GDN fused input-projection GEMV at the real qwen36 shapes
+    /// (qkvDim 8192, valueDim 4096, ab 32 each, N=2048). The weight read is
+    /// the metric: qkv + z + a + b ~= 12.7 MB/layer. Variants:
+    /// gdn_inproj (production 8-row), gdn_inproj_xsh8 (8-row + tgmem x),
+    /// gdn_inproj_r16 (16-row device x), gdn_inproj_xsh16 (16-row + tgmem).
+    private static func runGDN(kernelName: String,
+                               iterations: Int,
+                               context: MetalContext) throws {
+        let device = context.device
+        let qkvRows: UInt32 = 8192
+        let zRows: UInt32 = 4096
+        let abRows: UInt32 = 32
+        let N: UInt32 = 2048
+        let groupCount = Int(N) / 64
+
+        func makeBuffer(_ bytes: Int, _ value: UInt8) -> MTLBuffer {
+            let buf = device.makeBuffer(length: bytes, options: .storageModeShared)!
+            memset(buf.contents(), Int32(value), bytes)
+            return buf
+        }
+        let qkvW = makeBuffer(Int(qkvRows) * Int(N) / 2, 0x12)
+        let qkvS = makeBuffer(Int(qkvRows) * groupCount * 2, 0x01)
+        let qkvB = makeBuffer(Int(qkvRows) * groupCount * 2, 0x00)
+        let zW = makeBuffer(Int(zRows) * Int(N) / 2, 0x34)
+        let zS = makeBuffer(Int(zRows) * groupCount * 2, 0x01)
+        let zB = makeBuffer(Int(zRows) * groupCount * 2, 0x00)
+        let aW = makeBuffer(Int(abRows) * Int(N) / 2, 0x56)
+        let aS = makeBuffer(Int(abRows) * groupCount * 2, 0x01)
+        let aB = makeBuffer(Int(abRows) * groupCount * 2, 0x00)
+        let bW = makeBuffer(Int(abRows) * Int(N) / 2, 0x78)
+        let bS = makeBuffer(Int(abRows) * groupCount * 2, 0x01)
+        let bB = makeBuffer(Int(abRows) * groupCount * 2, 0x00)
+        let x = device.makeBuffer(length: Int(N) * 2, options: .storageModeShared)!
+        let xPtr = x.contents().assumingMemoryBound(to: UInt16.self)
+        for i in 0..<Int(N) {
+            xPtr[i] = Float16(Float(i + 1) * 0.001).bitPattern
+        }
+        let qkvY = makeBuffer(Int(qkvRows) * 2, 0)
+        let zY = makeBuffer(Int(zRows) * 2, 0)
+        let aY = makeBuffer(Int(abRows) * 2, 0)
+        let bY = makeBuffer(Int(abRows) * 2, 0)
+
+        let kernelName2: String
+        let rowsPerTG: Int
+        switch kernelName {
+        case "gdn_inproj_xsh8":
+            kernelName2 = "gdn_in_proj_gemv_simd_xsh8"
+            rowsPerTG = 8
+        case "gdn_inproj_r16":
+            kernelName2 = "gdn_in_proj_gemv_simd_r16"
+            rowsPerTG = 16
+        case "gdn_inproj_xsh16":
+            kernelName2 = "gdn_in_proj_gemv_simd_xsh16"
+            rowsPerTG = 16
+        default:
+            kernelName2 = "gdn_in_proj_gemv_simd"
+            rowsPerTG = 8
+        }
+        let pso = try context.pipeline(
+            kernelName2, constants: [],
+            maxTotalThreadsPerThreadgroup: rowsPerTG * 32)
+
+        let totalRows = Int(qkvRows + zRows + 2 * abRows)
+        let bytes = UInt64(Int(qkvRows) * Int(N) / 2 + Int(zRows) * Int(N) / 2
+                           + 2 * Int(abRows) * Int(N) / 2)
+        var qkvVar = qkvRows
+        var zVar = zRows
+        var abVar = abRows
+        var nVar = N
+
+        let cb = context.queue.makeCommandBuffer()!
+        guard let enc = cb.makeComputeCommandEncoder() else {
+            fatalError("could not create compute encoder")
+        }
+        enc.setComputePipelineState(pso)
+        enc.setBuffer(qkvW, offset: 0, index: 0)
+        enc.setBuffer(qkvS, offset: 0, index: 1)
+        enc.setBuffer(qkvB, offset: 0, index: 2)
+        enc.setBuffer(zW, offset: 0, index: 3)
+        enc.setBuffer(zS, offset: 0, index: 4)
+        enc.setBuffer(zB, offset: 0, index: 5)
+        enc.setBuffer(aW, offset: 0, index: 6)
+        enc.setBuffer(aS, offset: 0, index: 7)
+        enc.setBuffer(aB, offset: 0, index: 8)
+        enc.setBuffer(bW, offset: 0, index: 9)
+        enc.setBuffer(bS, offset: 0, index: 10)
+        enc.setBuffer(bB, offset: 0, index: 11)
+        enc.setBuffer(x, offset: 0, index: 12)
+        enc.setBuffer(qkvY, offset: 0, index: 13)
+        enc.setBuffer(zY, offset: 0, index: 14)
+        enc.setBuffer(aY, offset: 0, index: 15)
+        enc.setBuffer(bY, offset: 0, index: 16)
+        enc.setBytes(&qkvVar, length: MemoryLayout<UInt32>.size, index: 17)
+        enc.setBytes(&zVar, length: MemoryLayout<UInt32>.size, index: 18)
+        enc.setBytes(&abVar, length: MemoryLayout<UInt32>.size, index: 19)
+        enc.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 20)
+        for _ in 0..<iterations {
+            enc.dispatchThreadgroups(
+                MTLSize(width: (totalRows + rowsPerTG - 1) / rowsPerTG, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: rowsPerTG * 32, height: 1, depth: 1))
+        }
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        if let err = cb.error {
+            print("COMMAND BUFFER ERROR: \(err)")
+        }
+
+        let totalSeconds = cb.gpuEndTime - cb.gpuStartTime
+        let perIteration = totalSeconds / Double(iterations)
+        let gbPerSec = Double(bytes) / perIteration / 1_000_000_000
+        let theoretical = 100.0
+        print("kernel=\(kernelName) iterations=\(iterations) "
+            + "total=\(String(format: "%.4f", totalSeconds))s "
+            + "per_launch=\(String(format: "%.2f", perIteration * 1_000_000))us")
+        print("bytes/launch=\(bytes) "
+            + "achieved=\(String(format: "%.1f", gbPerSec)) GB/s "
+            + "efficiency=\(String(format: "%.0f", gbPerSec / theoretical * 100))% of ~100 GB/s peak")
     }
 }

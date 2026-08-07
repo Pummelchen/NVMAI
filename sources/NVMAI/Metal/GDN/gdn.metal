@@ -640,3 +640,161 @@ kernel void gdn_gated_norm(
         out[base + i] = half(normed * gate);
     }
 }
+
+// ---- bench variants (NVMAIBench gdn_inproj_*) ----
+// Access-pattern sweep for the fused in-proj GEMV: xsh8 (8 rows/TG +
+// threadgroup-staged x), r16 (16 rows/TG, device x), xsh16 (16 rows + tgmem).
+
+static inline float gdn_dequant_int4_gemv_simd_body_tgmem(
+    threadgroup const half* x,
+    device const uint8_t* W,
+    device const bfloat*  scales,
+    device const bfloat*  biases,
+    device half*          y,
+    uint                  M,
+    uint                  N,
+    uint                  rows_per_tg,
+    uint                  tg_idx,
+    uint                  sg_idx,
+    uint                  lane
+) {
+    const uint row = tg_idx * rows_per_tg + sg_idx;
+    if (row >= M) return 0.0f;
+    const uint n_groups  = N / kGdnGroupSize;
+    const uint row_bytes = N / 2;
+    device const uint8_t* W_row = W      + uint(row) * row_bytes;
+    device const bfloat*  s_row = scales + uint(row) * n_groups;
+    device const bfloat*  b_row = biases + uint(row) * n_groups;
+
+    float acc = 0.0f;
+    const uint full_blocks = n_groups / 4;
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        device const ushort* wp = (device const ushort*)(W_row + byte_base);
+        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
+        const uint g  = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 2u;
+        const float e0 = float(x[elem]), e1 = float(x[elem + 1u]);
+        const float e2 = float(x[elem + 2u]), e3 = float(x[elem + 3u]);
+        const float e4 = float(x[elem + 4u]), e5 = float(x[elem + 5u]);
+        const float e6 = float(x[elem + 6u]), e7 = float(x[elem + 7u]);
+        const uint b0 =  w4        & 0xFFu;
+        const uint b1 = (w4 >> 8)  & 0xFFu;
+        const uint b2 = (w4 >> 16) & 0xFFu;
+        const uint b3 = (w4 >> 24) & 0xFFu;
+        float dot = 0.0f;
+        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
+        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
+        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
+        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
+        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint8_t byte = W_row[g * (kGdnGroupSize / 2) + lane];
+        const float x0 = float(x[g * kGdnGroupSize + lane * 2u]);
+        const float x1 = float(x[g * kGdnGroupSize + lane * 2u + 1u]);
+        float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+        dot = fma(float(uint(byte >> 4)), x1, dot);
+        const float sum = x0 + x1;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        y[row] = half(acc);
+    }
+    return acc;
+}
+
+static inline void gdn_in_proj_rows(
+    device const half* xd, threadgroup const half* xt, bool tgmem,
+    device const uint8_t* qkvW, device const bfloat* qkvS, device const bfloat* qkvB,
+    device const uint8_t* zW,   device const bfloat* zS,   device const bfloat* zB,
+    device const uint8_t* aW,   device const bfloat* aS,   device const bfloat* aB,
+    device const uint8_t* bW,   device const bfloat* bS,   device const bfloat* bB,
+    device half* qkvY, device half* zY, device half* aY, device half* bY,
+    uint QKV, uint Z, uint AB, uint NN, uint global_row, uint lane
+) {
+    if (global_row >= QKV + Z + 2u * AB) return;
+    device const uint8_t* W;
+    device const bfloat* scales;
+    device const bfloat* biases;
+    device half* y;
+    uint local_row;
+    uint M;
+    if (global_row < QKV) {
+        W = qkvW; scales = qkvS; biases = qkvB; y = qkvY;
+        local_row = global_row;
+        M = QKV;
+    } else if (global_row < QKV + Z) {
+        W = zW; scales = zS; biases = zB; y = zY;
+        local_row = global_row - QKV;
+        M = Z;
+    } else if (global_row < QKV + Z + AB) {
+        W = aW; scales = aS; biases = aB; y = aY;
+        local_row = global_row - QKV - Z;
+        M = AB;
+    } else {
+        W = bW; scales = bS; biases = bB; y = bY;
+        local_row = global_row - QKV - Z - AB;
+        M = AB;
+    }
+    if (tgmem) {
+        gdn_dequant_int4_gemv_simd_body_tgmem(xt, W, scales, biases, y, M, NN,
+                                              1u, local_row, 0u, lane);
+    } else {
+        gdn_dequant_int4_gemv_simd_body(W, scales, biases, xd, y, M, NN,
+                                        1u, local_row, 0u, lane);
+    }
+}
+
+#define GDN_IN_PROJ_VARIANT(NAME, RPT, XSH)                                \
+kernel void NAME(                                                          \
+    device const uint8_t* qkvW [[buffer(0)]],                              \
+    device const bfloat*  qkvS [[buffer(1)]],                              \
+    device const bfloat*  qkvB [[buffer(2)]],                              \
+    device const uint8_t* zW   [[buffer(3)]],                              \
+    device const bfloat*  zS   [[buffer(4)]],                              \
+    device const bfloat*  zB   [[buffer(5)]],                              \
+    device const uint8_t* aW   [[buffer(6)]],                              \
+    device const bfloat*  aS   [[buffer(7)]],                              \
+    device const bfloat*  aB   [[buffer(8)]],                              \
+    device const uint8_t* bW   [[buffer(9)]],                              \
+    device const bfloat*  bS   [[buffer(10)]],                             \
+    device const bfloat*  bB   [[buffer(11)]],                             \
+    device const half*    x    [[buffer(12)]],                             \
+    device half* qkvY [[buffer(13)]], device half* zY [[buffer(14)]],      \
+    device half* aY   [[buffer(15)]], device half* bY [[buffer(16)]],      \
+    constant uint& qkvRows [[buffer(17)]], constant uint& zRows [[buffer(18)]], \
+    constant uint& abRows  [[buffer(19)]], constant uint& N      [[buffer(20)]], \
+    uint tg_idx [[threadgroup_position_in_grid]],                          \
+    uint sg_idx [[simdgroup_index_in_threadgroup]],                        \
+    uint lane   [[thread_index_in_simdgroup]]) {                           \
+    constexpr uint rows_per_tg = RPT;                                      \
+    const uint QKV = gdn_in_fc_qkv(qkvRows);                               \
+    const uint Z   = gdn_in_fc_z(zRows);                                   \
+    const uint AB  = gdn_in_fc_ab(abRows);                                 \
+    const uint NN  = gdn_in_fc_n(N);                                       \
+    threadgroup half xt[2816];                                             \
+    if (XSH) {                                                             \
+        for (uint i = lane; i < NN; i += 32u) { xt[i] = x[i]; }            \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+        gdn_in_proj_rows(x, xt, true, qkvW, qkvS, qkvB, zW, zS, zB, aW, aS, aB, \
+                         bW, bS, bB, qkvY, zY, aY, bY, QKV, Z, AB, NN,     \
+                         tg_idx * rows_per_tg + sg_idx, lane);             \
+    } else {                                                               \
+        gdn_in_proj_rows(x, nullptr, false, qkvW, qkvS, qkvB, zW, zS, zB, aW, aS, aB, \
+                         bW, bS, bB, qkvY, zY, aY, bY, QKV, Z, AB, NN,     \
+                         tg_idx * rows_per_tg + sg_idx, lane);             \
+    }                                                                      \
+}
+
+GDN_IN_PROJ_VARIANT(gdn_in_proj_gemv_simd_xsh8, 8,  1)
+GDN_IN_PROJ_VARIANT(gdn_in_proj_gemv_simd_r16, 16, 0)
+GDN_IN_PROJ_VARIANT(gdn_in_proj_gemv_simd_xsh16, 16, 1)
