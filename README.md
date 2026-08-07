@@ -20,9 +20,11 @@ runtime support. NVMAI merges that contribution and extends it further.
 
 ## Benchmark — NVMAI 2.0
 
-Measured on M3 24 GB, 4-bit checkpoint, current 2.0 build (64 expert-cache
-slots + resident pin + MoE phase-1 rewrite). Full measurement history:
+Measured on M3 24 GB, current 2.0 build (64 expert-cache slots + resident
+pin + MoE phase-1 rewrite). Full measurement history:
 [Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey).
+
+#### 4-bit
 
 | Stat | Value |
 | --- | --- |
@@ -30,13 +32,25 @@ slots + resident pin + MoE phase-1 rewrite). Full measurement history:
 | — reference: 32 slots + pin | 10.76 / 10.19 tok/s (+11.5%) |
 | Decode, 512-token greedy essay | 14.37 tok/s |
 | Routed MoE phase-1 GPU | 10.60 ms/token |
-| Long-gen 512-token (code-gen) | 4-bit 7.32 / 6-bit 4.54 / 8-bit 3.66 tok/s |
-| Throughput envelope (digit / count / essay / coding), 4-bit | 14.48 / 11.34 / 9.33 / 8.05 tok/s |
-| Throughput envelope (digit / count / essay / coding), 6-bit | 6.63 / 6.21 / 6.00 / 5.04 tok/s |
-| Throughput envelope (digit / count / essay / coding), 8-bit | 5.56 / 5.33 / 4.90 / 3.90 tok/s |
-| 2×2 cache × MTP matrix (off×off / on×off / off×on), 4-bit | 9.58 / 11.17 / 6.77 tok/s |
-| 2×2 cache × MTP matrix (off×off / on×off / off×on), 6-bit | 4.44 / 4.34 / 4.12 tok/s |
-| 2×2 cache × MTP matrix (off×off / on×off / off×on), 8-bit | 3.19 / 3.55 / 3.15 tok/s |
+| Long-gen 512-token (code-gen) | 7.32 tok/s |
+| Throughput envelope (digit / count / essay / coding) | 14.48 / 11.34 / 9.33 / 8.05 tok/s |
+| 2×2 cache × MTP matrix (off×off / on×off / off×on) | 9.58 / 11.17 / 6.77 tok/s |
+
+#### 6-bit
+
+| Stat | Value |
+| --- | --- |
+| Long-gen 512-token (code-gen) | 4.54 tok/s |
+| Throughput envelope (digit / count / essay / coding) | 6.63 / 6.21 / 6.00 / 5.04 tok/s |
+| 2×2 cache × MTP matrix (off×off / on×off / off×on) | 4.44 / 4.34 / 4.12 tok/s |
+
+#### 8-bit
+
+| Stat | Value |
+| --- | --- |
+| Long-gen 512-token (code-gen) | 3.66 tok/s |
+| Throughput envelope (digit / count / essay / coding) | 5.56 / 5.33 / 4.90 / 3.90 tok/s |
+| 2×2 cache × MTP matrix (off×off / on×off / off×on) | 3.19 / 3.55 / 3.15 tok/s |
 
 ## Documentation
 
