@@ -109,6 +109,86 @@ import Foundation
         #expect(m.expertStride == 16384)
     }
 
+    @Test func peekFamilyKeepsFullQwenWhenBitWidthOverridesPresent() throws {
+        let arch = ArchConfig.qwen36_35B_A3B
+        var files: [String: [String: Any]] = [
+            "model_weights.bin": ["size": 1, "sha256": String(repeating: "0", count: 64)],
+            "packed_experts/layout.json": ["size": 2, "sha256": String(repeating: "0", count: 64)],
+        ]
+        for layer in 0..<arch.numLayers {
+            files[String(format: "packed_experts/layer_%02d.bin", layer)] = [
+                "size": 1,
+                "sha256": String(repeating: "0", count: 64),
+            ]
+        }
+        let (dir, _) = try Self.writeToyManifest(
+            ["bitWidthOverridesHonored": 80],
+            archOverrides: [
+                "hiddenSize": arch.hiddenSize,
+                "ffnIntermediate": arch.intermediateSize,
+                "moeIntermediateSize": arch.moeIntermediateSize,
+                "numHeads": arch.numHeads,
+                "numKVHeads": arch.numKVHeads,
+                "numFullKVHeads": arch.numFullKVHeads,
+                "headDim": arch.headDim,
+                "fullHeadDim": arch.fullHeadDim,
+                "vocabSize": arch.vocabSize,
+                "slidingWindow": arch.slidingWindow,
+                "finalLogitSoftcap": arch.finalLogitSoftcap,
+                "ropeTheta": arch.ropeTheta,
+                "fullRopeTheta": arch.fullRopeTheta,
+                "partialRotaryFactor": arch.partialRotaryFactor,
+                "numLayers": arch.numLayers,
+                "numExperts": arch.numExperts,
+                "topKExperts": arch.topKExperts,
+                "tieWordEmbeddings": arch.tieWordEmbeddings,
+                "attentionKEqV": arch.attentionKEqV,
+                "hiddenActivation": arch.hiddenActivation,
+                "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
+            ],
+            filesOverride: files,
+            config: arch)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(try ManifestReader.peekFamily(directoryURL: dir) == .qwen36)
+    }
+
+    @Test func peekFamilyDetectsMTPByArchitectureShape() throws {
+        let arch = ArchConfig.qwen36MTP
+        let (dir, _) = try Self.writeToyManifest(
+            ["bitWidthOverridesHonored": 12],
+            archOverrides: [
+                "hiddenSize": arch.hiddenSize,
+                "ffnIntermediate": arch.intermediateSize,
+                "moeIntermediateSize": arch.moeIntermediateSize,
+                "numHeads": arch.numHeads,
+                "numKVHeads": arch.numKVHeads,
+                "numFullKVHeads": arch.numFullKVHeads,
+                "headDim": arch.headDim,
+                "fullHeadDim": arch.fullHeadDim,
+                "vocabSize": arch.vocabSize,
+                "slidingWindow": arch.slidingWindow,
+                "finalLogitSoftcap": arch.finalLogitSoftcap,
+                "ropeTheta": arch.ropeTheta,
+                "fullRopeTheta": arch.fullRopeTheta,
+                "partialRotaryFactor": arch.partialRotaryFactor,
+                "numLayers": arch.numLayers,
+                "numExperts": arch.numExperts,
+                "topKExperts": arch.topKExperts,
+                "tieWordEmbeddings": arch.tieWordEmbeddings,
+                "attentionKEqV": arch.attentionKEqV,
+                "hiddenActivation": arch.hiddenActivation,
+                "fullAttentionLayerMask": arch.fullAttentionLayerMask.map(Int.init),
+            ],
+            filesOverride: [
+                "model_weights.bin": ["size": 1, "sha256": String(repeating: "0", count: 64)],
+                "packed_experts/layout.json": ["size": 2, "sha256": String(repeating: "0", count: 64)],
+                "packed_experts/layer_0.bin": ["size": 1, "sha256": String(repeating: "0", count: 64)],
+            ],
+            config: arch)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(try ManifestReader.peekFamily(directoryURL: dir) == .qwen36MTP)
+    }
+
     @Test func missingManifestThrowsPartialInstall() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-empty-\(UUID().uuidString)")

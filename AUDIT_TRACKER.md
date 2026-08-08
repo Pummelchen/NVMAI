@@ -139,7 +139,7 @@ Parallelism rule: waves touch disjoint file sets; WS-G completes before WS-1..WS
 | F1 | RemoteStreamingRepacker.swift:219 | major | logic | resume mismatch deletes partial dir incl. fresh .remote-metadata → silent missing config.json | open |
 | F2 | VerifiedInstallTool.swift:36,163 | major | security | manifest/layout filenames joined w/o path validation (read-only traversal) | open |
 | F3 | ResidentWriter.swift | major | dead | unreachable mmap writer subsystem | open |
-| F4 | RemoteDownloadSession.swift:87 | major | bug | metadata HEAD redirects same-host vs ranged GET cross-host — asymmetric | open |
+| F4 | RemoteDownloadSession.swift:87 | major | bug | metadata HEAD redirects same-host vs ranged GET cross-host — asymmetric | fixed |
 | F5 | Posix.swift:299 | major | logic | mmap len==0 EINVAL on empty shard | open |
 | F6 | Posix.swift:273 | major | facade | adviseDontNeed documented no-op, never called | open |
 | F7 | RepackPlanner.swift:459 | major | unsafe | scalesShape.last! + UInt64 overflow on remote shape | open |

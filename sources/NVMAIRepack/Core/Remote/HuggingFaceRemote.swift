@@ -100,11 +100,7 @@ public struct HuggingFaceRemoteSource: Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw RepackError.remoteProtocolInvalid(detail: "missing HTTP response for \(filename)")
         }
-        // Only 2xx counts as success. 3xx responses are redirects that should
-        // have been followed by the session's redirect policy; if one still
-        // arrives here it is a protocol violation, not a valid metadata
-        // response (a 200-range body is required to carry X-Repo-Commit).
-        guard (200..<300).contains(http.statusCode) else {
+        guard isUsableRemoteMetadataResponse(http) else {
             throw RepackError.remoteHTTPResponse(
                 url: redactRemoteURL(url),
                 status: http.statusCode,
@@ -256,6 +252,14 @@ private func validateFilename(_ filename: String) throws {
           !filename.contains("#") else {
         throw RepackError.configurationInvalid(detail: "invalid remote filename \(filename)")
     }
+}
+
+private func isUsableRemoteMetadataResponse(_ http: HTTPURLResponse) -> Bool {
+    if (200..<300).contains(http.statusCode) {
+        return true
+    }
+    return (300..<400).contains(http.statusCode)
+        && remoteHeader(http, "X-Linked-Size") != nil
 }
 
 private func remoteSize(http: HTTPURLResponse, filename: String) throws -> UInt64 {

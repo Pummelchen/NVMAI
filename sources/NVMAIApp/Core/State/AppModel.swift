@@ -569,8 +569,14 @@ public final class AppModel {
                 at: directory,
                 descriptor: installer.descriptor)
             guard installationStatus == .complete else {
+                let detail: String
+                if case .partial(let reason) = installationStatus {
+                    detail = "completed install did not pass metadata validation: \(reason)"
+                } else {
+                    detail = "completed install did not pass metadata validation"
+                }
                 finishInstallFailure(
-                    RepackError.configurationInvalid(detail: "completed install did not pass metadata validation"),
+                    RepackError.configurationInvalid(detail: detail),
                     generation: generation)
                 return
             }
