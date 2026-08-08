@@ -28,6 +28,7 @@ func makeCompleteModelInstall(_ tag: String) throws -> URL {
         "flags": ["streamingPresent": true],
         "modelID": "test/qwen36",
         "sourceSnapshotHash": "sha256:" + AppModelInstallDescriptor.qwen36.sourceIndexSHA256,
+        "bitWidthOverridesHonored": 80,
         "quant": [
             "embedding": quantSlot(4),
             "attention": quantSlot(4),

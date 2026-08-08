@@ -53,8 +53,75 @@ struct RemoteDownloadSessionTests {
         #expect(sameHost?.value(forHTTPHeaderField: "Authorization") == "Bearer secret")
 
         #expect(policy.request(proposedRequest: URLRequest(
-            url: URL(string: "https://storage.test/signed?token=private")!)) == nil)
+            url: URL(string: "https://us.aws.cdn.hf.co/xet-bridge-us/object")!)) == nil)
         #expect(policy.request(proposedRequest: URLRequest(
+            url: URL(string: "https://cdn-lfs.huggingface.co/object")!)) == nil)
+        #expect(policy.request(proposedRequest: URLRequest(
+            url: URL(string: "https://storage.test/signed?token=private")!)) == nil)
+
+        var hopLimited = RemoteMetadataRedirectPolicy(
+            originalRequest: original,
+            maximumRedirects: 1)
+        #expect(hopLimited.request(proposedRequest: URLRequest(
+            url: URL(string: "https://hf.test/one")!)) != nil)
+        #expect(hopLimited.request(proposedRequest: URLRequest(
             url: URL(string: "https://hf.test/too-many")!)) == nil)
+    }
+
+    @Test func resolveFileInfoAcceptsHubRedirectWithLinkedMetadata() async throws {
+        resetFakeHF()
+        FakeHFURLProtocol.files["model.bin"] = Data([1, 2, 3, 4])
+        FakeHFURLProtocol.xetHashOverrides["model.bin"] = String(repeating: "ab", count: 32)
+        FakeHFURLProtocol.failures["HEAD:model.bin"] = [
+            .response(
+                status: 302,
+                headers: [
+                    "Location": "https://us.aws.cdn.hf.co/xet-bridge-us/object",
+                    "X-Repo-Commit": FakeHFURLProtocol.commit,
+                    "X-Linked-Size": "4",
+                    "X-Linked-ETag": "\"model-etag\"",
+                    "X-Xet-Hash": String(repeating: "ab", count: 32),
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": "64",
+                ],
+                body: Data()),
+        ]
+
+        let remote = HuggingFaceRemoteSource(
+            repoID: "owner/model",
+            requestedRevision: "main",
+            downloadSession: fakeHFSession(),
+            baseURL: URL(string: "https://hf.test")!)
+        let info = try await remote.resolveFileInfo(filename: "model.bin")
+
+        #expect(info.resolvedCommit == FakeHFURLProtocol.commit)
+        #expect(info.size == 4)
+        #expect(info.etag == "\"model-etag\"")
+        #expect(info.xetHash == String(repeating: "ab", count: 32))
+        #expect(info.acceptsRanges)
+    }
+
+    @Test func resolveFileInfoRejectsBareRedirectWithoutLinkedSize() async throws {
+        resetFakeHF()
+        FakeHFURLProtocol.files["model.bin"] = Data([1])
+        FakeHFURLProtocol.failures["HEAD:model.bin"] = [
+            .response(
+                status: 302,
+                headers: [
+                    "Location": "https://us.aws.cdn.hf.co/xet-bridge-us/object",
+                    "X-Repo-Commit": FakeHFURLProtocol.commit,
+                    "Content-Length": "64",
+                ],
+                body: Data()),
+        ]
+
+        let remote = HuggingFaceRemoteSource(
+            repoID: "owner/model",
+            requestedRevision: "main",
+            downloadSession: fakeHFSession(),
+            baseURL: URL(string: "https://hf.test")!)
+        await #expect(throws: RepackError.self) {
+            _ = try await remote.resolveFileInfo(filename: "model.bin")
+        }
     }
 }

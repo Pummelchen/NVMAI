@@ -2,6 +2,10 @@ import Darwin
 import Foundation
 
 public enum DecodeUnixSocket {
+    public static var sunPathCapacity: Int {
+        MemoryLayout.size(ofValue: sockaddr_un().sun_path)
+    }
+
     public static func connect(path: String) throws -> (input: FileHandle, output: FileHandle) {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
@@ -59,7 +63,7 @@ public enum DecodeUnixSocket {
     private static func makeAddress(path: String) throws -> sockaddr_un {
         let bytes = Array(path.utf8)
         var address = sockaddr_un()
-        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else {
+        guard bytes.count < sunPathCapacity else {
             throw POSIXError(.ENAMETOOLONG)
         }
         address.sun_family = sa_family_t(AF_UNIX)

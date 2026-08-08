@@ -25,6 +25,9 @@ import Testing
         let url = try makeCompleteModelInstall("probe")
         defer { try? FileManager.default.removeItem(at: url) }
         #expect(AppModelInstallationProbe.status(at: url) == .complete)
+        #expect(AppModelInstallationProbe.status(
+            at: url,
+            descriptor: .qwen36) == .complete)
     }
 
     @Test func receiptBoundToDifferentPathIsPartial() throws {

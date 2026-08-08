@@ -335,12 +335,6 @@ struct RemoteRedirectPolicy {
                 url: redactRemoteURL(proposedRequest.url),
                 detail: "only HTTPS redirects are allowed")
         }
-        // Ranged GETs must follow the HF `resolve/...` → object-store redirect
-        // wherever it leads (the CDN fronting a repo is not guaranteed to be a
-        // fixed name), so any HTTPS host is accepted — including the shared
-        // HF object-store hosts in RemoteHFObjectStoreHosts that the metadata
-        // HEAD policy additionally allows. Authorization is forwarded only
-        // while the host stays the same and is permanently dropped afterwards.
         let targetHost = proposedRequest.url?.host?.lowercased()
         if targetHost != sourceHost {
             authorizationMayBeForwarded = false

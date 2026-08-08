@@ -213,14 +213,15 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             throw AppInferenceError.modelLoadFailed(
                 "decode service executable is missing at \(serviceURL.path); run swift build -c release before launching the app")
         }
-        let identifier = "\(getuid()).\(getpid()).\(UUID().uuidString.lowercased())"
-        let label = "com.nvmai.decode.\(identifier)"
-        // D3: the socket lives in a uid-private directory (0700) so no other
-        // local user can observe or connect to it; the socket file itself is
-        // chmod'd 0600 by the service after bind.
+        let token = String(format: "%08x", UInt32.random(in: .min ... .max))
+        let label = "com.nvmai.decode.\(getuid()).\(getpid()).\(token)"
         let socketDirectory = try Self.socketDirectory()
         let socketPath = socketDirectory
-            .appendingPathComponent("nvmai-decode-\(identifier).sock").path
+            .appendingPathComponent("\(getpid()).\(token).sock").path
+        guard socketPath.utf8.count < DecodeUnixSocket.sunPathCapacity else {
+            throw AppInferenceError.modelLoadFailed(
+                "decode service socket path exceeds AF_UNIX limit (\(socketPath.utf8.count) >= \(DecodeUnixSocket.sunPathCapacity))")
+        }
         let propertyListURL = URL(
             fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("\(label).plist")
@@ -487,13 +488,14 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     // MARK: - Socket hygiene (D3, D12)
 
     private static func socketDirectory() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("NVMAIDecodeService-\(getuid())",
-                                    isDirectory: true)
+        let directory = URL(fileURLWithPath: "/tmp/nvmai-\(getuid())", isDirectory: true)
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path)
         return directory
     }
 

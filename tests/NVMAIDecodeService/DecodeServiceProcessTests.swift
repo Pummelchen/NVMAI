@@ -14,9 +14,16 @@ import NVMAIDecodeProtocol
 
     @Test func processHandshakeFailedLoadAndShutdown() throws {
         let binary = try Self.locateServiceBinary()
-        let socketPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nvmai-decode-svc-\(UUID().uuidString).sock")
+        let socketDirectory = URL(fileURLWithPath: "/tmp/nvmai-\(getuid())", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: socketDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let token = String(format: "%08x", UInt32.random(in: .min ... .max))
+        let socketPath = socketDirectory
+            .appendingPathComponent("t-\(getpid()).\(token).sock")
             .path
+        #expect(socketPath.utf8.count < DecodeUnixSocket.sunPathCapacity)
         defer { try? FileManager.default.removeItem(atPath: socketPath) }
 
         let process = Process()

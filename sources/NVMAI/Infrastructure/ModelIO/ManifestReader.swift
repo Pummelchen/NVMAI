@@ -127,22 +127,20 @@ public enum ManifestReader {
         let directory = try GTurboModelDirectory(rootURL: directoryURL)
         let data = try directory.readMetadata("manifest.json", maxBytes: 4 * 1024 * 1024)
         let wire = try JSONDecoder().decode(GTurboManifestV1.self, from: data)
-        // Qwen 3.6 uses "silu". Any other activation is unsupported (NVMAI is
-        // Qwen-only).
-        let family: ModelFamily
         switch wire.arch.hiddenActivation {
         case "silu":
-            // Check if this is a Qwen 3.6 variant with MTP bit-width overrides.
-            if wire.bitWidthOverridesHonored != nil {
-                family = .qwen36MTP
-            } else {
-                family = .qwen36
-            }
+            break
         default:
             throw ModelError.unsupportedArchitecture(
                 detail: "hiddenActivation=\(wire.arch.hiddenActivation)")
         }
-        return family
+        let mtp = ArchConfig.qwen36MTP
+        if wire.arch.numLayers == mtp.numLayers,
+           wire.arch.slidingWindow == mtp.slidingWindow,
+           wire.arch.fullAttentionLayerMask == mtp.fullAttentionLayerMask.map(Int.init) {
+            return .qwen36MTP
+        }
+        return .qwen36
     }
 
     static func validate(_ m: Manifest,
