@@ -18,6 +18,10 @@ hybrid layer graph, gated-DeltaNet kernels and state, ChatML tokenization, tool
 call parsing, model repacking, product integration, and the original 4-bit
 runtime support. NVMAI merges that contribution and extends it further.
 
+## FAQ
+
+- [Why more RAM doesn't speed up decode](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
+
 ## Benchmark — NVMAI 2.0
 
 Measured on M3 24 GB, current 2.0 build (64 expert-cache slots + resident
