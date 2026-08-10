@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
 
 BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
-MODEL="$BASE_DIR/models/qwen36-8bit.gturbo"
+MODEL="$BASE_DIR/models/qwen3.6_35B_A3B_8Bit"
 PORT=8083
 
 if [[ ! -f "$BINARY" ]]; then

@@ -17,12 +17,12 @@ Mac app.
 [GitHub Wiki](https://github.com/Pummelchen/NVMAI/wiki).
 
 ```bash
-swift run -c release NVMAIRepack --model qwen36 --output models/qwen36.gturbo
-swift run -c release NVMAIRepack --model qwen36 --output models/qwen36.gturbo --resume
+swift run -c release NVMAIRepack --model qwen36 --output models/qwen3.6_35B_A3B_4Bit
+swift run -c release NVMAIRepack --model qwen36 --output models/qwen3.6_35B_A3B_4Bit --resume
 swift build -c release
 .build/release/NVMAIMac
 swift run -c release NVMAICLI \
-  --model models/qwen36.gturbo \
+  --model models/qwen3.6_35B_A3B_4Bit \
   --prompt "The capital of France is" \
   --max-new 64
 ```

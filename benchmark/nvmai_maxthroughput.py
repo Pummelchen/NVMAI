@@ -13,7 +13,7 @@ import time
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "qwen36.gturbo")
+MODEL = os.path.join(BASE, "models", "qwen3.6_35B_A3B_4Bit")
 PORT = 8117
 PROMPTS = [
     ("code", "Write a Python function that computes the Levenshtein distance between two strings with a detailed docstring, then a second function using it to find the closest match in a list, with a demo main."),
@@ -24,7 +24,7 @@ PROMPTS = [
 
 
 def main():
-    models = sys.argv[1:] or [os.path.join(BASE, "models", "qwen36.gturbo")]
+    models = sys.argv[1:] or [os.path.join(BASE, "models", "qwen3.6_35B_A3B_4Bit")]
     for model in models:
         label = "4bit" if "6bit" not in model and "8bit" not in model else (
             "6bit" if "6bit" in model else "8bit")

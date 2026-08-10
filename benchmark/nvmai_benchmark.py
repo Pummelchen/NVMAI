@@ -460,8 +460,8 @@ def main():
     base_dir = os.path.abspath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)), ".."))
     main_model = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        base_dir, "models", "qwen36.gturbo")
-    mtp_model = os.path.join(base_dir, "models", "qwen36-mtp.gturbo")
+        base_dir, "models", "qwen3.6_35B_A3B_4Bit")
+    mtp_model = os.path.join(base_dir, "models", "qwen3.6_35B_A3B_MTP_4Bit")
 
     quant_label = "4bit"
     if "6bit" in main_model:

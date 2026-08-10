@@ -79,10 +79,10 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// Basename of the installed `.gturbo` directory for this descriptor.
     public var installDirectoryName: String {
         switch repoID {
-        case Self.qwen36_6bit.repoID: return "qwen36-6bit.gturbo"
-        case Self.qwen36_8bit.repoID: return "qwen36-8bit.gturbo"
-        case Self.qwen36.repoID: return "qwen36.gturbo"
-        default: return "qwen36.gturbo"
+        case Self.qwen36_6bit.repoID: return "qwen3.6_35B_A3B_6Bit"
+        case Self.qwen36_8bit.repoID: return "qwen3.6_35B_A3B_8Bit"
+        case Self.qwen36.repoID: return "qwen3.6_35B_A3B_4Bit"
+        default: return "qwen3.6_35B_A3B_4Bit"
         }
     }
 

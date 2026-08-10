@@ -87,9 +87,9 @@ def run_quant(model_path, label):
 
 def main():
     models = sys.argv[1:] or [
-        os.path.join(BASE, "models", "qwen36.gturbo"),
-        os.path.join(BASE, "models", "qwen36-6bit.gturbo"),
-        os.path.join(BASE, "models", "qwen36-8bit.gturbo"),
+        os.path.join(BASE, "models", "qwen3.6_35B_A3B_4Bit"),
+        os.path.join(BASE, "models", "qwen3.6_35B_A3B_6Bit"),
+        os.path.join(BASE, "models", "qwen3.6_35B_A3B_8Bit"),
     ]
     for model in models:
         label = "4bit" if "6bit" not in model and "8bit" not in model else (

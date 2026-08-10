@@ -18,7 +18,7 @@ import time
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "qwen36.gturbo")
+MODEL = os.path.join(BASE, "models", "qwen3.6_35B_A3B_4Bit")
 PORT = 8114
 MAX_TOKENS = int(sys.argv[1]) if len(sys.argv) > 1 else 512
 PROMPTS = [

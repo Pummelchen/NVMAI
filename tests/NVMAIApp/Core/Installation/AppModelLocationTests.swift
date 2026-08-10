@@ -21,7 +21,7 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/elsewhere"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: files.contains)
-        #expect(result.path == "/repo/models/qwen36.gturbo")
+        #expect(result.path == "/repo/models/qwen3.6_35B_A3B_4Bit")
     }
 
     @Test func currentDirectoryCanBePackageRoot() {
@@ -32,7 +32,7 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/repo"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: files.contains)
-        #expect(result.path == "/repo/models/qwen36.gturbo")
+        #expect(result.path == "/repo/models/qwen3.6_35B_A3B_4Bit")
     }
 
     @Test func standaloneAppFallsBackToApplicationSupport() {
@@ -42,6 +42,6 @@ import Testing
             currentDirectoryURL: URL(fileURLWithPath: "/"),
             applicationSupportURL: URL(fileURLWithPath: "/support"),
             fileExists: { _ in false })
-        #expect(result.path == "/support/NVMAI/qwen36.gturbo")
+        #expect(result.path == "/support/NVMAI/qwen3.6_35B_A3B_4Bit")
     }
 }

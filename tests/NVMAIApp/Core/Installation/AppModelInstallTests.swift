@@ -89,9 +89,9 @@ import NVMAIRepackCore
   }
 
   @Test func qwenQuantDescriptorsArePinnedAndDistinct() {
-    #expect(AppModelInstallDescriptor.qwen36.installDirectoryName == "qwen36.gturbo")
-    #expect(AppModelInstallDescriptor.qwen36_6bit.installDirectoryName == "qwen36-6bit.gturbo")
-    #expect(AppModelInstallDescriptor.qwen36_8bit.installDirectoryName == "qwen36-8bit.gturbo")
+    #expect(AppModelInstallDescriptor.qwen36.installDirectoryName == "qwen3.6_35B_A3B_4Bit")
+    #expect(AppModelInstallDescriptor.qwen36_6bit.installDirectoryName == "qwen3.6_35B_A3B_6Bit")
+    #expect(AppModelInstallDescriptor.qwen36_8bit.installDirectoryName == "qwen3.6_35B_A3B_8Bit")
     #expect(Set(AppModelInstallDescriptor.all.map(\.sourceIndexSHA256)).count == 3)
     #expect(AppModelInstallDescriptor.qwen36_6bit.repoID.hasSuffix("-6bit"))
     #expect(AppModelInstallDescriptor.qwen36_8bit.repoID.hasSuffix("-8bit"))
