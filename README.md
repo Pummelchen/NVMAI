@@ -19,9 +19,6 @@ hybrid layer graph, gated-DeltaNet kernels and state, ChatML tokenization, tool
 call parsing, model repacking, product integration, and the original 4-bit
 runtime support. NVMAI merges that contribution and extends it further.
 
-NVMAI 3.1 adds the OpenAI **Responses API** (`POST /v1/responses`) so current
-Codex-, Qwen-Code-, and Gemini-style CLIs connect directly, and reports the
-OpenAI REST protocol version (`openai-version: 2020-10-01`) on every response.
 NVMAI 3.1's concise mode is derived from the
 [Nail-Qwen3.6-35B-A3B](https://huggingface.co/peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-MLX)
 chat template by [peculiar-ragdoll](https://huggingface.co/peculiar-ragdoll),
