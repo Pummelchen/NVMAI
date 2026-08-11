@@ -80,6 +80,39 @@ is higher). Full measurement history:
 | Concise mode — answer tokens (8-question set) | 3,635+ → **759** (−79%) |
 | — concise prompt | strengthened (8-bit) |
 
+## Launch scripts
+
+`benchmark/` ships one launch script per quantization, in two flavors: the
+plain scripts start the server with the production defaults (prompt cache ON,
+MTP OFF); the `_concise` scripts add `NVMAI_CONCISE_MODE=1`. Build once
+(`swift build -c release`), then run a script — it checks the binary and
+model, stops any stale NVMAIServer on the port, and starts the server in the
+foreground (Ctrl-C to stop). The server binds to `127.0.0.1`.
+
+| Script | Model | Port | Mode |
+| --- | --- | --- | --- |
+| `launch_4bit.sh` / `launch_4bit_concise.sh` | 4-bit | 8081 | default / concise |
+| `launch_6bit.sh` / `launch_6bit_concise.sh` | 6-bit | 8082 | default / concise |
+| `launch_8bit.sh` / `launch_8bit_concise.sh` | 8-bit | 8083 | default / concise |
+
+**What concise ON changes.** Concise mode injects a per-quantization terse
+system prompt (standard for 4/6-bit, strengthened for 8-bit) into every
+request. Answers lead with the answer and skip preamble, restated questions,
+filler, and closing codas such as "let me know if you have questions". A
+system prompt you send yourself is kept, with the concise prompt appended
+after it.
+
+**What concise ON does NOT change.** Decode rate is unchanged — tok/s is bound
+by memory bandwidth, not by the prompt. Concise saves answer *length*, so the
+time-to-answer shrinks with it: measured on M3 24 GB (temp 0, 8 chat
+questions) answer tokens drop 55-79% per quant, roughly doubling to tripling
+the wall-clock work per answer.
+
+**When to leave it off.** Terseness can clip nuance on complex answers (the
+sampled 4-bit prompt occasionally dropped actionable detail). If an answer
+seems too clipped, use the plain script instead. The CLI offers the same
+choice per run (`--concise`); the Mac app exposes a concise-mode setting.
+
 ## Documentation
 
 - [Wiki](https://github.com/Pummelchen/NVMAI/wiki)
