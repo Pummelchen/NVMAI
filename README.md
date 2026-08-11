@@ -147,15 +147,17 @@ one command builds nothing, starts a fresh server, wires the CLI's provider
 config, and hands the terminal over.
 
 ```bash
-tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise] [nothink|think] [fast|full]
+tools/nvmai-cli.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
 ```
 
-Run it with no arguments and it asks five questions in order. Or pass them
-positionally, e.g.:
+Run it with no arguments and it asks five questions in order — CLI, model,
+quantization, mode, reasoning. Every choice has a default (**codex / full /
+4-bit / default / thinking on**), so pressing Enter through all prompts
+launches that configuration. Or pass them positionally, e.g.:
 
 ```bash
-tools/nvmai-cli.sh 4 codex concise nothink fast   # 4-bit, Codex, terse, no reasoning, fast alias
-tools/nvmai-cli.sh 6 qwen default think full      # 6-bit, Qwen Code, full answers, reasoning, full agent
+tools/nvmai-cli.sh codex fast 4 concise nothink   # Codex, fast alias, 4-bit, terse, no reasoning
+tools/nvmai-cli.sh qwen full 6 default think      # Qwen Code, full agent, 6-bit, full answers, reasoning
 ```
 
 Each run stops any running `NVMAIServer`, starts a fresh one on the chosen
@@ -165,13 +167,13 @@ session.
 
 ### Parameters
 
-| Argument | Choices | What it does | Pro | Con |
+| Argument | Choices (default) | What it does | Pro | Con |
 | --- | --- | --- | --- | --- |
-| Quantization | `4`, `6`, `8` | Which quantized model the server loads (4-bit → port 8081, 6-bit → 8082, 8-bit → 8083) | **4-bit:** fastest decode, smallest memory; **6-bit:** balance; **8-bit:** best fidelity | **4-bit:** most quantization error; **8-bit:** slowest and heaviest |
-| CLI | `codex`, `qwen`, `opencode` | Which coding CLI to launch | Codex: OpenAI agent, tool loop; Qwen Code: full agent config; OpenCode: lightweight, easy model picker | Each CLI brings its own agent prompt; Qwen Code's auto-memory is disabled for speed |
-| Mode | `default`, `concise` | Whether the server injects a terse-answer system prompt | **default:** full answers; **concise:** ~55-61% fewer answer tokens, near-identical correctness on sampled questions | **concise:** can clip nuance on complex answers; switch back to default if replies feel too short |
-| Reasoning | `nothink`, `think` | Whether the model reasons before answering | **think:** shows its work on hard questions | **think:** adds wall time and tokens; leave off for fast answers |
-| Model | `fast`, `full` | `fast` = the `<model>-fast` alias (CLI boilerplate stripped, seconds-per-answer chat); `full` = the base model (keeps the CLI's agentic tool loop) | **fast:** 10×-65× wall-time reduction, ~90-98% less prefill; **full:** agent can read/edit files and run tools | **fast:** no tool calls (chat-only); **full:** multi-thousand-token prefill takes minutes |
+| CLI | `codex` (default), `qwen`, `opencode` | Which coding CLI to launch | Codex: OpenAI agent, tool loop; Qwen Code: full agent config; OpenCode: lightweight, easy model picker | Each CLI brings its own agent prompt; Qwen Code's auto-memory is disabled for speed |
+| Model | `full` (default), `fast` | `fast` = the `<model>-fast` alias (CLI boilerplate stripped, seconds-per-answer chat); `full` = the base model (keeps the CLI's agentic tool loop) | **fast:** 10×-65× wall-time reduction, ~90-98% less prefill; **full:** agent can read/edit files and run tools | **fast:** no tool calls (chat-only); **full:** multi-thousand-token prefill takes minutes |
+| Quantization | `4` (default), `6`, `8` | Which quantized model the server loads (4-bit → port 8081, 6-bit → 8082, 8-bit → 8083) | **4-bit:** fastest decode, smallest memory; **6-bit:** balance; **8-bit:** best fidelity | **4-bit:** most quantization error; **8-bit:** slowest and heaviest |
+| Mode | `default` (default), `concise` | Whether the server injects a terse-answer system prompt | **default:** full answers; **concise:** ~55-61% fewer answer tokens, near-identical correctness on sampled questions | **concise:** can clip nuance on complex answers; switch back to default if replies feel too short |
+| Reasoning | `think` (default), `nothink` | Whether the model reasons before answering | **think:** shows its work on hard questions | **think:** adds wall time and tokens; choose `nothink` for fast answers |
 
 ### Env overrides
 
@@ -183,9 +185,9 @@ session.
 | `CODEX`, `QWEN`, `OPENCODE` | default install paths | Override the CLI binary to launch |
 | `NVMAI_STRIP_TAGS` | `system-reminder` | Comma-separated in-message scaffolding tags the fast alias strips |
 
-The launcher defaults to the fast alias, so answers arrive in seconds
-rather than minutes; choose `full` to keep the CLI's agent prompt and tool
-loop instead.
+The launcher defaults to the full model (agentic tool loop) with reasoning
+on; choose `fast` for seconds-per-answer chat and `nothink` for direct
+answers without the reasoning pass.
 
 ## Documentation
 

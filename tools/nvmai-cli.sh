@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Launch a coding CLI against NVMAI in the macOS terminal (interactive TUI).
 #
-#   tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise] [nothink|think] [fast|full]
+#   tools/nvmai-cli.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
 #
-# With no arguments, prompts 1-2-3-4-5 for the quantization, then the CLI,
-# then default/concise mode, then reasoning off/on, then fast/full. Stops
-# any running NVMAIServer, starts a fresh one on 8081 in the chosen
-# quant/mode, wires the CLI's provider config to the chosen model (the
-# "<model>-fast" alias strips CLI boilerplate before prefill for seconds-
-# per-answer chat speed; the base model keeps the CLI's agentic tool loop),
-# then hands the terminal over to the CLI.
+# With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
+# (fast/full), then the quantization, then default/concise mode, then
+# reasoning off/on. Every choice has a default (codex / full / 4-bit /
+# default / thinking on), so pressing Enter through the prompts launches
+# that configuration. Stops any running NVMAIServer, starts a fresh one on
+# 8081 in the chosen quant/mode, wires the CLI's provider config to the
+# chosen model (the "<model>-fast" alias strips CLI boilerplate before
+# prefill for seconds-per-answer chat speed; the base model keeps the CLI's
+# agentic tool loop), then hands the terminal over to the CLI.
 # Overrides: NVMAI_PORT, CODEX_HOME_NVMAI, QWEN_HOME_NVMAI, CODEX, QWEN,
 # OPENCODE, NVMAI_STRIP_TAGS (comma-separated scaffolding tag list).
 set -euo pipefail
@@ -24,16 +26,59 @@ MODEL="qwen3.6-35b-a3b"
 # definitions, and <system-reminder> scaffolding are dropped before prefill.
 FAST_MODEL="${MODEL}-fast"
 
-# --- 1) quantization: 4-bit / 6-bit / 8-bit ---
-quant="${1:-}"
+# --- 1) coding CLI: codex (default) / qwen / opencode ---
+cli="${1:-}"
+if [[ -z "$cli" ]]; then
+  echo "Which coding CLI do you want to launch?"
+  echo "  1) Codex"
+  echo "  2) Qwen Code"
+  echo "  3) OpenCode"
+  printf "Choice [1-3] (default 1): "
+  read -r cli_choice || exit 1
+  case "${cli_choice:-1}" in
+    1) cli=codex ;;
+    2) cli=qwen ;;
+    3) cli=opencode ;;
+    *) echo "invalid choice: $cli_choice" >&2; exit 2 ;;
+  esac
+fi
+case "$cli" in
+  codex|qwen|opencode) : ;;
+  *) echo "unknown CLI: $cli (codex|qwen|opencode)" >&2; exit 2 ;;
+esac
+
+# --- 2) model: full (default, agentic tool loop) or fast (strip boilerplate) ---
+if [[ -n "${2:-}" ]]; then
+  case "$2" in
+    fast|1) launch_model="$FAST_MODEL" ;;
+    full|0) launch_model="$MODEL" ;;
+    *) echo "unknown model: $2 (fast|full)" >&2; exit 2 ;;
+  esac
+else
+  echo ""
+  echo "Which model?"
+  echo "  1) Full (keep agent tools; multi-thousand-token prefill, slower)"
+  echo "  2) Fast (strip CLI boilerplate, seconds-per-answer chat)"
+  printf "Choice [1-2] (default 1): "
+  read -r model_choice || exit 1
+  case "${model_choice:-1}" in
+    1) launch_model="$MODEL" ;;
+    2) launch_model="$FAST_MODEL" ;;
+    *) echo "invalid choice: $model_choice" >&2; exit 2 ;;
+  esac
+fi
+
+# --- 3) quantization: 4-bit (default) / 6-bit / 8-bit ---
+quant="${3:-}"
 if [[ -z "$quant" ]]; then
+  echo ""
   echo "Which quantization?"
   echo "  1) 4-bit"
   echo "  2) 6-bit"
   echo "  3) 8-bit"
-  printf "Choice [1-3]: "
+  printf "Choice [1-3] (default 1): "
   read -r quant_choice || exit 1
-  case "$quant_choice" in
+  case "${quant_choice:-1}" in
     1) quant=4bit ;;
     2) quant=6bit ;;
     3) quant=8bit ;;
@@ -47,34 +92,12 @@ case "$quant" in
   *) echo "unknown quantization: $quant (4|6|8)" >&2; exit 2 ;;
 esac
 
-# --- 2) coding CLI: codex / qwen / opencode ---
-cli="${2:-}"
-if [[ -z "$cli" ]]; then
-  echo ""
-  echo "Which coding CLI do you want to launch?"
-  echo "  1) Codex"
-  echo "  2) Qwen Code"
-  echo "  3) OpenCode"
-  printf "Choice [1-3]: "
-  read -r cli_choice || exit 1
-  case "$cli_choice" in
-    1) cli=codex ;;
-    2) cli=qwen ;;
-    3) cli=opencode ;;
-    *) echo "invalid choice: $cli_choice" >&2; exit 2 ;;
-  esac
-fi
-case "$cli" in
-  codex|qwen|opencode) : ;;
-  *) echo "unknown CLI: $cli (codex|qwen|opencode)" >&2; exit 2 ;;
-esac
-
-# --- 3) NVMAI mode: default or concise (terse answers) ---
-if [[ -n "${3:-}" ]]; then
-  case "$3" in
+# --- 4) NVMAI mode: default (default) or concise (terse answers) ---
+if [[ -n "${4:-}" ]]; then
+  case "$4" in
     default|1) mode_suffix="" ;;
     concise|2) mode_suffix="_concise" ;;
-    *) echo "unknown mode: $3 (default|concise)" >&2; exit 2 ;;
+    *) echo "unknown mode: $4 (default|concise)" >&2; exit 2 ;;
   esac
 else
   echo ""
@@ -91,45 +114,24 @@ else
 fi
 launch_script="launch_${quant}${mode_suffix}.sh"
 
-# --- 4) reasoning: off (default) or on (model thinks before answering) ---
-if [[ -n "${4:-}" ]]; then
-  case "$4" in
+# --- 5) reasoning: on (default) or off (direct answers) ---
+if [[ -n "${5:-}" ]]; then
+  case "$5" in
     nothink|0|off) thinking="" ;;
     think|1|on) thinking="1" ;;
-    *) echo "unknown reasoning: $4 (nothink|think)" >&2; exit 2 ;;
+    *) echo "unknown reasoning: $5 (nothink|think)" >&2; exit 2 ;;
   esac
 else
   echo ""
   echo "Reasoning (thinking)?"
-  echo "  1) Off (direct answers, default)"
-  echo "  2) On (model reasons before answering)"
+  echo "  1) On (model reasons before answering, default)"
+  echo "  2) Off (direct answers)"
   printf "Choice [1-2] (default 1): "
   read -r think_choice || exit 1
   case "${think_choice:-1}" in
-    1) thinking="" ;;
-    2) thinking="1" ;;
+    1) thinking="1" ;;
+    2) thinking="" ;;
     *) echo "invalid choice: $think_choice" >&2; exit 2 ;;
-  esac
-fi
-
-# --- 5) model: fast alias (strip CLI boilerplate, seconds) or full (agentic) ---
-if [[ -n "${5:-}" ]]; then
-  case "$5" in
-    fast|1) launch_model="$FAST_MODEL" ;;
-    full|0) launch_model="$MODEL" ;;
-    *) echo "unknown model: $5 (fast|full)" >&2; exit 2 ;;
-  esac
-else
-  echo ""
-  echo "Which model?"
-  echo "  1) Fast (strip CLI boilerplate, seconds-per-answer chat)"
-  echo "  2) Full (keep agent tools; multi-thousand-token prefill, slower)"
-  printf "Choice [1-2] (default 1): "
-  read -r model_choice || exit 1
-  case "${model_choice:-1}" in
-    1) launch_model="$FAST_MODEL" ;;
-    2) launch_model="$MODEL" ;;
-    *) echo "invalid choice: $model_choice" >&2; exit 2 ;;
   esac
 fi
 
@@ -147,10 +149,10 @@ if pgrep -x NVMAIServer >/dev/null 2>&1; then
   fi
 fi
 echo "Starting NVMAIServer ($launch_script)..."
-# Reasoning mode: off (default) or on. The server reads this once at load;
-# it opens a <think> block in the generation prompt so the model reasons
-# before answering. Costs wall time and tokens; leave off for fast answers.
-export NVMAI_THINKING_MODE="${thinking:-0}"
+# Reasoning mode: on (default) or off. The server reads this once at load;
+# on opens a <think> block in the generation prompt so the model reasons
+# before answering (costs wall time and tokens); off gives direct answers.
+export NVMAI_THINKING_MODE="${thinking:-1}"
 nohup "$BASE_DIR/tools/$launch_script" >/tmp/nvmai-cli-server.log 2>&1 &
 for _ in $(seq 1 120); do
   curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 && break
