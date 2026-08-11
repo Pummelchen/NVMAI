@@ -17,20 +17,20 @@ import Testing
             GFTokenizer.Message(role: .user, content: "second"),
         ]
         let injected = ConcisePrompt.appendingSystemPrompt("CONCISE", to: messages)
-        #expect(injected.count == 4)
-        #expect(injected[2].role == .system)
-        #expect(injected[2].content == "CONCISE")
+        #expect(injected.count == 3)
+        #expect(injected[1].role == .system)
+        #expect(injected[1].content == "user system\n\nCONCISE")
     }
 
-    @Test func appendsAfterDeveloperGuidanceToo() {
+    @Test func mergesIntoDeveloperGuidanceToo() {
         let messages = [
             GFTokenizer.Message(role: .developer, content: "dev"),
             GFTokenizer.Message(role: .user, content: "question"),
         ]
         let injected = ConcisePrompt.appendingSystemPrompt("CONCISE", to: messages)
-        #expect(injected.count == 3)
-        #expect(injected[1].role == .system)
-        #expect(injected[1].content == "CONCISE")
+        #expect(injected.count == 2)
+        #expect(injected[0].role == .system)
+        #expect(injected[0].content == "dev\n\nCONCISE")
     }
 
     @Test func opensTheMessagesWhenNoSystemGuidanceExists() {

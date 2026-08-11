@@ -51,22 +51,27 @@ public enum ConcisePrompt {
         prompt(forRoutedExpertBits: model.routedExpertWeightBits)
     }
 
-    /// Insert the concise system message after the last system/developer
-    /// message (so our instructions come last, matching the Nail template's
-    /// append-after-user-guidance behavior), or as the opening message when
-    /// the request has no system guidance.
+    /// Apply the concise system prompt to a message list.
+    ///
+    /// NVMAI's chat template requires exactly one leading system message, so
+    /// the concise prompt is folded into the existing first system/developer
+    /// message (appended at the end, so our instructions come last within the
+    /// system block — the Nail template's append-after-user-guidance idea) or
+    /// becomes the opening system message when none exists.
     public static func appendingSystemPrompt(
         _ prompt: String,
         to messages: [GFTokenizer.Message]
     ) -> [GFTokenizer.Message] {
-        let concise = GFTokenizer.Message(role: .system, content: prompt)
-        guard let index = messages.lastIndex(where: {
+        guard let index = messages.firstIndex(where: {
             $0.role == .system || $0.role == .developer
         }) else {
-            return [concise] + messages
+            return [GFTokenizer.Message(role: .system, content: prompt)] + messages
         }
         var result = messages
-        result.insert(concise, at: index + 1)
+        let existing = result[index]
+        result[index] = GFTokenizer.Message(
+            role: .system,
+            content: (existing.content ?? "") + "\n\n" + prompt)
         return result
     }
 }
