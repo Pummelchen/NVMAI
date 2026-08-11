@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Launch a coding CLI against NVMAI in the macOS terminal (interactive TUI).
 #
-#   tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise] [nothink|think]
+#   tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise] [nothink|think] [fast|full]
 #
-# With no arguments, prompts 1-2-3-4 for the quantization, then the CLI,
-# then default/concise mode, then reasoning off/on. Stops any running
-# NVMAIServer, starts a fresh one on 8081 in the chosen quant/mode, wires
-# the CLI's provider config to the "<model>-fast" alias (chat-only speed:
-# CLI boilerplate is stripped before prefill), then hands the terminal over
-# to the CLI.
+# With no arguments, prompts 1-2-3-4-5 for the quantization, then the CLI,
+# then default/concise mode, then reasoning off/on, then fast/full. Stops
+# any running NVMAIServer, starts a fresh one on 8081 in the chosen
+# quant/mode, wires the CLI's provider config to the chosen model (the
+# "<model>-fast" alias strips CLI boilerplate before prefill for seconds-
+# per-answer chat speed; the base model keeps the CLI's agentic tool loop),
+# then hands the terminal over to the CLI.
 # Overrides: NVMAI_PORT, CODEX_HOME_NVMAI, QWEN_HOME_NVMAI, CODEX, QWEN,
 # OPENCODE, NVMAI_STRIP_TAGS (comma-separated scaffolding tag list).
 set -euo pipefail
@@ -111,6 +112,27 @@ else
   esac
 fi
 
+# --- 5) model: fast alias (strip CLI boilerplate, seconds) or full (agentic) ---
+if [[ -n "${5:-}" ]]; then
+  case "$5" in
+    fast|1) launch_model="$FAST_MODEL" ;;
+    full|0) launch_model="$MODEL" ;;
+    *) echo "unknown model: $5 (fast|full)" >&2; exit 2 ;;
+  esac
+else
+  echo ""
+  echo "Which model?"
+  echo "  1) Fast (strip CLI boilerplate, seconds-per-answer chat)"
+  echo "  2) Full (keep agent tools; multi-thousand-token prefill, slower)"
+  printf "Choice [1-2] (default 1): "
+  read -r model_choice || exit 1
+  case "${model_choice:-1}" in
+    1) launch_model="$FAST_MODEL" ;;
+    2) launch_model="$MODEL" ;;
+    *) echo "invalid choice: $model_choice" >&2; exit 2 ;;
+  esac
+fi
+
 # --- clean slate: stop any running NVMAIServer, then start fresh ---
 if pgrep -x NVMAIServer >/dev/null 2>&1; then
   echo "Stopping existing NVMAIServer instance(s)..."
@@ -138,14 +160,14 @@ curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 || {
   echo "ERROR: NVMAIServer did not come up on port $PORT" >&2
   exit 1
 }
-echo "NVMAIServer ready at $BASE_URL (model $MODEL, fast alias $FAST_MODEL)"
+echo "NVMAIServer ready at $BASE_URL (model $launch_model; base $MODEL)"
 
 case "$cli" in
   codex)
     CONFIG_DIR="${CODEX_HOME_NVMAI:-$HOME/.codex-nvmai}"
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/config.toml" <<EOF
-model = "$FAST_MODEL"
+model = "$launch_model"
 model_provider = "nvmai"
 
 [model_providers.nvmai]
@@ -169,8 +191,8 @@ EOF
   "modelProviders": {
     "openai": [
       {
-        "id": "$FAST_MODEL",
-        "name": "[NVMAI] $FAST_MODEL",
+        "id": "$launch_model",
+        "name": "[NVMAI] $launch_model",
         "baseUrl": "$BASE_URL",
         "description": "NVMAI local server",
         "envKey": "OPENAI_API_KEY"
@@ -183,7 +205,7 @@ EOF
     }
   },
   "model": {
-    "name": "$FAST_MODEL"
+    "name": "$launch_model"
   },
   "memory": {
     "enableManagedAutoMemory": false,
@@ -205,11 +227,12 @@ EOF
     # OpenCode reads the built-in openai provider override in its global
     # config (baseURL -> NVMAI), so no per-run config is written here. The
     # global config lists both the base model and the "-fast" alias; pick
-    # "Qwen 3.6 35B-A3B (fast)" in the TUI for the chat-only speed mode.
+    # the matching one in the TUI ("Qwen 3.6 35B-A3B (fast)" for the
+    # chat-only speed mode, "Qwen 3.6 35B-A3B" for the full agent loop).
     if ! grep -q "$BASE_URL" "$HOME/.config/opencode/opencode.jsonc" 2>/dev/null; then
       echo "WARNING: opencode global config does not point the openai provider at $BASE_URL" >&2
     fi
-    echo "Launching OpenCode..."
+    echo "Launching OpenCode ($launch_model)..."
     exec "${OPENCODE:-/opt/homebrew/bin/opencode}"
     ;;
   *)

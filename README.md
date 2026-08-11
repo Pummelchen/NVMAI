@@ -147,28 +147,31 @@ one command builds nothing, starts a fresh server, wires the CLI's provider
 config, and hands the terminal over.
 
 ```bash
-tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise]
+tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise] [nothink|think] [fast|full]
 ```
 
-Run it with no arguments and it asks three questions in order. Or pass them
+Run it with no arguments and it asks five questions in order. Or pass them
 positionally, e.g.:
 
 ```bash
-tools/nvmai-cli.sh 4 codex concise     # 4-bit, Codex, terse answers
-tools/nvmai-cli.sh 6 qwen default      # 6-bit, Qwen Code, full answers
+tools/nvmai-cli.sh 4 codex concise nothink fast   # 4-bit, Codex, terse, no reasoning, fast alias
+tools/nvmai-cli.sh 6 qwen default think full      # 6-bit, Qwen Code, full answers, reasoning, full agent
 ```
 
 Each run stops any running `NVMAIServer`, starts a fresh one on the chosen
-quantization, points the selected CLI at the `-fast` model alias, and execs
-into the CLI's TUI. Ctrl-C on the server ends the session.
+quantization, points the selected CLI at the chosen model (`-fast` alias or
+base model), and execs into the CLI's TUI. Ctrl-C on the server ends the
+session.
 
 ### Parameters
 
 | Argument | Choices | What it does | Pro | Con |
 | --- | --- | --- | --- | --- |
 | Quantization | `4`, `6`, `8` | Which quantized model the server loads (4-bit → port 8081, 6-bit → 8082, 8-bit → 8083) | **4-bit:** fastest decode, smallest memory; **6-bit:** balance; **8-bit:** best fidelity | **4-bit:** most quantization error; **8-bit:** slowest and heaviest |
-| CLI | `codex`, `qwen`, `opencode` | Which coding CLI to launch | Codex: OpenAI agent, tool loop; Qwen Code: full agent config; OpenCode: lightweight, easy model picker | Each CLI brings its own agent prompt (handled by the fast alias); Qwen Code's auto-memory is disabled for speed |
+| CLI | `codex`, `qwen`, `opencode` | Which coding CLI to launch | Codex: OpenAI agent, tool loop; Qwen Code: full agent config; OpenCode: lightweight, easy model picker | Each CLI brings its own agent prompt; Qwen Code's auto-memory is disabled for speed |
 | Mode | `default`, `concise` | Whether the server injects a terse-answer system prompt | **default:** full answers; **concise:** ~55-61% fewer answer tokens, near-identical correctness on sampled questions | **concise:** can clip nuance on complex answers; switch back to default if replies feel too short |
+| Reasoning | `nothink`, `think` | Whether the model reasons before answering | **think:** shows its work on hard questions | **think:** adds wall time and tokens; leave off for fast answers |
+| Model | `fast`, `full` | `fast` = the `<model>-fast` alias (CLI boilerplate stripped, seconds-per-answer chat); `full` = the base model (keeps the CLI's agentic tool loop) | **fast:** 10×-65× wall-time reduction, ~90-98% less prefill; **full:** agent can read/edit files and run tools | **fast:** no tool calls (chat-only); **full:** multi-thousand-token prefill takes minutes |
 
 ### Env overrides
 
@@ -180,9 +183,9 @@ into the CLI's TUI. Ctrl-C on the server ends the session.
 | `CODEX`, `QWEN`, `OPENCODE` | default install paths | Override the CLI binary to launch |
 | `NVMAI_STRIP_TAGS` | `system-reminder` | Comma-separated in-message scaffolding tags the fast alias strips |
 
-The launcher uses the fast alias by default, so answers arrive in seconds
-rather than minutes. Set `NVMAI_STRIP_CLI_PROMPT=0` to keep the CLI's full
-agent prompt and tool loop instead.
+The launcher defaults to the fast alias, so answers arrive in seconds
+rather than minutes; choose `full` to keep the CLI's agent prompt and tool
+loop instead.
 
 ## Documentation
 
