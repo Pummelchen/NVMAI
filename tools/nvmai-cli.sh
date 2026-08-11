@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Launch a coding CLI against NVMAI in the macOS terminal (interactive TUI).
 #
-#   tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise]
+#   tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise] [nothink|think]
 #
-# With no arguments, prompts 1-2-3 for the quantization, then the CLI, then
-# default/concise mode. Stops any running NVMAIServer, starts a fresh one on
-# 8081 in the chosen quant/mode, wires the CLI's provider config to the
-# "<model>-fast" alias (chat-only speed: CLI boilerplate is stripped before
-# prefill), then hands the terminal over to the CLI.
+# With no arguments, prompts 1-2-3-4 for the quantization, then the CLI,
+# then default/concise mode, then reasoning off/on. Stops any running
+# NVMAIServer, starts a fresh one on 8081 in the chosen quant/mode, wires
+# the CLI's provider config to the "<model>-fast" alias (chat-only speed:
+# CLI boilerplate is stripped before prefill), then hands the terminal over
+# to the CLI.
 # Overrides: NVMAI_PORT, CODEX_HOME_NVMAI, QWEN_HOME_NVMAI, CODEX, QWEN,
 # OPENCODE, NVMAI_STRIP_TAGS (comma-separated scaffolding tag list).
 set -euo pipefail
@@ -89,6 +90,27 @@ else
 fi
 launch_script="launch_${quant}${mode_suffix}.sh"
 
+# --- 4) reasoning: off (default) or on (model thinks before answering) ---
+if [[ -n "${4:-}" ]]; then
+  case "$4" in
+    nothink|0|off) thinking="" ;;
+    think|1|on) thinking="1" ;;
+    *) echo "unknown reasoning: $4 (nothink|think)" >&2; exit 2 ;;
+  esac
+else
+  echo ""
+  echo "Reasoning (thinking)?"
+  echo "  1) Off (direct answers, default)"
+  echo "  2) On (model reasons before answering)"
+  printf "Choice [1-2] (default 1): "
+  read -r think_choice || exit 1
+  case "${think_choice:-1}" in
+    1) thinking="" ;;
+    2) thinking="1" ;;
+    *) echo "invalid choice: $think_choice" >&2; exit 2 ;;
+  esac
+fi
+
 # --- clean slate: stop any running NVMAIServer, then start fresh ---
 if pgrep -x NVMAIServer >/dev/null 2>&1; then
   echo "Stopping existing NVMAIServer instance(s)..."
@@ -103,6 +125,10 @@ if pgrep -x NVMAIServer >/dev/null 2>&1; then
   fi
 fi
 echo "Starting NVMAIServer ($launch_script)..."
+# Reasoning mode: off (default) or on. The server reads this once at load;
+# it opens a <think> block in the generation prompt so the model reasons
+# before answering. Costs wall time and tokens; leave off for fast answers.
+export NVMAI_THINKING_MODE="${thinking:-0}"
 nohup "$BASE_DIR/tools/$launch_script" >/tmp/nvmai-cli-server.log 2>&1 &
 for _ in $(seq 1 120); do
   curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 && break

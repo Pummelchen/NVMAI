@@ -114,7 +114,19 @@ public struct GFTokenizer: @unchecked Sendable {
         self.thinkEndID = resolved.thinkEndID
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
-        self.generationSuffix = Self.deriveGenerationSuffix(tokenizer)
+        self.generationSuffix = Self.deriveGenerationSuffix(
+            tokenizer, thinkingEnabled: Self.thinkingModeEnabled())
+    }
+
+    /// NVMAI_THINKING_MODE=1 (or "on", "true", "yes") enables the model's
+    /// reasoning mode (chat template opens a `<think>` block the model must
+    /// fill). Off by default. Read at load; the tokenizer keeps no state, so
+    /// the struct layout is unchanged.
+    private static func thinkingModeEnabled() -> Bool {
+        switch ProcessInfo.processInfo.environment["NVMAI_THINKING_MODE"]?.lowercased() {
+        case "1", "on", "true", "yes": return true
+        default: return false
+        }
     }
 
     private struct ResolvedSpecialTokens {
@@ -282,17 +294,26 @@ public struct GFTokenizer: @unchecked Sendable {
     /// (R6); `generationSuffix` carries the template-derived value otherwise.
     private static let fallbackChatMLGenerationSuffix =
         "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    /// Same as `fallbackChatMLGenerationSuffix`, but for thinking mode ON:
+    /// the template's `enable_thinking=true` branch leaves the `<think>`
+    /// block open so the model must reason before answering.
+    private static let fallbackChatMLGenerationSuffixThinking =
+        "<|im_start|>assistant\n<think>\n"
 
     /// Derive the generation-prompt suffix from the tokenizer's bundled
-    /// `chat_template.jinja` (`add_generation_prompt` with thinking disabled),
-    /// falling back to the pinned constant when no template is available or
-    /// rendering fails. The probe renders one empty user turn both with and
-    /// without the generation prompt; the generation prompt is appended after
-    /// the message loop, so the suffix is the token-level difference between
-    /// the two renders.
-    private static func deriveGenerationSuffix(_ tokenizer: any Tokenizer) -> String {
+    /// `chat_template.jinja` (`add_generation_prompt` with thinking per
+    /// `thinkingEnabled`), falling back to the pinned constant when no
+    /// template is available or rendering fails. The probe renders one empty
+    /// user turn both with and without the generation prompt; the generation
+    /// prompt is appended after the message loop, so the suffix is the
+    /// token-level difference between the two renders.
+    private static func deriveGenerationSuffix(_ tokenizer: any Tokenizer,
+                                               thinkingEnabled: Bool) -> String {
+        let fallback = thinkingEnabled
+            ? Self.fallbackChatMLGenerationSuffixThinking
+            : Self.fallbackChatMLGenerationSuffix
         guard tokenizer.hasChatTemplate else {
-            return Self.fallbackChatMLGenerationSuffix
+            return fallback
         }
         let probe: [Tokenizers.Message] = [["role": "user", "content": ""]]
         do {
@@ -303,7 +324,7 @@ public struct GFTokenizer: @unchecked Sendable {
                 truncation: false,
                 maxLength: nil,
                 tools: [],
-                additionalContext: ["enable_thinking": false])
+                additionalContext: ["enable_thinking": thinkingEnabled])
             let withoutPrompt = try tokenizer.applyChatTemplate(
                 messages: probe,
                 chatTemplate: nil,
@@ -311,9 +332,9 @@ public struct GFTokenizer: @unchecked Sendable {
                 truncation: false,
                 maxLength: nil,
                 tools: [],
-                additionalContext: ["enable_thinking": false])
+                additionalContext: ["enable_thinking": thinkingEnabled])
             guard withPrompt.count > withoutPrompt.count else {
-                return Self.fallbackChatMLGenerationSuffix
+                return fallback
             }
             // The generation prompt is appended after the message loop, so the
             // with-prompt render is the without-prompt render plus the suffix.
@@ -392,7 +413,7 @@ public struct GFTokenizer: @unchecked Sendable {
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: ["enable_thinking": false]
+            additionalContext: ["enable_thinking": Self.thinkingModeEnabled()]
         ).map(Int32.init)
     }
 
