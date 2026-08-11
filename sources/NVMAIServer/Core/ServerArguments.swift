@@ -17,6 +17,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let promptCacheDiskDirectory: String?
     public let promptCacheDiskMiB: Int
     public let prefillChunkTokens: Int?
+    public let expertCacheSlots: Int?
 
     public static let usage = """
     usage: NVMAIServer --model <completed .gturbo directory> [options]
@@ -43,7 +44,11 @@ public struct ServerArguments: Equatable, Sendable {
                              SSD snapshot budget, 0...65536 (default 8192).
       --prefill-chunk <tokens>
                              Prefill chunk size: 32, 64, 128, 256, 512,
-                             1024, 2048, or 4096 (default 1024 for Qwen).
+                             1024, 2048, or 4096 (default 4096 for Qwen).
+      --expert-cache-slots <count>
+                             Routed-expert cache slots per layer: 8, 16, 24,
+                             32, 64, 96, or 128 (default 64). Environment
+                             override: NVMAI_EXPERT_CACHE_SLOTS.
       --help                 Show this help.
     """
 
@@ -61,6 +66,7 @@ public struct ServerArguments: Equatable, Sendable {
         var promptCacheDiskDirectory: String?
         var promptCacheDiskMiB = 8_192
         var prefillChunkTokens: Int?
+        var expertCacheSlots: Int?
         var index = 0
         while index < input.count {
             let flag = input[index]
@@ -142,6 +148,13 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--prefill-chunk is not supported")
                 }
                 prefillChunkTokens = parsed
+            case "--expert-cache-slots":
+                guard let parsed = Int(value),
+                      RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--expert-cache-slots must be one of \(RuntimeConfiguration.allowedExpertCacheSlots)")
+                }
+                expertCacheSlots = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -159,7 +172,8 @@ public struct ServerArguments: Equatable, Sendable {
                                promptCacheMemoryMiB: promptCacheMemoryMiB,
                                promptCacheDiskDirectory: promptCacheDiskDirectory,
                                promptCacheDiskMiB: promptCacheDiskMiB,
-                               prefillChunkTokens: prefillChunkTokens)
+                               prefillChunkTokens: prefillChunkTokens,
+                               expertCacheSlots: expertCacheSlots)
     }
 }
 

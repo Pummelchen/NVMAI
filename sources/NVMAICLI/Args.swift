@@ -36,7 +36,7 @@ public struct Args: Equatable, Sendable {
                 stops: [String] = [],
                 quiet: Bool = false,
                 concise: Bool = false,
-                expertCacheSlots: Int = 32,
+                expertCacheSlots: Int = 64,
                 rdadvise: String = "default",
                 prefillChunk: PrefillChunkChoice? = nil) {
         self.model = model
@@ -103,8 +103,8 @@ extension Args {
       --rdadvise <mode>         Expert read-ahead advice: off, default,
                                 bounded, or adaptive (default off).
       --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
-                                24, or 32 (default 16). More slots raise the
-                                hit rate but use more memory.
+                                24, 32, 64, 96, or 128 (default 64). More
+                                slots raise the hit rate but use more memory.
       --prefill-chunk <n|auto>  Prefill chunk tokens. Larger chunks reduce
                                 routed-expert file sweeps but use more GPU
                                 scratch. Allowed: 32, 64, 128, 256, 512,
@@ -199,7 +199,7 @@ extension Args {
             case "--expert-cache-slots":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Int(value),
-                      [8, 16, 24, 32, 64].contains(parsed) else {
+                      RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 expertCacheSlots = parsed

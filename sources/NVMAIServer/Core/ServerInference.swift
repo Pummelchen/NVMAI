@@ -432,6 +432,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                             promptCacheDiskDirectory: URL? = nil,
                             promptCacheDiskLimitBytes: Int = 8_192 * 1_048_576,
                             prefillChunkTokens requestedPrefillChunkTokens: Int? = nil,
+                            expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             mtpModelDirectory: URL? = nil,
                             mtpMemoryMiB: Int = StreamingMTPMemoryPlan.defaultBudgetMiB) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
@@ -447,7 +448,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         let loadRuntime = try RuntimeConfiguration(forceLogitsHead: true)
         let slotOverride = ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
-        let loadSlots = slotOverride ?? loadRuntime.expertCacheSlots
+        // Precedence: --expert-cache-slots flag, then the env override, then
+        // the production default (64).
+        let loadSlots = requestedExpertCacheSlots ?? slotOverride ?? loadRuntime.expertCacheSlots
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
