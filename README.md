@@ -113,6 +113,10 @@ sampled 4-bit prompt occasionally dropped actionable detail). If an answer
 seems too clipped, use the plain script instead. The CLI offers the same
 choice per run (`--concise`); the Mac app exposes a concise-mode setting.
 
+The server also implements the OpenAI Responses API (`POST /v1/responses`),
+so current Codex CLI versions connect directly (`base_url` +
+`wire_api = "responses"`) with no proxy — see the wiki server guide.
+
 ## Documentation
 
 - [Wiki](https://github.com/Pummelchen/NVMAI/wiki)
