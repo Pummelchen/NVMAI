@@ -629,16 +629,41 @@ public actor ServerModelSession: ServerInferenceBackend {
                 mtpDecoder?.reset()
             }
         }
+        // NVMAI_STRIP_CLI_PROMPT: drop the coding-CLI's system/developer
+        // guidance, tool definitions, tool-call history, and in-message
+        // <system-reminder> scaffolding, keeping only the real user/assistant
+        // conversation (see CLIStrip). Guards ensure the real prompt can
+        // never be stripped into an empty turn or an empty request. Runs when
+        // the request names the "<model>-fast" alias or NVMAI_STRIP_CLI_PROMPT
+        // is set.
+        let filteredMessages: [GFTokenizer.Message]
+        let filteredTools: [GFTokenizer.FunctionDefinition]
+        var stripStats: CLIStrip.Stats?
+        if request.stripCLIPrompt || CLIStrip.isEnabled() {
+            let filtered = CLIStrip.filter(
+                messages: request.messages,
+                tools: request.tools)
+            filteredMessages = filtered.messages
+            filteredTools = filtered.tools
+            stripStats = filtered.stats
+        } else {
+            filteredMessages = request.messages
+            filteredTools = request.tools
+        }
         let needsToolTemplate = usesToolTemplate(
-            messages: request.messages,
-            tools: request.tools)
+            messages: filteredMessages,
+            tools: filteredTools)
         let effectiveMessages = concisePrompt.map {
-            ConcisePrompt.appendingSystemPrompt($0, to: request.messages)
-        } ?? request.messages
+            ConcisePrompt.appendingSystemPrompt($0, to: filteredMessages)
+        } ?? filteredMessages
         let promptIDs = try encodePrompt(
             messages: effectiveMessages,
-            tools: request.tools,
+            tools: filteredTools,
             usesToolTemplate: needsToolTemplate)
+        if let stats = stripStats {
+            ServerLog.strip(stats: stats,
+                            promptTokens: promptIDs.count)
+        }
         guard promptIDs.count < maxContext else {
             throw ServerRequestError.invalid(
                 message: "prompt exceeds the configured context",

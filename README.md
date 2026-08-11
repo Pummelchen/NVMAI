@@ -4,6 +4,13 @@ Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
 per-quantization terse system prompt for direct, lean answers.
 
+Every model also serves a `<model>-fast` alias (e.g.
+`qwen3.6-35b-a3b-fast`): the same weights, but coding-CLI boilerplate — agent
+system prompts, tool definitions, and in-message scaffolding — is stripped
+before prefill, turning multi-thousand-token requests into a few hundred
+tokens. Coding CLIs answer simple questions in seconds instead of minutes.
+See [Fast alias](#fast-alias) below.
+
 ## References and credits
 
 NVMAI is a focused fork of
@@ -34,12 +41,18 @@ measurable correctness loss on the sampled questions.
 
 [FAQ](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
 
-## Benchmark — NVMAI 3.2
+## Benchmark — NVMAI 3.3
 
-Measured on M3 24 GB, current 3.2 build (64 expert-cache slots + resident
-pin + MoE phase-1 rewrite). Concise-mode answer tokens: temp 0, deterministic,
-8 chat questions, 512-token cap (`+` = baseline hit the cap, so its true total
-is higher). Full measurement history:
+**Coding-CLI latency, fast alias.** See
+[Fast alias](#fast-alias) for the 3-CLI × 3-quant wall-clock matrix
+("What is the capital of France?", `qwen3.6-35b-a3b-fast`): Codex 24.6-32.8 s,
+Qwen Code 4.6-12.8 s, OpenCode 5.9-10.2 s across 4/6/8-bit, versus ~250 s on
+the 4-bit base model.
+
+**Decode-rate reference (NVMAI 3.2 build).** Measured on M3 24 GB, 3.2 build
+(64 expert-cache slots + resident pin + MoE phase-1 rewrite). Concise-mode
+answer tokens: temp 0, deterministic, 8 chat questions, 512-token cap (`+` =
+baseline hit the cap, so its true total is higher). Full measurement history:
 [Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey).
 
 #### 4-bit
@@ -120,6 +133,72 @@ choice per run (`--concise`); the Mac app exposes a concise-mode setting.
 The server also implements the OpenAI Responses API (`POST /v1/responses`),
 so current Codex CLI versions connect directly (`base_url` +
 `wire_api = "responses"`) with no proxy — see the wiki server guide.
+
+## Fast alias
+
+Coding CLIs (Codex, Qwen Code, OpenCode) send several thousand tokens of
+boilerplate with every request: their agent system prompt, tool definitions,
+and in-message scaffolding such as Qwen Code's `<system-reminder>` blocks.
+On 4-bit that prefill alone can take 4+ minutes for a one-line question.
+
+The `<model>-fast` alias (e.g. `qwen3.6-35b-a3b-fast`) serves the same
+weights but applies a **CLI-strip heuristic** before encoding:
+
+- system/developer guidance is dropped;
+- tool definitions and tool-call history are dropped;
+- `<system-reminder>` blocks (or any tag in `NVMAI_STRIP_TAGS`) inside user
+  messages are dropped.
+
+What remains is the real user/assistant conversation — a few hundred tokens.
+Measured on the "What is the capital of France?" question, the fast alias
+answers in seconds where the base model takes minutes:
+
+| CLI | 4-bit base | 4-bit fast |
+| --- | --- | --- |
+| Codex | ~250 s | ~10 s |
+| OpenCode | ~218 s | ~8 s |
+| Qwen Code | >300 s (stalled) | ~7-25 s |
+
+**Full matrix (fast alias, "What is the capital of France?", wall clock).**
+Measured on M3 24 GB, macOS 26.6, Swift 6.3.3, commit 14b3f35 + fast-alias
+change, one quant per server process, prompt-cache ON / MTP OFF / concise ON,
+each CLI pointed at `qwen3.6-35b-a3b-fast`:
+
+| CLI | 4-bit | 6-bit | 8-bit |
+| --- | ---: | ---: | ---: |
+| Codex `exec` | 24.6 s | 24.7 s | 32.8 s |
+| Qwen Code `-p` | 4.6 s | 6.9 s | 12.8 s |
+| OpenCode `run` | 5.9 s | 8.2 s | 10.2 s |
+
+All nine cells answered correctly. Codex's wall time includes its client-side
+agent overhead; server-side generation for the same request was 16.3 s
+(4-bit), 28.3 s (6-bit), 28.3 s (8-bit) at prompt=1,210 tokens. Qwen Code and
+OpenCode sent a 19-token prompt after the strip and generated in 2.9-11.8 s.
+The Qwen Code cells also disable its post-turn auto-memory subagent
+(`memory.enableManagedAutoMemory=false`, as `nvmai-cli.sh` configures).
+
+**Trade-off.** The strip disables the CLI's agentic tool loop for that
+request: no tool calls, no file edits. Use the base model when the agent's
+tools are needed, the fast alias for direct chat-style questions.
+
+**How it works.** The alias is per-request: request `model` is
+`qwen3.6-35b-a3b-fast` (advertised by `/v1/models`), and the strip runs only
+for requests that name it. The server environment variable
+`NVMAI_STRIP_CLI_PROMPT=1` enables the same heuristic for *all* requests as a
+fallback; `NVMAI_STRIP_TAGS` sets the in-message tag list (default
+`system-reminder`). Each stripped request logs a strip report, e.g.:
+
+```
+strip v2 system=1 tools=59 reminders=5604chars messageFallback=0 requestFallback=false prompt=229
+```
+
+If a CLI rewrites its bloat template, the `reminders=`/`prompt=` counters
+change visibly in the server log — the early-warning signal that the heuristic
+needs a tag-list update or a rebuild.
+
+`tools/nvmai-cli.sh` launches Codex, Qwen Code, and OpenCode against the fast
+alias by default; set `NVMAI_STRIP_CLI_PROMPT=0` (or point the CLI config at
+the base model) to keep the full agent prompt and tool loop.
 
 ## Documentation
 

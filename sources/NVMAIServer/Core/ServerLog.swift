@@ -36,6 +36,23 @@ enum ServerLog {
             + "error=\(String(reflecting: error))")
     }
 
+    /// Strip report for one request (NVMAI_STRIP_CLI_PROMPT on). The reminder
+    /// and token counters are the early-warning signal: if a CLI changes its
+    /// bloat template, "reminders=" drops to 0 or "prompt=" jumps back to the
+    /// thousands, visible here without a model run.
+    static func strip(stats: CLIStrip.Stats, promptTokens: Int) {
+        write("strip v\(CLIStrip.version) "
+            + "system=\(stats.systemDropped) "
+            + "developer=\(stats.developerDropped) "
+            + "toolRole=\(stats.toolRoleDropped) "
+            + "tools=\(stats.toolsDropped) "
+            + "toolCalls=\(stats.toolCallsDropped) "
+            + "reminders=\(stats.reminderCharsRemoved)chars "
+            + "messageFallback=\(stats.emptyMessageFallbacks) "
+            + "requestFallback=\(stats.emptyRequestFallback) "
+            + "prompt=\(promptTokens)")
+    }
+
     private static func format(_ duration: Duration) -> String {
         let seconds = Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18

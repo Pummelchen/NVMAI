@@ -5,9 +5,11 @@
 #
 # With no arguments, prompts 1-2-3 for the quantization, then the CLI, then
 # default/concise mode. Stops any running NVMAIServer, starts a fresh one on
-# 8081 in the chosen quant/mode, wires the CLI's provider config to it, then
-# hands the terminal over to the CLI.
-# Overrides: NVMAI_PORT, CODEX, QWEN, OPENCODE.
+# 8081 in the chosen quant/mode, wires the CLI's provider config to the
+# "<model>-fast" alias (chat-only speed: CLI boilerplate is stripped before
+# prefill), then hands the terminal over to the CLI.
+# Overrides: NVMAI_PORT, CODEX_HOME_NVMAI, QWEN_HOME_NVMAI, CODEX, QWEN,
+# OPENCODE, NVMAI_STRIP_TAGS (comma-separated scaffolding tag list).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,6 +17,10 @@ BASE_DIR="${SCRIPT_DIR}/.."
 PORT="${NVMAI_PORT:-8081}"
 BASE_URL="http://127.0.0.1:${PORT}/v1"
 MODEL="qwen3.6-35b-a3b"
+# The "<model>-fast" alias serves the same weights with the CLI-strip
+# heuristic enabled per request (chat-only speed): system prompts, tool
+# definitions, and <system-reminder> scaffolding are dropped before prefill.
+FAST_MODEL="${MODEL}-fast"
 
 # --- 1) quantization: 4-bit / 6-bit / 8-bit ---
 quant="${1:-}"
@@ -106,14 +112,14 @@ curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 || {
   echo "ERROR: NVMAIServer did not come up on port $PORT" >&2
   exit 1
 }
-echo "NVMAIServer ready at $BASE_URL (model $MODEL)"
+echo "NVMAIServer ready at $BASE_URL (model $MODEL, fast alias $FAST_MODEL)"
 
 case "$cli" in
   codex)
     CONFIG_DIR="${CODEX_HOME_NVMAI:-$HOME/.codex-nvmai}"
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/config.toml" <<EOF
-model = "$MODEL"
+model = "$FAST_MODEL"
 model_provider = "nvmai"
 
 [model_providers.nvmai]
@@ -127,23 +133,53 @@ EOF
     exec "${CODEX:-$HOME/.local/bin/codex}"
     ;;
   qwen)
-    mkdir -p "$HOME/.config/qwen-code"
-    cat > "$HOME/.config/qwen-code/config.toml" <<EOF
-model = "$MODEL"
-model_provider = "nvmai"
-
-[model_providers.nvmai]
-name = "NVMAI"
-base_url = "$BASE_URL"
-wire_api = "responses"
+    # Qwen Code reads JSON settings from $QWEN_HOME (default ~/.qwen/), not a
+    # Codex-style TOML. Use a dedicated home so the user's real qwen-code
+    # config (providers, keys, memories) is left untouched.
+    CONFIG_DIR="${QWEN_HOME_NVMAI:-$HOME/.qwen-nvmai}"
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_DIR/settings.json" <<EOF
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "$FAST_MODEL",
+        "name": "[NVMAI] $FAST_MODEL",
+        "baseUrl": "$BASE_URL",
+        "description": "NVMAI local server",
+        "envKey": "OPENAI_API_KEY"
+      }
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "$FAST_MODEL"
+  },
+  "memory": {
+    "enableManagedAutoMemory": false,
+    "enableManagedAutoDream": false,
+    "enableAutoSkill": false
+  }
+}
 EOF
+    export QWEN_HOME="$CONFIG_DIR"
     export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
+    # NVMAI's cold 4-bit prefill of qwen-code's large system prompt can
+    # exceed qwen-code's default 240s stream-idle timeout; disable it so the
+    # request is not aborted mid-generation.
+    export QWEN_STREAM_IDLE_TIMEOUT_MS=0
     echo "Launching Qwen Code..."
     exec "${QWEN:-$HOME/.qwen-code/bin/qwen-code}" -i
     ;;
   opencode)
     # OpenCode reads the built-in openai provider override in its global
-    # config (baseURL -> NVMAI), so no per-run config is written here.
+    # config (baseURL -> NVMAI), so no per-run config is written here. The
+    # global config lists both the base model and the "-fast" alias; pick
+    # "Qwen 3.6 35B-A3B (fast)" in the TUI for the chat-only speed mode.
     if ! grep -q "$BASE_URL" "$HOME/.config/opencode/opencode.jsonc" 2>/dev/null; then
       echo "WARNING: opencode global config does not point the openai provider at $BASE_URL" >&2
     fi

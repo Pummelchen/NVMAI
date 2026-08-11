@@ -259,19 +259,24 @@ public struct ValidatedChatRequest: Sendable {
     public let includeUsage: Bool
     public let generationConfig: GenerationConfig
     public let maximumCompletionTokens: Int
+    /// Set when the request named the "<model>-fast" alias: the CLI-strip
+    /// heuristic runs for this request regardless of NVMAI_STRIP_CLI_PROMPT.
+    public let stripCLIPrompt: Bool
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
                 stream: Bool,
                 includeUsage: Bool,
                 generationConfig: GenerationConfig,
-                maximumCompletionTokens: Int) {
+                maximumCompletionTokens: Int,
+                stripCLIPrompt: Bool = false) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
         self.includeUsage = includeUsage
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
+        self.stripCLIPrompt = stripCLIPrompt
     }
 }
 
@@ -280,7 +285,12 @@ public enum OpenAIRequestValidator {
                                 modelID: String,
                                 maxContext: Int = RuntimeConfiguration
                                     .supportedContextTokens.max() ?? 262_144) throws -> ValidatedChatRequest {
-        guard request.model == modelID else { throw ServerRequestError.unknownModel }
+        // The "<model>-fast" alias selects the same weights as the base model
+        // but enables the CLI-strip heuristic per request (chat-only speed),
+        // so tool-using clients keep the base model and chat users opt in.
+        let fastModelID = modelID + "-fast"
+        let stripCLIPrompt = request.model == fastModelID
+        guard request.model == modelID || stripCLIPrompt else { throw ServerRequestError.unknownModel }
         guard request.n == nil || request.n == 1 else {
             throw invalid("only n=1 is supported", "n", "unsupported_value")
         }
@@ -397,7 +407,8 @@ public enum OpenAIRequestValidator {
                                     stream: request.stream ?? false,
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
-                                    maximumCompletionTokens: maximum)
+                                    maximumCompletionTokens: maximum,
+                                    stripCLIPrompt: stripCLIPrompt)
     }
 
     private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {

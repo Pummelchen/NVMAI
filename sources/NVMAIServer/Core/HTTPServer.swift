@@ -246,12 +246,20 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         case (.GET, "/health"):
             writeJSON(context, status: .ok, object: ["status": "ok"])
         case (.GET, "/v1/models"):
+            // Advertise the base model plus the "<model>-fast" alias, which
+            // serves the same weights with the CLI-strip heuristic enabled.
             let response = OpenAIModelList(
                 object: "list",
-                data: [.init(id: modelID,
-                             object: "model",
-                             created: nil,
-                             ownedBy: "nvmai")])
+                data: [
+                    .init(id: modelID,
+                          object: "model",
+                          created: nil,
+                          ownedBy: "nvmai"),
+                    .init(id: modelID + "-fast",
+                          object: "model",
+                          created: nil,
+                          ownedBy: "nvmai"),
+                ])
             writeCodable(context, status: .ok, response)
         case (.HEAD, "/health"), (.HEAD, "/v1/models"):
             // S28: HEAD is answered with headers only.
