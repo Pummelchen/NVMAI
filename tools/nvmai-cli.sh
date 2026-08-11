@@ -220,8 +220,11 @@ EOF
     export OPENAI_API_KEY="${OPENAI_API_KEY:-dummy}"
     # NVMAI's cold 4-bit prefill of qwen-code's large system prompt can
     # exceed qwen-code's default 240s stream-idle timeout; disable it so the
-    # request is not aborted mid-generation.
+    # request is not aborted mid-generation. Also disable the 900s
+    # stream-lifetime cap, which would otherwise abort long full-model or
+    # reasoning generations mid-answer.
     export QWEN_STREAM_IDLE_TIMEOUT_MS=0
+    export QWEN_STREAM_MAX_LIFETIME_MS=0
     echo "Launching Qwen Code..."
     exec "${QWEN:-$HOME/.qwen-code/bin/qwen-code}" -i
     ;;
