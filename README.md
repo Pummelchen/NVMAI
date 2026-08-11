@@ -1,3 +1,5 @@
+<img width="1122" height="1402" alt="image" src="https://github.com/user-attachments/assets/b807e4e2-f26f-4cae-9998-3a7fdbe03290" />
+
 # NVMAI
 
 **Answers in seconds, not minutes.** NVMAI v3.3 introduces a **10×–65×
