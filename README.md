@@ -26,6 +26,10 @@ which force-appends a terseness prompt to every request. Measured on NVMAI's
 own 4/6/8-bit builds, the built-in prompts cut answer tokens by 55-61% with no
 measurable correctness loss on the sampled questions.
 
+## Changelog
+
+- [Release notes since 1.0](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
+
 ## FAQ
 
 - [Why more RAM doesn't speed up decode](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
