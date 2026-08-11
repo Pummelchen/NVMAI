@@ -55,14 +55,6 @@ measurable correctness loss on the sampled questions.
 
 ## Benchmarks
 
-**Coding-CLI latency, fast alias.** See the
-[wiki Fast alias page](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server#fast-alias)
-for the 3-CLI × 3-quant wall-clock matrix ("What is the capital of France?",
-`qwen3.6-35b-a3b-fast`): Codex 24.6-32.8 s, Qwen Code 4.6-12.8 s, OpenCode
-5.9-10.2 s across 4/6/8-bit. On 4-bit that is **~10× (Codex), ~37× (OpenCode),
-and >65× (Qwen Code) faster than the base model** — a 90-98% reduction in wall
-time for the same question.
-
 **Decode-rate reference (NVMAI 3.2 build).** Measured on M3 24 GB, 3.2 build
 (64 expert-cache slots + resident pin + MoE phase-1 rewrite). Concise-mode
 answer tokens: temp 0, deterministic, 8 chat questions, 512-token cap (`+` =
