@@ -18,9 +18,23 @@ MODEL="qwen3.6-35b-a3b"
 
 cli="${1:-}"
 if [[ -z "$cli" ]]; then
-  echo "usage: $0 <codex|qwen|opencode>" >&2
-  exit 2
+  echo "Which coding CLI do you want to launch?"
+  echo "  1) Codex"
+  echo "  2) Qwen Code"
+  echo "  3) OpenCode"
+  printf "Choice [1-3]: "
+  read -r choice || exit 1
+  case "$choice" in
+    1) cli=codex ;;
+    2) cli=qwen ;;
+    3) cli=opencode ;;
+    *) echo "invalid choice: $choice" >&2; exit 2 ;;
+  esac
 fi
+case "$cli" in
+  codex|qwen|opencode) : ;;
+  *) echo "unknown CLI: $cli (codex|qwen|opencode)" >&2; exit 2 ;;
+esac
 
 # --- ensure the NVMAI server is up ---
 if ! curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1; then
