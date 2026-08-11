@@ -101,48 +101,16 @@ baseline hit the cap, so its true total is higher). Full measurement history:
 | Concise mode — answer tokens (8-question set) | 3,635+ → **1,570** (−57%) |
 | — concise prompt | standard (8-bit) |
 
-## Launch scripts
-
-`tools/` ships one launch script per quantization, in two flavors: the
-plain scripts start the server with the production defaults (prompt cache ON,
-MTP OFF); the `_concise` scripts add `NVMAI_CONCISE_MODE=1`. Build once
-(`swift build -c release`), then run a script — it checks the binary and
-model, stops any stale NVMAIServer on the port, and starts the server in the
-foreground (Ctrl-C to stop). The server binds to `127.0.0.1`.
-
-| Script | Model | Port | Mode |
-| --- | --- | --- | --- |
-| `launch_4bit.sh` / `launch_4bit_concise.sh` | 4-bit | 8081 | default / concise |
-| `launch_6bit.sh` / `launch_6bit_concise.sh` | 6-bit | 8082 | default / concise |
-| `launch_8bit.sh` / `launch_8bit_concise.sh` | 8-bit | 8083 | default / concise |
-
-**What concise ON changes.** Concise mode injects a per-quantization terse
-system prompt (the same standard prompt for 4/6/8-bit) into every
-request. Answers lead with the answer and skip preamble, restated questions,
-filler, and closing codas such as "let me know if you have questions". A
-system prompt you send yourself is kept, with the concise prompt appended
-after it.
-
-**What concise ON does NOT change.** Decode rate is unchanged — tok/s is bound
-by memory bandwidth, not by the prompt. Concise saves answer *length*, so the
-time-to-answer shrinks with it: measured on M3 24 GB (temp 0, 8 chat
-questions) answer tokens drop 55-61% per quant, roughly doubling the
-wall-clock work per answer.
-
-**When to leave it off.** Terseness can clip nuance on complex answers (the
-sampled 4-bit prompt occasionally dropped actionable detail). If an answer
-seems too clipped, use the plain script instead. The CLI offers the same
-choice per run (`--concise`); the Mac app exposes a concise-mode setting.
-
-The server also implements the OpenAI Responses API (`POST /v1/responses`),
-so current Codex CLI versions connect directly (`base_url` +
-`wire_api = "responses"`) with no proxy — see the wiki server guide.
-
 ## Coding CLI launcher
 
-`tools/nvmai-cli.sh` is the fastest way to get a coding CLI talking to NVMAI:
-one command builds nothing, starts a fresh server, wires the CLI's provider
-config, and hands the terminal over.
+`tools/nvmai-cli.sh` is the single launcher for getting a coding CLI talking
+to NVMAI: one command builds nothing, starts a fresh server, wires the CLI's
+provider config, and hands the terminal over. It drives the per-quantization
+launch scripts (`tools/launch_{4,6,8}bit[_concise].sh`) internally — pick a
+quantization and mode and it runs the matching `launch_${quant}${mode}.sh`,
+which checks the binary and model, stops any stale `NVMAIServer`, and starts
+a fresh server bound to `127.0.0.1` (4-bit → 8081, 6-bit → 8082, 8-bit →
+8083).
 
 ```bash
 tools/nvmai-cli.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
@@ -162,6 +130,25 @@ Each run stops any running `NVMAIServer`, starts a fresh one on the chosen
 quantization, points the selected CLI at the chosen model (`-fast` alias or
 base model), and execs into the CLI's TUI. Ctrl-C on the server ends the
 session.
+
+### Concise mode
+
+**What concise ON changes.** Concise mode injects a per-quantization terse
+system prompt (the same standard prompt for 4/6/8-bit) into every request.
+Answers lead with the answer and skip preamble, restated questions, filler,
+and closing codas such as "let me know if you have questions". A system
+prompt you send yourself is kept, with the concise prompt appended after it.
+
+**What concise ON does NOT change.** Decode rate is unchanged — tok/s is bound
+by memory bandwidth, not by the prompt. Concise saves answer *length*, so the
+time-to-answer shrinks with it: measured on M3 24 GB (temp 0, 8 chat
+questions) answer tokens drop 55-61% per quant, roughly doubling the
+wall-clock work per answer.
+
+**When to leave it off.** Terseness can clip nuance on complex answers (the
+sampled 4-bit prompt occasionally dropped actionable detail). If an answer
+seems too clipped, launch with `default` mode instead. The Mac app exposes a
+concise-mode setting.
 
 ### Parameters
 
@@ -186,3 +173,7 @@ session.
 The launcher defaults to the full model (agentic tool loop) with reasoning
 on; choose `fast` for seconds-per-answer chat and `nothink` for direct
 answers without the reasoning pass.
+
+The server also implements the OpenAI Responses API (`POST /v1/responses`),
+so current Codex CLI versions connect directly (`base_url` +
+`wire_api = "responses"`) with no proxy — see the wiki server guide.
