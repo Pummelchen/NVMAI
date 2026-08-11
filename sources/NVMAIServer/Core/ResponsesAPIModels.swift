@@ -161,10 +161,13 @@ public enum ResponsesAPIMapper {
             streamOptions: nil,
             temperature: request.temperature ?? 0.2,
             topP: request.topP,
-            // Bound generation when the client does not send
-            // max_output_tokens (Codex omits it) so a runaway reply cannot
-            // hog the server for many minutes on a slow local model.
-            maxTokens: request.maxOutputTokens ?? 2_048,
+            // Codex and OpenCode omit max_output_tokens, so the default here
+            // is the effective cap for them. Bound it generously (16k) so
+            // long reasoning + answer generations can run to completion;
+            // maxNewTokens is still clamped to the available context in
+            // ServerInference. The previous 2,048 default truncated answers
+            // whose thinking pass alone consumed the whole budget.
+            maxTokens: request.maxOutputTokens ?? 16_384,
             maxCompletionTokens: nil,
             stop: nil,
             seed: nil,
