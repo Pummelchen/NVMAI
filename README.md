@@ -101,35 +101,43 @@ baseline hit the cap, so its true total is higher). Full measurement history:
 | Concise mode — answer tokens (8-question set) | 3,635+ → **1,570** (−57%) |
 | — concise prompt | standard (8-bit) |
 
-## Coding CLI launcher
+## Launchers
 
-`tools/nvmai-cli.sh` is the single launcher for getting a coding CLI talking
-to NVMAI: one command builds nothing, starts a fresh server, wires the CLI's
-provider config, and hands the terminal over. It drives the per-quantization
-launch scripts (`tools/launch_{4,6,8}bit[_concise].sh`) internally — pick a
-quantization and mode and it runs the matching `launch_${quant}${mode}.sh`,
-which checks the binary and model, stops any stale `NVMAIServer`, and starts
-a fresh server bound to `127.0.0.1` (4-bit → 8081, 6-bit → 8082, 8-bit →
-8083).
+`tools/` ships two launchers that ask the same five questions (CLI, model,
+quantization, mode, reasoning):
 
-```bash
-tools/nvmai-cli.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
-```
+- **`tools/server_launcher.sh`** starts the NVMAIServer only, in the
+  foreground (Ctrl-C to stop). The quantization/mode/reasoning answers drive
+  the server; the CLI/model answers print the matching `tools/cli_launcher.sh`
+  command to connect a coding CLI afterwards. The server binds to
+  `127.0.0.1`: 4-bit → 8081, 6-bit → 8082, 8-bit → 8083.
+- **`tools/cli_launcher.sh`** starts any of the three coding CLIs (Codex,
+  Qwen Code, OpenCode): it stops any stale `NVMAIServer`, starts a fresh one
+  via `server_launcher.sh` for the chosen quantization/mode/reasoning, wires
+  the CLI's provider config to the chosen model, and execs into the CLI's
+  TUI. The server keeps running after the CLI exits.
 
-Run it with no arguments and it asks five questions in order — CLI, model,
-quantization, mode, reasoning. Every choice has a default (**codex / full /
-4-bit / default / thinking on**), so pressing Enter through all prompts
-launches that configuration. Or pass them positionally, e.g.:
+Both accept the same positional arguments:
 
 ```bash
-tools/nvmai-cli.sh codex fast 4 concise nothink   # Codex, fast alias, 4-bit, terse, no reasoning
-tools/nvmai-cli.sh qwen full 6 default think      # Qwen Code, full agent, 6-bit, full answers, reasoning
+tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
+tools/cli_launcher.sh    [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
 ```
 
-Each run stops any running `NVMAIServer`, starts a fresh one on the chosen
-quantization, points the selected CLI at the chosen model (`-fast` alias or
-base model), and execs into the CLI's TUI. Ctrl-C on the server ends the
-session.
+Run either with no arguments and it asks the same five questions in order —
+CLI, model, quantization, mode, reasoning. Every choice has a default
+(**codex / full / 4-bit / default / thinking on**), so pressing Enter through
+all prompts launches that configuration. Or pass them positionally, e.g.:
+
+```bash
+tools/cli_launcher.sh codex fast 4 concise nothink   # Codex, fast alias, 4-bit, terse, no reasoning
+tools/cli_launcher.sh qwen full 6 default think      # Qwen Code, full agent, 6-bit, full answers, reasoning
+tools/server_launcher.sh qwen fast 4 concise think   # server only, foreground (Ctrl-C to stop)
+```
+
+Each `cli_launcher.sh` run stops any running `NVMAIServer`, starts a fresh
+one on the chosen quantization, points the selected CLI at the chosen model
+(`-fast` alias or base model), and execs into the CLI's TUI.
 
 ### Concise mode
 
@@ -164,13 +172,13 @@ concise-mode setting.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `NVMAI_PORT` | `8081` | Port for the server (and the CLI configs it writes) |
+| `NVMAI_PORT` | per-quant (4-bit → 8081, 6-bit → 8082, 8-bit → 8083) | Port for the server (and the CLI configs it writes) |
 | `CODEX_HOME_NVMAI` | `~/.codex-nvmai` | Where the Codex config is written (dedicated, so your real `~/.codex` is untouched) |
 | `QWEN_HOME_NVMAI` | `~/.qwen-nvmai` | Where the Qwen Code settings are written (dedicated home, real `~/.qwen` untouched) |
 | `CODEX`, `QWEN`, `OPENCODE` | default install paths | Override the CLI binary to launch |
 | `NVMAI_STRIP_TAGS` | `system-reminder` | Comma-separated in-message scaffolding tags the fast alias strips |
 
-The launcher defaults to the full model (agentic tool loop) with reasoning
+Both launchers default to the full model (agentic tool loop) with reasoning
 on; choose `fast` for seconds-per-answer chat and `nothink` for direct
 answers without the reasoning pass.
 

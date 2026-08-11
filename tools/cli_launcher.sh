@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # Launch a coding CLI against NVMAI in the macOS terminal (interactive TUI).
+# Asks the same five question blocks as tools/server_launcher.sh — CLI,
+# model, quantization, mode, reasoning — and uses all of them: it stops any
+# stale NVMAIServer, starts a fresh one via tools/server_launcher.sh for the
+# chosen quantization/mode/reasoning, wires the CLI's provider config to the
+# chosen model (the "<model>-fast" alias strips CLI boilerplate before
+# prefill for seconds-per-answer chat speed; the base model keeps the CLI's
+# agentic tool loop), then hands the terminal over to the CLI.
 #
-#   tools/nvmai-cli.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
+#   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
 #
 # With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
 # (fast/full), then the quantization, then default/concise mode, then
 # reasoning off/on. Every choice has a default (codex / full / 4-bit /
 # default / thinking on), so pressing Enter through the prompts launches
-# that configuration. Stops any running NVMAIServer, starts a fresh one on
-# 8081 in the chosen quant/mode, wires the CLI's provider config to the
-# chosen model (the "<model>-fast" alias strips CLI boilerplate before
-# prefill for seconds-per-answer chat speed; the base model keeps the CLI's
-# agentic tool loop), then hands the terminal over to the CLI.
+# that configuration. The server keeps running after the CLI exits; the next
+# launcher run stops it and starts fresh.
 # Overrides: NVMAI_PORT, CODEX_HOME_NVMAI, QWEN_HOME_NVMAI, CODEX, QWEN,
 # OPENCODE, NVMAI_STRIP_TAGS (comma-separated scaffolding tag list).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
-PORT="${NVMAI_PORT:-8081}"
-BASE_URL="http://127.0.0.1:${PORT}/v1"
 MODEL="qwen3.6-35b-a3b"
 # The "<model>-fast" alias serves the same weights with the CLI-strip
 # heuristic enabled per request (chat-only speed): system prompts, tool
@@ -50,8 +52,8 @@ esac
 # --- 2) model: full (default, agentic tool loop) or fast (strip boilerplate) ---
 if [[ -n "${2:-}" ]]; then
   case "$2" in
-    fast|1) launch_model="$FAST_MODEL" ;;
-    full|0) launch_model="$MODEL" ;;
+    fast|1) launch_model="$FAST_MODEL" ; model_word=fast ;;
+    full|0) launch_model="$MODEL" ; model_word=full ;;
     *) echo "unknown model: $2 (fast|full)" >&2; exit 2 ;;
   esac
 else
@@ -62,8 +64,8 @@ else
   printf "Choice [1-2] (default 1): "
   read -r model_choice || exit 1
   case "${model_choice:-1}" in
-    1) launch_model="$MODEL" ;;
-    2) launch_model="$FAST_MODEL" ;;
+    1) launch_model="$MODEL" ; model_word=full ;;
+    2) launch_model="$FAST_MODEL" ; model_word=fast ;;
     *) echo "invalid choice: $model_choice" >&2; exit 2 ;;
   esac
 fi
@@ -95,8 +97,8 @@ esac
 # --- 4) NVMAI mode: default (default) or concise (terse answers) ---
 if [[ -n "${4:-}" ]]; then
   case "$4" in
-    default|1) mode_suffix="" ;;
-    concise|2) mode_suffix="_concise" ;;
+    default|1) mode_suffix="" ; mode_word=default ;;
+    concise|2) mode_suffix="_concise" ; mode_word=concise ;;
     *) echo "unknown mode: $4 (default|concise)" >&2; exit 2 ;;
   esac
 else
@@ -107,18 +109,17 @@ else
   printf "Choice [1-2] (default 1): "
   read -r mode_choice || exit 1
   case "${mode_choice:-1}" in
-    1) mode_suffix="" ;;
-    2) mode_suffix="_concise" ;;
+    1) mode_suffix="" ; mode_word=default ;;
+    2) mode_suffix="_concise" ; mode_word=concise ;;
     *) echo "invalid choice: $mode_choice" >&2; exit 2 ;;
   esac
 fi
-launch_script="launch_${quant}${mode_suffix}.sh"
 
 # --- 5) reasoning: on (default) or off (direct answers) ---
 if [[ -n "${5:-}" ]]; then
   case "$5" in
-    nothink|0|off) thinking="" ;;
-    think|1|on) thinking="1" ;;
+    nothink|0|off) thinking="" ; think_word=nothink ;;
+    think|1|on) thinking="1" ; think_word=think ;;
     *) echo "unknown reasoning: $5 (nothink|think)" >&2; exit 2 ;;
   esac
 else
@@ -129,11 +130,19 @@ else
   printf "Choice [1-2] (default 1): "
   read -r think_choice || exit 1
   case "${think_choice:-1}" in
-    1) thinking="1" ;;
-    2) thinking="" ;;
+    1) thinking="1" ; think_word=think ;;
+    2) thinking="" ; think_word=nothink ;;
     *) echo "invalid choice: $think_choice" >&2; exit 2 ;;
   esac
 fi
+
+# --- resolve quantization -> port (server_launcher.sh picks the same) ---
+case "$quant" in
+  4bit) PORT="${NVMAI_PORT:-8081}" ;;
+  6bit) PORT="${NVMAI_PORT:-8082}" ;;
+  8bit) PORT="${NVMAI_PORT:-8083}" ;;
+esac
+BASE_URL="http://127.0.0.1:${PORT}/v1"
 
 # --- clean slate: stop any running NVMAIServer, then start fresh ---
 if pgrep -x NVMAIServer >/dev/null 2>&1; then
@@ -148,18 +157,15 @@ if pgrep -x NVMAIServer >/dev/null 2>&1; then
     exit 1
   fi
 fi
-echo "Starting NVMAIServer ($launch_script)..."
-# Reasoning mode: on (default) or off. The server reads this once at load;
-# on opens a <think> block in the generation prompt so the model reasons
-# before answering (costs wall time and tokens); off gives direct answers.
-export NVMAI_THINKING_MODE="${thinking:-1}"
-nohup "$BASE_DIR/tools/$launch_script" >/tmp/nvmai-cli-server.log 2>&1 &
+echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
+nohup "$BASE_DIR/tools/server_launcher.sh" "$cli" "$model_word" "$quant" "$mode_word" "$think_word" >/tmp/nvmai-server.log 2>&1 &
 for _ in $(seq 1 120); do
   curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 && break
   sleep 5
 done
 curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 || {
   echo "ERROR: NVMAIServer did not come up on port $PORT" >&2
+  echo "Check /tmp/nvmai-server.log" >&2
   exit 1
 }
 echo "NVMAIServer ready at $BASE_URL (model $launch_model; base $MODEL)"
