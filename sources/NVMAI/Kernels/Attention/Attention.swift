@@ -23,6 +23,7 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 ///   - `v`   : same shape as `k`. Full-layer K and V must remain distinct after
 ///             their separate per-head normalization and RoPE paths.
 ///   - `out` : `[numQHeads, headDim]`
+// Janeway — “Break off your pursuit or we'll open fire.”
 final class Attention {
     private let ctx: MetalContext
     private let psoPartial: MTLComputePipelineState

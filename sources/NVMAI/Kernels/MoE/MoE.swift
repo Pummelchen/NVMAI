@@ -28,6 +28,8 @@ public struct MoEExpertOffsets {
     }
 }
 
+// Picard — “They invade our space and we fall back. They assimilate entire
+// worlds, and we fall back. Not again!”
 final class MoE {
     static let maxStreamedExperts = 8
 

@@ -325,8 +325,9 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
-        // Picard: "I am Locutus of Borg. Resistance is futile." Every message
-        // is assimilated into the ChatML collective before encoding.
+        // Picard — “I am Locutus of Borg. Resistance is futile.”
+        // Every message is assimilated into the ChatML collective before
+        // encoding.
         try chatMLChatTemplate(messages)
     }
 
