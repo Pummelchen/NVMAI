@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Launch a coding CLI against NVMAI in the macOS terminal (interactive TUI).
 #
-#   tools/nvmai-cli.sh codex [default|concise]
-#   tools/nvmai-cli.sh qwen [default|concise]
-#   tools/nvmai-cli.sh opencode [default|concise]
+#   tools/nvmai-cli.sh [4|6|8] [codex|qwen|opencode] [default|concise]
 #
-# Without arguments, prompts 1-2-3 for the CLI and then default/concise mode.
-# Stops any running NVMAIServer, starts a fresh one on 8081 in the chosen
-# mode, wires the CLI's provider config to it, then hands the terminal over
-# to the CLI. Overrides: NVMAI_PORT, CODEX, QWEN, OPENCODE.
+# With no arguments, prompts 1-2-3 for the quantization, then the CLI, then
+# default/concise mode. Stops any running NVMAIServer, starts a fresh one on
+# 8081 in the chosen quant/mode, wires the CLI's provider config to it, then
+# hands the terminal over to the CLI.
+# Overrides: NVMAI_PORT, CODEX, QWEN, OPENCODE.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,19 +16,44 @@ PORT="${NVMAI_PORT:-8081}"
 BASE_URL="http://127.0.0.1:${PORT}/v1"
 MODEL="qwen3.6-35b-a3b"
 
-cli="${1:-}"
+# --- 1) quantization: 4-bit / 6-bit / 8-bit ---
+quant="${1:-}"
+if [[ -z "$quant" ]]; then
+  echo "Which quantization?"
+  echo "  1) 4-bit"
+  echo "  2) 6-bit"
+  echo "  3) 8-bit"
+  printf "Choice [1-3]: "
+  read -r quant_choice || exit 1
+  case "$quant_choice" in
+    1) quant=4bit ;;
+    2) quant=6bit ;;
+    3) quant=8bit ;;
+    *) echo "invalid choice: $quant_choice" >&2; exit 2 ;;
+  esac
+fi
+case "$quant" in
+  4|4bit) quant=4bit ;;
+  6|6bit) quant=6bit ;;
+  8|8bit) quant=8bit ;;
+  *) echo "unknown quantization: $quant (4|6|8)" >&2; exit 2 ;;
+esac
+
+# --- 2) coding CLI: codex / qwen / opencode ---
+cli="${2:-}"
 if [[ -z "$cli" ]]; then
+  echo ""
   echo "Which coding CLI do you want to launch?"
   echo "  1) Codex"
   echo "  2) Qwen Code"
   echo "  3) OpenCode"
   printf "Choice [1-3]: "
-  read -r choice || exit 1
-  case "$choice" in
+  read -r cli_choice || exit 1
+  case "$cli_choice" in
     1) cli=codex ;;
     2) cli=qwen ;;
     3) cli=opencode ;;
-    *) echo "invalid choice: $choice" >&2; exit 2 ;;
+    *) echo "invalid choice: $cli_choice" >&2; exit 2 ;;
   esac
 fi
 case "$cli" in
@@ -37,12 +61,12 @@ case "$cli" in
   *) echo "unknown CLI: $cli (codex|qwen|opencode)" >&2; exit 2 ;;
 esac
 
-# --- NVMAI mode: default or concise (terse answers) ---
-if [[ -n "${2:-}" ]]; then
-  case "$2" in
-    default|1) launch_script="launch_4bit.sh" ;;
-    concise|2) launch_script="launch_4bit_concise.sh" ;;
-    *) echo "unknown mode: $2 (default|concise)" >&2; exit 2 ;;
+# --- 3) NVMAI mode: default or concise (terse answers) ---
+if [[ -n "${3:-}" ]]; then
+  case "$3" in
+    default|1) mode_suffix="" ;;
+    concise|2) mode_suffix="_concise" ;;
+    *) echo "unknown mode: $3 (default|concise)" >&2; exit 2 ;;
   esac
 else
   echo ""
@@ -52,11 +76,12 @@ else
   printf "Choice [1-2] (default 1): "
   read -r mode_choice || exit 1
   case "${mode_choice:-1}" in
-    1) launch_script="launch_4bit.sh" ;;
-    2) launch_script="launch_4bit_concise.sh" ;;
+    1) mode_suffix="" ;;
+    2) mode_suffix="_concise" ;;
     *) echo "invalid choice: $mode_choice" >&2; exit 2 ;;
   esac
 fi
+launch_script="launch_${quant}${mode_suffix}.sh"
 
 # --- clean slate: stop any running NVMAIServer, then start fresh ---
 if pgrep -x NVMAIServer >/dev/null 2>&1; then
