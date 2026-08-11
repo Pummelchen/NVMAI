@@ -161,13 +161,10 @@ public enum ResponsesAPIMapper {
             streamOptions: nil,
             temperature: request.temperature ?? 0.2,
             topP: request.topP,
-            // Codex and OpenCode omit max_output_tokens, so the default here
-            // is the effective cap for them. Bound it generously (16k) so
-            // long reasoning + answer generations can run to completion;
-            // maxNewTokens is still clamped to the available context in
-            // ServerInference. The previous 2,048 default truncated answers
-            // whose thinking pass alone consumed the whole budget.
-            maxTokens: request.maxOutputTokens ?? 16_384,
+            // Codex and OpenCode omit max_output_tokens; forward nil so the
+            // chat validator applies its context-bounded default (no
+            // artificial output cap) instead of a fixed token budget.
+            maxTokens: request.maxOutputTokens,
             maxCompletionTokens: nil,
             stop: nil,
             seed: nil,

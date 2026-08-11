@@ -338,7 +338,11 @@ public enum OpenAIRequestValidator {
             throw invalid("repetition_penalty must be positive",
                           "repetition_penalty", "invalid_value")
         }
-        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? 4096
+        // No artificial output cap: when the client omits max_tokens /
+        // max_completion_tokens, generation is bounded only by the session's
+        // configured context window (further clamped to the available context
+        // at inference time), so the model replies until it is done.
+        let maximum = request.maxCompletionTokens ?? request.maxTokens ?? maxContext
         guard maximum > 0 else {
             throw invalid("maximum completion tokens must be positive",
                           request.maxCompletionTokens != nil ? "max_completion_tokens" : "max_tokens",
