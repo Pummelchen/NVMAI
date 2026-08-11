@@ -3,10 +3,10 @@ import Testing
 @testable import NVMAI
 
 @Suite struct ConcisePromptTests {
-    @Test func promptSelectionIsPerQuantization() {
+    @Test func promptSelectionIsConsistentAcrossQuantizations() {
         #expect(ConcisePrompt.prompt(forRoutedExpertBits: 4) == ConcisePrompt.standard)
         #expect(ConcisePrompt.prompt(forRoutedExpertBits: 6) == ConcisePrompt.standard)
-        #expect(ConcisePrompt.prompt(forRoutedExpertBits: 8) == ConcisePrompt.strengthened)
+        #expect(ConcisePrompt.prompt(forRoutedExpertBits: 8) == ConcisePrompt.standard)
         #expect(ConcisePrompt.standard != ConcisePrompt.strengthened)
     }
 

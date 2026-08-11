@@ -23,7 +23,7 @@ NVMAI 3.0's concise mode is derived from the
 [Nail-Qwen3.6-35B-A3B](https://huggingface.co/peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-MLX)
 chat template by [peculiar-ragdoll](https://huggingface.co/peculiar-ragdoll),
 which force-appends a terseness prompt to every request. Measured on NVMAI's
-own 4/6/8-bit builds, the built-in prompts cut answer tokens by 55-79% with no
+own 4/6/8-bit builds, the built-in prompts cut answer tokens by 55-61% with no
 measurable correctness loss on the sampled questions.
 
 ## FAQ
@@ -77,8 +77,8 @@ is higher). Full measurement history:
 | Long-gen 512-token (code-gen) | 3.66 tok/s |
 | Throughput envelope (digit / count / essay / coding) | 5.56 / 5.33 / 4.90 / 3.90 tok/s |
 | 2×2 cache × MTP matrix (off×off / on×off / off×on) | 3.19 / 3.55 / 3.15 tok/s |
-| Concise mode — answer tokens (8-question set) | 3,635+ → **759** (−79%) |
-| — concise prompt | strengthened (8-bit) |
+| Concise mode — answer tokens (8-question set) | 3,635+ → **1,570** (−57%) |
+| — concise prompt | standard (8-bit) |
 
 ## Launch scripts
 
@@ -96,7 +96,7 @@ foreground (Ctrl-C to stop). The server binds to `127.0.0.1`.
 | `launch_8bit.sh` / `launch_8bit_concise.sh` | 8-bit | 8083 | default / concise |
 
 **What concise ON changes.** Concise mode injects a per-quantization terse
-system prompt (standard for 4/6-bit, strengthened for 8-bit) into every
+system prompt (the same standard prompt for 4/6/8-bit) into every
 request. Answers lead with the answer and skip preamble, restated questions,
 filler, and closing codas such as "let me know if you have questions". A
 system prompt you send yourself is kept, with the concise prompt appended
@@ -105,8 +105,8 @@ after it.
 **What concise ON does NOT change.** Decode rate is unchanged — tok/s is bound
 by memory bandwidth, not by the prompt. Concise saves answer *length*, so the
 time-to-answer shrinks with it: measured on M3 24 GB (temp 0, 8 chat
-questions) answer tokens drop 55-79% per quant, roughly doubling to tripling
-the wall-clock work per answer.
+questions) answer tokens drop 55-61% per quant, roughly doubling the
+wall-clock work per answer.
 
 **When to leave it off.** Terseness can clip nuance on complex answers (the
 sampled 4-bit prompt occasionally dropped actionable detail). If an answer

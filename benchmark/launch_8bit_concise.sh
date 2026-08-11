@@ -26,7 +26,7 @@ echo " NVMAIServer — 8-bit + concise + cache ON + MTP OFF"
 echo "============================================================"
 echo " Port:      $PORT"
 echo " Model:     $MODEL"
-echo " Concise:   on (strengthened 8-bit prompt)"
+echo " Concise:   on (standard 8-bit prompt)"
 echo "============================================================"
 echo ""
 
