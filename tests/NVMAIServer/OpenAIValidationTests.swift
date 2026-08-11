@@ -187,7 +187,7 @@ struct OpenAIValidationTests {
                 == .object(["child-key": .integer(7)]))
     }
 
-    @Test func ambiguousParameterKeysFailValidation() throws {
+    @Test func freeFormParameterNamesAreAccepted() throws {
         let data = Data(#"""
         {
           "model":"m",
@@ -208,9 +208,10 @@ struct OpenAIValidationTests {
         }
         """#.utf8)
         let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
-        }
+        // S-audit: tool parameter names are deliberately free-form (only the
+        // schema structure is validated), even inside allOf compositions.
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        #expect(validated.tools.count == 1)
     }
 }
 
