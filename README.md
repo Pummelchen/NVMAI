@@ -139,16 +139,6 @@ Each `cli_launcher.sh` run stops any running `NVMAIServer`, starts a fresh
 one on the chosen quantization, points the selected CLI at the chosen model
 (`-fast` alias or base model), and execs into the CLI's TUI.
 
-### Env overrides
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `NVMAI_PORT` | per-quant (4-bit → 8081, 6-bit → 8082, 8-bit → 8083) | Port for the server (and the CLI configs it writes) |
-| `CODEX_HOME_NVMAI` | `~/.codex-nvmai` | Where the Codex config is written (dedicated, so your real `~/.codex` is untouched) |
-| `QWEN_HOME_NVMAI` | `~/.qwen-nvmai` | Where the Qwen Code settings are written (dedicated home, real `~/.qwen` untouched) |
-| `CODEX`, `QWEN`, `OPENCODE` | default install paths | Override the CLI binary to launch |
-| `NVMAI_STRIP_TAGS` | `system-reminder` | Comma-separated in-message scaffolding tags the fast alias strips |
-
 Both launchers default to the full model (agentic tool loop) with reasoning
 on; choose `fast` for seconds-per-answer chat and `nothink` for direct
 answers without the reasoning pass.
