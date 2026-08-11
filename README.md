@@ -1,15 +1,24 @@
 # NVMAI
 
+**Answers in seconds, not minutes.** NVMAI v3.3 introduces a **10×–65×
+reduction in response time** for coding CLIs — Codex, Qwen Code, and
+OpenCode — with the new `<model>-fast` model alias. Same model, same weights,
+same answers: the CLIs' agent boilerplate is stripped before prefill, so a
+question that took minutes now answers in seconds.
+
+**The Paris test** — "What is the capital of France?" (4-bit, wall clock):
+
+| CLI | Base model | `-fast` alias | Speed-up |
+| --- | ---: | ---: | --- |
+| Codex `exec` | ~250 s | 24.6 s | **~10×** |
+| OpenCode `run` | ~218 s | 5.9 s | **~37×** |
+| Qwen Code `-p` | >300 s (stalled) | 4.6 s | **>65×** |
+
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
-per-quantization terse system prompt for direct, lean answers.
-
-Every model also serves a `<model>-fast` alias (e.g.
-`qwen3.6-35b-a3b-fast`): the same weights, but coding-CLI boilerplate — agent
-system prompts, tool definitions, and in-message scaffolding — is stripped
-before prefill, turning multi-thousand-token requests into a few hundred
-tokens. Coding CLIs answer simple questions in seconds instead of minutes.
-See [Fast alias](#fast-alias) below.
+per-quantization terse system prompt for direct, lean answers. The fast alias
+is available on every quantization — see [Fast alias](#fast-alias) below for
+how it works and the full 4/6/8-bit matrix.
 
 ## References and credits
 
@@ -150,15 +159,10 @@ weights but applies a **CLI-strip heuristic** before encoding:
 - `<system-reminder>` blocks (or any tag in `NVMAI_STRIP_TAGS`) inside user
   messages are dropped.
 
-What remains is the real user/assistant conversation — a few hundred tokens.
-Measured on the "What is the capital of France?" question (4-bit), the fast
-alias answers in seconds where the base model takes minutes:
-
-| CLI | 4-bit base | 4-bit fast | Saving |
-| --- | --- | --- | --- |
-| Codex | ~250 s | 24.6 s | **~10× faster (≈90%)** |
-| OpenCode | ~218 s | 5.9 s | **~37× faster (≈97%)** |
-| Qwen Code | >300 s (stalled) | 4.6 s | **>65× faster (>98%)** |
+What remains is the real user/assistant conversation — a few hundred tokens
+instead of several thousand. That is the entire trick behind the 10×–65×
+speed-up in the opening table: same model, same weights, ~90-98% less prefill
+per request.
 
 **Full matrix (fast alias, "What is the capital of France?", wall clock).**
 Measured on M3 24 GB, macOS 26.6, Swift 6.3.3, commit 14b3f35 + fast-alias
