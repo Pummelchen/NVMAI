@@ -139,35 +139,6 @@ Each `cli_launcher.sh` run stops any running `NVMAIServer`, starts a fresh
 one on the chosen quantization, points the selected CLI at the chosen model
 (`-fast` alias or base model), and execs into the CLI's TUI.
 
-### Concise mode
-
-**What concise ON changes.** Concise mode injects a per-quantization terse
-system prompt (the same standard prompt for 4/6/8-bit) into every request.
-Answers lead with the answer and skip preamble, restated questions, filler,
-and closing codas such as "let me know if you have questions". A system
-prompt you send yourself is kept, with the concise prompt appended after it.
-
-**What concise ON does NOT change.** Decode rate is unchanged — tok/s is bound
-by memory bandwidth, not by the prompt. Concise saves answer *length*, so the
-time-to-answer shrinks with it: measured on M3 24 GB (temp 0, 8 chat
-questions) answer tokens drop 55-61% per quant, roughly doubling the
-wall-clock work per answer.
-
-**When to leave it off.** Terseness can clip nuance on complex answers (the
-sampled 4-bit prompt occasionally dropped actionable detail). If an answer
-seems too clipped, launch with `default` mode instead. The Mac app exposes a
-concise-mode setting.
-
-### Parameters
-
-| Argument | Choices (default) | What it does | Pro | Con |
-| --- | --- | --- | --- | --- |
-| CLI | `codex` (default), `qwen`, `opencode` | Which coding CLI to launch | Codex: OpenAI agent, tool loop; Qwen Code: full agent config; OpenCode: lightweight, easy model picker | Each CLI brings its own agent prompt; Qwen Code's auto-memory is disabled for speed |
-| Model | `full` (default), `fast` | `fast` = the `<model>-fast` alias (CLI boilerplate stripped, seconds-per-answer chat); `full` = the base model (keeps the CLI's agentic tool loop) | **fast:** 10×-65× wall-time reduction, ~90-98% less prefill; **full:** agent can read/edit files and run tools | **fast:** no tool calls (chat-only); **full:** multi-thousand-token prefill takes minutes |
-| Quantization | `4` (default), `6`, `8` | Which quantized model the server loads (4-bit → port 8081, 6-bit → 8082, 8-bit → 8083) | **4-bit:** fastest decode, smallest memory; **6-bit:** balance; **8-bit:** best fidelity | **4-bit:** most quantization error; **8-bit:** slowest and heaviest |
-| Mode | `default` (default), `concise` | Whether the server injects a terse-answer system prompt | **default:** full answers; **concise:** ~55-61% fewer answer tokens, near-identical correctness on sampled questions | **concise:** can clip nuance on complex answers; switch back to default if replies feel too short |
-| Reasoning | `think` (default), `nothink` | Whether the model reasons before answering | **think:** shows its work on hard questions | **think:** adds wall time and tokens; choose `nothink` for fast answers |
-
 ### Env overrides
 
 | Variable | Default | Purpose |
