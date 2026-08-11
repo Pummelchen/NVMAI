@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Launch a coding CLI against NVMAI in the macOS terminal (interactive TUI).
 #
-#   benchmark/nvmai-cli.sh codex
-#   benchmark/nvmai-cli.sh qwen
-#   benchmark/nvmai-cli.sh opencode
+#   tools/nvmai-cli.sh codex
+#   tools/nvmai-cli.sh qwen
+#   tools/nvmai-cli.sh opencode
 #
 # Starts the NVMAI server on 8081 if it isn't already running, wires the
 # CLI's provider config to it, then hands the terminal over to the CLI.
@@ -25,7 +25,7 @@ fi
 # --- ensure the NVMAI server is up ---
 if ! curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1; then
   echo "Starting NVMAIServer on port $PORT..."
-  nohup "$BASE_DIR/benchmark/launch_4bit.sh" >/tmp/nvmai-cli-server.log 2>&1 &
+  nohup "$BASE_DIR/tools/launch_4bit.sh" >/tmp/nvmai-cli-server.log 2>&1 &
   for _ in $(seq 1 120); do
     curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 && break
     sleep 5

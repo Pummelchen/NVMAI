@@ -86,7 +86,7 @@ is higher). Full measurement history:
 
 ## Launch scripts
 
-`benchmark/` ships one launch script per quantization, in two flavors: the
+`tools/` ships one launch script per quantization, in two flavors: the
 plain scripts start the server with the production defaults (prompt cache ON,
 MTP OFF); the `_concise` scripts add `NVMAI_CONCISE_MODE=1`. Build once
 (`swift build -c release`), then run a script — it checks the binary and
