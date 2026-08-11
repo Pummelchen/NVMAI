@@ -76,7 +76,8 @@ public final class AppModel {
         self.modelPathText = directory.path
         self.runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
-            prefillEnabled: settings.prefillEnabled)
+            prefillEnabled: settings.prefillEnabled,
+            conciseMode: settings.conciseMode)
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled

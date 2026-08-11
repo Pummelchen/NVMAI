@@ -296,7 +296,8 @@ import NVMAIDecodeProtocol
             prefillEnabled: options.prefillEnabled,
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: rdadvisePolicy,
-            modelVerification: modelVerification)
+            modelVerification: modelVerification,
+            conciseMode: options.conciseMode)
         try resolved.validate()
         return resolved
     }

@@ -82,6 +82,33 @@ import Testing
         #expect(!settings.prefillEnabled)
         #expect(settings.newlineShortcut == .return)
         #expect(settings.showPromptExamples)
+        #expect(!settings.conciseMode)
+    }
+
+    @Test func conciseModeDecodesAndRoundTrips() throws {
+        let data = Data("""
+        {
+          "version": 1,
+          "contextTokens": 4096,
+          "expertCacheSlots": 64,
+          "temperature": 0.2,
+          "topKEnabled": true,
+          "topK": 64,
+          "topPEnabled": true,
+          "topP": 0.95,
+          "prefillEnabled": true,
+          "conciseMode": true
+        }
+        """.utf8)
+
+        let settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
+        #expect(settings.conciseMode)
+
+        let roundTripped = try JSONDecoder().decode(
+            MacAppSettings.self,
+            from: JSONEncoder().encode(settings))
+        #expect(roundTripped.conciseMode)
+        #expect(roundTripped == settings)
     }
 
     @Test(arguments: AppNewlineShortcut.allCases)

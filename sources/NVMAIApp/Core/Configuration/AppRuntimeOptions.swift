@@ -60,19 +60,22 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var prefillChunkTokens: Int
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
+    public var conciseMode: Bool
 
     public init(expertCacheSlots: Int = 64,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
                 rdadvisePolicy: AppRDAdvicePolicy = .default,
-                modelVerification: AppModelVerification = .fullSha256) {
+                modelVerification: AppModelVerification = .fullSha256,
+                conciseMode: Bool = false) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
+        self.conciseMode = conciseMode
     }
 
     public func validate() throws {

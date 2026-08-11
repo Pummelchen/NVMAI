@@ -93,12 +93,21 @@ import Testing
         }
     }
 
+    @Test func conciseFlagParsesAndDefaultsOff() throws {
+        let on = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi", "--concise",
+        ])
+        #expect(on.concise)
+        let off = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(!off.concise)
+    }
+
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
-            "--rdadvise", "--expert-cache-slots", "--prefill-chunk",
+            "--rdadvise", "--expert-cache-slots", "--prefill-chunk", "--concise",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

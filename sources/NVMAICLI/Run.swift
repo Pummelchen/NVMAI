@@ -18,18 +18,41 @@ public func run(args: Args,
     do {
         let modelURL = URL(fileURLWithPath: args.model)
         let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
+        // Concise mode injects a per-quantization system prompt. The routed
+        // expert bit width comes from the manifest so the right prompt
+        // variant is selected before the full model load.
+        let concisePrompt: String?
+        if args.concise {
+            let bits = (try? ManifestReader.load(
+                directoryURL: modelURL,
+                expecting: .qwen36_35B_A3B).quant?.routedExpert.weightBits) ?? 4
+            concisePrompt = ConcisePrompt.prompt(forRoutedExpertBits: bits)
+        } else {
+            concisePrompt = nil
+        }
         let promptIds: [Int32]
         if let rawPrompt = args.prompt {
-            promptIds = tokenizer.encode(rawPrompt, addBOS: true)
+            if let concisePrompt {
+                let messages = ConcisePrompt.appendingSystemPrompt(
+                    concisePrompt,
+                    to: [GFTokenizer.Message(role: .user, content: rawPrompt)])
+                let rendered = try tokenizer.applyChatTemplate(messages)
+                promptIds = tokenizer.encode(rendered, addBOS: false)
+            } else {
+                promptIds = tokenizer.encode(rawPrompt, addBOS: true)
+            }
         } else if let messagesFile = args.messagesFile {
             let data = try Data(contentsOf: URL(fileURLWithPath: messagesFile),
                                 options: [.mappedIfSafe])
             let rows = try JSONDecoder().decode([MessageJSON].self, from: data)
-            let messages = try rows.map { row -> GFTokenizer.Message in
+            var messages = try rows.map { row -> GFTokenizer.Message in
                 guard let role = GFTokenizer.Role(rawValue: row.role) else {
                     throw GFTokenizerError.invalidChatTemplate("unsupported role \(row.role)")
                 }
                 return GFTokenizer.Message(role: role, content: row.content)
+            }
+            if let concisePrompt {
+                messages = ConcisePrompt.appendingSystemPrompt(concisePrompt, to: messages)
             }
             let rendered = try tokenizer.applyChatTemplate(messages)
             promptIds = tokenizer.encode(rendered, addBOS: false)

@@ -1,15 +1,16 @@
 # NVMAI
 
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
-and 8-bit quantization on Apple M1-M5 systems.
+and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
+per-quantization terse system prompt for direct, lean answers.
+
+## References and credits
 
 NVMAI is a focused fork of
 [drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare). The
 original project provides the bounded-memory inference architecture, streaming
 expert runtime, installer, CLI, Mac app, and local server on which this fork is
 built.
-
-## Qwen contribution credit
 
 The foundational Qwen 3.6 35B-A3B integration came from
 [upstream pull request #29](https://github.com/drumih/turbo-fieldfare/pull/29),
@@ -18,14 +19,23 @@ hybrid layer graph, gated-DeltaNet kernels and state, ChatML tokenization, tool
 call parsing, model repacking, product integration, and the original 4-bit
 runtime support. NVMAI merges that contribution and extends it further.
 
+NVMAI 3.0's concise mode is derived from the
+[Nail-Qwen3.6-35B-A3B](https://huggingface.co/peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-MLX)
+chat template by [peculiar-ragdoll](https://huggingface.co/peculiar-ragdoll),
+which force-appends a terseness prompt to every request. Measured on NVMAI's
+own 4/6/8-bit builds, the built-in prompts cut answer tokens by 55-79% with no
+measurable correctness loss on the sampled questions.
+
 ## FAQ
 
 - [Why more RAM doesn't speed up decode](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
 
-## Benchmark — NVMAI 2.0
+## Benchmark — NVMAI 3.0
 
-Measured on M3 24 GB, current 2.0 build (64 expert-cache slots + resident
-pin + MoE phase-1 rewrite). Full measurement history:
+Measured on M3 24 GB, current 3.0 build (64 expert-cache slots + resident
+pin + MoE phase-1 rewrite). Concise-mode answer tokens: temp 0, deterministic,
+8 chat questions, 512-token cap (`+` = baseline hit the cap, so its true total
+is higher). Full measurement history:
 [Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey).
 
 #### 4-bit
@@ -39,6 +49,8 @@ pin + MoE phase-1 rewrite). Full measurement history:
 | Long-gen 512-token (code-gen) | 7.32 tok/s |
 | Throughput envelope (digit / count / essay / coding) | 14.48 / 11.34 / 9.33 / 8.05 tok/s |
 | 2×2 cache × MTP matrix (off×off / on×off / off×on) | 9.58 / 11.17 / 6.77 tok/s |
+| Concise mode — answer tokens (8-question set) | 3,788+ → **1,480** (−61%) |
+| — concise prompt | standard (4-bit) |
 
 #### 6-bit
 
@@ -51,6 +63,8 @@ pin + MoE phase-1 rewrite). Full measurement history:
 | Long-gen 512-token (code-gen) | 4.54 tok/s |
 | Throughput envelope (digit / count / essay / coding) | 6.63 / 6.21 / 6.00 / 5.04 tok/s |
 | 2×2 cache × MTP matrix (off×off / on×off / off×on) | 4.44 / 4.34 / 4.12 tok/s |
+| Concise mode — answer tokens (8-question set) | 3,714+ → **1,680** (−55%) |
+| — concise prompt | standard (6-bit) |
 
 #### 8-bit
 
@@ -63,6 +77,8 @@ pin + MoE phase-1 rewrite). Full measurement history:
 | Long-gen 512-token (code-gen) | 3.66 tok/s |
 | Throughput envelope (digit / count / essay / coding) | 5.56 / 5.33 / 4.90 / 3.90 tok/s |
 | 2×2 cache × MTP matrix (off×off / on×off / off×on) | 3.19 / 3.55 / 3.15 tok/s |
+| Concise mode — answer tokens (8-question set) | 3,635+ → **759** (−79%) |
+| — concise prompt | strengthened (8-bit) |
 
 ## Documentation
 

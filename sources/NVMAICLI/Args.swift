@@ -18,6 +18,7 @@ public struct Args: Equatable, Sendable {
     public var seed: UInt64?
     public var stops: [String]
     public var quiet: Bool
+    public var concise: Bool
     public var expertCacheSlots: Int
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice?
@@ -34,6 +35,7 @@ public struct Args: Equatable, Sendable {
                 seed: UInt64? = nil,
                 stops: [String] = [],
                 quiet: Bool = false,
+                concise: Bool = false,
                 expertCacheSlots: Int = 32,
                 rdadvise: String = "default",
                 prefillChunk: PrefillChunkChoice? = nil) {
@@ -52,6 +54,7 @@ public struct Args: Equatable, Sendable {
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
+        self.concise = concise
     }
 }
 
@@ -107,6 +110,9 @@ extension Args {
                                 scratch. Allowed: 32, 64, 128, 256, 512,
                                 1024, 2048, 4096; auto covers the prompt with
                                 the smallest allowed chunk.
+      --concise                 Inject the per-quantization concise-mode
+                                system prompt (answers without preamble,
+                                filler, or closing codas).
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -124,6 +130,7 @@ extension Args {
         var seed: UInt64?
         var stops: [String] = []
         var quiet = false
+        var concise = false
         var expertCacheSlots = 64
         var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
@@ -136,6 +143,9 @@ extension Args {
                 throw ArgsError.helpRequested
             case "--quiet":
                 quiet = true
+                index += 1
+            case "--concise":
+                concise = true
                 index += 1
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
@@ -238,6 +248,7 @@ extension Args {
                     seed: seed,
                     stops: stops,
                     quiet: quiet,
+                    concise: concise,
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
                     prefillChunk: prefillChunk)

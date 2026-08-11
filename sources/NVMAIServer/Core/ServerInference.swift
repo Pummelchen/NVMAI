@@ -410,6 +410,9 @@ public actor ServerModelSession: ServerInferenceBackend {
     private var promptCache: ServerPromptCache
     private let promptStateStore: ServerPromptStateStore?
     private var activePromptCacheEntryID: UUID?
+    /// Concise-mode system prompt injected into every completion, or nil when
+    /// concise mode is off. Selected per quantization (see ConcisePrompt).
+    private nonisolated let concisePrompt: String?
 
     static func effectivePromptCacheMode(
         requested: ServerPromptCacheMode,
@@ -550,7 +553,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   promptCacheMode: effectivePromptCacheMode,
                                   promptCacheDomain: promptCacheDomain,
                                   promptCache: promptCache,
-                                  promptStateStore: promptStateStore)
+                                  promptStateStore: promptStateStore,
+                                  concisePrompt: conciseModeEnabled()
+                                    ? ConcisePrompt.prompt(for: model) : nil)
     }
 
     private init(context: MetalContext,
@@ -564,7 +569,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                  promptCacheMode: ServerPromptCacheMode,
                  promptCacheDomain: ServerPromptCacheDomain,
                  promptCache: ServerPromptCache,
-                 promptStateStore: ServerPromptStateStore?) {
+                 promptStateStore: ServerPromptStateStore?,
+                 concisePrompt: String?) {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
@@ -579,6 +585,16 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.promptCacheDomain = promptCacheDomain
         self.promptCache = promptCache
         self.promptStateStore = promptStateStore
+        self.concisePrompt = concisePrompt
+    }
+
+    /// NVMAI_CONCISE_MODE=1 (or "on") enables concise mode; the per-quant
+    /// system prompt is then injected into every completion.
+    private static func conciseModeEnabled() -> Bool {
+        switch ProcessInfo.processInfo.environment["NVMAI_CONCISE_MODE"]?.lowercased() {
+        case "1", "on", "true", "yes": return true
+        default: return false
+        }
     }
 
     public func generate(
@@ -613,8 +629,11 @@ public actor ServerModelSession: ServerInferenceBackend {
         let needsToolTemplate = usesToolTemplate(
             messages: request.messages,
             tools: request.tools)
+        let effectiveMessages = concisePrompt.map {
+            ConcisePrompt.appendingSystemPrompt($0, to: request.messages)
+        } ?? request.messages
         let promptIDs = try encodePrompt(
-            messages: request.messages,
+            messages: effectiveMessages,
             tools: request.tools,
             usesToolTemplate: needsToolTemplate)
         guard promptIDs.count < maxContext else {

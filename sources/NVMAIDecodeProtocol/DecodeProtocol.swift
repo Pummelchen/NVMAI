@@ -7,19 +7,22 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var prefillChunkTokens: Int
     public var rdadvisePolicy: String
     public var modelVerification: String
+    public var conciseMode: Bool
 
     public init(expertCacheSlots: Int = 32,
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 rdadvisePolicy: String = "default",
-                modelVerification: String = "full-sha256") {
+                modelVerification: String = "full-sha256",
+                conciseMode: Bool = false) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
         self.prefillChunkTokens = prefillChunkTokens
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
+        self.conciseMode = conciseMode
     }
 }
 

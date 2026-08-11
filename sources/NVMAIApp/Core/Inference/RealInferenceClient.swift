@@ -284,9 +284,20 @@ actor RealInferenceSession {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
 
-            let renderedPrompt = try tokenizer.applyChatTemplate([
+            var messages: [GFTokenizer.Message] = [
                 GFTokenizer.Message(role: .user, content: request.prompt)
-            ])
+            ]
+            if request.runtimeOptions.conciseMode {
+                // Concise mode injects the per-quantization system prompt.
+                // The routed expert bit width comes from the manifest.
+                let bits = (try? ManifestReader.load(
+                    directoryURL: request.modelDirectory,
+                    expecting: .qwen36_35B_A3B).quant?.routedExpert.weightBits) ?? 4
+                messages = ConcisePrompt.appendingSystemPrompt(
+                    ConcisePrompt.prompt(forRoutedExpertBits: bits),
+                    to: messages)
+            }
+            let renderedPrompt = try tokenizer.applyChatTemplate(messages)
             let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)
             progress.promptTokenCount = promptIds.count
             // D23: reject only when prompt + 1 exceeds the context, so a
