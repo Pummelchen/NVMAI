@@ -26,8 +26,6 @@ public enum ExpertStreamingMode: Sendable {
 /// Loaded `.gturbo/` model. Resident weights live behind one mmap'd
 /// `MTLBuffer`; routed expert weights live behind per-layer streaming
 /// backends opened lazily on first touch.
-// Picard — “We have not lost the Enterprise. We are not going to lose the
-// Enterprise. Not to the Borg. Not while I'm in command.”
 public struct Model {
     struct SharedTargetWeights: @unchecked Sendable {
         let embedding: TensorView

@@ -38,7 +38,6 @@ public struct KVView: @unchecked Sendable {
 /// 8 GB rule: storage is bounded by per-layer physical capacity, allocated
 /// once. `reset()` returns physical pages to the OS via `MADV_DONTNEED` so a
 /// finished generation does not keep its KV resident into the next turn.
-// Admiral Janeway — “Just enough to bring chaos to order.”
 public final class KVCacheManager {
     public let config: ArchConfig
     public let maxContext: Int

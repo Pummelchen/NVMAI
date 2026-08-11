@@ -2,7 +2,6 @@ import Metal
 
 /// Final BF16 RMSNorm, INT4 affine lm-head projection, and greedy argmax.
 /// The hot path writes one token ID without materializing vocab-sized logits.
-// Janeway — “Now, this is how I prefer the Borg: in pieces.”
 final class LMHeadChainInt4 {
     static let rowsPerThreadgroup = 8
 

@@ -65,8 +65,6 @@ public enum ExpertCachePolicy: String, Sendable {
 }
 
 /// `pread`-based routed-expert streamer with a fixed per-layer slot cache.
-// Janeway — “Is it? You've scanned our vessel. You know we can match your
-// firepower.”
 public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }

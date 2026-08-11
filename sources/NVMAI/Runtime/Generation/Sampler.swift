@@ -84,7 +84,6 @@ enum SamplePath: Sendable, Equatable {
 /// Truncation follows mlx-lm's sampler order: Top-P is computed from the
 /// model's full probability distribution, Top-K caps that surviving set, and
 /// temperature is applied only to the final categorical draw.
-// Janeway — “I don't know about the rest of you, but I feel lucky today.”
 final class Sampler {
     private let softcap: LogitSoftcapSoftmax
     private let sampleKernel: Sample

@@ -141,8 +141,6 @@ public struct MTPDecodeBatch: Sendable, Equatable {
 /// Target-verified greedy native-MTP session. The target always verifies the draft; a
 /// rejected draft is rolled back to the GPU checkpoint captured immediately
 /// after the confirmed boundary row.
-// Picard — “I am Locutus of Borg. Resistance is futile. Your life as it has
-// been is over.”
 public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
     @unchecked Sendable {
     public let target: RealForwardRunner

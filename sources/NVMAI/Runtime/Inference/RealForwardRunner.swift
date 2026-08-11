@@ -125,8 +125,6 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
-// Picard — “I will not sacrifice the Enterprise. Not again! The line must be
-// drawn here! This far, no further!”
 public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, @unchecked Sendable {
     private struct LayerSharedExpertProjections {
         let gate: SharedExpertInt8Proj
