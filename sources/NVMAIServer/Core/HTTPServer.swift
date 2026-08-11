@@ -123,6 +123,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
+    /// The OpenAI REST protocol/version identifier reported in the
+    /// `openai-version` response header on every API response. The REST API
+    /// major version is v1 (endpoints under /v1/...).
+    private static let openAIVersionHeader = ("openai-version", "2020-10-01")
+
     /// S4: cap on SSE frames waiting to be written; a slow reader that exceeds
     /// it fails the stream instead of growing the pending queue without bound.
     private static let maximumPendingStreamChunks = 512
@@ -550,6 +555,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         headers.add(name: "content-type", value: "text/event-stream")
         headers.add(name: "cache-control", value: "no-cache")
         headers.add(name: "connection", value: "keep-alive")
+        headers.add(name: Self.openAIVersionHeader.0, value: Self.openAIVersionHeader.1)
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         let contextBox = SendableContext(context)
         let promise = context.eventLoop.makePromise(of: Void.self)
@@ -742,6 +748,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         headers.add(name: "content-type", value: "text/event-stream")
         headers.add(name: "cache-control", value: "no-cache")
         headers.add(name: "connection", value: "keep-alive")
+        headers.add(name: Self.openAIVersionHeader.0, value: Self.openAIVersionHeader.1)
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         let contextBox = SendableContext(context)
         let promise = context.eventLoop.makePromise(of: Void.self)
@@ -979,6 +986,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             var headers = HTTPHeaders()
             headers.add(name: "content-type", value: "application/json")
             headers.add(name: "content-length", value: "0")
+            headers.add(name: Self.openAIVersionHeader.0, value: Self.openAIVersionHeader.1)
             contextBox.value.write(self.wrapOutboundOut(.head(
                 HTTPResponseHead(version: .http1_1, status: status, headers: headers))),
                 promise: nil)
@@ -1026,6 +1034,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             var headers = HTTPHeaders()
             headers.add(name: "content-type", value: "application/json")
             headers.add(name: "content-length", value: "\(data.count)")
+            headers.add(name: Self.openAIVersionHeader.0, value: Self.openAIVersionHeader.1)
             contextBox.value.write(self.wrapOutboundOut(.head(
                 HTTPResponseHead(version: .http1_1, status: status, headers: headers))),
                 promise: nil)
