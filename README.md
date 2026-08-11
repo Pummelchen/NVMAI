@@ -28,11 +28,11 @@ measurable correctness loss on the sampled questions.
 
 ## Changelog
 
-- [Release notes since 1.0](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
+[Changelog](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
 
 ## FAQ
 
-- [Why more RAM doesn't speed up decode](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
+[FAQ](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
 
 ## Benchmark — NVMAI 3.2
 
