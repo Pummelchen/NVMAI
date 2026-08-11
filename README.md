@@ -45,14 +45,6 @@ which force-appends a terseness prompt to every request. Measured on NVMAI's
 own 4/6/8-bit builds, the built-in prompts cut answer tokens by 55-61% with no
 measurable correctness loss on the sampled questions.
 
-## Changelog
-
-[Changelog](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
-
-## FAQ
-
-[FAQ](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
-
 ## Benchmarks
 
 **Decode-rate reference (NVMAI 3.2 build).** Measured on M3 24 GB, 3.2 build
@@ -189,9 +181,11 @@ The launcher defaults to the full model (agentic tool loop) with reasoning
 on; choose `fast` for seconds-per-answer chat and `nothink` for direct
 answers without the reasoning pass.
 
-## Documentation
+## Core Links
 
 - [Wiki](https://github.com/Pummelchen/NVMAI/wiki)
+- [Changelog](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
+- [FAQ](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
 
 NVMAI remains text-only. The server binds to `127.0.0.1` without authentication
 or TLS and must not be exposed through a proxy or tunnel.
