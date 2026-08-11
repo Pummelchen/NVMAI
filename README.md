@@ -110,9 +110,9 @@ quantization, mode, reasoning):
   foreground (Ctrl-C to stop). The quantization/mode/reasoning answers drive
   the server; the CLI/model answers print the matching `tools/cli_launcher.sh`
   command to connect a coding CLI afterwards. Once the server is up it
-  prints the OpenAI API setup (base URL, API key, model IDs) for pointing
-  any OpenAI-compatible client at it. The server binds to `127.0.0.1`:
-  4-bit → 8081, 6-bit → 8082, 8-bit → 8083.
+  prints the OpenAI API setup (base URL, API key, the chosen model ID) for
+  pointing any OpenAI-compatible client at it. The server binds to
+  `127.0.0.1`: 4-bit → 8081, 6-bit → 8082, 8-bit → 8083.
 - **`tools/cli_launcher.sh`** starts any of the three coding CLIs (Codex,
   Qwen Code, OpenCode): it stops any stale `NVMAIServer`, starts a fresh one
   via `server_launcher.sh` for the chosen quantization/mode/reasoning, wires

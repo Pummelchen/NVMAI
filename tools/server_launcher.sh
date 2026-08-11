@@ -14,8 +14,8 @@
 # default / thinking on), so pressing Enter through the prompts launches
 # that configuration. Stops any stale NVMAIServer on the port and starts a
 # fresh one in the foreground (Ctrl-C to stop). Once the server is up it
-# prints the OpenAI API setup (base URL, API key, model IDs) so any
-# OpenAI-compatible client can be pointed at it. The server binds to
+# prints the OpenAI API setup (base URL, API key, the chosen model ID) so
+# any OpenAI-compatible client can be pointed at it. The server binds to
 # 127.0.0.1.
 # Overrides: NVMAI_PORT, NVMAI_CONCISE_MODE, NVMAI_THINKING_MODE.
 set -euo pipefail
@@ -206,6 +206,16 @@ if ! curl -s --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; 
   exit 1
 fi
 
+# The API setup advertises the model chosen in the question flow — the fast
+# alias for chat-only speed, or the base model for the agentic tool loop.
+if [[ "$model_word" == fast ]]; then
+  api_model="$FAST_MODEL"
+  api_model_note="(fast alias, seconds-per-answer chat)"
+else
+  api_model="$MODEL"
+  api_model_note="(full agent loop)"
+fi
+
 echo ""
 echo "============================================================"
 echo " NVMAIServer ready — $quant + ${concise_label}cache ON + MTP OFF"
@@ -214,8 +224,7 @@ echo ""
 echo "OpenAI API setup — point any OpenAI-compatible client at this:"
 echo "  Base URL:   http://127.0.0.1:${PORT}/v1"
 echo "  API key:    any value (the server does not authenticate)"
-echo "  Models:     $MODEL       (full agent loop)"
-echo "              $FAST_MODEL  (fast alias, seconds-per-answer chat)"
+echo "  Model:      $api_model $api_model_note"
 echo "  Endpoints:  POST /v1/chat/completions, POST /v1/responses"
 echo ""
 echo "Or let the CLI launcher wire Codex / Qwen Code / OpenCode for you:"
