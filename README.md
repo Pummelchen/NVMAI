@@ -46,8 +46,9 @@ measurable correctness loss on the sampled questions.
 **Coding-CLI latency, fast alias.** See
 [Fast alias](#fast-alias) for the 3-CLI × 3-quant wall-clock matrix
 ("What is the capital of France?", `qwen3.6-35b-a3b-fast`): Codex 24.6-32.8 s,
-Qwen Code 4.6-12.8 s, OpenCode 5.9-10.2 s across 4/6/8-bit, versus ~250 s on
-the 4-bit base model.
+Qwen Code 4.6-12.8 s, OpenCode 5.9-10.2 s across 4/6/8-bit. On 4-bit that is
+**~10× (Codex), ~37× (OpenCode), and >65× (Qwen Code) faster than the base
+model** — a 90-98% reduction in wall time for the same question.
 
 **Decode-rate reference (NVMAI 3.2 build).** Measured on M3 24 GB, 3.2 build
 (64 expert-cache slots + resident pin + MoE phase-1 rewrite). Concise-mode
@@ -150,14 +151,14 @@ weights but applies a **CLI-strip heuristic** before encoding:
   messages are dropped.
 
 What remains is the real user/assistant conversation — a few hundred tokens.
-Measured on the "What is the capital of France?" question, the fast alias
-answers in seconds where the base model takes minutes:
+Measured on the "What is the capital of France?" question (4-bit), the fast
+alias answers in seconds where the base model takes minutes:
 
-| CLI | 4-bit base | 4-bit fast |
-| --- | --- | --- |
-| Codex | ~250 s | ~10 s |
-| OpenCode | ~218 s | ~8 s |
-| Qwen Code | >300 s (stalled) | ~7-25 s |
+| CLI | 4-bit base | 4-bit fast | Saving |
+| --- | --- | --- | --- |
+| Codex | ~250 s | 24.6 s | **~10× faster (≈90%)** |
+| OpenCode | ~218 s | 5.9 s | **~37× faster (≈97%)** |
+| Qwen Code | >300 s (stalled) | 4.6 s | **>65× faster (>98%)** |
 
 **Full matrix (fast alias, "What is the capital of France?", wall clock).**
 Measured on M3 24 GB, macOS 26.6, Swift 6.3.3, commit 14b3f35 + fast-alias
