@@ -13,7 +13,9 @@
 # reasoning off/on. Every choice has a default (codex / full / 4-bit /
 # default / thinking on), so pressing Enter through the prompts launches
 # that configuration. Stops any stale NVMAIServer on the port and starts a
-# fresh one in the foreground (Ctrl-C to stop). The server binds to
+# fresh one in the foreground (Ctrl-C to stop). Once the server is up it
+# prints the OpenAI API setup (base URL, API key, model IDs) so any
+# OpenAI-compatible client can be pointed at it. The server binds to
 # 127.0.0.1.
 # Overrides: NVMAI_PORT, NVMAI_CONCISE_MODE, NVMAI_THINKING_MODE.
 set -euo pipefail
@@ -21,6 +23,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
 BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
+MODEL="qwen3.6-35b-a3b"
+# The "<model>-fast" alias is served alongside the base model name by the
+# same server; the fast alias applies the CLI-strip heuristic per request
+# (chat-only speed) instead of the base model's agentic tool loop.
+FAST_MODEL="${MODEL}-fast"
 
 # --- 1) coding CLI: codex (default) / qwen / opencode ---
 cli="${1:-}"
@@ -182,17 +189,40 @@ if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   fi
 fi
 
+echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
+"$BINARY" \
+  --model "$MODEL_DIR" \
+  --port "$PORT" \
+  --prompt-cache-mode multi-prefix &
+server_pid=$!
+
+for _ in $(seq 1 120); do
+  curl -s --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1 && break
+  sleep 5
+done
+if ! curl -s --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; then
+  echo "ERROR: NVMAIServer did not come up on port $PORT" >&2
+  kill "$server_pid" 2>/dev/null || true
+  exit 1
+fi
+
+echo ""
 echo "============================================================"
-echo " NVMAIServer — $quant + ${concise_label}cache ON + MTP OFF"
+echo " NVMAIServer ready — $quant + ${concise_label}cache ON + MTP OFF"
 echo "============================================================"
-echo " Port:      $PORT"
-echo " Model:     $MODEL_DIR"
-echo " Reasoning: $think_word"
-echo " Next:      tools/cli_launcher.sh $cli $model_word $quant $mode_word $think_word"
+echo ""
+echo "OpenAI API setup — point any OpenAI-compatible client at this:"
+echo "  Base URL:   http://127.0.0.1:${PORT}/v1"
+echo "  API key:    any value (the server does not authenticate)"
+echo "  Models:     $MODEL       (full agent loop)"
+echo "              $FAST_MODEL  (fast alias, seconds-per-answer chat)"
+echo "  Endpoints:  POST /v1/chat/completions, POST /v1/responses"
+echo ""
+echo "Or let the CLI launcher wire Codex / Qwen Code / OpenCode for you:"
+echo "  tools/cli_launcher.sh $cli $model_word $quant $mode_word $think_word"
+echo ""
+echo "Model: $MODEL_DIR | Reasoning: $think_word | Ctrl-C to stop"
 echo "============================================================"
 echo ""
 
-exec "$BINARY" \
-  --model "$MODEL_DIR" \
-  --port "$PORT" \
-  --prompt-cache-mode multi-prefix
+wait "$server_pid"
