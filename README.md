@@ -53,7 +53,7 @@ measurable correctness loss on the sampled questions.
 
 [FAQ](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
 
-## Benchmark — NVMAI 3.3
+## Benchmarks
 
 **Coding-CLI latency, fast alias.** See the
 [wiki Fast alias page](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server#fast-alias)
