@@ -8,7 +8,9 @@ import NVMAI
 /// modeled. Text-only: image/video input items are rejected.
 public struct ResponsesAPIRequest: Decodable, Sendable {
     public struct Item: Decodable, Sendable {
-        public let type: String
+        /// Item kind. Optional: some clients (e.g. OpenCode) omit it and rely
+        /// on role+content / call_id+output to convey the kind.
+        public let type: String?
         public let role: String?
         /// String content or an array of parts ({type: input_text, text}).
         public let content: JSONValue?
@@ -20,6 +22,16 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
         enum CodingKeys: String, CodingKey {
             case type, role, content, name, arguments, output
             case callID = "call_id"
+        }
+
+        /// Resolved item kind: the explicit `type`, or inferred from the
+        /// present fields when the client omits it.
+        public var resolvedType: String? {
+            if let type { return type }
+            if role != nil && content != nil { return "message" }
+            if callID != nil && output != nil { return "function_call_output" }
+            if name != nil && arguments != nil { return "function_call" }
+            return nil
         }
     }
 
@@ -94,7 +106,12 @@ public enum ResponsesAPIMapper {
         }
         var messages: [OpenAIChatMessage] = []
         for item in request.input ?? [] {
-            switch item.type {
+            guard let kind = item.resolvedType else {
+                throw ServerRequestError.invalid(
+                    message: "unsupported input item; cannot determine its type",
+                    param: "input", code: "unsupported_input")
+            }
+            switch kind {
             case "message":
                 let role = item.role ?? "user"
                 let text = try messageText(item.content)

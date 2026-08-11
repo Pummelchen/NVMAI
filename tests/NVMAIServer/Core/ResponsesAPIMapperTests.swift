@@ -84,6 +84,29 @@ import Testing
         }
     }
 
+    @Test func inputItemsWithoutTypeAreInferred() throws {
+        // OpenCode omits the item "type" field and relies on role+content.
+        let request = try decode("""
+        {
+          "model": "m",
+          "input": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "hi"},
+            {"call_id": "call_1", "name": "bash", "arguments": "{}"},
+            {"call_id": "call_1", "output": "ok"}
+          ]
+        }
+        """)
+        let chat = try ResponsesAPIMapper.chatRequest(request)
+        #expect(chat.messages.count == 4)
+        #expect(chat.messages[0].role == "system")
+        #expect(chat.messages[1].role == "user")
+        #expect(chat.messages[2].role == "assistant")
+        #expect(chat.messages[2].toolCalls?.first?.function.name == "bash")
+        #expect(chat.messages[3].role == "tool")
+        #expect(chat.messages[3].toolCallID == "call_1")
+    }
+
     @Test func unsupportedInputItemIsRejected() throws {
         let request = try decode("""
         {"model": "m", "input": [{"type": "computer_call", "action": "click"}]}
