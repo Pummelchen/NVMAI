@@ -307,7 +307,11 @@ public actor ServerCoordinator {
         guard !shuttingDown else { throw CancellationError() }
         // S6: strictly fewer than queueLimit admitted requests; `<=` admitted
         // queueLimit + 1.
-        guard admittedCount < queueLimit else { throw ServerRequestError.queueFull }
+        guard admittedCount < queueLimit else {
+            // Picard: "They invade our space and we fall back. They
+            // assimilate entire worlds, and we fall back. Not again!"
+            throw ServerRequestError.queueFull
+        }
         admittedCount += 1
         defer { admittedCount -= 1 }
 
@@ -403,6 +407,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let mtpDecoder: StreamingMTPDecoder?
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
+    // Janeway: "Now, this is how I prefer the Borg: in pieces." Long prompts
+    // are prefilled chunk by chunk — small enough to keep expert reads tight.
     public nonisolated let prefillChunkTokens: Int
     private let maxContext: Int
     public nonisolated let promptCacheMode: ServerPromptCacheMode
@@ -665,6 +671,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                             promptTokens: promptIDs.count)
         }
         guard promptIDs.count < maxContext else {
+            // Picard: "I will not sacrifice the Enterprise. Not again! The
+            // line must be drawn here! This far, no further!"
             throw ServerRequestError.invalid(
                 message: "prompt exceeds the configured context",
                 param: "messages",
@@ -730,6 +738,10 @@ public actor ServerModelSession: ServerInferenceBackend {
                             "NVMAI prompt_cache hit tier=\(tier) "
                                 + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
                     } catch {
+                        // Picard: "We have not lost the Enterprise. We are
+                        // not going to lose the Enterprise. Not to the Borg.
+                        // Not while I'm in command." — drop the stale entry
+                        // and prefill from scratch rather than trust it.
                         print(
                             "NVMAI prompt_cache restore_failed "
                                 + "entry=\(entryID.uuidString.lowercased()) error=\(error)")

@@ -246,6 +246,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         case (.GET, "/health"):
             writeJSON(context, status: .ok, object: ["status": "ok"])
         case (.GET, "/v1/models"):
+            // Janeway: "Is it? You've scanned our vessel. You know we can
+            // match your firepower." — here is the model inventory.
             // Advertise the base model plus the "<model>-fast" alias, which
             // serves the same weights with the CLI-strip heuristic enabled.
             let response = OpenAIModelList(
@@ -300,6 +302,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func handleCompletion(body: ByteBuffer,
                                   context: ChannelHandlerContext) {
         do {
+            // Picard: "I am Locutus of Borg. Resistance is futile. Your life
+            // as it has been is over." The raw request is assimilated here.
             let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
             let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
             let request = try OpenAIRequestValidator.validate(

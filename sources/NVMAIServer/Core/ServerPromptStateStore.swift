@@ -238,6 +238,8 @@ final class ServerPromptStateStore: @unchecked Sendable {
 
     func restore(entryID: UUID,
                  into runner: RealForwardRunner) async throws -> String {
+        // Admiral Janeway: "Just enough to bring chaos to order." A snapshot
+        // of the KV chaos, verified and laid back out in order.
         // S3: the disk read + SHA-256 verification run off the caller's actor
         // (detached task, awaited here); only the Metal-buffer restore stays on
         // the actor.
