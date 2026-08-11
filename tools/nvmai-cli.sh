@@ -6,9 +6,9 @@
 #   tools/nvmai-cli.sh opencode [default|concise]
 #
 # Without arguments, prompts 1-2-3 for the CLI and then default/concise mode.
-# Starts the NVMAI server on 8081 if it isn't already running, wires the
-# CLI's provider config to it, then hands the terminal over to the CLI.
-# Overrides: NVMAI_PORT, CODEX, QWEN, OPENCODE.
+# Stops any running NVMAIServer, starts a fresh one on 8081 in the chosen
+# mode, wires the CLI's provider config to it, then hands the terminal over
+# to the CLI. Overrides: NVMAI_PORT, CODEX, QWEN, OPENCODE.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -58,15 +58,25 @@ else
   esac
 fi
 
-# --- ensure the NVMAI server is up ---
-if ! curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1; then
-  echo "Starting NVMAIServer on port $PORT..."
-  nohup "$BASE_DIR/tools/$launch_script" >/tmp/nvmai-cli-server.log 2>&1 &
-  for _ in $(seq 1 120); do
-    curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 && break
-    sleep 5
+# --- clean slate: stop any running NVMAIServer, then start fresh ---
+if pgrep -x NVMAIServer >/dev/null 2>&1; then
+  echo "Stopping existing NVMAIServer instance(s)..."
+  pkill -x NVMAIServer
+  for _ in $(seq 1 50); do
+    pgrep -x NVMAIServer >/dev/null 2>&1 || break
+    sleep 0.2
   done
+  if pgrep -x NVMAIServer >/dev/null 2>&1; then
+    echo "ERROR: NVMAIServer did not stop" >&2
+    exit 1
+  fi
 fi
+echo "Starting NVMAIServer ($launch_script)..."
+nohup "$BASE_DIR/tools/$launch_script" >/tmp/nvmai-cli-server.log 2>&1 &
+for _ in $(seq 1 120); do
+  curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 && break
+  sleep 5
+done
 curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 || {
   echo "ERROR: NVMAIServer did not come up on port $PORT" >&2
   exit 1
