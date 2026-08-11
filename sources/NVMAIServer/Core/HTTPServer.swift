@@ -262,7 +262,18 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             handleCompletion(
                 body: body,
                 context: context)
-        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"):
+        case (.POST, "/v1/responses"):
+            guard head.headers.first(name: "content-type")?
+                .lowercased().hasPrefix("application/json") == true else {
+                writeError(context, status: .unsupportedMediaType,
+                           OpenAIErrorEnvelope(message: "content-type must be application/json",
+                                               code: "unsupported_media_type"))
+                return
+            }
+            handleResponses(
+                body: body,
+                context: context)
+        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"):
             writeError(context, status: .methodNotAllowed,
                        OpenAIErrorEnvelope(message: "method not allowed",
                                            code: "method_not_allowed"))
@@ -384,6 +395,307 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                        OpenAIErrorEnvelope(message: "malformed JSON request",
                                            code: "invalid_json"))
         }
+    }
+
+    /// Streaming item bookkeeping for one /v1/responses turn (message item
+    /// announced, function-call output indices).
+    private final class ResponsesItemState: @unchecked Sendable {
+        var messageAnnounced = false
+        var toolCount = 0
+    }
+
+    private static func eventFrame(name: String, object: [String: Any]) -> Data? {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            return nil
+        }
+        return Self.sseFrame("event: " + name + "\ndata: " + String(decoding: data, as: UTF8.self))
+    }
+
+    /// OpenAI Responses API endpoint (`POST /v1/responses`). The request is
+    /// mapped onto the chat-completions path (see ResponsesAPIMapper) and the
+    /// generation is streamed back as Responses-API SSE events (or returned
+    /// as a single response object when stream is false). This is what lets
+    /// current Codex CLI versions (which only speak the Responses API) talk
+    /// to NVMAI directly.
+    private func handleResponses(body: ByteBuffer,
+                                 context: ChannelHandlerContext) {
+        do {
+            let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
+            let decoded = try JSONDecoder().decode(ResponsesAPIRequest.self, from: Data(bytes))
+            let chatRequest = try ResponsesAPIMapper.chatRequest(decoded)
+            let request = try OpenAIRequestValidator.validate(
+                chatRequest, modelID: modelID, maxContext: backend.maximumContext)
+            let responseID = ResponsesAPIBuilder.responseID()
+            let created = Int(Date().timeIntervalSince1970)
+            let contextBox = SendableContext(context)
+            let streamState = StreamState()
+            let itemState = ResponsesItemState()
+            let phaseState = requestPhaseState
+            let startStream: @Sendable () -> Void = {
+                guard request.stream,
+                      streamState.start(eventLoop: contextBox.value.eventLoop,
+                                        interval: self.heartbeatInterval,
+                                        ping: {
+                          self.writeHeartbeat(contextBox.value)
+                      }) else { return }
+                let future = self.beginResponsesStream(
+                    contextBox.value,
+                    id: responseID,
+                    created: created,
+                    request: request,
+                    store: decoded.store)
+                streamState.setStartFuture(future)
+            }
+            let onQueued: @Sendable () -> Void = {
+                phaseState.set("queued")
+                ServerLog.queued(id: responseID)
+                startStream()
+            }
+            activeTask = childChannels.startTask {
+                defer { streamState.stop() }
+                let started = ContinuousClock.now
+                ServerLog.accepted(id: responseID, streaming: request.stream)
+                let outbox: SSEOutbox? = request.stream
+                    ? SSEOutbox(capacity: Self.maximumPendingStreamChunks)
+                    : nil
+                let drainer = outbox.map { outbox in
+                    Task { [self] in
+                        await self.drainOutbox(contextBox.value, outbox: outbox)
+                    }
+                }
+                do {
+                    let completion = try await self.coordinator.run(onQueued: onQueued) {
+                        try Task.checkCancellation()
+                        startStream()
+                        try await streamState.waitUntilStarted()
+                        try Task.checkCancellation()
+                        phaseState.set("generating")
+                        ServerLog.generating(id: responseID)
+                        return try await self.backend.generate(request) { event in
+                            guard request.stream, let outbox else { return }
+                            switch event {
+                            case .content(let text):
+                                self.enqueueResponsesContentDelta(
+                                    id: responseID, created: created,
+                                    request: request, text: text,
+                                    itemState: itemState,
+                                    outbox: outbox, context: contextBox.value)
+                            case .toolCall(let call):
+                                self.enqueueResponsesToolDelta(
+                                    id: responseID, created: created,
+                                    request: request, call: call,
+                                    itemState: itemState,
+                                    outbox: outbox, context: contextBox.value)
+                            }
+                        }
+                    }
+                    ServerLog.completed(id: responseID,
+                                        duration: started.duration(to: .now),
+                                        completion: completion)
+                    if request.stream, let outbox {
+                        streamState.stop()
+                        self.finishResponsesStream(
+                            contextBox.value, id: responseID, created: created,
+                            request: request, completion: completion,
+                            itemState: itemState, outbox: outbox)
+                    } else {
+                        self.writeResponses(
+                            contextBox.value, id: responseID, created: created,
+                            request: request, completion: completion)
+                    }
+                } catch {
+                    streamState.stop()
+                    self.handleAsyncError(error,
+                                          context: contextBox.value,
+                                          id: responseID,
+                                          phase: phaseState.value,
+                                          stream: request.stream,
+                                          outbox: outbox)
+                }
+                if let drainer {
+                    await Self.awaitDrainer(drainer)
+                }
+            }
+        } catch let error as ServerRequestError {
+            writeError(context,
+                       status: error == .unknownModel ? .notFound : .badRequest,
+                       error.envelope)
+        } catch {
+            writeError(context, status: .badRequest,
+                       OpenAIErrorEnvelope(message: "malformed JSON request",
+                                           code: "invalid_json"))
+        }
+    }
+
+    private func beginResponsesStream(_ context: ChannelHandlerContext,
+                                      id: String,
+                                      created: Int,
+                                      request: ValidatedChatRequest,
+                                      store: Bool?) -> EventLoopFuture<Void> {
+        let response = ResponsesAPIBuilder.responseObject(
+            id: id, created: created, model: modelID, status: "in_progress",
+            output: [], usage: nil, store: store ?? false)
+        let createdEvent = ResponsesAPIBuilder.responseObject(
+            id: id, created: created, model: modelID, status: "in_progress",
+            output: [], usage: nil, store: store ?? false)
+        var frames = Data()
+        if let frame = Self.eventFrame(name: "response.created",
+                                       object: ["type": "response.created", "response": response]),
+           let second = Self.eventFrame(name: "response.in_progress",
+                                        object: ["type": "response.in_progress", "response": createdEvent]) {
+            frames.append(frame)
+            frames.append(second)
+        }
+        var headers = HTTPHeaders()
+        headers.add(name: "content-type", value: "text/event-stream")
+        headers.add(name: "cache-control", value: "no-cache")
+        headers.add(name: "connection", value: "keep-alive")
+        let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+        let contextBox = SendableContext(context)
+        let promise = context.eventLoop.makePromise(of: Void.self)
+        context.eventLoop.execute {
+            contextBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
+            var buffer = contextBox.value.channel.allocator.buffer(capacity: frames.count)
+            buffer.writeBytes(frames)
+            contextBox.value.writeAndFlush(
+                self.wrapOutboundOut(.body(.byteBuffer(buffer))),
+                promise: promise)
+        }
+        return promise.futureResult
+    }
+
+    private func enqueueResponsesEvent(name: String,
+                                       object: [String: Any],
+                                       outbox: SSEOutbox,
+                                       context: ChannelHandlerContext) {
+        guard let frame = Self.eventFrame(name: name, object: object) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream response could not be encoded",
+                       code: "internal_error")
+            return
+        }
+        guard outbox.enqueue(frame) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream backpressure limit exceeded; client is too slow",
+                       code: "stream_overflow")
+            return
+        }
+    }
+
+    private func enqueueResponsesContentDelta(id: String,
+                                              created: Int,
+                                              request: ValidatedChatRequest,
+                                              text: String,
+                                              itemState: ResponsesItemState,
+                                              outbox: SSEOutbox,
+                                              context: ChannelHandlerContext) {
+        if !itemState.messageAnnounced {
+            itemState.messageAnnounced = true
+            enqueueResponsesEvent(
+                name: "response.output_item.added",
+                object: ["type": "response.output_item.added", "output_index": 0,
+                         "item": ["id": id + "_msg0", "type": "message",
+                                  "role": "assistant", "status": "in_progress",
+                                  "content": []]],
+                outbox: outbox, context: context)
+            enqueueResponsesEvent(
+                name: "response.content_part.added",
+                object: ["type": "response.content_part.added", "item_id": id + "_msg0",
+                         "output_index": 0, "content_index": 0,
+                         "part": ["type": "output_text", "text": "", "annotations": []]],
+                outbox: outbox, context: context)
+        }
+        enqueueResponsesEvent(
+            name: "response.output_text.delta",
+            object: ["type": "response.output_text.delta", "item_id": id + "_msg0",
+                     "output_index": 0, "content_index": 0, "delta": text],
+            outbox: outbox, context: context)
+        enqueueResponsesEvent(
+            name: "response.content_part.delta",
+            object: ["type": "response.content_part.delta", "item_id": id + "_msg0",
+                     "output_index": 0, "content_index": 0,
+                     "delta": ["type": "output_text", "text": text, "annotations": []]],
+            outbox: outbox, context: context)
+    }
+
+    private func enqueueResponsesToolDelta(id: String,
+                                           created: Int,
+                                           request: ValidatedChatRequest,
+                                           call: ParsedToolCall,
+                                           itemState: ResponsesItemState,
+                                           outbox: SSEOutbox,
+                                           context: ChannelHandlerContext) {
+        let index = itemState.toolCount
+        itemState.toolCount += 1
+        if index == 0 {
+            enqueueResponsesEvent(
+                name: "response.output_item.added",
+                object: ["type": "response.output_item.added", "output_index": 1,
+                         "item": ["id": id + "_fc0", "type": "function_call",
+                                  "status": "in_progress", "name": call.name,
+                                  "arguments": "", "call_id": call.id,
+                                  "output_index": 1]],
+                outbox: outbox, context: context)
+        }
+        let fragments = utf8Fragments(call.argumentsJSON, maximumBytes: 1024)
+        for fragment in fragments {
+            enqueueResponsesEvent(
+                name: "response.function_call_arguments.delta",
+                object: ["type": "response.function_call_arguments.delta",
+                         "item_id": id + "_fc0", "output_index": 1, "delta": fragment],
+                outbox: outbox, context: context)
+        }
+    }
+
+    private func finishResponsesStream(_ context: ChannelHandlerContext,
+                                       id: String,
+                                       created: Int,
+                                       request: ValidatedChatRequest,
+                                       completion: ServerCompletion,
+                                       itemState: ResponsesItemState,
+                                       outbox: SSEOutbox) {
+        if itemState.messageAnnounced {
+            enqueueResponsesEvent(
+                name: "response.content_part.done",
+                object: ["type": "response.content_part.done", "item_id": id + "_msg0",
+                         "output_index": 0, "content_index": 0,
+                         "part": ["type": "output_text", "text": completion.content,
+                                  "annotations": []]],
+                outbox: outbox, context: context)
+            enqueueResponsesEvent(
+                name: "response.output_item.done",
+                object: ["type": "response.output_item.done", "output_index": 0,
+                         "item": ResponsesAPIBuilder.messageItem(
+                            id: id + "_msg0", role: "assistant",
+                            text: completion.content, status: "completed")],
+                outbox: outbox, context: context)
+        }
+        var output = ResponsesAPIBuilder.outputItems(completion: completion, idPrefix: id)
+        if output.isEmpty {
+            output.append(ResponsesAPIBuilder.messageItem(
+                id: id + "_msg0", role: "assistant", text: "", status: "completed"))
+        }
+        if let frame = Self.eventFrame(
+            name: "response.completed",
+            object: ["type": "response.completed",
+                     "response": ResponsesAPIBuilder.responseObject(
+                        id: id, created: created, model: modelID, status: "completed",
+                        output: output, usage: completion.usage)]) {
+            _ = outbox.enqueue(frame)
+        }
+        outbox.enqueueTerminal([Self.doneFrame()], closeWhenDrained: false)
+    }
+
+    private func writeResponses(_ context: ChannelHandlerContext,
+                                id: String,
+                                created: Int,
+                                request: ValidatedChatRequest,
+                                completion: ServerCompletion) {
+        let output = ResponsesAPIBuilder.outputItems(completion: completion, idPrefix: id)
+        writeJSON(context, status: .ok, object:
+                  ResponsesAPIBuilder.responseObject(
+                    id: id, created: created, model: modelID, status: "completed",
+                    output: output, usage: completion.usage))
     }
 
     private func writeCompletion(_ context: ChannelHandlerContext,
