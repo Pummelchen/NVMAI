@@ -19,7 +19,10 @@ hybrid layer graph, gated-DeltaNet kernels and state, ChatML tokenization, tool
 call parsing, model repacking, product integration, and the original 4-bit
 runtime support. NVMAI merges that contribution and extends it further.
 
-NVMAI 3.0's concise mode is derived from the
+NVMAI 3.1 adds the OpenAI **Responses API** (`POST /v1/responses`) so current
+Codex-, Qwen-Code-, and Gemini-style CLIs connect directly, and reports the
+OpenAI REST protocol version (`openai-version: 2020-10-01`) on every response.
+NVMAI 3.1's concise mode is derived from the
 [Nail-Qwen3.6-35B-A3B](https://huggingface.co/peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-MLX)
 chat template by [peculiar-ragdoll](https://huggingface.co/peculiar-ragdoll),
 which force-appends a terseness prompt to every request. Measured on NVMAI's
@@ -30,9 +33,9 @@ measurable correctness loss on the sampled questions.
 
 - [Why more RAM doesn't speed up decode](https://github.com/Pummelchen/NVMAI/wiki/FAQ)
 
-## Benchmark — NVMAI 3.0
+## Benchmark — NVMAI 3.1
 
-Measured on M3 24 GB, current 3.0 build (64 expert-cache slots + resident
+Measured on M3 24 GB, current 3.1 build (64 expert-cache slots + resident
 pin + MoE phase-1 rewrite). Concise-mode answer tokens: temp 0, deterministic,
 8 chat questions, 512-token cap (`+` = baseline hit the cap, so its true total
 is higher). Full measurement history:
