@@ -50,3 +50,6 @@ __pycache__/
 
 # Standalone release binaries
 Binary/
+
+# 72-combo harness mock (test scaffolding)
+benchmark/mock/
