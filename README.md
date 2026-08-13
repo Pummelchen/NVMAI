@@ -16,6 +16,13 @@ question that took minutes now answers in seconds.
 | OpenCode `run` | ~218 s | 5.9 s | **~37×** |
 | Qwen Code `-p` | >300 s (stalled) | 4.6 s | **>65×** |
 
+**New in 3.4:** two launchers — `tools/server_launcher.sh` (server only,
+prints the OpenAI API setup when ready) and `tools/cli_launcher.sh` (any of
+the three coding CLIs), both asking the same five questions — plus a
+reasoning mode (`think`/`nothink`) and **no artificial output-token cap**:
+when a client omits `max_tokens`, the model replies until it is done,
+bounded only by the context window.
+
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
 per-quantization terse system prompt for direct, lean answers. The fast alias
