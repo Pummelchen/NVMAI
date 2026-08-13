@@ -101,6 +101,44 @@ baseline hit the cap, so its true total is higher). Full measurement history:
 | Concise mode — answer tokens (8-question set) | 3,635+ → **1,570** (−57%) |
 | — concise prompt | standard (8-bit) |
 
+#### Coding-CLI 72-combo benchmark (in progress)
+
+The 72-combo harness (`benchmark/combos.sh`) runs 3 coding CLIs (Codex, Qwen
+Code, OpenCode) × 2 models (`full` / `-fast`) × 3 quantizations × 2 modes
+(default/concise) × 2 reasoning (off/on), ordered fastest-first. Prompt:
+`difference of swift and c++ in detail` (4-bit M3 24 GB). Decode = completion
+tokens ÷ wall time, so `full` rows include the large agent-prompt prefill
+while `fast` rows are near-pure decode. **Partial — 23 of 72 combos** (the run
+was stopped and is resumable with `bash benchmark/combos.sh`). Quality is the
+rubric score (correctness 40 / coverage 30 / structure 20 / examples 10),
+judging only the final answer text:
+
+| tok/s | Config | CLI | Model | Wall (s) | Comp. tok | Quality |
+| ---: | --- | --- | --- | ---: | ---: | ---: |
+| 11.9 | 4-bit default, no thinking | Qwen Code | fast | 377.0 | 4,478 | 90 |
+| 11.4 | 4-bit concise, no thinking | Qwen Code | fast | 254.4 | 2,888 | 87 |
+| 11.0 | 4-bit default, no thinking | OpenCode | fast | 410.8 | 4,521 | 91 |
+| 11.0 | 4-bit default, no thinking | Codex | fast | 360.9 | 3,982 | 88 |
+| 10.9 | 4-bit concise, no thinking | OpenCode | fast | 227.8 | 2,494 | 83 |
+| 10.6 | 4-bit concise, no thinking | Codex | fast | 257.3 | 2,724 | 78 |
+| 6.0 | 6-bit concise, no thinking | Qwen Code | fast | 365.9 | 2,193 | 82 |
+| 5.8 | 6-bit concise, no thinking | OpenCode | fast | 464.4 | 2,695 | 82 |
+| 5.8 | 6-bit concise, thinking | Qwen Code | fast | 461.9 | 2,684 | 82 |
+| 5.7 | 6-bit concise, thinking | OpenCode | fast | 487.8 | 2,757 | 81 |
+| 5.7 | 6-bit concise, no thinking | Codex | fast | 390.4 | 2,215 | 80 |
+| 5.5 | 6-bit concise, thinking | Codex | fast | 457.7 | 2,500 | 81 |
+| 4.5 | 4-bit default, no thinking | Codex | full | 453.2 | 2,054 | 93 |
+| 2.8 | 4-bit concise, no thinking | OpenCode | full | 294.0 | 812 | 85 |
+| 2.5 | 4-bit concise, no thinking | Codex | full | 294.4 | 730 | 82 |
+| 2.1 | 6-bit concise, no thinking | Codex | full | 482.2 | 1,030 | 81 |
+| 1.9 | 6-bit concise, thinking | Codex | full | 454.3 | 863 | 80 |
+| 1.9 | 6-bit concise, no thinking | OpenCode | full | 436.3 | 815 | 77 |
+| 1.8 | 4-bit default, no thinking | OpenCode | full | 240.9 | 433 | 74 |
+| 1.6 | 6-bit concise, thinking | OpenCode | full | 392.5 | 609 | 76 |
+| 0.9 | 6-bit concise, no thinking | Qwen Code | full | 3,196.3 | 2,841 | 94 |
+| 0.7 | 4-bit default, no thinking | Qwen Code | full | 2,401.7 | 1,564 | 89 |
+| 0.0 | 4-bit concise, no thinking | Qwen Code | full | 1,926.1 | 0 | — (GPU hang) |
+
 ## Launchers
 
 `tools/` ships two launchers that ask the same five questions (CLI, model,
