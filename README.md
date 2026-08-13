@@ -109,11 +109,12 @@ Code, OpenCode) × 2 models (`full` / `-fast`) × 3 quantizations × 2 modes
 `difference of swift and c++ in detail` (4-bit M3 24 GB). Decode = completion
 tokens ÷ wall time, so `full` rows include the large agent-prompt prefill
 while `fast` rows are near-pure decode. **Partial — 23 of 72 combos** (the run
-was stopped and is resumable with `bash benchmark/combos.sh`). Quality is the
-rubric score (correctness 40 / coverage 30 / structure 20 / examples 10),
-judging only the final answer text:
+was stopped and is resumable with `bash benchmark/combos.sh`). The table lists
+the combos at ≥ 5.0 tok/s. Answer Quality is the rubric score (correctness 40
+/ coverage 30 / structure 20 / examples 10), judging only the final answer
+text:
 
-| tok/s | Config | CLI | Model | Wall (s) | Comp. tok | Quality |
+| tok/s | Config | CLI | Model | Wall (s) | Comp. tok | Answer Quality |
 | ---: | --- | --- | --- | ---: | ---: | ---: |
 | 11.9 | 4-bit default, no thinking | Qwen Code | fast | 377.0 | 4,478 | 90 |
 | 11.4 | 4-bit concise, no thinking | Qwen Code | fast | 254.4 | 2,888 | 87 |
@@ -127,17 +128,6 @@ judging only the final answer text:
 | 5.7 | 6-bit concise, thinking | OpenCode | fast | 487.8 | 2,757 | 81 |
 | 5.7 | 6-bit concise, no thinking | Codex | fast | 390.4 | 2,215 | 80 |
 | 5.5 | 6-bit concise, thinking | Codex | fast | 457.7 | 2,500 | 81 |
-| 4.5 | 4-bit default, no thinking | Codex | full | 453.2 | 2,054 | 93 |
-| 2.8 | 4-bit concise, no thinking | OpenCode | full | 294.0 | 812 | 85 |
-| 2.5 | 4-bit concise, no thinking | Codex | full | 294.4 | 730 | 82 |
-| 2.1 | 6-bit concise, no thinking | Codex | full | 482.2 | 1,030 | 81 |
-| 1.9 | 6-bit concise, thinking | Codex | full | 454.3 | 863 | 80 |
-| 1.9 | 6-bit concise, no thinking | OpenCode | full | 436.3 | 815 | 77 |
-| 1.8 | 4-bit default, no thinking | OpenCode | full | 240.9 | 433 | 74 |
-| 1.6 | 6-bit concise, thinking | OpenCode | full | 392.5 | 609 | 76 |
-| 0.9 | 6-bit concise, no thinking | Qwen Code | full | 3,196.3 | 2,841 | 94 |
-| 0.7 | 4-bit default, no thinking | Qwen Code | full | 2,401.7 | 1,564 | 89 |
-| 0.0 | 4-bit concise, no thinking | Qwen Code | full | 1,926.1 | 0 | — (GPU hang) |
 
 ## Launchers
 
