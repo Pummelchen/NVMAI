@@ -89,6 +89,13 @@ enum CLIStrip {
             } else {
                 content = nil
             }
+            if message.role == .assistant,
+               content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                // An assistant turn whose only content was tool calls now
+                // renders as an empty turn; drop it instead of emitting a
+                // hollow <|im_start|>assistant block.
+                return nil
+            }
             return GFTokenizer.Message(
                 role: message.role,
                 content: content,
@@ -114,8 +121,10 @@ enum CLIStrip {
             result += remaining[..<open.lowerBound]
             remaining = remaining[open.upperBound...]
             let closeMarker = "</\(tag)>"
-            guard let close = remaining.range(of: closeMarker) else {
-                // Unterminated block: drop the rest of the message.
+            guard let close = remaining.range(of: closeMarker, options: .caseInsensitive) else {
+                // Unterminated block: keep the remainder verbatim rather than
+                // silently dropping the real user prompt.
+                result += remaining
                 return result
             }
             remaining = remaining[close.upperBound...]
@@ -130,7 +139,7 @@ enum CLIStrip {
         var best: (tag: String, range: Range<String.Index>)?
         for tag in tags {
             let marker = "<\(tag)>"
-            if let range = text.range(of: marker),
+            if let range = text.range(of: marker, options: .caseInsensitive),
                best.map({ range.lowerBound < $0.range.lowerBound }) ?? true {
                 best = (tag, range)
             }

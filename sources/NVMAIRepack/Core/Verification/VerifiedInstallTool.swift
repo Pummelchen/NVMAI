@@ -160,15 +160,15 @@ public enum VerifiedInstallTool {
             throw RepackError.configurationInvalid(detail: "manifest missing \(layoutRelativePath)")
         }
         let layout = try loadLayout(access: access)
-        let pageSize = UInt64(getpagesize())
+        let alignment = GTurboFormatV1.alignmentBytes
         guard layout.expertStride == manifest.expertStride,
               layout.numLayers == manifest.numLayers,
               layout.expertsPerLayer == manifest.expertsPerLayer else {
             throw RepackError.configurationInvalid(detail: "packed expert layout dimensions mismatch manifest")
         }
-        guard layout.expertStride % pageSize == 0 else {
+        guard layout.expertStride % alignment == 0 else {
             throw RepackError.configurationInvalid(
-                detail: "expertStride \(layout.expertStride) is not page-aligned")
+                detail: "expertStride \(layout.expertStride) is not aligned to \(alignment) bytes")
         }
         guard layout.layers.count == layout.numLayers else {
             throw RepackError.configurationInvalid(detail: "packed expert layout layer count mismatch")
@@ -212,9 +212,9 @@ public enum VerifiedInstallTool {
                     throw RepackError.configurationInvalid(
                         detail: "\(relativePath) expert \(expertID) size mismatch")
                 }
-                guard expert.offset % pageSize == 0 else {
+                guard expert.offset % GTurboFormatV1.alignmentBytes == 0 else {
                     throw RepackError.configurationInvalid(
-                        detail: "\(relativePath) expert \(expertID) offset is not page-aligned")
+                        detail: "\(relativePath) expert \(expertID) offset is not aligned to \(GTurboFormatV1.alignmentBytes) bytes")
                 }
                 guard expert.offset <= actualSize,
                       expert.size <= actualSize - expert.offset else {

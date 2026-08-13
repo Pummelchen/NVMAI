@@ -117,7 +117,7 @@ void logit_softcap_softmax(
         if (simd_lane_id == 0) {
             final_m     = m_all;
             // Reciprocal once so the normalize loop is a single multiply.
-            final_inv_d = 1.0f / d_all;
+            final_inv_d = (d_all > 0.0f) ? (1.0f / d_all) : 0.0f;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);

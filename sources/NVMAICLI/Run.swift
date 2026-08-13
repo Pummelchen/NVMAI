@@ -4,7 +4,39 @@ import NVMAI
 
 private struct MessageJSON: Decodable {
     let role: String
-    let content: String
+    let content: String?
+
+    enum CodingKeys: String, CodingKey { case role, content }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        role = try container.decode(String.self, forKey: .role)
+        if let value = try container.decodeIfPresent(JSONValue.self, forKey: .content) {
+            content = Self.text(value)
+        } else {
+            content = nil
+        }
+    }
+
+    private static func text(_ value: JSONValue) -> String? {
+        switch value {
+        case .string(let s):
+            return s
+        case .null:
+            return nil
+        case .array(let parts):
+            var out = ""
+            for part in parts {
+                guard case .object(let dict) = part,
+                      case .string(let type)? = dict["type"], type == "input_text",
+                      case .string(let text)? = dict["text"] else { continue }
+                out += text
+            }
+            return out
+        default:
+            return nil
+        }
+    }
 }
 
 public struct RunResult: Equatable, Sendable {

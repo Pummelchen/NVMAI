@@ -54,7 +54,7 @@ public struct RemoteRetryPolicy: Sendable {
         } else {
             raw = nil
         }
-        guard let raw else { return min(localDelayNs, maxServerDelayNs) }
+        guard let raw else { return min(localDelayNs, maxDelayNs) }
         let server = try parseRetryAfterNs(raw, now: now)
         guard server <= maxServerDelayNs else {
             throw RepackError.remoteRetryDelayExceeded(

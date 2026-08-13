@@ -319,7 +319,7 @@ public enum OpenAIRequestValidator {
                           "max_tokens", "invalid_value")
         }
 
-        let temperature = request.temperature ?? 0.6
+        let temperature = request.temperature ?? 0.2
         guard temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
                           "temperature", "invalid_value")
@@ -329,7 +329,7 @@ public enum OpenAIRequestValidator {
             throw invalid("top_p must be greater than 0 and at most 1",
                           "top_p", "invalid_value")
         }
-        let topK = request.topK ?? 20
+        let topK = request.topK ?? 64
         guard (1...256).contains(topK) else {
             throw invalid("top_k must be between 1 and 256", "top_k", "invalid_value")
         }

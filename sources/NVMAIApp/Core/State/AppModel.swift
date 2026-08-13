@@ -671,10 +671,14 @@ public final class AppModel {
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-        // NOTE: silent failure on settings save — user settings may be stale on next launch
-        try? MacAppSettingsFileStore.save(
-            settings,
-            forModelDirectory: modelDirectory)
+        do {
+            try MacAppSettingsFileStore.save(
+                settings,
+                forModelDirectory: modelDirectory)
+        } catch {
+            FileHandle.standardError.write(Data(
+                ("NVMAI app settings persist failed: \(error)\n").utf8))
+        }
     }
 
     private func finishInstallFailure(_ error: Error, generation: UInt64) {

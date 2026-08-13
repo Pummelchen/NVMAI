@@ -75,8 +75,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     }
 
     public static var production: RuntimeConfiguration {
-        // Defaults (16 slots, 128 chunk) are compile-time constants on the
-        // allowed lists, so this can never throw.
+        // Defaults are compile-time constants on the allowed lists, so this
+        // can never throw.
         try! RuntimeConfiguration()
     }
 

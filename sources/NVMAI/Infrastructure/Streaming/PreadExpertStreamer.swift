@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Metal
+import Synchronization
 
 public struct ExpertIOAdviceResult: Sendable, Equatable {
     public let requested: Int
@@ -327,8 +328,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         // with the idle CPU cores doing the fills in parallel.
         if ProcessInfo.processInfo.environment["NVMAI_PARALLEL_IO"] != "0",
            plan.misses.count > 1 {
-            var firstError: Error?
-            let bookkeeping = NSLock()
+            let firstError = Mutex<Error?>(nil)
             DispatchQueue.concurrentPerform(iterations: plan.misses.count) { i in
                 let index = plan.misses[i]
                 let slot = plan.assignedSlots[index]
@@ -342,18 +342,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                         into: slotPointers[slot],
                         fileOffset: layout.streamOffset + regionOffset,
                         count: Int(layout.expertStride))
-                    bookkeeping.lock()
+                    cacheLock.lock()
                     slotPendingFill[slot] = false
                     slotExpert[slot] = expert
                     slotLastUse[slot] = useClock
-                    bookkeeping.unlock()
+                    cacheLock.unlock()
                 } catch {
-                    bookkeeping.lock()
-                    if firstError == nil { firstError = error }
-                    bookkeeping.unlock()
+                    firstError.withLock { if $0 == nil { $0 = error } }
                 }
             }
-            if let firstError { throw firstError }
+            if let error = firstError.withLock({ $0 }) { throw error }
             return expertCachePlanBuffers(plan)
         }
 

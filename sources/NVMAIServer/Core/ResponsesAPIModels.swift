@@ -123,11 +123,15 @@ public enum ResponsesAPIMapper {
                         toolCalls: nil, toolCallID: nil, name: nil))
                 }
             case "function_call":
-                let callID = item.callID ?? "call_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(24)
+                guard let callID = item.callID, !callID.isEmpty else {
+                    throw ServerRequestError.invalid(
+                        message: "function_call item requires call_id",
+                        param: "input", code: "invalid_value")
+                }
                 let function = OpenAIFunctionCall(name: item.name ?? "", arguments: item.arguments ?? "{}")
                 messages.append(OpenAIChatMessage(
                     role: "assistant", content: nil,
-                    toolCalls: [OpenAIToolCall(id: String(callID), type: "function", function: function)],
+                    toolCalls: [OpenAIToolCall(id: callID, type: "function", function: function)],
                     toolCallID: nil, name: nil))
             case "function_call_output":
                 messages.append(OpenAIChatMessage(
@@ -135,7 +139,7 @@ public enum ResponsesAPIMapper {
                     toolCalls: nil, toolCallID: item.callID, name: nil))
             default:
                 throw ServerRequestError.invalid(
-                    message: "unsupported input item type \(item.type)",
+                    message: "unsupported input item type \(item.type ?? "null")",
                     param: "input", code: "unsupported_input")
             }
         }
@@ -257,18 +261,15 @@ public enum ResponsesAPIBuilder {
     public static func outputItems(completion: ServerCompletion,
                                    idPrefix: String) -> [[String: Any]] {
         var output: [[String: Any]] = []
-        var index = 0
         if !completion.content.isEmpty {
             output.append(messageItem(id: idPrefix + "_msg0", role: "assistant",
                                       text: completion.content, status: "completed"))
-            index += 1
         }
-        for call in completion.toolCalls {
+        for (index, call) in completion.toolCalls.enumerated() {
             output.append(functionCallItem(
                 id: idPrefix + "_fc\(index)", name: call.name,
                 arguments: call.argumentsJSON, callID: call.id,
-                outputIndex: index, status: "completed"))
-            index += 1
+                outputIndex: index + 1, status: "completed"))
         }
         return output
     }

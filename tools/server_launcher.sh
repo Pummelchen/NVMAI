@@ -119,7 +119,7 @@ fi
 # --- 5) reasoning: on (default) or off (direct answers) ---
 if [[ -n "${5:-}" ]]; then
   case "$5" in
-    nothink|0|off) thinking="" ; think_word=nothink ;;
+    nothink|0|off) thinking="0" ; think_word=nothink ;;
     think|1|on) thinking="1" ; think_word=think ;;
     *) echo "unknown reasoning: $5 (nothink|think)" >&2; exit 2 ;;
   esac
@@ -132,7 +132,7 @@ else
   read -r think_choice || exit 1
   case "${think_choice:-1}" in
     1) thinking="1" ; think_word=think ;;
-    2) thinking="" ; think_word=nothink ;;
+    2) thinking="0" ; think_word=nothink ;;
     *) echo "invalid choice: $think_choice" >&2; exit 2 ;;
   esac
 fi
@@ -148,6 +148,7 @@ if [[ "$mode_suffix" == "_concise" ]]; then
   export NVMAI_CONCISE_MODE=1
   concise_label="concise + "
 else
+  unset NVMAI_CONCISE_MODE
   concise_label=""
 fi
 # Reasoning mode: on (default) or off. The server reads this once at load;

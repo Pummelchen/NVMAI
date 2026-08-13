@@ -360,6 +360,13 @@ void attention_decode_combine(
     // max and denominator rather than pay a threadgroup reduction + barriers.
     float m_glob = -INFINITY;
     for (uint c = 0; c < NC; ++c) { m_glob = max(m_glob, m_row[c]); }
+    if (m_glob == -INFINITY) {
+        // All chunks empty (e.g. seq_len == kv_start): zero the row rather
+        // than producing NaN from exp(-inf - -inf).
+        device half* out_row = out + uint(q_head) * HD;
+        for (uint i = lid; i < HD; i += lsize) { out_row[i] = 0.0h; }
+        return;
+    }
     float D = 0.0f;
     for (uint c = 0; c < NC; ++c) { D += d_row[c] * attn_softmax_exp(m_row[c] - m_glob); }
     const float inv_d = (D > 0.0f) ? (1.0f / D) : 0.0f;

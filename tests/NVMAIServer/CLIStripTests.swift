@@ -27,10 +27,12 @@ struct CLIStripTests {
         #expect(!out.contains("date"))
     }
 
-    @Test func unterminatedBlockDropsRestOfMessage() {
+    @Test func unterminatedBlockKeepsRemainder() {
         let input = "<system-reminder>\nskills\nWhat is the capital of France?"
         let out = CLIStrip.stripReminderBlocks(input, tags: ["system-reminder"])
-        #expect(out.isEmpty)
+        // An unterminated block keeps the remainder verbatim so the real user
+        // prompt is never dropped.
+        #expect(out == "\nskills\nWhat is the capital of France?")
     }
 
     @Test func unrecognizedTagLeavesTextUntouched() {
@@ -96,8 +98,9 @@ struct CLIStripTests {
         let user = GFTokenizer.Message(role: .user, content: "Continue")
         let result = CLIStrip.filter(messages: [user, assistantCall, toolResult], tools: [])
 
-        #expect(result.messages.map(\.role) == [.user, .assistant])
-        #expect(result.messages[1].toolCalls.isEmpty)
+        // The assistant turn carried only a tool call; once cleared it renders
+        // as an empty turn and is dropped, and the tool result is dropped too.
+        #expect(result.messages.map(\.role) == [.user])
         #expect(result.stats.toolRoleDropped == 1)
         #expect(result.stats.toolCallsDropped == 1)
     }

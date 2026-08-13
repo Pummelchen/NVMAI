@@ -5,7 +5,6 @@ import Darwin
 /// so callers can stay inside tile-bounded scratch budgets without a
 /// Foundation `FileHandle` allocation per write.
 public enum Posix {
-    public static let pageSize: Int = Int(getpagesize())
 
     public enum EntryKind: Hashable, Sendable {
         case absent

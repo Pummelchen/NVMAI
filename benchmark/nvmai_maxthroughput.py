@@ -91,8 +91,11 @@ def run_quant(model, label):
     for pname, _ in PROMPTS:
         r = rates[idx:idx + 2]
         c = cts[idx:idx + 2]
-        print(f"{label} {pname}: measured={r[1]:.2f} (warmup {r[0]:.2f}) "
-              f"ct={c}", flush=True)
+        if len(r) == 2:
+            print(f"{label} {pname}: measured={r[1]:.2f} (warmup {r[0]:.2f}) "
+                  f"ct={c}", flush=True)
+        else:
+            print(f"{label} {pname}: missing rate footer (request failed?)", flush=True)
         idx += 2
 
 

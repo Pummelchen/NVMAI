@@ -742,9 +742,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                         // not going to lose the Enterprise. Not to the Borg.
                         // Not while I'm in command." — drop the stale entry
                         // and prefill from scratch rather than trust it.
-                        print(
-                            "NVMAI prompt_cache restore_failed "
-                                + "entry=\(entryID.uuidString.lowercased()) error=\(error)")
+                        FileHandle.standardError.write(Data(
+                            ("NVMAI prompt_cache restore_failed "
+                                + "entry=\(entryID.uuidString.lowercased()) error=\(error)\n").utf8))
                         promptStateStore?.remove(entryIDs: [entryID])
                         promptCache.remove(entryIDs: [entryID])
                         activePromptCacheEntryID = nil
@@ -1023,7 +1023,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                             entry: entry,
                             snapshot: snapshot)
                         if let diskError = saved.diskError {
-                            print("NVMAI prompt_cache disk_write_failed error=\(diskError)")
+                            FileHandle.standardError.write(Data(
+                                ("NVMAI prompt_cache disk_write_failed error=\(diskError)\n").utf8))
                         }
                         print(
                             "NVMAI prompt_cache stored "
@@ -1037,7 +1038,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                     // S24: a snapshot that cannot be captured or verified is
                     // never left published without backing; drop the entry so
                     // the next hit re-prefills instead of a doomed restore.
-                    print("NVMAI prompt_cache snapshot_failed error=\(error)")
+                    FileHandle.standardError.write(Data(
+                        ("NVMAI prompt_cache snapshot_failed error=\(error)\n").utf8))
                     promptCache.remove(entryIDs: [publication.entry.id])
                     activePromptCacheEntryID = nil
                 }

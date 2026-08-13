@@ -21,6 +21,7 @@ Usage:
 Requires a release build: swift build -c release
 """
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -96,7 +97,7 @@ def main():
     chunks = [int(v) for v in args.chunks.split(",")]
     prompt_file = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False).name
     with open(prompt_file, "w") as f:
-        f.write('[{"role": "user", "content": %r}]' % make_prompt(args.prompt_tokens))
+        f.write(json.dumps([{"role": "user", "content": make_prompt(args.prompt_tokens)}]))
 
     print("NVMAI M5 sweep")
     print("  model: %s" % args.model)

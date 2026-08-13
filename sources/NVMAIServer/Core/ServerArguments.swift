@@ -108,8 +108,8 @@ public struct ServerArguments: Equatable, Sendable {
                 }
                 maxContext = parsed
             case "--queue-limit":
-                guard let parsed = Int(value), parsed > 0 else {
-                    throw ServerArgumentError.invalid("--queue-limit must be positive")
+                guard let parsed = Int(value), (1...64).contains(parsed) else {
+                    throw ServerArgumentError.invalid("--queue-limit must be between 1 and 64")
                 }
                 queueLimit = parsed
             case "--prompt-cache-mode":

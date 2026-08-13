@@ -200,7 +200,9 @@ kernel void router_topk_select_k8(
 
     for (uint e = 0; e < NE; ++e) {
         const float s = logits[e];
-        if (s <= top_score[7]) continue;
+        // Equal scores at the boundary are still considered so the inner
+        // loop's lower-index tie-break (matching the reference) applies.
+        if (s < top_score[7]) continue;
         uint pos = 8u;
         for (uint i = 0; i < 8; ++i) {
             if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {

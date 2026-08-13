@@ -534,32 +534,6 @@ enum RepackPlanner {
         return 100
     }
 
-    /// Within-layer slot order. Mirrors the per-layer description in the
-    /// architecture doc.
-    private static func slotRank(in n: String) -> Int {
-        if n.contains(".self_attn.q_proj.weight") { return 0 }
-        if n.contains(".self_attn.k_proj.weight") { return 1 }
-        if n.contains(".self_attn.v_proj.weight") { return 2 }
-        if n.contains(".self_attn.o_proj.weight") { return 3 }
-        if n.contains(".self_attn.q_norm.weight") { return 4 }
-        if n.contains(".self_attn.k_norm.weight") { return 5 }
-        if n.contains(".router.proj.weight")      { return 6 }
-        if n.contains(".router.scale")            { return 7 }
-        if n.contains(".router.per_expert_scale") { return 8 }
-        if n.contains(".mlp.gate_proj.weight")    { return 9 }
-        if n.contains(".mlp.up_proj.weight")      { return 10 }
-        if n.contains(".mlp.down_proj.weight")    { return 11 }
-        if n.hasSuffix(".input_layernorm.weight") { return 12 }
-        if n.hasSuffix(".post_attention_layernorm.weight") { return 13 }
-        if n.hasSuffix(".pre_feedforward_layernorm.weight") { return 14 }
-        if n.hasSuffix(".pre_feedforward_layernorm_2.weight") { return 15 }
-        if n.hasSuffix(".post_feedforward_layernorm.weight") { return 16 }
-        if n.hasSuffix(".post_feedforward_layernorm_1.weight") { return 17 }
-        if n.hasSuffix(".post_feedforward_layernorm_2.weight") { return 18 }
-        if n.hasSuffix(".layer_scalar")           { return 19 }
-        return 100
-    }
-
     /// Normalize the sidecar's single decoder layer to the target tensor-name
     /// contract. MTP-only adapter tensors retain their upstream names.
     private static func residentDestinationName(_ source: String,

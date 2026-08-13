@@ -168,9 +168,14 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { [weak self] _ in
+            continuation.onTermination = { [weak self] termination in
                 task.cancel()
-                self?.cancel()
+                // Only target a cancel at the service when the consumer
+                // actually cancelled the stream; a normal finish() must not
+                // emit an untargeted cancel(nil) that could hit a new load.
+                if case .cancelled = termination {
+                    self?.cancel()
+                }
             }
         }
     }

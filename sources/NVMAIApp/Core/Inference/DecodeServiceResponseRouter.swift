@@ -9,11 +9,11 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
     private struct State {
         var pending: [UUID: [DecodeServiceEvent]] = [:]
         var terminalError: Error?
+        var waiters: [UUID: DispatchSemaphore] = [:]
     }
 
     private let state = Mutex(State())
     private let output: FileHandle
-    private let eventSignal = DispatchSemaphore(value: 0)
 
     init(output: FileHandle) {
         self.output = output
@@ -45,14 +45,20 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
             while true {
                 try Task.checkCancellation()
                 let event = try DecodeFrameCodec.read(DecodeServiceEvent.self, from: output)
-                state.withLock { $0.pending[event.generationID, default: []].append(event) }
-                eventSignal.signal()
+                let semaphore = state.withLock { current -> DispatchSemaphore? in
+                    current.pending[event.generationID, default: []].append(event)
+                    return current.waiters[event.generationID]
+                }
+                semaphore?.signal()
             }
         } catch is CancellationError {
             // Expected on cancellation
         } catch {
-            state.withLock { $0.terminalError = error }
-            eventSignal.signal()
+            let waiters = state.withLock { current -> [DispatchSemaphore] in
+                current.terminalError = error
+                return Array(current.waiters.values)
+            }
+            for semaphore in waiters { semaphore.signal() }
         }
         // The reader thread owns the file handle: close it here, on the
         // reader, after the blocking read returned (EOF or error) — never from
@@ -62,44 +68,44 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
 
     private func waitForEvent(matching requestID: UUID,
                               timeout: TimeInterval) throws -> DecodeServiceEvent {
-        // First check: event already available?
+        // Register a per-request semaphore BEFORE the first dequeue so a frame
+        // landing between the check and the wait cannot be lost.
+        let semaphore = DispatchSemaphore(value: 0)
+        state.withLock { $0.waiters[requestID] = semaphore }
+        defer { state.withLock { $0.waiters[requestID] = nil } }
+
         if let event = dequeueEvent(for: requestID) {
             return event
         }
 
-        // Block until an event arrives, a terminal error occurs, or the
-        // timeout elapses. The loop continues while pending[requestID] is
-        // empty AND no error exists AND the deadline has not passed.
         let deadline = DispatchTime.now() + timeout
-        while state.withLock({ $0.pending[requestID]?.isEmpty != false }),
-              state.withLock({ $0.terminalError == nil }) {
-            if eventSignal.wait(timeout: deadline) == .timedOut {
-                break
+        while true {
+            let (hasEvent, hasError) = state.withLock {
+                ($0.pending[requestID]?.isEmpty == false, $0.terminalError != nil)
             }
+            if hasEvent || hasError { break }
+            if semaphore.wait(timeout: deadline) == .timedOut { break }
         }
 
-        // Try dequeue again after signal
         if let event = dequeueEvent(for: requestID) {
             return event
         }
 
-        // No event — throw terminal error, or a clear timeout error.
         throw state.withLock({ $0.terminalError }) ?? DecodeFrameError.timedOut
     }
 
     private func dequeueEvent(for requestID: UUID) -> DecodeServiceEvent? {
-        guard var events = state.withLock({ $0.pending[requestID] }),
-              !events.isEmpty else {
-            return nil
-        }
-        let event = events.removeFirst()
-        state.withLock { current in
+        return state.withLock { current -> DecodeServiceEvent? in
+            guard var events = current.pending[requestID], !events.isEmpty else {
+                return nil
+            }
+            let event = events.removeFirst()
             if events.isEmpty {
                 current.pending.removeValue(forKey: requestID)
             } else {
                 current.pending[requestID] = events
             }
+            return event
         }
-        return event
     }
 }

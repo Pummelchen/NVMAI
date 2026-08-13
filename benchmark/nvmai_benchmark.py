@@ -74,10 +74,16 @@ def verify_response(prompt_capability, response):
             return True
         except (ValueError, IndexError):
             return False
-    if expected == "Semantic scoring" or expected == "States not provided":
-        # Content-dependent: verify the response is non-empty and on-topic
-        # by checking it mentions the subject or declines to answer.
-        return len(response.strip()) > 0
+    if expected == "Semantic scoring":
+        # Summarization prompt: "The server failed because its disk was full."
+        norm = _normalize(response)
+        return any(key in norm for key in ("disk", "server", "full"))
+    if expected == "States not provided":
+        # Refusal prompt: the code was never given; a correct answer declines
+        # rather than fabricating one.
+        norm = _normalize(response)
+        return any(key in norm for key in (
+            "notprovided", "noprovided", "none", "cannot", "dontknow", "decline"))
     return _normalize(expected) in _normalize(response)
 
 

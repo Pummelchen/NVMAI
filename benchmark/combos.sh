@@ -20,7 +20,16 @@ if [[ ! -s "$RESULTS" ]]; then
 fi
 
 stop_server() {
-  pkill -x NVMAIServer 2>/dev/null
+  # Kill only NVMAIServer processes holding the benchmark ports — never an
+  # unrelated NVMAIServer elsewhere (AGENTS.md: never terminate an existing
+  # server you did not launch).
+  for port in 8081 8082 8083; do
+    for pid in $(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null); do
+      if ps -p "$pid" -o command= | grep -q NVMAIServer; then
+        kill "$pid" 2>/dev/null
+      fi
+    done
+  done
   # Wait until the NVMAI ports actually free so the next readiness poll can
   # never be satisfied by a stale server mid-teardown (bounded 10s).
   for _ in $(seq 1 100); do
@@ -56,6 +65,8 @@ run_one() {
   local quant="$1" mode="$2" reasoning="$3" cli="$4" model="$5"
   local tag="q${quant}_m${mode}_r${reasoning}_${cli}_${model}"
   local outfile="$OUT/answers/${tag}.txt"
+  local mode_word=default
+  [[ "$mode" == "_concise" ]] && mode_word=concise
   if [[ -s "$outfile" ]]; then echo "SKIP $tag"; return; fi
   local port
   case "$quant" in 4) port=8081 ;; 6) port=8082 ;; 8) port=8083 ;; esac
@@ -99,8 +110,11 @@ EOF2
   }
 }
 EOF2
+  local oc_home="$OUT/opencode-config-$tag"
   if [[ -f "$HOME/.config/opencode/opencode.jsonc" ]]; then
-    sed -i.bak "s|http://127.0.0.1:[0-9]*/v1|http://127.0.0.1:${port}/v1|" "$HOME/.config/opencode/opencode.jsonc"
+    mkdir -p "$oc_home/opencode"
+    cp "$HOME/.config/opencode/opencode.jsonc" "$oc_home/opencode/opencode.jsonc"
+    sed -i.bak "s|http://127.0.0.1:[0-9]*/v1|http://127.0.0.1:${port}/v1|" "$oc_home/opencode/opencode.jsonc"
   fi
 
   local wall
@@ -117,13 +131,19 @@ EOF2
         > "$outfile" 2>"$OUT/time_${tag}.txt"
       ;;
     opencode)
-      /usr/bin/time -p env OPENAI_API_KEY=dummy \
+      /usr/bin/time -p env XDG_CONFIG_HOME="$oc_home" OPENAI_API_KEY=dummy \
         "$OPENCODE_BIN" run -m "openai/$api_model" "$PROMPT" \
         > "$outfile" 2>"$OUT/time_${tag}.txt"
       ;;
   esac
+  local cli_status=$?
   wall=$(grep '^real' "$OUT/time_${tag}.txt" 2>/dev/null | awk '{print $2}')
   wall="${wall:-0}"
+  if [[ "$cli_status" -ne 0 || "$wall" == "0" ]]; then
+    echo "  FAILED ($tag): CLI exited $cli_status, no timing captured"
+    echo -e "$quant\t${mode_word}\t$reasoning\t$cli\t$model\tFAILED\t0\t0\t0\t$tag" >> "$RESULTS"
+    return
+  fi
 
   local stats ptok ctok dtoks
   # take the first completed line logged after this combo started (log_start+1)
@@ -132,7 +152,7 @@ EOF2
   ptok="${stats#*prompt=}"; ptok="${ptok%% *}"; ptok="${ptok:-0}"
   ctok="${stats#*completion=}"; ctok="${ctok%% *}"; ctok="${ctok:-0}"
   dtoks=$(python3 -c "print(f'{$ctok/$wall:.1f}')" 2>/dev/null || echo 0)
-  echo -e "$quant\t$mode\t$reasoning\t$cli\t$model\t$wall\t$ptok\t$ctok\t$dtoks\t$tag" >> "$RESULTS"
+  echo -e "$quant\t${mode_word}\t$reasoning\t$cli\t$model\t$wall\t$ptok\t$ctok\t$dtoks\t$tag" >> "$RESULTS"
   echo "  done: ${wall}s, ${ctok} completion tok (${dtoks} tok/s)"
 }
 

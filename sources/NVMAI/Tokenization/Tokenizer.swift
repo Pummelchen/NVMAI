@@ -341,7 +341,7 @@ public struct GFTokenizer: @unchecked Sendable {
             let suffixIDs = Array(withPrompt[withoutPrompt.count...])
             return tokenizer.decode(tokens: suffixIDs, skipSpecialTokens: false)
         } catch {
-            return Self.fallbackChatMLGenerationSuffix
+            return fallback
         }
     }
 

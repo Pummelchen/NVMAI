@@ -155,7 +155,8 @@ extension Args {
                 messagesFile = try takeValue(argv, &index, flag: flag)
             case "--max-new":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Int(value), parsed > 0 else {
+                guard let parsed = Int(value),
+                      (1...RuntimeConfiguration.maximumContextTokens).contains(parsed) else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 maxNew = parsed
@@ -168,7 +169,7 @@ extension Args {
                 maxContext = parsed
             case "--temperature":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed >= 0 else {
+                guard let parsed = Float(value), parsed >= 0, parsed <= 2 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 temperature = parsed

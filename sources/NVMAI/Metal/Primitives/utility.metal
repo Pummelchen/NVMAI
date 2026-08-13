@@ -1,6 +1,16 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Local copy of the tanh-GELU used by the shared-expert kernels. Kept local
+// (rather than a cross-module static inline from moe.metal) so reordering the
+// concatenated shader library can never break this file's resolution.
+static inline float utility_gelu_pytorch_tanh(float x) {
+    const float x3 = x * x * x;
+    float inner = 0.7978845608028654f * (x + 0.044715f * x3);
+    inner = clamp(inner, -20.0f, 20.0f);
+    return 0.5f * x * (1.0f + tanh(inner));
+}
+
 // Kept in the shared library so both INT4 and INT8 shared-expert paths use
 // the same gelu_pytorch_tanh activation without compiling a private shader
 // module.
@@ -15,7 +25,7 @@ void gelu_mul_fp16(
     if (tid >= count) return;
     const float g = float(gate[tid]);
     const float u = float(up[tid]);
-    out[tid] = half(gelu_pytorch_tanh(g) * u);
+    out[tid] = half(utility_gelu_pytorch_tanh(g) * u);
 }
 
 // SwiGLU counterpart for architectures with silu hidden activation (Qwen 3.6).

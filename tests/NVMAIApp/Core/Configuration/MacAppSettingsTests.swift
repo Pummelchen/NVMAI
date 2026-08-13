@@ -26,7 +26,7 @@ import Testing
         #expect(decoded == MacAppSettings())
     }
 
-    @Test func malformedFileIsReplacedWithDefaults() throws {
+    @Test func malformedFileFallsBackToDefaultsWithoutOverwriting() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let model = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
@@ -36,10 +36,9 @@ import Testing
         let settings = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: model)
 
         #expect(settings == MacAppSettings())
-        let decoded = try JSONDecoder().decode(
-            MacAppSettings.self,
-            from: Data(contentsOf: fileURL))
-        #expect(decoded == MacAppSettings())
+        // The corrupt file is preserved (not silently deleted) so the user's
+        // data can be recovered or corrected; defaults are used this session.
+        #expect(try String(contentsOf: fileURL, encoding: .utf8) == "not json")
     }
 
     @Test func invalidValuesAreReplacedWithDefaults() throws {

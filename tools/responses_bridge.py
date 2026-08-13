@@ -104,14 +104,16 @@ def chat_messages(instructions, input_items):
 
 
 def build_chat_request(body):
+    max_out = body.get("max_output_tokens")
     req = {
         "model": body.get("model"),
         "messages": chat_messages(body.get("instructions"), body.get("input")),
         "stream": True,
         "temperature": 0.2,
         # Bound generation so a runaway reply cannot hog the server for many
-        # minutes on a slow local model; codex's max_output_tokens wins.
-        "max_tokens": body.get("max_output_tokens") or 2_048,
+        # minutes on a slow local model; codex's max_output_tokens wins. A
+        # caller's 0 means "no cap" — forward null, not the 2048 default.
+        "max_tokens": None if max_out == 0 else (max_out or 2_048),
     }
     tools = chat_tools(body.get("tools"))
     if tools:
@@ -196,14 +198,19 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:500]
             self.emit_error("upstream HTTP %s: %s" % (exc.code, detail))
-            raise
+            return
         except urllib.error.URLError as exc:
             self.emit_error("upstream unreachable: %s" % exc.reason)
-            raise
+            return
 
     def forward_chat_stream(self, upstream, rid, created, model, response):
         output_index = 0
         usage = None
+        text_parts = []
+        self.emit("response.output_item.added", {
+            "type": "response.output_item.added", "output_index": 0,
+            "item": {"id": rid + "_msg0", "type": "message", "role": "assistant",
+                     "status": "in_progress", "content": []}})
         for raw in upstream:
             line = raw.decode(errors="replace").strip()
             if not line.startswith("data:") or line == "data: [DONE]":
@@ -216,7 +223,9 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                 usage = chunk["usage"]
             delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
             if delta.get("content"):
+                text_parts.append(delta["content"])
                 self.emit_output_text_delta(rid, output_index, delta["content"])
+                self.emit_content_part_delta(rid, output_index, delta["content"])
             for tc in delta.get("tool_calls") or []:
                 index = tc.get("index", 0) + output_index
                 if tc.get("id"):
@@ -229,19 +238,17 @@ class BridgeHandler(http.server.BaseHTTPRequestHandler):
                         "output_index": index,
                         "delta": tc["function"]["arguments"],
                     })
-            if delta.get("content"):
-                self.emit_content_part_delta(rid, output_index, delta["content"])
-        # finalize: one completed text item summarizing the stream
-        self.emit("response.output_item.added", {
-            "type": "response.output_item.added", "output_index": 0,
-            "item": {"id": rid + "_msg0", "type": "message", "role": "assistant",
-                     "status": "in_progress", "content": []}})
+        full_text = "".join(text_parts)
         self.emit("response.output_item.done", {
             "type": "response.output_item.done", "output_index": 0,
             "item": {"id": rid + "_msg0", "type": "message", "role": "assistant",
                      "status": "completed",
-                     "content": [{"type": "output_text", "text": "", "annotations": []}]}})
+                     "content": [{"type": "output_text", "text": full_text, "annotations": []}]}})
         response["status"] = "completed"
+        response["output"] = [{
+            "id": rid + "_msg0", "type": "message", "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": full_text, "annotations": []}]}]
         if usage:
             response["usage"] = {
                 "input_tokens": usage.get("prompt_tokens", 0),

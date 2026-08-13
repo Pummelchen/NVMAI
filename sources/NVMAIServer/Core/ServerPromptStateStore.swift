@@ -71,7 +71,7 @@ final class ServerPromptStateStore: @unchecked Sendable {
     /// Hard ceiling for one snapshot capture (S2). A snapshot above this is
     /// never allocated, bounding the multi-GiB capture + write cost regardless
     /// of a large configured disk budget (default 8 GiB).
-    static let maximumCaptureBytes = 4 * 1_048_576 * 1_048_576
+    static let maximumCaptureBytes = 4 * 1_024 * 1_048_576
 
     private struct State {
         var memory: [UUID: InferenceStateSnapshot] = [:]
@@ -318,6 +318,7 @@ final class ServerPromptStateStore: @unchecked Sendable {
     }
 
     func remove(entryIDs: some Sequence<UUID>) {
+        var directories: [URL] = []
         state.withLock { state in
             for id in entryIDs {
                 if let snapshot = state.memory.removeValue(forKey: id) {
@@ -326,10 +327,13 @@ final class ServerPromptStateStore: @unchecked Sendable {
                 state.memoryLRU.removeAll { $0 == id }
                 if let record = state.disk.removeValue(forKey: id) {
                     state.diskBytes -= record.metadata.descriptor.payloadBytes
-                    try? fileManager.removeItem(at: record.directory)
+                    directories.append(record.directory)
                 }
                 state.diskLRU.removeAll { $0 == id }
             }
+        }
+        for directory in directories {
+            try? fileManager.removeItem(at: directory)
         }
     }
 
@@ -386,19 +390,24 @@ final class ServerPromptStateStore: @unchecked Sendable {
     }
 
     private func evictDiskIfNeeded() -> [UUID] {
-        state.withLock { state -> [UUID] in
+        var directories: [URL] = []
+        let evicted = state.withLock { state -> [UUID] in
             var evicted: [UUID] = []
             while state.diskBytes > configuration.diskLimitBytes,
                   let id = state.diskLRU.first {
                 state.diskLRU.removeFirst()
                 if let record = state.disk.removeValue(forKey: id) {
                     state.diskBytes -= record.metadata.descriptor.payloadBytes
-                    try? fileManager.removeItem(at: record.directory)
+                    directories.append(record.directory)
                     evicted.append(id)
                 }
             }
             return evicted
         }
+        for directory in directories {
+            try? fileManager.removeItem(at: directory)
+        }
+        return evicted
     }
 
     private func writeDisk(entry: ServerPromptCacheEntry,

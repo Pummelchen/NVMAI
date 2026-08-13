@@ -34,7 +34,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     init(version: Int = currentVersion,
          contextTokens: Int = AppContextLengthOption.fourK.tokens,
-         expertCacheSlots: Int = 32,
+         expertCacheSlots: Int = 64,
          temperature: Double = 0.2,
          topKEnabled: Bool = true,
          topK: Int = 64,
@@ -100,20 +100,29 @@ enum MacAppSettingsFileStore {
     static func loadOrCreate(forModelDirectory modelDirectory: URL,
                              fileManager: FileManager = .default) -> MacAppSettings {
         let fileURL = fileURL(forModelDirectory: modelDirectory)
-        if fileManager.fileExists(atPath: fileURL.path) {
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            let settings = MacAppSettings()
             do {
-                let data = try Data(contentsOf: fileURL)
-                let settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
-                guard settings.isValid() else { throw InvalidSettings() }
-                return settings
+                try save(settings, forModelDirectory: modelDirectory, fileManager: fileManager)
             } catch {
-                try? fileManager.removeItem(at: fileURL)
+                FileHandle.standardError.write(Data(
+                    ("NVMAI app settings save failed: \(error)\n").utf8))
             }
+            return settings
         }
-
-        let settings = MacAppSettings()
-        try? save(settings, forModelDirectory: modelDirectory, fileManager: fileManager)
-        return settings
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
+            guard settings.isValid() else { throw InvalidSettings() }
+            return settings
+        } catch {
+            // Keep the existing file on a transient/decode error so the user's
+            // settings can be recovered or corrected; fall back to defaults
+            // for this session only rather than destroying the file.
+            FileHandle.standardError.write(Data(
+                ("NVMAI app settings load failed: \(error); using defaults\n").utf8))
+            return MacAppSettings()
+        }
     }
 
     static func save(_ settings: MacAppSettings,

@@ -191,7 +191,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             oversized = false
             // S10/S25: reset per-request phase state and drop the reference to
             // any previous request's (finished) task when a new request head
-            // arrives.
+            // arrives. Pipelined requests are serialized by NIO's pipeline
+            // assistance, so an in-flight request is never mid-generation
+            // when a later head is delivered.
             requestPhaseState = RequestPhaseState()
             activeTask = nil
             inFlightRequests += 1
@@ -439,6 +441,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
             let decoded = try JSONDecoder().decode(ResponsesAPIRequest.self, from: Data(bytes))
+            if decoded.store == true {
+                throw ServerRequestError.invalid(
+                    message: "store is not supported",
+                    param: "store", code: "unsupported_value")
+            }
             let chatRequest = try ResponsesAPIMapper.chatRequest(decoded)
             let request = try OpenAIRequestValidator.validate(
                 chatRequest, modelID: modelID, maxContext: backend.maximumContext)
@@ -563,6 +570,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             frames.append(frame)
             frames.append(second)
         }
+        let framesSnapshot = frames
         var headers = HTTPHeaders()
         headers.add(name: "content-type", value: "text/event-stream")
         headers.add(name: "cache-control", value: "no-cache")
@@ -573,8 +581,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         let promise = context.eventLoop.makePromise(of: Void.self)
         context.eventLoop.execute {
             contextBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
-            var buffer = contextBox.value.channel.allocator.buffer(capacity: frames.count)
-            buffer.writeBytes(frames)
+            var buffer = contextBox.value.channel.allocator.buffer(capacity: framesSnapshot.count)
+            buffer.writeBytes(framesSnapshot)
             contextBox.value.writeAndFlush(
                 self.wrapOutboundOut(.body(.byteBuffer(buffer))),
                 promise: promise)
@@ -645,22 +653,22 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                            context: ChannelHandlerContext) {
         let index = itemState.toolCount
         itemState.toolCount += 1
-        if index == 0 {
-            enqueueResponsesEvent(
-                name: "response.output_item.added",
-                object: ["type": "response.output_item.added", "output_index": 1,
-                         "item": ["id": id + "_fc0", "type": "function_call",
-                                  "status": "in_progress", "name": call.name,
-                                  "arguments": "", "call_id": call.id,
-                                  "output_index": 1]],
-                outbox: outbox, context: context)
-        }
+        let outputIndex = index + 1
+        let itemID = id + "_fc\(index)"
+        enqueueResponsesEvent(
+            name: "response.output_item.added",
+            object: ["type": "response.output_item.added", "output_index": outputIndex,
+                     "item": ["id": itemID, "type": "function_call",
+                              "status": "in_progress", "name": call.name,
+                              "arguments": "", "call_id": call.id,
+                              "output_index": outputIndex]],
+            outbox: outbox, context: context)
         let fragments = utf8Fragments(call.argumentsJSON, maximumBytes: 1024)
         for fragment in fragments {
             enqueueResponsesEvent(
                 name: "response.function_call_arguments.delta",
                 object: ["type": "response.function_call_arguments.delta",
-                         "item_id": id + "_fc0", "output_index": 1, "delta": fragment],
+                         "item_id": itemID, "output_index": outputIndex, "delta": fragment],
                 outbox: outbox, context: context)
         }
     }
@@ -686,6 +694,24 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                          "item": ResponsesAPIBuilder.messageItem(
                             id: id + "_msg0", role: "assistant",
                             text: completion.content, status: "completed")],
+                outbox: outbox, context: context)
+        }
+        for (index, call) in completion.toolCalls.enumerated() {
+            let outputIndex = index + 1
+            let itemID = id + "_fc\(index)"
+            enqueueResponsesEvent(
+                name: "response.function_call_arguments.done",
+                object: ["type": "response.function_call_arguments.done",
+                         "item_id": itemID, "output_index": outputIndex,
+                         "arguments": call.argumentsJSON],
+                outbox: outbox, context: context)
+            enqueueResponsesEvent(
+                name: "response.output_item.done",
+                object: ["type": "response.output_item.done", "output_index": outputIndex,
+                         "item": ResponsesAPIBuilder.functionCallItem(
+                            id: itemID, name: call.name,
+                            arguments: call.argumentsJSON, callID: call.id,
+                            outputIndex: outputIndex, status: "completed")],
                 outbox: outbox, context: context)
         }
         var output = ResponsesAPIBuilder.outputItems(completion: completion, idPrefix: id)
@@ -906,13 +932,19 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
         // Outbox closed and drained: end the HTTP response body; close the
         // connection when the stream ended in failure.
-        try? await writeSSEEnd(context)
+        let endWriteFailed: Bool
+        do {
+            try await writeSSEEnd(context)
+            endWriteFailed = false
+        } catch {
+            endWriteFailed = true
+        }
         let close = outbox.closeWhenDrained
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
             if self.inFlightRequests > 0 { self.inFlightRequests -= 1 }
             self.resetIdleDeadline(contextBox.value)
-            if close {
+            if close || endWriteFailed {
                 contextBox.value.close(promise: nil)
             }
         }
@@ -957,7 +989,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         let envelope: OpenAIErrorEnvelope
         let status: HTTPResponseStatus
         if let requestError = error as? ServerRequestError {
-            status = requestError == .queueFull ? .tooManyRequests : .badRequest
+            switch requestError {
+            case .queueFull: status = .tooManyRequests
+            case .unknownModel: status = .notFound
+            default: status = .badRequest
+            }
             envelope = requestError.envelope
         } else {
             status = .internalServerError

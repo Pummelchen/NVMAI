@@ -571,8 +571,9 @@ public final class RemoteStreamingRepacker {
     }
 
     private func writeSmall(path: String, data: Data) throws {
-        try Posix.mkdirP((path as NSString).deletingLastPathComponent)
-        try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
+        let directory = (path as NSString).deletingLastPathComponent
+        try Posix.mkdirP(directory)
+        try Posix.atomicWrite(data, to: path, durableIn: directory)
         audit.recordWrite(bytes: data.count)
     }
 
@@ -724,6 +725,7 @@ public final class RemoteStreamingRepacker {
         let final = (partialDir as NSString).appendingPathComponent("manifest.json")
         try writeSmall(path: tmp, data: data)
         try Posix.rename(from: tmp, to: final)
+        try Posix.fsyncDirectory(partialDir)
         let manifestSha = try Sha256Stream.hashFile(path: final)
         let receipt = try VerifiedInstallReceiptWriter.encode(
             outputDir: options.outputDir,
@@ -737,5 +739,6 @@ public final class RemoteStreamingRepacker {
         let tmpReceiptPath = receiptPath + ".tmp"
         try writeSmall(path: tmpReceiptPath, data: receipt)
         try Posix.rename(from: tmpReceiptPath, to: receiptPath)
+        try Posix.fsyncDirectory(partialDir)
     }
 }
