@@ -105,7 +105,9 @@ extension ModelLoaderTests {
       loadStats: &stats)
     #expect(stats.manifestSha256Nanos > 0)
     #expect(stats.receiptValidationNanos > 0)
-    #expect(stats.eagerSha256Nanos > 0)
+    // The whole point of the trusted receipt is to skip the full weights
+    // re-hash, so the eager SHA timer stays 0 under a valid receipt.
+    #expect(stats.eagerSha256Nanos == 0)
   }
 
   @Test func trustedReceiptModeRejectsExtraReceiptFileEntry() throws {

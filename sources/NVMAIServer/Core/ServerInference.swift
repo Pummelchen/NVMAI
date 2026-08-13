@@ -305,9 +305,9 @@ public actor ServerCoordinator {
     ) async throws -> T {
         try Task.checkCancellation()
         guard !shuttingDown else { throw CancellationError() }
-        // S6: strictly fewer than queueLimit admitted requests; `<=` admitted
-        // queueLimit + 1.
-        guard admittedCount < queueLimit else {
+        // S6: at most queueLimit queued behind one active request, i.e. up to
+        // queueLimit + 1 admitted.
+        guard admittedCount <= queueLimit else {
             // Picard: "They invade our space and we fall back. They
             // assimilate entire worlds, and we fall back. Not again!"
             throw ServerRequestError.queueFull

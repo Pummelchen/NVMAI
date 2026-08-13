@@ -232,6 +232,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         context.fireChannelInactive()
     }
 
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        // An I/O error (e.g. a write to a disconnected client) means the
+        // stream can no longer be delivered; cancel the generation so it
+        // stops promptly, then let the pipeline handle the error.
+        activeTask?.cancel()
+        context.fireErrorCaught(error)
+    }
+
     private func route(head: HTTPRequestHead,
                        body: ByteBuffer,
                        context: ChannelHandlerContext) {

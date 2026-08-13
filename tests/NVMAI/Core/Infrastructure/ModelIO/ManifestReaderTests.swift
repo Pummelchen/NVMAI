@@ -351,6 +351,8 @@ import Foundation
             "packed_experts/layout.json": ["size": 1024, "sha256": String(repeating: "0", count: 64)],
             "packed_experts/layer_00.bin": ["size": 16384, "sha256": String(repeating: "0", count: 64)],
             "packed_experts/layer_01.bin": ["size": 16384, "sha256": String(repeating: "0", count: 64)],
+            "packed_experts/layer_02.bin": ["size": 16384, "sha256": String(repeating: "0", count: 64)],
+            "packed_experts/layer_03.bin": ["size": 16384, "sha256": String(repeating: "0", count: 64)],
         ]
         let (dir, toy) = try Self.writeToyManifest(filesOverride: files)
         defer { try? FileManager.default.removeItem(at: dir) }

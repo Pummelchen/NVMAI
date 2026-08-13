@@ -10,12 +10,16 @@ import Testing
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+        model.runState = .running
         client.generationTranscriptMailbox.append("lossless output")
 
         #expect(model.currentProcessMemoryBytes == 2_100_000_000)
         #expect(model.outputResponsePlainText == "lossless output")
         #expect(model.outputConversationPlainText == "Answer:\nlossless output")
 
+        // clearOutput() no-ops while a generation is running, so return to
+        // idle before asserting it clears the transcript.
+        model.runState = .idle
         model.clearOutput()
         #expect(client.generationTranscriptMailbox.completeText.isEmpty)
         #expect(model.outputResponsePlainText.isEmpty)

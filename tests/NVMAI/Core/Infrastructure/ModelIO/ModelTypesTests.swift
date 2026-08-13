@@ -16,7 +16,9 @@ import Foundation
         #expect(a.tieWordEmbeddings == false)
         #expect(a.finalLogitSoftcap == 0.0)
         #expect(a.fullAttentionLayerMask.count == 40)
-        let fullCount = a.fullAttentionLayerMask.reduce(0) { $0 + Int($1) }
+        // Mask values: 0 = sliding-window, 1 = full attention, 2 = gated-DeltaNet
+        // linear. Count the full-attention (== 1) layers.
+        let fullCount = a.fullAttentionLayerMask.filter { $0 == 1 }.count
         #expect(fullCount == 10, "Qwen 3.6 has 10 full-attention layers, got \(fullCount)")
         // Mask flags every 4th layer (3, 7, ..., 39) as full; the rest linear.
         for L in stride(from: 3, to: 40, by: 4) {

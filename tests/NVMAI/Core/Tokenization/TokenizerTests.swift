@@ -138,8 +138,9 @@ struct TokenizerTests {
             assembled += detok.push(id)
         }
         assembled += detok.flush()
+        // The prefix may truncate a multi-byte codepoint, in which case the
+        // reference decoder produces U+FFFD too; matching it is the contract.
         #expect(assembled == tok.decode(prefix))
-        #expect(!assembled.unicodeScalars.contains("\u{FFFD}"))
     }
 
     @Test("Flush with no tokens yields empty string")

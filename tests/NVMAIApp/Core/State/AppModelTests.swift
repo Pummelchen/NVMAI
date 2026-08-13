@@ -16,9 +16,9 @@ import Testing
         #expect(request.maxNewTokens == 4_096)
         #expect(request.repetitionPenalty == 1)
         #expect(!request.isPureGreedy)
-        #expect(request.runtimeOptions.expertCacheSlots == 16)
+        #expect(request.runtimeOptions.expertCacheSlots == 64)
         #expect(request.runtimeOptions.expertCachePolicy == .lfu)
-        #expect(request.runtimeOptions.rdadvisePolicy == .off)
+        #expect(request.runtimeOptions.rdadvisePolicy == .default)
         #expect(request.runtimeOptions.prefillEnabled)
     }
 

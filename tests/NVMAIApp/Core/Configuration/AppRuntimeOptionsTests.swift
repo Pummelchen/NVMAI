@@ -6,21 +6,21 @@ import NVMAI
 @Suite struct AppRuntimeOptionsTests {
     @Test func defaultsMatchProduction() throws {
         let options = AppRuntimeOptions()
-        #expect(options.expertCacheSlots == 16)
+        #expect(options.expertCacheSlots == 64)
         #expect(options.expertCachePolicy == .lfu)
         #expect(options.prefillEnabled)
-        #expect(options.prefillChunkTokens == 1_024)
-        #expect(options.rdadvisePolicy == .off)
+        #expect(options.prefillChunkTokens == 4096)
+        #expect(options.rdadvisePolicy == .default)
         #expect(options.modelVerification == .fullSha256)
 
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
         #expect(runtime.expertCacheSlots == RuntimeConfiguration.production.expertCacheSlots)
         #expect(runtime.expertCachePolicy == RuntimeConfiguration.production.expertCachePolicy)
-        #expect(runtime.prefillConfig.chunkTokens == 1_024)
+        #expect(runtime.prefillConfig.chunkTokens == 4096)
         #expect(runtime.rdadvisePolicy == RuntimeConfiguration.production.rdadvisePolicy)
         #expect(runtime.headPath == RuntimeConfiguration.production.headPath)
         #expect(options.resultSummary ==
-            "Cache 16 LFU, prefill 1024, FP16 KV, RDADVISE off, full SHA-256")
+            "Cache 64 LFU, prefill 4096, FP16 KV, RDADVISE default, full SHA-256")
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {

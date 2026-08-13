@@ -169,14 +169,13 @@ import Metal
                 weightBytes: bf16DBytes,
                 scaleBytes: 0,
                 biasBytes: 0))
-            // Router (8-bit, matching quant.router) + sigmoid-gated shared
-            // expert at the sharedExpert slot width (Qwen names, no aux
-            // scales).
+            // Router (8-bit, matching quant.router) + the sigmoid-gated shared
+            // expert gate (also at the router width, 8-bit on the target).
             specs.append(int8AffineSpec(
                 "\(prefix).mlp.gate.weight",
                 rows: toy.numExperts,
                 cols: d))
-            specs.append(int4AffineSpec(
+            specs.append(int8AffineSpec(
                 "\(prefix).mlp.shared_expert_gate.weight",
                 rows: 1,
                 cols: d))

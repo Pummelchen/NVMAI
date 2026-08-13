@@ -85,7 +85,9 @@ enum QwenToySynthetic {
             // sigmoid-gated shared expert at the sharedExpert slot width.
             specs.append(int8AffineSpec("\(prefix).mlp.gate.weight",
                                         rows: toy.numExperts, cols: d))
-            specs.append(affineSpec("\(prefix).mlp.shared_expert_gate.weight",
+            // The shared-expert scalar gate is quantized at the router width
+            // (8-bit on the target, like mlp.gate) — not the sharedExpert slot.
+            specs.append(int8AffineSpec("\(prefix).mlp.shared_expert_gate.weight",
                                         rows: 1, cols: d))
             specs.append(affineSpec("\(prefix).mlp.shared_expert.gate_proj.weight",
                                         rows: toy.intermediateSize, cols: d))

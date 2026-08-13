@@ -463,12 +463,16 @@ extension Model {
                 receipt = loadedReceipt
                 trustedReceiptUsable = true
             } catch {
-                // A receipt that cannot be validated (for example, the model
-                // directory was moved after install so the recorded path no
-                // longer matches) is not a hard error: fall back to full
-                // SHA-256 verification of the payload below.
-                receipt = nil
-                trustedReceiptUsable = false
+                // The trusted-receipt policy is strict: a missing or invalid
+                // receipt is a hard error, because silently falling back to a
+                // full re-hash would mask tampering or a moved directory and
+                // defeat the policy's purpose.
+                if let receiptError = error as? ModelError,
+                   case .trustedReceiptInvalid = receiptError {
+                    throw receiptError
+                }
+                throw ModelError.trustedReceiptInvalid(
+                    detail: "\(VerifiedInstallReceiptReader.fileName): \(error)")
             }
         } else {
             receipt = nil

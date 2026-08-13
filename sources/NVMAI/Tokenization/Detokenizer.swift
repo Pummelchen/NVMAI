@@ -30,12 +30,6 @@ struct GFDetokenizer {
     @usableFromInline var stableIDs: [Int] = []
     @usableFromInline var trailingByteIDs: [Int] = []
     @usableFromInline var emitted: String = ""
-    /// Number of `stableIDs` already folded into `decodedText`.
-    @usableFromInline var decodedPrefixCount = 0
-    /// Rolling decode of `stableIDs[..<decodedPrefixCount]` (plus committed
-    /// byte-fallback ids). Built incrementally so `push` never re-decodes the
-    /// full history (R7).
-    @usableFromInline var decodedText: String = ""
 
     init(tokenizer: GFTokenizer) {
         self.tokenizer = tokenizer.tokenizer
@@ -55,17 +49,37 @@ struct GFDetokenizer {
         }
         stableIDs.append(tokenID)
 
-        // Decode only the newly appended ids (which always end with a
-        // non-byte-fallback token, so the decoder commits every byte) and
-        // append to the rolling text.
-        let segment = Array(stableIDs[decodedPrefixCount...])
-        decodedText += tokenizer.decode(tokens: segment, skipSpecialTokens: true)
-        decodedPrefixCount = stableIDs.count
-        return commitDelta(decodedText)
+        // Decode the full stable prefix (not just the newly appended ids) so
+        // multi-byte codepoints split across tokens reassemble with their full
+        // context. A byte-level tokenizer can still leave a trailing
+        // incomplete UTF-8 sequence; hold those bytes back so they don't
+        // surface as a replacement character — the next push completes them.
+        let current = tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
+        return commitDelta(Self.completeUTF8Prefix(current))
+    }
+
+    /// Longest prefix of `s` that ends on a complete UTF-8 codepoint. A
+    /// trailing split codepoint (fewer continuation bytes than its leading
+    /// byte expects) is held back rather than emitted as U+FFFD.
+    static func completeUTF8Prefix(_ s: String) -> String {
+        let bytes = Array(s.utf8)
+        guard let last = bytes.last, last & 0x80 != 0 else { return s }
+        var lead = bytes.count - 1
+        while lead > 0, bytes[lead] & 0xC0 == 0x80 { lead -= 1 }
+        let b = bytes[lead]
+        let expected: Int
+        if b & 0xE0 == 0xC0 { expected = 2 }
+        else if b & 0xF0 == 0xE0 { expected = 3 }
+        else if b & 0xF8 == 0xF0 { expected = 4 }
+        else { return s }
+        guard bytes.count - lead < expected else { return s }
+        return String(decoding: bytes[..<lead], as: UTF8.self)
     }
 
     mutating func flush() -> String {
-        let stableText = decodedText
+        let stableText = stableIDs.isEmpty
+            ? ""
+            : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
         let trailingText = assembleByteFallback(trailingByteIDs)
         let fullText = stableText + trailingText
         return commitDelta(fullText)
@@ -73,20 +87,19 @@ struct GFDetokenizer {
 
     @usableFromInline
     mutating func commitDelta(_ current: String) -> String {
-        // `emitted` is the leading `emittedUTF8Count` bytes of `current`
-        // whenever the decoder is prefix-stable (it is for the Qwen ChatML
-        // fixture; see the type doc). Track the boundary instead of rescanning
-        // the whole emitted string each token (R7).
+        // A combining mark can extend the last emitted grapheme, so compare
+        // the append-only prefix byte-for-byte rather than by Character.
         let currentUTF8 = current.utf8
-        let emittedCount = emitted.utf8.count
-        guard currentUTF8.count >= emittedCount else {
-            // Decoder rewrote the prefix (or produced a shorter string) —
-            // resync rather than emit garbage.
-            emitted = current
-            return ""
+        var boundary = currentUTF8.startIndex
+        for byte in emitted.utf8 {
+            guard boundary != currentUTF8.endIndex,
+                  currentUTF8[boundary] == byte else {
+                // Decoder altered the prefix — resync rather than emit garbage.
+                emitted = current
+                return ""
+            }
+            currentUTF8.formIndex(after: &boundary)
         }
-        let boundary = currentUTF8.index(currentUTF8.startIndex,
-                                         offsetBy: emittedCount)
         let delta = String(current[boundary...])
         emitted = current
         return delta
@@ -97,28 +110,63 @@ struct GFDetokenizer {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(ids.count)
         for id in ids {
-            guard let tok = tokenizer.convertIdToToken(id) else {
-                // NOTE: nil token in byte-fallback path means a token ID has no
-                // corresponding vocabulary entry — output may be silently truncated.
+            guard let tok = tokenizer.convertIdToToken(id),
+                  let byte = Self.byteFallbackByte(tok) else {
+                // A nil token or non-byte token here means a token ID has no
+                // corresponding byte — output may be silently truncated.
                 continue
             }
-            guard Self.isByteFallback(tok),
-                  let byte = UInt8(tok.dropFirst(3).dropLast(), radix: 16)
-            else { continue }
             bytes.append(byte)
         }
-        // Never fails: invalid/split trailing byte sequences are replaced with
-        // U+FFFD instead of silently dropped (R13). The stable prefix already
-        // committed everything decodable, so this only affects a genuinely
+        // Invalid/split trailing byte sequences are replaced with U+FFFD
+        // instead of silently dropped; this only affects a genuinely
         // truncated final codepoint.
         return String(decoding: bytes, as: UTF8.self)
     }
 
+    /// The byte represented by a byte-fallback token, in either of the two
+    /// forms this project uses: the `<0xXX>` spelling and the ByteLevel
+    /// byte-to-unicode single-character spelling. Returns nil for tokens that
+    /// are not single bytes, and for ASCII (which never splits a codepoint).
+    @usableFromInline
+    static func byteFallbackByte(_ token: String) -> UInt8? {
+        if token.count == 6,
+           token.hasPrefix("<0x"),
+           token.hasSuffix(">"),
+           token.dropFirst(3).dropLast().allSatisfy({ $0.isHexDigit }),
+           let byte = UInt8(token.dropFirst(3).dropLast(), radix: 16) {
+            return byte
+        }
+        guard token.unicodeScalars.count == 1,
+              let scalar = token.unicodeScalars.first,
+              let byte = Self.byteLevelCharToByte[scalar.value],
+              byte >= 0x80 else {
+            return nil
+        }
+        return byte
+    }
+
     @usableFromInline
     static func isByteFallback(_ token: String) -> Bool {
-        token.count == 6
-            && token.hasPrefix("<0x")
-            && token.hasSuffix(">")
-            && token.dropFirst(3).dropLast().allSatisfy { $0.isHexDigit }
+        byteFallbackByte(token) != nil
     }
+
+    /// Inverse GPT-2 / HuggingFace ByteLevel byte-to-unicode mapping, used to
+    /// recover the raw byte from a single-character ByteLevel token.
+    @usableFromInline
+    static let byteLevelCharToByte: [UInt32: UInt8] = {
+        var bytes: [Int] = Array(0x21...0x7E) + Array(0xA1...0xAC) + Array(0xAE...0xFF)
+        var chars: [Int] = bytes
+        var n = 0
+        for b in 0...255 where !bytes.contains(b) {
+            bytes.append(b)
+            chars.append(0x100 + n)
+            n += 1
+        }
+        var table: [UInt32: UInt8] = [:]
+        for (b, c) in zip(bytes, chars) {
+            table[UInt32(c)] = UInt8(b)
+        }
+        return table
+    }()
 }

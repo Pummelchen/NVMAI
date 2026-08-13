@@ -491,10 +491,13 @@ struct HTTPServerTests {
     /// generation (S25: channelInactive cancels the active task).
     @Test func midStreamClientDisconnectCancelsGeneration() async throws {
         let backend = CancellableServerBackend()
+        // A short heartbeat makes the server notice the dead peer quickly via
+        // a failed ping write.
         let server = NVMAIHTTPServer(
             modelID: "test-model",
             queueLimit: 1,
-            backend: backend)
+            backend: backend,
+            heartbeatInterval: .milliseconds(50))
         let channel = try await server.start(port: 0)
         let port = try #require(channel.localAddress?.port)
         let socket = try connectedSocket(port: port)
