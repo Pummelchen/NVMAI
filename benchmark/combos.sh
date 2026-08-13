@@ -14,6 +14,8 @@ RESULTS=$OUT/results.tsv
 CODEX_BIN="${CODEX_BIN:-$HOME/.local/bin/codex}"
 QWEN_BIN="${QWEN_BIN:-$HOME/.qwen-code/bin/qwen-code}"
 OPENCODE_BIN="${OPENCODE_BIN:-/opt/homebrew/bin/opencode}"
+# LIMIT=N runs only the first N combos (fastest-first). Unset/empty = all 72.
+LIMIT="${LIMIT:-}"
 mkdir -p "$OUT/answers"
 if [[ ! -s "$RESULTS" ]]; then
   echo -e "quant\tmode\treasoning\tcli\tmodel\twall_s\tprompt_tok\tcompletion_tok\tdecode_tok_s\tanswer_file" > "$RESULTS"
@@ -249,6 +251,7 @@ ORDER=(
 
 prev_cfg=""
 failed_cfg=""
+runs=0
 for combo in "${ORDER[@]}"; do
   read -r quant mode_word reasoning cli model <<< "$combo"
   mode=""
@@ -266,6 +269,11 @@ for combo in "${ORDER[@]}"; do
     fi
   fi
   run_one "$quant" "$mode" "$reasoning" "$cli" "$model"
+  runs=$((runs + 1))
+  if [[ -n "$LIMIT" && "$runs" -ge "$LIMIT" ]]; then
+    echo "Reached LIMIT=$LIMIT runs; stopping."
+    break
+  fi
 done
 stop_server
 echo "ALL DONE"
