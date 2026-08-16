@@ -261,6 +261,10 @@ actor RealInferenceSession {
         loadedKey = nil
     }
 
+    /// lint:allow-long one generation on the app's in-process client: build
+    /// the request, stream events back to the caller, and report the final
+    /// state. The event callback closes over the loop's mutable progress, so
+    /// the stages cannot be separated without hoisting that state.
     func run(request: AppGenerationRequest,
              memorySampler: AppMemorySampler,
              continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation) async {

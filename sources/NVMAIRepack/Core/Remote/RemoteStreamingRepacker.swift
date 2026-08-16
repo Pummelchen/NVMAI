@@ -189,6 +189,11 @@ public final class RemoteStreamingRepacker {
         try Posix.fsyncDirectory(paths.parentDirectory)
     }
 
+    /// lint:allow-long the install pipeline for one prepared plan: fetch
+    /// ranges, verify, write, checkpoint, promote. The stages share the
+    /// checkpoint, the byte budget and the progress reporter, and their order
+    /// is the resumability contract -- separating them would move that
+    /// contract into parameter lists.
     private func runPrepared(paths: RemoteInstallPaths,
                              progress: @escaping @Sendable (ModelInstallProgress) -> Void) async throws
         -> RemoteStreamingRepackResult {

@@ -44,6 +44,9 @@ public struct RunResult: Equatable, Sendable {
     public init(exitCode: Int32) { self.exitCode = exitCode }
 }
 
+/// lint:allow-long the CLI driver: parse messages, load the model, run one
+/// completion, print the timing footer. It is the top-level script for a
+/// one-shot tool, and its steps have no other caller.
 public func run(args: Args,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {

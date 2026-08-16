@@ -4,6 +4,10 @@ import NVMAIAppCore
 import NVMAIDecodeProtocol
 
 @main enum NVMAIDecodeServiceMain {
+    /// lint:allow-long the decode service's command loop: one `case` per
+    /// protocol message, each with its reply. Splitting it per command would
+    /// hide the exhaustive switch that makes an unhandled message a
+    /// compile-visible gap, and the cases share the session state.
     static func main() async {
         let socketPath = argument(after: "--socket")
         let launchLabel = argument(after: "--launch-label")

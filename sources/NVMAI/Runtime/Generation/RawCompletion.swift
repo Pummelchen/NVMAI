@@ -79,6 +79,11 @@ extension GenerationConfig {
 /// logits buffer is never written; the loop then requires a pure-greedy config
 /// and reads `lastGreedyToken`. Callers with sampling configs must construct
 /// the runner with `forceLogitsHead: true`.
+/// lint:allow-long the generation loop: continuation validation, the prefill
+/// mode switch, then token-by-token decode with stop matching and progress
+/// reporting. The loop body reads and writes the same half-dozen pieces of
+/// decode state on every iteration, so splitting it would thread that state
+/// back through parameters on every call.
 public func runRawCompletion(producer: any LogitProducer,
                              tokenizer: GFTokenizer,
                              promptIds: [Int32],

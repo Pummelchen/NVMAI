@@ -445,6 +445,10 @@ public actor ServerModelSession: ServerInferenceBackend {
         mtpEnabled ? .off : requested
     }
 
+    /// lint:allow-long a sequential construction pipeline: tokenizer, Metal
+    /// context, runtime config, model, optional MTP sidecar, runner, scratch.
+    /// Each step consumes the last, so extracting any of them would return a
+    /// tuple straight back into the next -- the same shape as Model.load.
     public static func load(modelDirectory: URL,
                             maxContext: Int,
                             promptCacheMode: ServerPromptCacheMode = .multiPrefix,
@@ -796,6 +800,11 @@ public actor ServerModelSession: ServerInferenceBackend {
         return (effectivePromptIDs, completionStart)
     }
 
+    /// lint:allow-long the request orchestrator: prompt preparation, cache
+    /// resolution, decode, publish, and the completion. Each of those is its
+    /// own method; what remains is the sequence plus a nested failure builder
+    /// that closes over eight locals -- hoisting it would mean an
+    /// eight-parameter signature for a twenty-line body.
     public func generate(
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
