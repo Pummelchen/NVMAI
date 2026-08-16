@@ -1,15 +1,12 @@
 sources/NVMAI/Runtime/Generation/RawCompletion.swift:runRawCompletion:202
 sources/NVMAI/Runtime/Inference/Model.swift:load:190
-sources/NVMAI/Runtime/Inference/RealForwardRunner.swift:executePrefillChunk:994
-sources/NVMAI/Runtime/Inference/RealForwardRunner.swift:produceToken:595
+sources/NVMAI/Runtime/Inference/RealForwardRunner.swift:executePrefillChunk:186
+sources/NVMAI/Runtime/Inference/RealForwardRunner.swift:produceToken:203
 sources/NVMAIApp/Core/Inference/RealInferenceClient.swift:run:127
 sources/NVMAIBench/main.swift:runGDN:191
 sources/NVMAIBench/main.swift:runMoE:205
-sources/NVMAICLI/Args.swift:parse:136
 sources/NVMAICLI/Run.swift:run:153
 sources/NVMAIDecodeService/Entry.swift:main:194
 sources/NVMAIRepack/Core/Remote/RemoteStreamingRepacker.swift:runPrepared:260
-sources/NVMAIServer/Core/OpenAIModels.swift:validate:133
-sources/NVMAIServer/Core/ServerArguments.swift:parse:140
 sources/NVMAIServer/Core/ServerInference.swift:generate:254
 sources/NVMAIServer/Core/ServerInference.swift:load:140

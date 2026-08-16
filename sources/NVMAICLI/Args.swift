@@ -117,6 +117,8 @@ extension Args {
       --help                    Show this message.
     """
 
+    /// lint:allow-long same shape as ServerArguments.parse: a flag table
+    /// where the exhaustive switch is the point.
     public static func parse(_ argv: [String]) throws -> Args {
         var model: String?
         var prompt: String?

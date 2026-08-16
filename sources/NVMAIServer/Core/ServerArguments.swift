@@ -78,6 +78,9 @@ public struct ServerArguments: Equatable, Sendable {
       --help                 Show this help.
     """
 
+    /// lint:allow-long a flag table: one `case` per option plus its
+    /// validation. Splitting it into per-group parsers would hide the
+    /// exhaustive switch that makes an unhandled flag a compile-visible gap.
     public static func parse(_ input: [String]) throws -> ServerArguments {
         var model: String?
         var mtpModel: String?

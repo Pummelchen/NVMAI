@@ -303,6 +303,9 @@ public struct ValidatedChatRequest: Sendable {
 }
 
 public enum OpenAIRequestValidator {
+    /// lint:allow-long a straight-line validation cascade: each guard
+    /// rejects one malformed field with its own error. Grouping them into
+    /// sub-validators would add indirection without removing a single check.
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
                                 maxContext: Int = RuntimeConfiguration
