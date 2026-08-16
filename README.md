@@ -26,9 +26,12 @@ shortcut for the coding-CLI benchmark harness.
 **Unreleased (since 3.5):** the prompt cache now keys on the post-strip view
 of a request, so a `-fast` conversation keeps its strip on cached follow-up
 turns instead of replaying the CLI's `<system-reminder>` scaffolding; the CI
-warning gate matches compiler diagnostics only; and the superseded
+warning gate matches compiler diagnostics only; the superseded
 `tools/responses_bridge.py` proxy is gone (the server has spoken the
-Responses API natively since 3.4). 660 tests / 120 suites.
+Responses API natively since 3.4); and the server exposes
+`POST /v1/models/unload` to release the model's memory on demand — it waits
+for in-flight requests to drain, then unloads (a no-op without
+`--lazy-load`/`--idle-unload-seconds`). 677 tests / 121 suites.
 
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a

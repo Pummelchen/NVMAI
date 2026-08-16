@@ -296,7 +296,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             handleResponses(
                 body: body,
                 context: context)
-        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"):
+        case (.POST, "/v1/models/unload"):
+            handleUnload(context: context)
+        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"), (_, "/v1/models/unload"):
             writeError(context, status: .methodNotAllowed,
                        OpenAIErrorEnvelope(message: "method not allowed",
                                            code: "method_not_allowed"))
@@ -304,6 +306,18 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             writeError(context, status: .notFound,
                        OpenAIErrorEnvelope(message: "route not found",
                                            code: "not_found"))
+        }
+    }
+
+    /// Control endpoint: release the model's memory on demand. With residency
+    /// managed (--lazy-load / --idle-unload-seconds) this waits for in-flight
+    /// requests to drain, then unloads; with a plain session it is a no-op.
+    private func handleUnload(context: ChannelHandlerContext) {
+        let contextBox = SendableContext(context)
+        activeTask = childChannels.startTask {
+            let released = await self.backend.unload()
+            self.writeJSON(contextBox.value, status: .ok,
+                           object: ["status": "ok", "unloaded": released])
         }
     }
 

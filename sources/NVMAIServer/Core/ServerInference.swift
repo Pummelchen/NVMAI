@@ -264,12 +264,17 @@ public protocol ServerInferenceBackend: Sendable {
     var maximumContext: Int { get }
     func generate(_ request: ValidatedChatRequest,
                   onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion
+    /// Releases the model's memory on demand. Backends that do not manage
+    /// residency (a plain session) have nothing to release and return false.
+    func unload() async -> Bool
 }
 
 public extension ServerInferenceBackend {
     var maximumContext: Int {
         RuntimeConfiguration.supportedContextTokens.max() ?? 262_144
     }
+
+    func unload() async -> Bool { false }
 }
 
 public actor ServerCoordinator {

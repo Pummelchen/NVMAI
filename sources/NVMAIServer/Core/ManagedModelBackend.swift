@@ -53,8 +53,15 @@ public actor ManagedModelBackend: ServerInferenceBackend {
     private var inFlight = 0
     private var lastActivity = ContinuousClock.now
     private var reaper: Task<Void, Never>?
+    /// Manual unloads waiting for in-flight requests to drain.
+    private var unloadWaiters: [UnloadWaiter] = []
     /// Built on the first load, then reused for the process lifetime.
     private var metalContext: MetalContext?
+
+    private struct UnloadWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Never>
+    }
 
     public init(plan: ModelSessionPlan,
                 facts: ModelSessionFacts,
@@ -80,6 +87,39 @@ public actor ManagedModelBackend: ServerInferenceBackend {
         return try await active.generate(request, onEvent: onEvent)
     }
 
+    /// Releases the model on demand. Waits for in-flight requests to drain
+    /// first, so a manual unload never fails a generation; returns true when a
+    /// resident session was released. Idempotent: with nothing loaded it
+    /// returns false immediately.
+    public func unload() async -> Bool {
+        // Stop the reaper so it cannot race the manual unload; a later load
+        // restarts it.
+        reaper?.cancel()
+        reaper = nil
+        while session != nil {
+            if Task.isCancelled { return false }
+            if inFlight == 0 {
+                session = nil
+                ServerLog.residency("unloaded")
+                return true
+            }
+            let id = UUID()
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    unloadWaiters.append(UnloadWaiter(id: id, continuation: continuation))
+                }
+            } onCancel: {
+                Task { await self.cancelUnloadWaiter(id) }
+            }
+        }
+        return false
+    }
+
+    private func cancelUnloadWaiter(_ id: UUID) {
+        guard let index = unloadWaiters.firstIndex(where: { $0.id == id }) else { return }
+        unloadWaiters.remove(at: index).continuation.resume()
+    }
+
     // MARK: - Residency
 
     /// Marks the request in-flight *before* the first suspension point, so the
@@ -91,6 +131,7 @@ public actor ManagedModelBackend: ServerInferenceBackend {
             return try await residentSession()
         } catch {
             inFlight -= 1
+            noteIdle()
             throw error
         }
     }
@@ -100,6 +141,17 @@ public actor ManagedModelBackend: ServerInferenceBackend {
         // Measured from when a request finished, so a long generation does not
         // count against the idle window.
         lastActivity = .now
+        noteIdle()
+    }
+
+    /// Wakes manual unloads once the last in-flight request has drained.
+    private func noteIdle() {
+        guard inFlight == 0, !unloadWaiters.isEmpty else { return }
+        let waiters = unloadWaiters
+        unloadWaiters.removeAll()
+        for waiter in waiters {
+            waiter.continuation.resume()
+        }
     }
 
     private func residentSession() async throws -> any ServerInferenceBackend {
@@ -164,7 +216,12 @@ public actor ManagedModelBackend: ServerInferenceBackend {
     /// isolation because the reaper's decision was made before its sleep.
     private func unloadIfIdle() {
         reaper = nil
-        guard case .stop = reaperStep(), session != nil else {
+        // Nothing to reap: a manual unload or shutdown already released the
+        // session while the reaper was waking. Restarting the countdown here
+        // would spawn a reaper that immediately finds nothing and respawns
+        // itself forever.
+        guard session != nil else { return }
+        guard case .stop = reaperStep() else {
             // Activity arrived while the reaper was waking; keep the model and
             // restart the countdown.
             startReaper()

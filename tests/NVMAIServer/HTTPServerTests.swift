@@ -155,6 +155,19 @@ private actor ThrowingMidStreamBackend: ServerInferenceBackend {
     }
 }
 
+/// Counts how often a residency-managed backend was built, so the unload
+/// endpoint's release/reload cycle is observable without a model on disk.
+private final class LoadCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+
+    var count: Int { lock.withLock { _count } }
+
+    func increment() {
+        lock.withLock { _count += 1 }
+    }
+}
+
 @Suite("OpenAI HTTP server", .serialized)
 struct HTTPServerTests {
     @Test func healthModelsAndNonStreamingCompletion() async throws {
@@ -447,6 +460,103 @@ struct HTTPServerTests {
         #expect(await server.queuedRequestCount == 0)
         #expect(await !server.hasActiveRequest)
         #expect(await server.acceptedConnectionCount == 0)
+        try await server.shutdown()
+    }
+
+    // MARK: - Model unload endpoint
+
+    @Test func unloadEndpointReleasesTheModel() async throws {
+        let counter = LoadCounter()
+        let managed = ManagedModelBackend(
+            plan: ModelSessionPlan(
+                modelDirectory: URL(fileURLWithPath: "/nonexistent/model"),
+                maxContext: 4_096,
+                promptCacheMode: .multiPrefix,
+                promptCacheMaximumEntries: 1,
+                promptCacheMemoryLimitBytes: 1_048_576,
+                promptCacheDiskDirectory: nil,
+                promptCacheDiskLimitBytes: 1_048_576,
+                prefillChunkTokens: nil,
+                expertCacheSlots: nil,
+                mtpModelDirectory: nil,
+                mtpMemoryMiB: 0),
+            facts: ModelSessionFacts(modelID: "test-model",
+                                     prefillChunkTokens: 4_096,
+                                     promptCacheMode: .multiPrefix),
+            idleTimeout: nil,
+            loader: { _, _ in
+                counter.increment()
+                return ScriptedServerBackend()
+            })
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: managed)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        // The first completion loads the model.
+        var completion = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        completion.httpMethod = "POST"
+        completion.setValue("application/json", forHTTPHeaderField: "content-type")
+        completion.httpBody = Data(#"""
+        {"model":"test-model","messages":[{"role":"user","content":"hi"}]}
+        """#.utf8)
+        let (_, response) = try await URLSession.shared.data(for: completion)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(counter.count == 1)
+
+        // The unload endpoint releases it.
+        var unload = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/models/unload")!)
+        unload.httpMethod = "POST"
+        let (data, unloadResponse) = try await URLSession.shared.data(for: unload)
+        #expect((unloadResponse as? HTTPURLResponse)?.statusCode == 200)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["unloaded"] as? Bool == true)
+
+        // A second completion reloads on demand.
+        let (_, secondResponse) = try await URLSession.shared.data(for: completion)
+        #expect((secondResponse as? HTTPURLResponse)?.statusCode == 200)
+        #expect(counter.count == 2)
+
+        try await server.shutdown()
+    }
+
+    @Test func unloadEndpointIsANoOpWithoutResidency() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var unload = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/models/unload")!)
+        unload.httpMethod = "POST"
+        let (data, response) = try await URLSession.shared.data(for: unload)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["unloaded"] as? Bool == false)
+
+        try await server.shutdown()
+    }
+
+    @Test func unloadEndpointRejectsNonPostMethods() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        let (_, response) = try await URLSession.shared.data(
+            from: URL(string: "http://127.0.0.1:\(port)/v1/models/unload")!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 405)
+
         try await server.shutdown()
     }
 

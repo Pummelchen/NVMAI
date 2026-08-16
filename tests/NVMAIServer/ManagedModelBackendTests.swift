@@ -51,6 +51,35 @@ private struct StubBackend: ServerInferenceBackend {
     }
 }
 
+/// A backend whose generation can be held open, so a manual unload can be
+/// observed waiting for an in-flight request to drain.
+private actor GatedBackend: ServerInferenceBackend {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    var isWaiting: Bool { continuation != nil }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        await withCheckedContinuation { continuation = $0 }
+        onEvent(.content("ok"))
+        return ServerCompletion(
+            content: "ok",
+            toolCalls: [],
+            finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1,
+                               completionTokens: 1,
+                               totalTokens: 2,
+                               cachedTokens: 0))
+    }
+}
+
 @Suite("Managed model backend")
 struct ManagedModelBackendTests {
     private func plan() -> ModelSessionPlan {
@@ -239,6 +268,83 @@ struct ManagedModelBackendTests {
         _ = try await managed.generate(request()) { _ in }
         #expect(recorder.loads == 2)
         #expect(await managed.isLoaded)
+    }
+
+    // MARK: - Manual unload
+
+    @Test func unloadReleasesTheSessionWhenIdle() async throws {
+        let recorder = LoadRecorder()
+        let managed = backend(recorder: recorder)
+        _ = try await managed.generate(request()) { _ in }
+        #expect(await managed.isLoaded)
+
+        let released = await managed.unload()
+        #expect(released)
+        #expect(await managed.isLoaded == false)
+
+        // A later request reloads on demand.
+        _ = try await managed.generate(request()) { _ in }
+        #expect(recorder.loads == 2)
+        #expect(await managed.isLoaded)
+    }
+
+    @Test func unloadIsIdempotentWhenNothingIsLoaded() async throws {
+        let recorder = LoadRecorder()
+        let managed = backend(recorder: recorder)
+        #expect(await managed.isLoaded == false)
+
+        let released = await managed.unload()
+        #expect(released == false)
+        #expect(await managed.isLoaded == false)
+        #expect(recorder.loads == 0)
+    }
+
+    @Test func unloadCancelsTheReaper() async throws {
+        let recorder = LoadRecorder()
+        let managed = backend(idleTimeout: .seconds(600), recorder: recorder)
+        _ = try await managed.generate(request()) { _ in }
+        #expect(await managed.hasReaper)
+
+        let released = await managed.unload()
+        #expect(released)
+        #expect(await managed.hasReaper == false)
+        #expect(await managed.isLoaded == false)
+
+        // The reaper must not respawn itself: with the session gone it would
+        // immediately find nothing to reap and chain new reaper tasks forever.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await managed.hasReaper == false)
+        #expect(await managed.isLoaded == false)
+    }
+
+    @Test func unloadWaitsForInFlightRequestsToDrain() async throws {
+        let recorder = LoadRecorder()
+        let gated = GatedBackend()
+        let managed = ManagedModelBackend(
+            plan: plan(),
+            facts: facts(),
+            idleTimeout: nil,
+            loader: { _, context in
+                try recorder.record(context)
+                return gated
+            })
+
+        let generation = Task { try? await managed.generate(request()) { _ in } }
+        while await gated.isWaiting == false {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await managed.inFlightCount == 1)
+
+        let unload = Task { await managed.unload() }
+        // The unload must not complete while the generation is in flight.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await managed.isLoaded)
+
+        await gated.release()
+        _ = await generation.value
+        let released = await unload.value
+        #expect(released)
+        #expect(await managed.isLoaded == false)
     }
 
     // MARK: - Lifecycle
