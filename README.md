@@ -16,14 +16,7 @@ seconds. (Introduced in v3.3; see the callout below for what is new in 3.5.)
 | OpenCode `run` | ~218 s | 5.9 s | **~37×** |
 | Qwen Code `-p` | >300 s (stalled) | 4.6 s | **>65×** |
 
-**New in 3.5:** production-readiness hardening — full-codebase audit fixes
-across the OpenAI-compatible server (multi-tool-call streaming, request
-validation, corrected temperature/top_k defaults), the Mac app's
-decode-service IPC, the runtime, installer, and Metal kernels — plus a fully
-green test suite (658 tests / 120 suites) and a `LIMIT=N` fastest-first
-shortcut for the coding-CLI benchmark harness.
-
-**Unreleased (since 3.5)**
+**New in 3.6**
 
 - **Model residency.** `--lazy-load` binds the port immediately and defers the
   load to the first inference request; `--idle-unload-seconds <n>` releases the
