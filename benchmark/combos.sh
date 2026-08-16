@@ -7,7 +7,10 @@
 # Results go to benchmark/benchmark-results/ (git-ignored).
 set -uo pipefail
 
-NVMAI="${NVMAI:-/Users/andreborchert/Downloads/NVMAI}"
+# Default to the checkout this script lives in, so the harness runs from any
+# clone; NVMAI=<path> still overrides it.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+NVMAI="${NVMAI:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PROMPT="difference of swift and c++ in detail"
 OUT="${OUT:-$NVMAI/benchmark/benchmark-results}"
 RESULTS=$OUT/results.tsv

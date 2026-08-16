@@ -314,8 +314,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             // Picard: "I am Locutus of Borg. Resistance is futile. Your life
             // as it has been is over." The raw request is assimilated here.
-            let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
-            let decoded = try JSONDecoder().decode(OpenAIChatRequest.self, from: Data(bytes))
+            // One copy out of the ByteBuffer, not two: a [UInt8] hop would
+            // duplicate a body of up to `maximumBodyBytes` before decoding.
+            let decoded = try JSONDecoder().decode(
+                OpenAIChatRequest.self, from: Data(body.readableBytesView))
             let request = try OpenAIRequestValidator.validate(
                 decoded, modelID: modelID, maxContext: backend.maximumContext)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
@@ -447,8 +449,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func handleResponses(body: ByteBuffer,
                                  context: ChannelHandlerContext) {
         do {
-            let bytes = body.getBytes(at: body.readerIndex, length: body.readableBytes) ?? []
-            let decoded = try JSONDecoder().decode(ResponsesAPIRequest.self, from: Data(bytes))
+            let decoded = try JSONDecoder().decode(
+                ResponsesAPIRequest.self, from: Data(body.readableBytesView))
             if decoded.store == true {
                 throw ServerRequestError.invalid(
                     message: "store is not supported",

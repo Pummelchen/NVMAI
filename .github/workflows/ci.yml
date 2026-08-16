@@ -28,8 +28,13 @@ jobs:
       - name: Build release products (0 warnings gate)
         run: |
           swift build -c release 2>&1 | tee /tmp/build.log
-          if grep -q 'warning:' /tmp/build.log; then
+          # Match compiler diagnostics only (file:line:col: warning:). A bare
+          # `grep warning:` also catches SwiftPM dependency-resolution notices
+          # such as "warning: 'swift-system': skipping cache due to an error",
+          # which would fail the gate with a misleading message.
+          if grep -qE '^[^ ]+\.(swift|metal|c|h|m|mm):[0-9]+:[0-9]+: warning:' /tmp/build.log; then
             echo "::error::build emitted warnings; CI requires a warning-free release build"
+            grep -E '^[^ ]+\.(swift|metal|c|h|m|mm):[0-9]+:[0-9]+: warning:' /tmp/build.log
             exit 1
           fi
       - name: Run serial tests
