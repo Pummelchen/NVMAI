@@ -407,6 +407,11 @@ extension Model {
     /// Open a `.gturbo/` directory and return a typed handle. Eagerly verifies
     /// SHA-256 of `model_weights.bin` and `packed_experts/layout.json`; layer
     /// files are verified lazily on first `routedExpert(...)` touch.
+    /// lint:allow-long a sequential load pipeline -- open, hash, verify the
+    /// receipt, decode the layout, map the resident buffer -- whose stages
+    /// share a descriptor, sizes and timing stats. Extracting any of them
+    /// needs six or seven parameters, trading one readable sequence for
+    /// several functions with unwieldy signatures.
     public static func load(directoryURL: URL,
                             device: MTLDevice,
                             expecting: ArchConfig = .qwen36_35B_A3B,

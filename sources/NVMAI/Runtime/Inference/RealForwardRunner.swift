@@ -1188,6 +1188,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return scratch
     }
 
+    /// lint:allow-long the orchestrator for one prefill chunk: scratch setup,
+    /// the per-layer dispatch, and the head. Each stage it calls is its own
+    /// method; what remains is the sequence, and inlining less of it would
+    /// only hide the order the stages must run in.
     private func executePrefillChunk(tokens: ArraySlice<Int32>,
                                      startPosition: Int,
                                      outputMode: PrefillOutputMode,
@@ -1376,6 +1380,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         prefillChunkState.markCommitted()
     }
 
+    /// lint:allow-long the orchestrator for one decode step, in the same
+    /// shape as executePrefillChunk: embed, the per-layer dispatch, the head.
     private func produceToken(token: Int32,
                               position: Int,
                               into logits: MTLBuffer,

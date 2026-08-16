@@ -145,6 +145,9 @@ struct NVMAIBench {
     /// metric: phase-1 reads gate+up (8 x 2 x F*D/2 bytes), phase-2 reads
     /// down (8 x D*F/2 bytes). The combined "moe" mode dispatches both in
     /// one command buffer, mirroring the decode routedCB.
+    /// lint:allow-long NVMAIBench is a development harness, not a shipped
+    /// product: each run* is one linear measurement script whose setup,
+    /// dispatch and reporting only make sense read top to bottom.
     private static func runMoE(kernelName: String,
                                iterations: Int,
                                context: MetalContext) throws {
@@ -357,6 +360,9 @@ struct NVMAIBench {
     /// the metric: qkv + z + a + b ~= 12.7 MB/layer. Variants:
     /// gdn_inproj (production 8-row), gdn_inproj_xsh8 (8-row + tgmem x),
     /// gdn_inproj_r16 (16-row device x), gdn_inproj_xsh16 (16-row + tgmem).
+    /// lint:allow-long NVMAIBench is a development harness, not a shipped
+    /// product: each run* is one linear measurement script whose setup,
+    /// dispatch and reporting only make sense read top to bottom.
     private static func runGDN(kernelName: String,
                                iterations: Int,
                                context: MetalContext) throws {
