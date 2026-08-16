@@ -5,22 +5,7 @@ import Metal
 import NVMAIValidationSupport
 
 @Suite struct PrefillAttentionTests {
-    private struct Fixture {
-        var q: [Float]
-        var k: [Float]
-        var v: [Float]
-        var qStride: Int
-        var kvStride: Int
-        var oStride: Int
-        var headDim: Int
-        var qHeads: Int
-        var kvHeads: Int
-        var start: Int
-        var chunk: Int
-        var kvValid: Int
-        var window: Int
-        var scale: Float
-    }
+    private typealias Fixture = PrefillAttentionRef.Inputs
 
     @Test func prefillAttentionMatchesCPUReferenceFullAndSWA() throws {
         let cases: [(label: String, start: Int, chunk: Int, window: Int)] = [
@@ -63,7 +48,7 @@ import NVMAIValidationSupport
         ringFixture.k = kRing
         ringFixture.v = vRing
         let actual = try Self.runKernel(ringFixture, kvRingCapacity: UInt32(ringCapacity))
-        let reference = Self.reference(fixture)
+        let reference = PrefillAttentionRef.apply(fixture)
         let maxAbs = RelError.maxAbsDiff(actual, reference)
         let rel = RelError.compute(actual: actual, reference: reference)
         #expect(maxAbs <= 2e-2, "ring prefill maxAbs=\(maxAbs) rel=\(rel)")
@@ -84,7 +69,7 @@ import NVMAIValidationSupport
         }
 
         let actual = try Self.runKernel(fixture)
-        let reference = Self.reference(fixture)
+        let reference = PrefillAttentionRef.apply(fixture)
         let maxAbs = RelError.maxAbsDiff(actual, reference)
         let rel = RelError.compute(actual: actual, reference: reference)
         #expect(maxAbs <= 2e-2, "future mask maxAbs=\(maxAbs) rel=\(rel) qPerKV=\(qPerKV)")
@@ -155,7 +140,7 @@ import NVMAIValidationSupport
         let repeated = try Self.runKernel(
             fixture,
             path: .fullTensorOps2DValidityV2)
-        let reference = Self.reference(fixture)
+        let reference = PrefillAttentionRef.apply(fixture)
         let maxAbs = RelError.maxAbsDiff(candidate, reference)
         let rel = RelError.compute(actual: candidate, reference: reference)
         #expect(candidate == repeated,
@@ -178,7 +163,7 @@ import NVMAIValidationSupport
         let preferred = try Self.runKernel(
             fixture,
             path: .fullTensorOps2DPreferred)
-        let reference = Self.reference(fixture)
+        let reference = PrefillAttentionRef.apply(fixture)
         let maxAbs = RelError.maxAbsDiff(preferred, reference)
         let rel = RelError.compute(actual: preferred, reference: reference)
         #expect(maxAbs <= 2e-2,
@@ -232,7 +217,7 @@ import NVMAIValidationSupport
 
     private static func runAndCompare(_ fixture: Fixture, label: String) throws {
         let actual = try Self.runKernel(fixture)
-        let reference = Self.reference(fixture)
+        let reference = PrefillAttentionRef.apply(fixture)
         let maxAbs = RelError.maxAbsDiff(actual, reference)
         let rel = RelError.compute(actual: actual, reference: reference)
         #expect(maxAbs <= 2e-2, "\(label) maxAbs=\(maxAbs) rel=\(rel)")
@@ -307,46 +292,4 @@ import NVMAIValidationSupport
 
 
 
-    private static func reference(_ fixture: Fixture) -> [Float] {
-        var out = [Float](repeating: 0, count: fixture.chunk * fixture.qHeads * fixture.headDim)
-        let qPerKV = fixture.qHeads / fixture.kvHeads
-        for t in 0..<fixture.chunk {
-            let absQ = fixture.start + t
-            let first: Int
-            if fixture.window == 0 {
-                first = 0
-            } else {
-                first = max(0, absQ + 1 - fixture.window)
-            }
-            let last = min(fixture.kvValid, absQ + 1)
-            for qh in 0..<fixture.qHeads {
-                let kvh = qh / qPerKV
-                var scores: [Float] = []
-                scores.reserveCapacity(last - first)
-                for key in first..<last {
-                    var score: Float = 0
-                    for d in 0..<fixture.headDim {
-                        let qv = fixture.q[t * fixture.qStride + qh * fixture.headDim + d]
-                        let kv = fixture.k[key * fixture.kvStride + kvh * fixture.headDim + d]
-                        score += qv * kv
-                    }
-                    scores.append(score * fixture.scale)
-                }
-                let maxScore = scores.max() ?? -.infinity
-                var denom: Float = 0
-                for score in scores {
-                    denom += Foundation.exp(score - maxScore)
-                }
-                for d in 0..<fixture.headDim {
-                    var acc: Float = 0
-                    for (i, key) in (first..<last).enumerated() {
-                        let w = Foundation.exp(scores[i] - maxScore)
-                        acc += w * fixture.v[key * fixture.kvStride + kvh * fixture.headDim + d]
-                    }
-                    out[(t * fixture.qHeads + qh) * fixture.headDim + d] = denom > 0 ? acc / denom : 0
-                }
-            }
-        }
-        return out
-    }
 }
