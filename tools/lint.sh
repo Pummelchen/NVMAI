@@ -15,7 +15,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BASELINE="$SCRIPT_DIR/func-length-baseline.txt"
 MAX_FUNC_LINES="${MAX_FUNC_LINES:-120}"
 
