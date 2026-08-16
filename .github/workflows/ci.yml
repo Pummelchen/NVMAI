@@ -76,3 +76,16 @@ jobs:
           puts "Checked #{checked} local link(s); #{failures} broken."
           exit(failures.zero? ? 0 : 1)
           RUBY
+
+  # Separate job: the instrumented build plus the ~3.5x slower suite would
+  # roughly double the main job's wall time, and its feedback is orthogonal to
+  # a functional failure. Runs in parallel with `test`.
+  thread-sanitizer:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run serial tests under ThreadSanitizer
+        # The suite passes clean today (660 tests, 0 races, ~344s locally), so
+        # any report here is a real regression rather than pre-existing noise.
+        run: swift test --no-parallel --sanitize=thread

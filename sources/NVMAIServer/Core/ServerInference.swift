@@ -605,42 +605,27 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
     }
 
-    public func generate(
-        _ request: ValidatedChatRequest,
-        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
-    ) async throws -> ServerCompletion {
-        // Stage-split measurement (NVMAI_RUNNER_STATS): snapshot the runner's
-        // lifetime counters so the footer can report this request's delta.
-        let runnerSnapshot = RunnerCounterSnapshot(
-            cb1: runner.totalCb1Nanos,
-            io: runner.totalIoNanos,
-            cb2: runner.totalCb2Nanos,
-            head: runner.totalHeadNanos,
-            headFused: runner.totalHeadFusedNanos,
-            rdadvise: runner.totalRDAdviseNanos,
-            rdadviseCalls: runner.totalRDAdviseCalls,
-            rdadviseBytes: runner.totalRDAdviseBytes,
-            wait: runner.totalWaitNanos,
-            body: runner.totalBodyNanos)
-        runner.resetKernelGPUTimings()
-        var completed = false
-        defer {
-            if !completed {
-                if promptCacheMode == .singlePrefix {
-                    promptCache.invalidate()
-                }
-                activePromptCacheEntryID = nil
-                runner.reset()
-                mtpDecoder?.reset()
-            }
-        }
-        // NVMAI_STRIP_CLI_PROMPT: drop the coding-CLI's system/developer
-        // guidance, tool definitions, tool-call history, and in-message
-        // <system-reminder> scaffolding, keeping only the real user/assistant
-        // conversation (see CLIStrip). Guards ensure the real prompt can
-        // never be stripped into an empty turn or an empty request. Runs when
-        // the request names the "<model>-fast" alias or NVMAI_STRIP_CLI_PROMPT
-        // is set.
+    /// Render a validated request into prompt tokens.
+    ///
+    /// NVMAI_STRIP_CLI_PROMPT: drop the coding-CLI's system/developer guidance,
+    /// tool definitions, tool-call history, and in-message <system-reminder>
+    /// scaffolding, keeping only the real user/assistant conversation (see
+    /// CLIStrip). Guards ensure the real prompt can never be stripped into an
+    /// empty turn or an empty request. Runs when the request names the
+    /// "<model>-fast" alias or NVMAI_STRIP_CLI_PROMPT is set.
+    ///
+    /// Returns the encoded prompt alongside the `cacheRequest` — the post-strip
+    /// view the prompt cache must key on. Cache entries describe a KV range
+    /// prefilled from the filtered messages, and the cache's text-continuation
+    /// path re-renders the tail with the same template, so matching or
+    /// publishing against the raw request would splice an unstripped tail onto
+    /// a stripped prefix, silently losing the "-fast" alias's strip on every
+    /// cached continuation turn.
+    private func preparePrompt(
+        _ request: ValidatedChatRequest
+    ) throws -> (promptIDs: [Int32],
+                 cacheRequest: ValidatedChatRequest,
+                 needsToolTemplate: Bool) {
         let filteredMessages: [GFTokenizer.Message]
         let filteredTools: [GFTokenizer.FunctionDefinition]
         var stripStats: CLIStrip.Stats?
@@ -655,12 +640,6 @@ public actor ServerModelSession: ServerInferenceBackend {
             filteredMessages = request.messages
             filteredTools = request.tools
         }
-        // The prompt cache keys on the post-strip view. Its entries describe a
-        // KV range prefilled from `filteredMessages`, and its text-continuation
-        // path re-renders the tail with the same template — so matching or
-        // publishing against the raw request would splice an unstripped tail
-        // onto a stripped prefix, silently losing the "-fast" alias's strip on
-        // every cached continuation turn.
         let cacheRequest = request.replacingMessages(
             filteredMessages,
             tools: filteredTools)
@@ -679,14 +658,23 @@ public actor ServerModelSession: ServerInferenceBackend {
                             promptTokens: promptIDs.count)
         }
         guard promptIDs.count < maxContext else {
-            // Picard: "I will not sacrifice the Enterprise. Not again! The
-            // line must be drawn here! This far, no further!"
             throw ServerRequestError.invalid(
                 message: "prompt exceeds the configured context",
                 param: "messages",
                 code: "context_length_exceeded")
         }
+        return (promptIDs, cacheRequest, needsToolTemplate)
+    }
 
+    /// Decide where this request's prefill starts: from scratch, or resumed on
+    /// a cache entry whose KV is live or restorable.
+    ///
+    /// Mutates the cache and `activePromptCacheEntryID`, so it must run on the
+    /// actor and before any generation begins.
+    private func resolveCacheStart(
+        cacheRequest: ValidatedChatRequest,
+        promptIDs: [Int32]
+    ) async throws -> (effectivePromptIDs: [Int32], start: RawCompletionStart) {
         let effectivePromptIDs: [Int32]
         var completionStart: RawCompletionStart
         if promptCacheMode == .singlePrefix {
@@ -784,6 +772,48 @@ public actor ServerModelSession: ServerInferenceBackend {
                 param: "messages",
                 code: "context_length_exceeded")
         }
+        return (effectivePromptIDs, completionStart)
+    }
+
+    public func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        // Stage-split measurement (NVMAI_RUNNER_STATS): snapshot the runner's
+        // lifetime counters so the footer can report this request's delta.
+        let runnerSnapshot = RunnerCounterSnapshot(
+            cb1: runner.totalCb1Nanos,
+            io: runner.totalIoNanos,
+            cb2: runner.totalCb2Nanos,
+            head: runner.totalHeadNanos,
+            headFused: runner.totalHeadFusedNanos,
+            rdadvise: runner.totalRDAdviseNanos,
+            rdadviseCalls: runner.totalRDAdviseCalls,
+            rdadviseBytes: runner.totalRDAdviseBytes,
+            wait: runner.totalWaitNanos,
+            body: runner.totalBodyNanos)
+        runner.resetKernelGPUTimings()
+        var completed = false
+        defer {
+            if !completed {
+                if promptCacheMode == .singlePrefix {
+                    promptCache.invalidate()
+                }
+                activePromptCacheEntryID = nil
+                runner.reset()
+                mtpDecoder?.reset()
+            }
+        }
+        let prepared = try preparePrompt(request)
+        let promptIDs = prepared.promptIDs
+        let cacheRequest = prepared.cacheRequest
+        let needsToolTemplate = prepared.needsToolTemplate
+
+        let resolved = try await resolveCacheStart(
+            cacheRequest: cacheRequest,
+            promptIDs: promptIDs)
+        let effectivePromptIDs = resolved.effectivePromptIDs
+        let completionStart = resolved.start
 
         var config = request.generationConfig
         config.maxNewTokens = min(
