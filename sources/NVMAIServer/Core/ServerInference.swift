@@ -912,77 +912,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                     shouldStop = true
                 }
         }
-        if let activeMTP = activeProducer as? StreamingMTPDecoder {
-            let stats = activeMTP.statistics
-            let decodeRate = result.decodeSeconds > 0
-                ? Double(result.newTokens) / result.decodeSeconds : 0
-            print(String(format:
-                "NVMAI mtp drafted=%d accepted=%d acceptance=%.1f%% "
-                    + "target_passes=%d emitted_per_pass=%.3f "
-                    + "prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f "
-                    + "memory_required_mib=%.1f memory_budget_mib=%.1f",
-                stats.draftedTokens,
-                stats.acceptedTokens,
-                stats.acceptanceRate * 100,
-                stats.targetBackbonePasses,
-                stats.emittedTokensPerTargetPass,
-                result.prefillSeconds,
-                result.decodeSeconds,
-                decodeRate,
-                Double(activeMTP.memoryPlan.requiredBytes) / 1_048_576,
-                Double(activeMTP.memoryPlan.budgetBytes) / 1_048_576))
-        } else {
-            let decodeRate = result.decodeSeconds > 0
-                ? Double(result.newTokens) / result.decodeSeconds : 0
-            print(String(format:
-                "NVMAI generation prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f",
-                result.prefillSeconds,
-                result.decodeSeconds,
-                decodeRate))
-        }
-        if ProcessInfo.processInfo.environment["NVMAI_RUNNER_STATS"] != nil {
-            let tokens = max(1, result.newTokens)
-            let ms: (UInt64, UInt64) -> Double = { delta, base in
-                Double(delta > base ? delta - base : 0) / Double(tokens) / 1_000_000
-            }
-            let cb1 = ms(runner.totalCb1Nanos, runnerSnapshot.cb1)
-            let io = ms(runner.totalIoNanos, runnerSnapshot.io)
-            let cb2 = ms(runner.totalCb2Nanos, runnerSnapshot.cb2)
-            let head = ms(runner.totalHeadNanos, runnerSnapshot.head)
-            let headFused = ms(runner.totalHeadFusedNanos, runnerSnapshot.headFused)
-            let rdadvise = ms(runner.totalRDAdviseNanos, runnerSnapshot.rdadvise)
-            let wait = ms(runner.totalWaitNanos, runnerSnapshot.wait)
-            let body = ms(runner.totalBodyNanos, runnerSnapshot.body)
-            let calls = runner.totalRDAdviseCalls - runnerSnapshot.rdadviseCalls
-            let bytes = Double(runner.totalRDAdviseBytes - runnerSnapshot.rdadviseBytes)
-                / 1_048_576
-            print(String(
-                format: "NVMAI runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
-                    + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
-                    + "wait_ms=%.3f body_ms=%.3f "
-                    + "rdadvise_calls=%llu rdadvise_mib=%.1f",
-                cb1, io, cb2, head, headFused, rdadvise, wait, body, calls, bytes))
-        }
-        if ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
-            let tokens = max(1, result.newTokens)
-            let summary = runner.kernelGPUTimingSummary()
-            var totalGPU: Double = 0
-            for entry in summary {
-                totalGPU += entry.millis
-            }
-            for entry in summary {
-                print(String(
-                    format: "NVMAI kernel role=%@ gpu_ms=%.3f per_token_ms=%.3f "
-                        + "count=%d",
-                    entry.role, entry.millis, entry.millis / Double(tokens),
-                    entry.count))
-            }
-            print(String(format: "NVMAI kernel total_gpu_ms=%.3f "
-                + "gpu_share_of_decode=%.1f%%",
-                totalGPU,
-                result.decodeSeconds > 0
-                    ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
-        }
+        emitGenerationDiagnostics(activeProducer: activeProducer,
+                                  result: result,
+                                  snapshot: runnerSnapshot)
         func structuredFailure(
             kind: StructuredOutputFailureKind,
             cause: StructuredOutputFailureCause
@@ -1166,5 +1098,86 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         let rendered = try tokenizer.applyChatTemplate(messages)
         return tokenizer.encode(rendered, addBOS: false)
+    }
+
+    /// Optional per-request diagnostics: MTP acceptance, the NVMAI_RUNNER_STATS
+    /// stage split, and the NVMAI_KERNEL_STATS GPU breakdown. All three are
+    /// env-gated and read-only, so they stay out of the generation path proper.
+    private func emitGenerationDiagnostics(
+        activeProducer: any LogitProducer,
+        result: RawDecodeResult,
+        snapshot runnerSnapshot: RunnerCounterSnapshot
+    ) {
+        if let activeMTP = activeProducer as? StreamingMTPDecoder {
+            let stats = activeMTP.statistics
+            let decodeRate = result.decodeSeconds > 0
+                ? Double(result.newTokens) / result.decodeSeconds : 0
+            print(String(format:
+                "NVMAI mtp drafted=%d accepted=%d acceptance=%.1f%% "
+                    + "target_passes=%d emitted_per_pass=%.3f "
+                    + "prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f "
+                    + "memory_required_mib=%.1f memory_budget_mib=%.1f",
+                stats.draftedTokens,
+                stats.acceptedTokens,
+                stats.acceptanceRate * 100,
+                stats.targetBackbonePasses,
+                stats.emittedTokensPerTargetPass,
+                result.prefillSeconds,
+                result.decodeSeconds,
+                decodeRate,
+                Double(activeMTP.memoryPlan.requiredBytes) / 1_048_576,
+                Double(activeMTP.memoryPlan.budgetBytes) / 1_048_576))
+        } else {
+            let decodeRate = result.decodeSeconds > 0
+                ? Double(result.newTokens) / result.decodeSeconds : 0
+            print(String(format:
+                "NVMAI generation prefill_s=%.3f decode_s=%.3f decode_tok_s=%.3f",
+                result.prefillSeconds,
+                result.decodeSeconds,
+                decodeRate))
+        }
+        if ProcessInfo.processInfo.environment["NVMAI_RUNNER_STATS"] != nil {
+            let tokens = max(1, result.newTokens)
+            let ms: (UInt64, UInt64) -> Double = { delta, base in
+                Double(delta > base ? delta - base : 0) / Double(tokens) / 1_000_000
+            }
+            let cb1 = ms(runner.totalCb1Nanos, runnerSnapshot.cb1)
+            let io = ms(runner.totalIoNanos, runnerSnapshot.io)
+            let cb2 = ms(runner.totalCb2Nanos, runnerSnapshot.cb2)
+            let head = ms(runner.totalHeadNanos, runnerSnapshot.head)
+            let headFused = ms(runner.totalHeadFusedNanos, runnerSnapshot.headFused)
+            let rdadvise = ms(runner.totalRDAdviseNanos, runnerSnapshot.rdadvise)
+            let wait = ms(runner.totalWaitNanos, runnerSnapshot.wait)
+            let body = ms(runner.totalBodyNanos, runnerSnapshot.body)
+            let calls = runner.totalRDAdviseCalls - runnerSnapshot.rdadviseCalls
+            let bytes = Double(runner.totalRDAdviseBytes - runnerSnapshot.rdadviseBytes)
+                / 1_048_576
+            print(String(
+                format: "NVMAI runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
+                    + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
+                    + "wait_ms=%.3f body_ms=%.3f "
+                    + "rdadvise_calls=%llu rdadvise_mib=%.1f",
+                cb1, io, cb2, head, headFused, rdadvise, wait, body, calls, bytes))
+        }
+        if ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
+            let tokens = max(1, result.newTokens)
+            let summary = runner.kernelGPUTimingSummary()
+            var totalGPU: Double = 0
+            for entry in summary {
+                totalGPU += entry.millis
+            }
+            for entry in summary {
+                print(String(
+                    format: "NVMAI kernel role=%@ gpu_ms=%.3f per_token_ms=%.3f "
+                        + "count=%d",
+                    entry.role, entry.millis, entry.millis / Double(tokens),
+                    entry.count))
+            }
+            print(String(format: "NVMAI kernel total_gpu_ms=%.3f "
+                + "gpu_share_of_decode=%.1f%%",
+                totalGPU,
+                result.decodeSeconds > 0
+                    ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
+        }
     }
 }
