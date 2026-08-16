@@ -60,8 +60,14 @@ check_force_cast() {
 # Indentation-anchored: a function runs from its `func` line to the first line
 # that closes a brace at the same indent. Brace-depth counting drifts on braces
 # inside strings and comments; this codebase is consistently formatted, so
-# indent is the more reliable anchor. A function whose closer is never found is
-# skipped rather than guessed at, so the ratchet never invents a violation.
+# indent is the more reliable anchor.
+#
+# Every `func` must land in exactly one of three buckets: no body (a protocol
+# requirement), a body that opens and closes on one line, or a body with a
+# closer at its own indent. Anything else is printed as UNRESOLVED and fails
+# the check. A gate that silently skips what it cannot parse reports "ok" for
+# code it never looked at, which is worse than no gate — so unparsed input is
+# an error, not a shrug.
 measure_functions() {
   ruby -e '
     Encoding.default_external = Encoding::UTF_8
@@ -70,21 +76,46 @@ measure_functions() {
     root = ENV.fetch("ROOT")
     Dir.glob(File.join(root, "sources", "**", "*.swift")).sort.each do |path|
       lines = File.readlines(path, chomp: true)
+      rel = path.delete_prefix(root + "/")
       lines.each_with_index do |line, i|
         next unless (m = line.match(/^(\s*)(?:[\w@\(\)]+\s+)*func\s+([A-Za-z_]\w*)/))
         indent, name = m[1], m[2]
-        closer = /^#{indent}\}/
-        stop = nil
-        ((i + 1)...lines.length).each do |j|
-          if lines[j] =~ closer
-            stop = j
+
+        # Walk the (possibly multi-line) signature looking for the body brace.
+        # Stop at the next declaration or at a closer no deeper than us, which
+        # is what a bodyless protocol requirement runs into.
+        open_at = nil
+        j = i
+        while j < lines.length
+          text = lines[j].sub(%r{//.*$}, "")
+          if j > i && text =~ /^\s{0,#{indent.length}}(\}|func\s|var\s|let\s|case\s)/
             break
           end
+          if text.include?("{")
+            open_at = j
+            break
+          end
+          j += 1
         end
-        next if stop.nil?
+
+        if open_at.nil?
+          next # no body: protocol requirement or bodyless declaration
+        end
+
+        opener = lines[open_at].sub(%r{//.*$}, "")
+        if opener.count("{") == opener.count("}") && opener.rstrip.end_with?("}")
+          next # body opens and closes on one line
+        end
+
+        closer = /^#{indent}\}/
+        stop = ((open_at + 1)...lines.length).find { |k| lines[k] =~ closer }
+        if stop.nil?
+          puts "UNRESOLVED:#{rel}:#{name}:#{i + 1}"
+          next
+        end
         length = stop - i
         next unless length > limit
-        puts "#{path.delete_prefix(root + "/")}:#{name}:#{length}"
+        puts "#{rel}:#{name}:#{length}"
       end
     end
   '
@@ -92,8 +123,22 @@ measure_functions() {
 
 check_func_length() {
   echo "== func-length: no NEW function over $MAX_FUNC_LINES lines =="
-  local current new
-  current="$(measure_functions | sort)"
+  local measured current new unresolved
+  measured="$(measure_functions | sort)"
+
+  # Coverage first: if the scanner could not resolve a function, the ratchet
+  # below is reporting on an unknown subset of the tree. Fail loudly rather
+  # than let an "ok" stand for code that was never measured.
+  unresolved="$(echo "$measured" | grep '^UNRESOLVED:' || true)"
+  if [ -n "$unresolved" ]; then
+    echo "$unresolved" | sed 's/^UNRESOLVED:/  UNRESOLVED: /'
+    echo "  FAIL: the length scanner could not find these functions' bounds."
+    echo "        Fix tools/lint.sh — do not silence this by ignoring them."
+    status=1
+    return
+  fi
+  current="$(echo "$measured" | grep -v '^UNRESOLVED:' || true)"
+
   if [ ! -f "$BASELINE" ]; then
     echo "  no baseline at ${BASELINE#$ROOT/}; writing one"
     echo "$current" > "$BASELINE"
