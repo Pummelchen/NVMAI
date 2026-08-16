@@ -64,6 +64,20 @@ Run package tests serially (`swift test --no-parallel`), passing any extra
 arguments like `--filter` through. Run only one app, CLI, or model-using test
 at a time.
 
+`tools/lint.sh` runs the two gates CI enforces beyond the compiler: no `as!` /
+`try!` under `sources/` without a `lint:allow-force <reason>` comment above it,
+and no new function over 120 lines (existing ones are listed in
+`tools/func-length-baseline.txt`; drop a row when its function shrinks below
+the limit, or the gate fails on the stale exemption).
+
+`tools/golden-baseline.sh --check 4` compares greedy, fixed-seed generation
+against `benchmark/golden/`. It is the only check that exercises real
+inference, so run it for any change to the runtime or the model-load path —
+the unit tests never load a model. It counts as a model run: apply the
+preconditions above first. A baseline is valid for one (machine, build, model)
+triple; re-capture only for a deliberate numerics change, never to make a
+mismatch go away.
+
 For performance results, build release once and follow the [community benchmark guide](https://github.com/Pummelchen/NVMAI/wiki/Benchmarking-Guide) exactly. Do not enable experimental controls or profiling.
 
 Launch helpers live in `benchmark/`. Start the server before running any benchmark script.

@@ -23,15 +23,29 @@ decode-service IPC, the runtime, installer, and Metal kernels — plus a fully
 green test suite (658 tests / 120 suites) and a `LIMIT=N` fastest-first
 shortcut for the coding-CLI benchmark harness.
 
-**Unreleased (since 3.5):** the prompt cache now keys on the post-strip view
-of a request, so a `-fast` conversation keeps its strip on cached follow-up
-turns instead of replaying the CLI's `<system-reminder>` scaffolding; the CI
-warning gate matches compiler diagnostics only; the superseded
-`tools/responses_bridge.py` proxy is gone (the server has spoken the
-Responses API natively since 3.4); and the server exposes
-`POST /v1/models/unload` to release the model's memory on demand — it waits
-for in-flight requests to drain, then unloads (a no-op without
-`--lazy-load`/`--idle-unload-seconds`). 677 tests / 121 suites.
+**Unreleased (since 3.5)**
+
+- **Model residency.** `--lazy-load` binds the port immediately and defers the
+  load to the first inference request; `--idle-unload-seconds <n>` releases the
+  weights after `n` idle seconds and reloads transparently on the next request;
+  `POST /v1/models/unload` releases them on demand, draining in-flight requests
+  first. Measured on M3 24 GB, 4-bit: **2.9 MB idle → 5.7 GB loaded → 245 MB
+  after unload**. Both flags default to off, so existing invocations are
+  unchanged. See the [server guide](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server#model-residency).
+- **Correctness.** Fixed a data race in the softmax kernel that could NaN an
+  entire probability row and make the sampler emit an out-of-range token id.
+  The prompt cache now keys on the post-strip view of a request, so a `-fast`
+  conversation keeps its strip on cached follow-up turns instead of replaying
+  the CLI's `<system-reminder>` scaffolding.
+- **Operability.** A stale install receipt (from moving or renaming a model
+  directory) now names the one-line `--verify-install` recovery instead of
+  failing opaquely.
+- **Production gates.** `tools/lint.sh` (force-cast and function-length
+  ratchet) and a ThreadSanitizer CI job, both run by CI; the warning gate now
+  matches compiler diagnostics only. The superseded `tools/responses_bridge.py`
+  proxy is gone — the server has spoken the Responses API natively since 3.4.
+
+680 tests / 121 suites.
 
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
