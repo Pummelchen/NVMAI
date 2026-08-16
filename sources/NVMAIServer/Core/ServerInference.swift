@@ -1010,6 +1010,41 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             reason = "stop"
         }
+        publishCacheEntry(
+            cacheRequest: cacheRequest,
+            content: content,
+            calls: calls,
+            result: result,
+            stopStringFiltered: stopMatcher.isStopped)
+        completed = true
+        return ServerCompletion(
+            content: content,
+            toolCalls: calls,
+            finishReason: reason,
+            // S26: completion_tokens reports the number of GENERATED tokens,
+            // matching OpenAI's "completion_tokens = tokens in the generated
+            // completion". A stop-string-hidden suffix is therefore counted as
+            // generated even though it is filtered from the visible content.
+            usage: OpenAIUsage(promptTokens: result.prefillTokens,
+                               completionTokens: result.newTokens,
+                               totalTokens: result.prefillTokens + result.newTokens,
+                               cachedTokens: result.cachedPromptTokens))
+    }
+
+    /// Publish this turn's KV range to the prompt cache, and persist a snapshot
+    /// so a later request can resume from it without re-prefilling.
+    ///
+    /// Every failure path here degrades to "no cache entry" rather than to a
+    /// broken one: an entry whose snapshot cannot be captured or verified is
+    /// removed again, so the next hit re-prefills instead of attempting a
+    /// doomed restore.
+    private func publishCacheEntry(
+        cacheRequest: ValidatedChatRequest,
+        content: String,
+        calls: [ParsedToolCall],
+        result: RawDecodeResult,
+        stopStringFiltered: Bool
+    ) {
         if mtpDecoder != nil {
             // Native MTP keeps a second KV stream. Until both states are
             // persisted atomically, do not publish target-only cache entries.
@@ -1022,7 +1057,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 content: content,
                 calls: calls,
                 result: result,
-                stopStringFiltered: stopMatcher.isStopped)
+                stopStringFiltered: stopStringFiltered)
             if publication == nil { promptCache.invalidate() }
         } else if promptCacheMode == .multiPrefix {
             let previousActive = activePromptCacheEntryID
@@ -1032,7 +1067,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 content: content,
                 calls: calls,
                 result: result,
-                stopStringFiltered: stopMatcher.isStopped) {
+                stopStringFiltered: stopStringFiltered) {
                 promptStateStore?.remove(entryIDs: publication.evictedEntryIDs)
                 do {
                     guard let promptStateStore else {
@@ -1089,19 +1124,6 @@ public actor ServerModelSession: ServerInferenceBackend {
                 activePromptCacheEntryID = nil
             }
         }
-        completed = true
-        return ServerCompletion(
-            content: content,
-            toolCalls: calls,
-            finishReason: reason,
-            // S26: completion_tokens reports the number of GENERATED tokens,
-            // matching OpenAI's "completion_tokens = tokens in the generated
-            // completion". A stop-string-hidden suffix is therefore counted as
-            // generated even though it is filtered from the visible content.
-            usage: OpenAIUsage(promptTokens: result.prefillTokens,
-                               completionTokens: result.newTokens,
-                               totalTokens: result.prefillTokens + result.newTokens,
-                               cachedTokens: result.cachedPromptTokens))
     }
 
     private func usesToolTemplate(
