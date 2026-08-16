@@ -66,6 +66,10 @@ public enum ExpertCachePolicy: String, Sendable {
 }
 
 /// `pread`-based routed-expert streamer with a fixed per-layer slot cache.
+/// unchecked-invariant: the expert cache bookkeeping is guarded by `cacheLock`,
+/// which is what lets `DispatchQueue.concurrentPerform` fan the misses out
+/// across threads. The mmap'd slot storage is written only inside that lock
+/// and read only after it, so concurrent readers see completed slots.
 public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }

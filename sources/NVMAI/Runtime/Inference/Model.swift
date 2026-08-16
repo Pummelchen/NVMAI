@@ -72,6 +72,9 @@ public struct Model {
     let streamersBox: StreamersBox
     let streamersQueue: DispatchQueue
 
+    /// unchecked-invariant: every access goes through `streamersQueue`, the
+    /// serial queue on the owning Model. The box exists so Model can stay a
+    /// struct while still mutating per-layer streamer state.
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]

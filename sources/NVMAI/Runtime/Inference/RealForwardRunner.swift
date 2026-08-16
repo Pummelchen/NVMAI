@@ -125,6 +125,13 @@ internal enum PrefillProjectionDispatchPolicy {
     }
 }
 
+/// unchecked-invariant: exclusively owned by one caller for its lifetime and
+/// never shared. In the server it is a `private let` on the `ServerModelSession`
+/// actor, so every entry point is already actor-isolated; the CLI and the
+/// decode service each drive one runner from a single task. Its ~19 mutable
+/// properties are decode cursors and scratch handles with no internal locking,
+/// so two concurrent callers would corrupt them -- the ownership is the whole
+/// safety argument, not an implementation detail.
 public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporting, ContinuableLogitProducer, @unchecked Sendable {
     private struct LayerSharedExpertProjections {
         let gate: SharedExpertInt8Proj

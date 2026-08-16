@@ -213,11 +213,73 @@ check_func_length() {
   echo "  ok ($(echo "$current" | grep -c .) baselined, 0 new, $scanned scanned)"
 }
 
+# --- unchecked Sendable -----------------------------------------------------
+# `@unchecked Sendable` is a promise to the compiler that a type is safe to
+# share across threads. Unlike the checked kind, nothing verifies it — so the
+# reasoning has to be written down where the next reader will find it, or the
+# promise is unreviewable. Existing sites are baselined; new ones must explain
+# themselves.
+SENDABLE_BASELINE="$SCRIPT_DIR/unchecked-sendable-baseline.txt"
+
+check_unchecked_sendable() {
+  echo "== unchecked-sendable: new conformances must document their invariant =="
+  local current new stale
+  current="$(ruby -e '
+    Encoding.default_external = Encoding::UTF_8
+    Encoding.default_internal = Encoding::UTF_8
+    root = ENV.fetch("ROOT")
+    Dir.glob(File.join(root, "sources", "**", "*.swift")).sort.each do |path|
+      lines = File.readlines(path, chomp: true)
+      rel = path.delete_prefix(root + "/")
+      lines.each_with_index do |line, i|
+        next unless line.include?("@unchecked Sendable")
+        next if line =~ /^\s*(\/\/|\/\/\/)/      # a comment mentioning it
+        # Contiguous comment block directly above, declaration line excluded.
+        j = i - 1
+        block = []
+        while j >= 0 && lines[j] =~ /^\s*(\/\/|\/\/\/)/
+          block << lines[j]
+          j -= 1
+        end
+        text = block.join(" ").downcase
+        next if text =~ /unchecked-invariant:/
+        # Name the type so the row survives line-number churn.
+        name = line[/(?:class|struct|enum|actor)\s+([A-Za-z_]\w*)/, 1] || "line#{i + 1}"
+        puts "#{rel}:#{name}"
+      end
+    end
+  ' | sort -u)"
+
+  if [ ! -f "$SENDABLE_BASELINE" ]; then
+    echo "$current" > "$SENDABLE_BASELINE"
+    echo "  ok (baseline created, $(echo "$current" | grep -c .) entries)"
+    return
+  fi
+  new="$(comm -13 <(sort -u "$SENDABLE_BASELINE") <(echo "$current"))"
+  if [ -n "$new" ]; then
+    echo "$new" | sed 's/^/  NEW: /'
+    echo "  FAIL: document the invariant above it in a comment containing"
+    echo "        'unchecked-invariant: <what makes this safe>'"
+    status=1
+    return
+  fi
+  stale="$(comm -23 <(sort -u "$SENDABLE_BASELINE") <(echo "$current"))"
+  if [ -n "$stale" ]; then
+    echo "$stale" | sed 's/^/  DOCUMENTED: /'
+    echo "  These now carry an invariant — drop them from"
+    echo "  ${SENDABLE_BASELINE#$ROOT/} so the exemption cannot be reused."
+    status=1
+    return
+  fi
+  echo "  ok ($(echo "$current" | grep -c .) undocumented, 0 new)"
+}
+
 case "$want" in
-  all)         check_force_cast; check_func_length ;;
+  all)         check_force_cast; check_func_length; check_unchecked_sendable ;;
   force-cast)  check_force_cast ;;
   func-length) check_func_length ;;
-  *) echo "unknown check: $want (all|force-cast|func-length)" >&2; exit 2 ;;
+  sendable)    check_unchecked_sendable ;;
+  *) echo "unknown check: $want (all|force-cast|func-length|sendable)" >&2; exit 2 ;;
 esac
 
 exit $status
