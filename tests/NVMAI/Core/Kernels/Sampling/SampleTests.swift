@@ -9,6 +9,47 @@ import NVMAIValidationSupport
 /// distributions and assert exact behaviour.
 @Suite struct SampleTests {
 
+    /// Anchors the sampler's selection arithmetic to an independent CPU
+    /// implementation.
+    ///
+    /// Until this existed the chain never reached one: SampleTopK64Tests
+    /// compares the specialised kernel against the general `Sample` kernel, and
+    /// SampleTests checked `Sample` only by properties (argmax lands where
+    /// expected, a fixed seed replays, ids stay in range). An error in the
+    /// top-p / top-k / temperature / inverse-CDF maths shared by both GPU paths
+    /// would have passed every one of those.
+    @Test func selectionMatchesCPUReference() throws {
+        let cases: [(v: Int, temperature: Float, topK: UInt32, topP: Float)] = [
+            (32,   1.0, 32,  1.0),
+            (32,   0.7, 8,   1.0),
+            (64,   1.0, 16,  0.9),
+            (64,   2.0, 64,  0.95),
+            (128,  0.5, 4,   1.0),
+            (256,  1.3, 64,  0.8),
+        ]
+        for c in cases {
+            var rng = SeedTree(0x5A3D).key("sample-selection-\(c.v)-\(c.topK)")
+            let raw = (0..<c.v).map { _ in Float(rng.uniform(0.01, 1.0)) }
+            let probs = Self.makeProbs(raw)
+            // Compare against exactly what the kernel reads: the FP16 values.
+            let asFloats = probs.map { Float($0) }
+            for seed in UInt64(1)...6 {
+                let got = try Self.runSampler(probs: probs,
+                                              temperature: c.temperature,
+                                              topK: c.topK,
+                                              topP: c.topP,
+                                              seed: seed)
+                let want = SampleSelectionRef.select(probs: asFloats,
+                                                     temperature: c.temperature,
+                                                     topK: Int(c.topK),
+                                                     topP: c.topP,
+                                                     seed: seed)
+                #expect(got == want,
+                        "v=\(c.v) T=\(c.temperature) k=\(c.topK) p=\(c.topP) seed=\(seed): kernel \(got) vs reference \(want)")
+            }
+        }
+    }
+
     private static func makeProbs(_ values: [Float]) -> [Float16] {
         // Renormalize so the test inputs always sum to 1.0 exactly. The kernel
         // does not require a normalized input but the unit tests are clearer
