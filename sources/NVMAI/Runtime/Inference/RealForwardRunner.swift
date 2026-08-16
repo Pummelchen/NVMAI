@@ -1480,12 +1480,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         for L in 0..<cfg.numLayers {
             let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let isLinear = cfg.layerIsLinear(L)
-            let isFull = cfg.fullAttentionLayerMask[L] == 1
-            let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
-            let numKVL   = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
-            let qDim     = UInt32(cfg.numHeads * headDimL)
-            let kvDim    = UInt32(numKVL * headDimL)
-            let seqLen   = UInt32(position + 1)
 
             let inNorm   = try model.inputNorm(layer: L)
             let postAttn = try model.postAttnNorm(layer: L)
@@ -1514,114 +1508,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 throw ModelError.residentBufferWrapFailed
             }
 
-            if isLinear {
-                // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
-                // fixed-size recurrent state updated in place.
-                try encodeLinearAttentionDecode(attnCB, layer: L)
-            } else if cfg.attnOutputGate {
-                // Qwen full attention: packed [query ; gate] q_proj, real
-                // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.
-                try encodeGatedFullAttentionDecode(attnCB, layer: L,
-                                                   position: position,
-                                                   seqLen: seqLen)
-            } else {
-                let kSlot = kv?.kSlot(layer: L, position: position) ?? (buffer: kStage, offset: 0)
-                let vSlot = kv?.vSlot(layer: L, position: position) ?? (buffer: vStage, offset: 0)
-                let q     = try model.qProj(layer: L)
-                let k     = try model.kProj(layer: L)
-                // Under the K=V quirk full layers reuse k_proj; otherwise
-                // v_proj is a real tensor.
-                let vProj = (isFull && cfg.attentionKEqV) ? k : (try model.vProj(layer: L))
-                let o     = try model.oProj(layer: L)
-                let qNorm = try model.qNorm(layer: L)
-                let kNorm = try model.kNorm(layer: L)
-
-                try fusedQKVGEMV.encode(commandBuffer: attnCB,
-                                    qWeights: q.buffer, qWeightsOffset: Int(q.offset),
-                                    qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
-                                    qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
-                                    kWeights: k.buffer, kWeightsOffset: Int(k.offset),
-                                    kScales: k.buffer, kScalesOffset: Int(k.scaleOffset),
-                                    kBiases: k.buffer, kBiasesOffset: Int(k.biasOffset),
-                                    vWeights: vProj.buffer, vWeightsOffset: Int(vProj.offset),
-                                    vScales: vProj.buffer, vScalesOffset: Int(vProj.scaleOffset),
-                                    vBiases: vProj.buffer, vBiasesOffset: Int(vProj.biasOffset),
-                                    x: normed,
-                                    qOut: qScratch,
-                                    kOut: kSlot.buffer, kOutOffset: kSlot.offset,
-                                    vOut: vSlot.buffer, vOutOffset: vSlot.offset,
-                                    qRows: qDim,
-                                    kvRows: kvDim,
-                                    n: D)
-
-                let rotated = isFull
-                    ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
-                    : UInt32(headDimL / 2)
-                try fusedQKVEpilogue.encode(commandBuffer: attnCB,
-                                        q: qScratch,
-                                        k: kSlot.buffer,
-                                        kOffset: kSlot.offset,
-                                        v: vSlot.buffer,
-                                        vOffset: vSlot.offset,
-                                        qWeight: qNorm.buffer,
-                                        qWeightOffset: Int(qNorm.offset),
-                                        kWeight: kNorm.buffer,
-                                        kWeightOffset: Int(kNorm.offset),
-                                        headDim: UInt32(headDimL),
-                                        numQHeads: UInt32(cfg.numHeads),
-                                        numKVHeads: UInt32(numKVL),
-                                        position: UInt32(position),
-                                        theta: isFull ? Float(cfg.fullRopeTheta) : Float(cfg.ropeTheta),
-                                        rotatedPairs: rotated,
-                                        eps: eps)
-
-                guard kv != nil else {
-                    throw ModelError.internalInconsistency(
-                        detail: "FP16 attention requires an FP16 KV cache")
-                }
-                guard let attentionCB = ctx.queue.makeCommandBuffer() else {
-                    throw ModelError.residentBufferWrapFailed
-                }
-                softmaxCB = attentionCB
-                if isFull {
-                    try attention.encodeFull(commandBuffer: attentionCB,
-                                         q: qScratch,
-                                         k: kSlot.buffer, kOffset: 0,
-                                         v: vSlot.buffer, vOffset: 0,
-                                         out: attnOut,
-                                         headDim: UInt32(headDimL),
-                                         numQHeads: UInt32(cfg.numHeads),
-                                         numKVHeads: UInt32(numKVL),
-                                         seqLen: seqLen,
-                                         scale: Float(cfg.attentionScale))
-                } else {
-                    let ringCapacity = kv?.ringCapacity(layer: L) ?? 0
-                    let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
-                        ? UInt32(ringCapacity)
-                        : 0
-                    try attention.encodeSWA(commandBuffer: attentionCB,
-                                        q: qScratch,
-                                        k: kSlot.buffer, kOffset: 0,
-                                        v: vSlot.buffer, vOffset: 0,
-                                        out: attnOut,
-                                        headDim: UInt32(headDimL),
-                                        numQHeads: UInt32(cfg.numHeads),
-                                        numKVHeads: UInt32(numKVL),
-                                        seqLen: seqLen,
-                                        window: UInt32(cfg.slidingWindow),
-                                        scale: Float(cfg.attentionScale),
-                                        ringCapacity: activeRingCapacity)
-                }
-                try int4.encode(commandBuffer: tailCB,
-                            weights: o.buffer, weightsOffset: Int(o.offset),
-                            scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
-                            biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
-                            x: attnOut, y: oOut, m: D, n: qDim)
-            }
-
-            // Plain pre-norm residual block: hidden += attention branch,
-            // then one post-attention norm feeds router, shared expert,
-            // and routed phase 1 (routedX doubles as moeX).
+            try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
+                                      softmaxCB: &softmaxCB,
+                                      layer: L, position: position,
+                                      isLinear: isLinear, rmsEps: eps)
             try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
                                            hidden: hidden,
                                            delta: oOut,
@@ -3133,5 +3023,137 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     cb = nextCB
                 }
                 prefillTailNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - prefillTileEnd
+    }
+
+    /// Attention stage of one decode layer: the gated-DeltaNet branch or the
+    /// softmax branch, both writing into `oOut` for the residual add.
+    ///
+    /// lint:allow-long the two branches are alternatives over the same set of
+    /// scratch buffers; splitting them apart again would only re-create the
+    /// dispatch this method exists to hold.
+    private func encodeDecodeAttention(
+        attnCB: MTLCommandBuffer,
+        tailCB: MTLCommandBuffer,
+        softmaxCB: inout MTLCommandBuffer?,
+        layer L: Int,
+        position: Int,
+        isLinear: Bool,
+        rmsEps eps: Float
+    ) throws {
+        let D = UInt32(cfg.hiddenSize)
+        let isFull = cfg.fullAttentionLayerMask[L] == 1
+        let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
+        let numKVL   = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
+        let qDim     = UInt32(cfg.numHeads * headDimL)
+        let kvDim    = UInt32(numKVL * headDimL)
+        let seqLen   = UInt32(position + 1)
+        if isLinear {
+            // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
+            // fixed-size recurrent state updated in place.
+            try encodeLinearAttentionDecode(attnCB, layer: L)
+        } else if cfg.attnOutputGate {
+            // Qwen full attention: packed [query ; gate] q_proj, real
+            // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.
+            try encodeGatedFullAttentionDecode(attnCB, layer: L,
+                                               position: position,
+                                               seqLen: seqLen)
+        } else {
+            let kSlot = kv?.kSlot(layer: L, position: position) ?? (buffer: kStage, offset: 0)
+            let vSlot = kv?.vSlot(layer: L, position: position) ?? (buffer: vStage, offset: 0)
+            let q     = try model.qProj(layer: L)
+            let k     = try model.kProj(layer: L)
+            // Under the K=V quirk full layers reuse k_proj; otherwise
+            // v_proj is a real tensor.
+            let vProj = (isFull && cfg.attentionKEqV) ? k : (try model.vProj(layer: L))
+            let o     = try model.oProj(layer: L)
+            let qNorm = try model.qNorm(layer: L)
+            let kNorm = try model.kNorm(layer: L)
+
+            try fusedQKVGEMV.encode(commandBuffer: attnCB,
+                                qWeights: q.buffer, qWeightsOffset: Int(q.offset),
+                                qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
+                                qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
+                                kWeights: k.buffer, kWeightsOffset: Int(k.offset),
+                                kScales: k.buffer, kScalesOffset: Int(k.scaleOffset),
+                                kBiases: k.buffer, kBiasesOffset: Int(k.biasOffset),
+                                vWeights: vProj.buffer, vWeightsOffset: Int(vProj.offset),
+                                vScales: vProj.buffer, vScalesOffset: Int(vProj.scaleOffset),
+                                vBiases: vProj.buffer, vBiasesOffset: Int(vProj.biasOffset),
+                                x: normed,
+                                qOut: qScratch,
+                                kOut: kSlot.buffer, kOutOffset: kSlot.offset,
+                                vOut: vSlot.buffer, vOutOffset: vSlot.offset,
+                                qRows: qDim,
+                                kvRows: kvDim,
+                                n: D)
+
+            let rotated = isFull
+                ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
+                : UInt32(headDimL / 2)
+            try fusedQKVEpilogue.encode(commandBuffer: attnCB,
+                                    q: qScratch,
+                                    k: kSlot.buffer,
+                                    kOffset: kSlot.offset,
+                                    v: vSlot.buffer,
+                                    vOffset: vSlot.offset,
+                                    qWeight: qNorm.buffer,
+                                    qWeightOffset: Int(qNorm.offset),
+                                    kWeight: kNorm.buffer,
+                                    kWeightOffset: Int(kNorm.offset),
+                                    headDim: UInt32(headDimL),
+                                    numQHeads: UInt32(cfg.numHeads),
+                                    numKVHeads: UInt32(numKVL),
+                                    position: UInt32(position),
+                                    theta: isFull ? Float(cfg.fullRopeTheta) : Float(cfg.ropeTheta),
+                                    rotatedPairs: rotated,
+                                    eps: eps)
+
+            guard kv != nil else {
+                throw ModelError.internalInconsistency(
+                    detail: "FP16 attention requires an FP16 KV cache")
+            }
+            guard let attentionCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            softmaxCB = attentionCB
+            if isFull {
+                try attention.encodeFull(commandBuffer: attentionCB,
+                                     q: qScratch,
+                                     k: kSlot.buffer, kOffset: 0,
+                                     v: vSlot.buffer, vOffset: 0,
+                                     out: attnOut,
+                                     headDim: UInt32(headDimL),
+                                     numQHeads: UInt32(cfg.numHeads),
+                                     numKVHeads: UInt32(numKVL),
+                                     seqLen: seqLen,
+                                     scale: Float(cfg.attentionScale))
+            } else {
+                let ringCapacity = kv?.ringCapacity(layer: L) ?? 0
+                let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
+                    ? UInt32(ringCapacity)
+                    : 0
+                try attention.encodeSWA(commandBuffer: attentionCB,
+                                    q: qScratch,
+                                    k: kSlot.buffer, kOffset: 0,
+                                    v: vSlot.buffer, vOffset: 0,
+                                    out: attnOut,
+                                    headDim: UInt32(headDimL),
+                                    numQHeads: UInt32(cfg.numHeads),
+                                    numKVHeads: UInt32(numKVL),
+                                    seqLen: seqLen,
+                                    window: UInt32(cfg.slidingWindow),
+                                    scale: Float(cfg.attentionScale),
+                                    ringCapacity: activeRingCapacity)
+            }
+            try int4.encode(commandBuffer: tailCB,
+                        weights: o.buffer, weightsOffset: Int(o.offset),
+                        scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
+                        biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
+                        x: attnOut, y: oOut, m: D, n: qDim)
+        }
+
+        // Plain pre-norm residual block: hidden += attention branch,
+        // then one post-attention norm feeds router, shared expert,
+        // and routed phase 1 (routedX doubles as moeX).
     }
 }
