@@ -317,6 +317,28 @@ struct ManagedModelBackendTests {
         #expect(await managed.isLoaded == false)
     }
 
+    @Test func aCancelledUnloadHandsBackTheIdleTimer() async throws {
+        let recorder = LoadRecorder()
+        let managed = backend(idleTimeout: .seconds(600), recorder: recorder)
+        _ = try await managed.generate(request()) { _ in }
+        // Hold a request open so the unload has to wait rather than complete.
+        await managed.bumpInFlightForTesting(1)
+
+        let attempt = Task { await managed.unload() }
+        try await Task.sleep(for: .milliseconds(50))
+        attempt.cancel()
+        let released = await attempt.value
+
+        #expect(released == false)
+        #expect(await managed.isLoaded)
+        // The model is still resident, so the idle timer must still be armed.
+        // Otherwise a client disconnecting mid-unload silently disables
+        // --idle-unload-seconds for the life of the session.
+        #expect(await managed.hasReaper)
+
+        await managed.bumpInFlightForTesting(-1)
+    }
+
     @Test func unloadWaitsForInFlightRequestsToDrain() async throws {
         let recorder = LoadRecorder()
         let gated = GatedBackend()

@@ -97,7 +97,14 @@ public actor ManagedModelBackend: ServerInferenceBackend {
         reaper?.cancel()
         reaper = nil
         while session != nil {
-            if Task.isCancelled { return false }
+            if Task.isCancelled {
+                // Giving up without unloading: the model is still resident, so
+                // hand the idle timer back. Without this, a client that
+                // disconnects mid-unload silently disables --idle-unload-seconds
+                // for the life of the session.
+                startReaper()
+                return false
+            }
             if inFlight == 0 {
                 session = nil
                 ServerLog.residency("unloaded")

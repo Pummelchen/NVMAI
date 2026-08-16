@@ -74,11 +74,13 @@ measure_functions() {
     Encoding.default_internal = Encoding::UTF_8
     limit = Integer(ENV.fetch("MAX_FUNC_LINES", "120"))
     root = ENV.fetch("ROOT")
+    scanned = 0
     Dir.glob(File.join(root, "sources", "**", "*.swift")).sort.each do |path|
       lines = File.readlines(path, chomp: true)
       rel = path.delete_prefix(root + "/")
       lines.each_with_index do |line, i|
         next unless (m = line.match(/^(\s*)(?:[\w@\(\)]+\s+)*func\s+([A-Za-z_]\w*)/))
+        scanned += 1
         indent, name = m[1], m[2]
 
         # Walk the (possibly multi-line) signature looking for the body brace.
@@ -118,13 +120,35 @@ measure_functions() {
         puts "#{rel}:#{name}:#{length}"
       end
     end
+    # Coverage receipt. Without it an empty result is indistinguishable from
+    # "scanner never ran", and the gate would report ok for an unexamined tree.
+    puts "SCANNED:#{scanned}"
   '
 }
 
 check_func_length() {
   echo "== func-length: no NEW function over $MAX_FUNC_LINES lines =="
-  local measured current new unresolved
-  measured="$(measure_functions | sort)"
+  local measured current new unresolved raw rc scanned
+
+  # Capture without a pipe so the scanner's exit status survives, then check it.
+  # A gate whose measurement step died must fail, not report "ok (0 new)" —
+  # that is how an unexported ROOT once let this check pass while looking at
+  # nothing at all.
+  raw="$(measure_functions)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  FAIL: the length scanner exited $rc; it measured nothing."
+    status=1
+    return
+  fi
+  scanned="$(echo "$raw" | sed -n 's/^SCANNED://p' | tail -1)"
+  if [ -z "$scanned" ] || [ "$scanned" -eq 0 ] 2>/dev/null; then
+    echo "  FAIL: the length scanner reported no functions scanned."
+    echo "        Expected ~1000 under sources/; check ROOT and the glob."
+    status=1
+    return
+  fi
+  measured="$(echo "$raw" | grep -v '^SCANNED:' | sort)"
 
   # Coverage first: if the scanner could not resolve a function, the ratchet
   # below is reporting on an unknown subset of the tree. Fail loudly rather
@@ -154,7 +178,7 @@ check_func_length() {
     echo "  FAIL: shorten it, or update ${BASELINE#$ROOT/} with a reason in the PR"
     status=1
   else
-    echo "  ok ($(echo "$current" | grep -c .) baselined, 0 new)"
+    echo "  ok ($(echo "$current" | grep -c .) baselined, 0 new, $scanned scanned)"
   fi
 }
 

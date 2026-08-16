@@ -54,6 +54,31 @@ import NVMAIValidationSupport
         }
     }
 
+    /// Pins the invariant the generation loop depends on: whatever the logits,
+    /// the sampler returns an index inside the vocabulary. The result is used
+    /// to index the vocabulary and to extend the KV history, so an out-of-range
+    /// value propagates a garbage token rather than failing cleanly.
+    ///
+    /// Note on coverage: `-inf`/NaN logits do *not* reach the top-k reduction
+    /// as a degenerate row, because the softcap stage tanh-clamps them first.
+    /// This test therefore does not exercise the `kept == 0` branch and does
+    /// not reproduce the intermittent out-of-range id seen under full-suite GPU
+    /// load — that trigger is still unidentified. It guards the invariant, not
+    /// that bug.
+    @Test func degenerateDistributionStillReturnsAnInRangeToken() throws {
+        let v = 64
+        let rig = try Rig(vocab: v)
+        for fill in [-Float.infinity, Float.nan] {
+            let logits = [Float](repeating: fill, count: v)
+            for seed in UInt64(1)...8 {
+                let cfg = GenerationConfig(temperature: 1.0, topK: v, seed: seed)
+                let id = try rig.draw(logits, config: cfg, position: Int(seed)).id
+                #expect(id < UInt32(v),
+                        "sampler returned \(id) (0x\(String(id, radix: 16))) for a distribution with no finite mass; vocab=\(v)")
+            }
+        }
+    }
+
     @Test func greedy_picksArgmax() throws {
         let v = 2048
         let rig = try Rig(vocab: v)

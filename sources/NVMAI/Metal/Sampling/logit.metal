@@ -436,8 +436,15 @@ void sample(
         // Default to slot 0 (the global argmax — always a valid index) so a
         // CDF that never crosses u (FP rounding leaves run slightly below the
         // surviving mass) still returns a real token, never a tail sentinel.
+        // `kept == 0` means slot 0 itself failed the `< V` / isfinite test
+        // above — every entry reduced to the UINT_MAX sentinel, which happens
+        // when the probability row carries no finite mass. Seeding `picked`
+        // from topk_idx[0] unconditionally would then emit that sentinel as a
+        // token id. Fall back to a real index instead: an arbitrary token beats
+        // an out-of-range one that the generation loop would use to index the
+        // vocabulary.
         float run = 0.0f;
-        uint  picked = topk_idx[0];
+        uint  picked = (kept > 0) ? topk_idx[0] : 0u;
         for (uint i = 0; i < kept; ++i) {
             run += topk_val[i];
             if (u <= run) { picked = topk_idx[i]; break; }
