@@ -2,11 +2,11 @@
 
 # NVMAI
 
-**Answers in seconds, not minutes.** NVMAI v3.3 introduces a **10×–65×
-reduction in response time** for coding CLIs — Codex, Qwen Code, and
-OpenCode — with the new `<model>-fast` model alias. Same model, same weights,
-same answers: the CLIs' agent boilerplate is stripped before prefill, so a
-question that took minutes now answers in seconds.
+**Answers in seconds, not minutes.** The `<model>-fast` model alias delivers a
+**10×–65× reduction in response time** for coding CLIs — Codex, Qwen Code, and
+OpenCode. Same model, same weights, same answers: the CLIs' agent boilerplate
+is stripped before prefill, so a question that took minutes now answers in
+seconds. (Introduced in v3.3; see the callout below for what is new in 3.5.)
 
 **The Paris test** — "What is the capital of France?" (4-bit, wall clock):
 
@@ -22,6 +22,13 @@ validation, corrected temperature/top_k defaults), the Mac app's
 decode-service IPC, the runtime, installer, and Metal kernels — plus a fully
 green test suite (658 tests / 120 suites) and a `LIMIT=N` fastest-first
 shortcut for the coding-CLI benchmark harness.
+
+**Unreleased (since 3.5):** the prompt cache now keys on the post-strip view
+of a request, so a `-fast` conversation keeps its strip on cached follow-up
+turns instead of replaying the CLI's `<system-reminder>` scaffolding; the CI
+warning gate matches compiler diagnostics only; and the superseded
+`tools/responses_bridge.py` proxy is gone (the server has spoken the
+Responses API natively since 3.4). 660 tests / 120 suites.
 
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
