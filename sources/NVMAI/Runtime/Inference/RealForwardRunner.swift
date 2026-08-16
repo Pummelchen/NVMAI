@@ -1231,32 +1231,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
 
-        let layerViews = try (0..<cfg.numLayers).map { L in
-            let isFull = cfg.fullAttentionLayerMask[L] == 1
-            let isLinear = cfg.layerIsLinear(L)
-            return LayerPrefillQKVViews(
-                inputNorm: try model.inputNorm(layer: L),
-                postAttention: try model.postAttnNorm(layer: L),
-                router: try model.router(layer: L),
-                q: isLinear ? nil : try model.qProj(layer: L),
-                k: isLinear ? nil : try model.kProj(layer: L),
-                v: isLinear ? nil
-                    : ((isFull && cfg.attentionKEqV)
-                        ? (try model.kProj(layer: L))
-                        : (try model.vProj(layer: L))),
-                o: isLinear ? nil : try model.oProj(layer: L),
-                qNorm: isLinear ? nil : try model.qNorm(layer: L),
-                kNorm: isLinear ? nil : try model.kNorm(layer: L),
-                linQKV: isLinear ? try model.linearInProjQKV(layer: L) : nil,
-                linZ: isLinear ? try model.linearInProjZ(layer: L) : nil,
-                linA: isLinear ? try model.linearInProjA(layer: L) : nil,
-                linB: isLinear ? try model.linearInProjB(layer: L) : nil,
-                linOut: isLinear ? try model.linearOutProj(layer: L) : nil,
-                linConv: isLinear ? try model.linearConv1d(layer: L) : nil,
-                linALog: isLinear ? try model.linearALog(layer: L) : nil,
-                linDtBias: isLinear ? try model.linearDtBias(layer: L) : nil,
-                linNorm: isLinear ? try model.linearNorm(layer: L) : nil)
-        }
+        let layerViews = try makeLayerPrefillViews()
 
         // Reused UInt32 token-ID buffer, sized to the largest chunk seen so
         // far and grown on demand (R23); the prefill hot path never allocates
@@ -1698,51 +1673,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if writeFinalHead {
-            let finalNorm = try model.finalNorm()
-            let lm = try model.lmHead()
-            guard let finalCB = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            if outputMode == .greedyIfAvailable, useFusedGreedyHead {
-                try fusionHead.encodeGreedyDecode(
-                    commandBuffer: finalCB,
-                    hidden: scratch.hidden,
-                    hiddenOffset: (t - 1) * D * MemoryLayout<Float16>.stride,
-                    normWeight: finalNorm.buffer,
-                    normOffset: Int(finalNorm.offset),
-                    weights: lm.buffer,
-                    weightsOffset: Int(lm.offset),
-                    scales: lm.buffer,
-                    scalesOffset: Int(lm.scaleOffset),
-                    biases: lm.buffer,
-                    biasesOffset: Int(lm.biasOffset),
-                    outToken: greedyTokenBuf,
-                    d: UInt32(D),
-                    vocab: UInt32(cfg.vocabSize),
-                    rmsEps: eps)
-            } else {
-                try prefillFinalRowHead.encodeLogits(commandBuffer: finalCB,
-                                                 hiddenBlock: scratch.hidden,
-                                                 row: t - 1,
-                                                 rowStrideElements: D,
-                                                 normWeight: finalNorm.buffer,
-                                                 normWeightOffset: Int(finalNorm.offset),
-                                                 weights: lm.buffer,
-                                                 weightsOffset: Int(lm.offset),
-                                                 scales: lm.buffer,
-                                                 scalesOffset: Int(lm.scaleOffset),
-                                                 biases: lm.buffer,
-                                                 biasesOffset: Int(lm.biasOffset),
-                                                 logits: logits,
-                                                 d: UInt32(D),
-                                                 vocab: UInt32(cfg.vocabSize),
-                                                 rmsEps: eps)
-            }
-            finalCB.commit()
-            try waitForCompletion(finalCB)
-            if outputMode == .greedyIfAvailable, useFusedGreedyHead {
-                lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
-            }
+            try encodeFinalHead(logits: logits, scratch: scratch,
+                                tokenCount: t, hiddenSize: D, rmsEps: eps,
+                                outputMode: outputMode)
         }
 
         kv?.advance(by: tokens.count)
@@ -3084,5 +3017,92 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  xStrideElements: qDim,
                                  yStrideElements: D,
                                  useTwoRowProjection: useTwoRowProjection)
+    }
+
+    /// Resolve every layer's tensor views once, before the chunk loop.
+    private func makeLayerPrefillViews() throws -> [LayerPrefillQKVViews] {
+        try (0..<cfg.numLayers).map { L in
+            let isFull = cfg.fullAttentionLayerMask[L] == 1
+            let isLinear = cfg.layerIsLinear(L)
+            return LayerPrefillQKVViews(
+                inputNorm: try model.inputNorm(layer: L),
+                postAttention: try model.postAttnNorm(layer: L),
+                router: try model.router(layer: L),
+                q: isLinear ? nil : try model.qProj(layer: L),
+                k: isLinear ? nil : try model.kProj(layer: L),
+                v: isLinear ? nil
+                    : ((isFull && cfg.attentionKEqV)
+                        ? (try model.kProj(layer: L))
+                        : (try model.vProj(layer: L))),
+                o: isLinear ? nil : try model.oProj(layer: L),
+                qNorm: isLinear ? nil : try model.qNorm(layer: L),
+                kNorm: isLinear ? nil : try model.kNorm(layer: L),
+                linQKV: isLinear ? try model.linearInProjQKV(layer: L) : nil,
+                linZ: isLinear ? try model.linearInProjZ(layer: L) : nil,
+                linA: isLinear ? try model.linearInProjA(layer: L) : nil,
+                linB: isLinear ? try model.linearInProjB(layer: L) : nil,
+                linOut: isLinear ? try model.linearOutProj(layer: L) : nil,
+                linConv: isLinear ? try model.linearConv1d(layer: L) : nil,
+                linALog: isLinear ? try model.linearALog(layer: L) : nil,
+                linDtBias: isLinear ? try model.linearDtBias(layer: L) : nil,
+                linNorm: isLinear ? try model.linearNorm(layer: L) : nil)
+        }
+    }
+
+    /// Final norm and lm_head for the last chunk, writing logits or a fused
+    /// greedy token depending on the output mode.
+    private func encodeFinalHead(
+        logits: MTLBuffer,
+        scratch: PrefillChunkScratchBuffers,
+        tokenCount t: Int,
+        hiddenSize D: Int,
+        rmsEps eps: Float,
+        outputMode: PrefillOutputMode
+    ) throws {
+        let finalNorm = try model.finalNorm()
+        let lm = try model.lmHead()
+        guard let finalCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+            try fusionHead.encodeGreedyDecode(
+                commandBuffer: finalCB,
+                hidden: scratch.hidden,
+                hiddenOffset: (t - 1) * D * MemoryLayout<Float16>.stride,
+                normWeight: finalNorm.buffer,
+                normOffset: Int(finalNorm.offset),
+                weights: lm.buffer,
+                weightsOffset: Int(lm.offset),
+                scales: lm.buffer,
+                scalesOffset: Int(lm.scaleOffset),
+                biases: lm.buffer,
+                biasesOffset: Int(lm.biasOffset),
+                outToken: greedyTokenBuf,
+                d: UInt32(D),
+                vocab: UInt32(cfg.vocabSize),
+                rmsEps: eps)
+        } else {
+            try prefillFinalRowHead.encodeLogits(commandBuffer: finalCB,
+                                             hiddenBlock: scratch.hidden,
+                                             row: t - 1,
+                                             rowStrideElements: D,
+                                             normWeight: finalNorm.buffer,
+                                             normWeightOffset: Int(finalNorm.offset),
+                                             weights: lm.buffer,
+                                             weightsOffset: Int(lm.offset),
+                                             scales: lm.buffer,
+                                             scalesOffset: Int(lm.scaleOffset),
+                                             biases: lm.buffer,
+                                             biasesOffset: Int(lm.biasOffset),
+                                             logits: logits,
+                                             d: UInt32(D),
+                                             vocab: UInt32(cfg.vocabSize),
+                                             rmsEps: eps)
+        }
+        finalCB.commit()
+        try waitForCompletion(finalCB)
+        if outputMode == .greedyIfAvailable, useFusedGreedyHead {
+            lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
+        }
     }
 }
