@@ -1,5 +1,4 @@
 import Foundation
-import NVMAIRepackCore
 
 public enum AppModelInstallState: Equatable, Sendable {
     case idle

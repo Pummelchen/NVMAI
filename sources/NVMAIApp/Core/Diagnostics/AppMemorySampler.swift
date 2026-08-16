@@ -1,5 +1,4 @@
 import Darwin
-import Darwin.Mach
 import Foundation
 
 public final class AppMemorySampler: @unchecked Sendable {
