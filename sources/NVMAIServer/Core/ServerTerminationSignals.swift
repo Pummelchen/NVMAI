@@ -3,8 +3,7 @@ import Dispatch
 import Foundation
 
 public actor ServerTerminationSignals {
-    // Janeway: "Break off your pursuit or we'll open fire." Graceful shutdown
-    // on SIGINT/SIGTERM — the server stands its ground, then powers down.
+    // Graceful shutdown on SIGINT/SIGTERM: stop accepting work, drain, exit.
     private let stream: AsyncStream<Int32>
     private let continuation: AsyncStream<Int32>.Continuation
     private let sources: [any DispatchSourceSignal]

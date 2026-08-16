@@ -421,8 +421,7 @@ public enum OpenAIRequestValidator {
             try validateTool($0)
         }
         let messages = try validateMessages(request.messages)
-        // Janeway: "I don't know about the rest of you, but I feel lucky
-        // today." — a client-supplied seed makes the dice deterministic.
+        // A client-supplied seed makes sampling deterministic.
         let config = GenerationConfig(maxNewTokens: maximum,
                                       temperature: temperature,
                                       topK: topK,

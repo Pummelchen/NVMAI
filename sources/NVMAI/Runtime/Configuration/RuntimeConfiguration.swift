@@ -75,8 +75,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     }
 
     public static var production: RuntimeConfiguration {
-        // Defaults are compile-time constants on the allowed lists, so this
-        // can never throw.
+        // lint:allow-force every default is a compile-time constant on the
+        // allowed lists, so the validating init cannot throw here;
+        // RuntimeConfigurationTests pins that.
         try! RuntimeConfiguration()
     }
 

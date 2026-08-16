@@ -152,7 +152,13 @@ public func runRawCompletion(producer: any LogitProducer,
     case .reset:
         producer.reset()
     case .resume:
-        let continuable = producer as! any ContinuableLogitProducer
+        // Re-derive the conformance rather than force-cast on the guard 30
+        // lines above: a trap here would take down the server process, and the
+        // invariant is far enough away to be broken by an unrelated edit.
+        guard let continuable = producer as? any ContinuableLogitProducer else {
+            throw GeneratorError.invalidContinuation(
+                "producer does not support continuation")
+        }
         try continuable.prepareForContinuation(expectedPosition: cachedPromptTokens)
     }
     let prefillStart = Date()
@@ -161,6 +167,8 @@ public func runRawCompletion(producer: any LogitProducer,
     let prefillTokens = promptIds[cachedPromptTokens...]
     switch prefillConfig.mode {
     case .chunked where producer is any ChunkedPrefillRunner:
+        // lint:allow-force the `where` clause one line above is the guard; a
+        // producer without the conformance falls through to plain `.chunked`.
         let chunked = producer as! any ChunkedPrefillRunner
         let mode: PrefillOutputMode = fusedGreedy ? .greedyIfAvailable : .logits
         let result = try await chunked.prefillChunked(tokens: prefillTokens,

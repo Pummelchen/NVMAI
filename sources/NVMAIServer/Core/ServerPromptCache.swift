@@ -136,7 +136,7 @@ struct ServerPromptCache: Sendable {
                     request: request,
                     renderedPromptIDs: renderedPromptIDs,
                     tokenizer: tokenizer) else { continue }
-            if best == nil || candidate.cached > best!.cached {
+            if candidate.cached > (best?.cached ?? -1) {
                 best = (index, candidate.effective, candidate.cached)
             }
         }

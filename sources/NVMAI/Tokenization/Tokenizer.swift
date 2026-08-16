@@ -346,8 +346,8 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
-        // Picard: "I am Locutus of Borg. Resistance is futile." Every message
-        // is assimilated into the ChatML collective before encoding.
+        // Every message is rendered through the ChatML template before
+        // encoding; there is no other prompt path.
         try chatMLChatTemplate(messages)
     }
 

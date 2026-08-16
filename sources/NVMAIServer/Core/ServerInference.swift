@@ -308,8 +308,7 @@ public actor ServerCoordinator {
         // S6: at most queueLimit queued behind one active request, i.e. up to
         // queueLimit + 1 admitted.
         guard admittedCount <= queueLimit else {
-            // Picard: "They invade our space and we fall back. They
-            // assimilate entire worlds, and we fall back. Not again!"
+            // Shed load rather than queue without bound.
             throw ServerRequestError.queueFull
         }
         admittedCount += 1
@@ -407,8 +406,8 @@ public actor ServerModelSession: ServerInferenceBackend {
     private let mtpDecoder: StreamingMTPDecoder?
     private let scratch: RawCompletionScratch
     private let prefillConfig: PrefillRuntimeConfig
-    // Janeway: "Now, this is how I prefer the Borg: in pieces." Long prompts
-    // are prefilled chunk by chunk — small enough to keep expert reads tight.
+    // Long prompts are prefilled chunk by chunk — small enough to keep expert
+    // reads tight.
     public nonisolated let prefillChunkTokens: Int
     private let maxContext: Int
     public nonisolated let promptCacheMode: ServerPromptCacheMode
@@ -747,10 +746,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                             "NVMAI prompt_cache hit tier=\(tier) "
                                 + "cached_tokens=\(cached) entry=\(entryID.uuidString.lowercased())")
                     } catch {
-                        // Picard: "We have not lost the Enterprise. We are
-                        // not going to lose the Enterprise. Not to the Borg.
-                        // Not while I'm in command." — drop the stale entry
-                        // and prefill from scratch rather than trust it.
+                        // Drop the stale entry and prefill from scratch rather
+                        // than trust it.
                         FileHandle.standardError.write(Data(
                             ("NVMAI prompt_cache restore_failed "
                                 + "entry=\(entryID.uuidString.lowercased()) error=\(error)\n").utf8))
