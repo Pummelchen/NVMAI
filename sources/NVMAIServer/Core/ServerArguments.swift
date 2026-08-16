@@ -18,6 +18,24 @@ public struct ServerArguments: Equatable, Sendable {
     public let promptCacheDiskMiB: Int
     public let prefillChunkTokens: Int?
     public let expertCacheSlots: Int?
+    /// Defer the model load to the first inference request.
+    public let lazyLoad: Bool
+    /// Release the weights after this many idle seconds; 0 disables unloading.
+    public let idleUnloadSeconds: Int
+
+    /// Unloading implies deferring the first load — loading at boot only to
+    /// drop it moments later is incoherent. Derived rather than folded into
+    /// `lazyLoad` so the struct stays a faithful record of what was typed.
+    public var managesResidency: Bool { lazyLoad || idleUnloadSeconds > 0 }
+
+    /// Idle unloading discards the in-memory prefix cache with the session.
+    /// With a disk cache configured the entries rehydrate on reload; without
+    /// one, every unload costs a full cold prefill on the next request.
+    public var unloadDiscardsWarmCache: Bool {
+        idleUnloadSeconds > 0
+            && promptCacheMode != .off
+            && promptCacheDiskDirectory == nil
+    }
 
     public static let usage = """
     usage: NVMAIServer --model <completed .gturbo directory> [options]
@@ -49,6 +67,14 @@ public struct ServerArguments: Equatable, Sendable {
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
                              override: NVMAI_EXPERT_CACHE_SLOTS.
+      --lazy-load            Bind the port immediately and defer the model load
+                             to the first inference request (default off).
+      --idle-unload-seconds <n>
+                             Release the model weights after n seconds with no
+                             requests, 0...86400 (default 0, disabled). The
+                             next request reloads transparently. Implies
+                             --lazy-load. Pair with --prompt-cache-disk, since
+                             unloading discards the in-memory prefix cache.
       --help                 Show this help.
     """
 
@@ -67,10 +93,20 @@ public struct ServerArguments: Equatable, Sendable {
         var promptCacheDiskMiB = 8_192
         var prefillChunkTokens: Int?
         var expertCacheSlots: Int?
+        var lazyLoad = false
+        var idleUnloadSeconds = 0
         var index = 0
         while index < input.count {
             let flag = input[index]
             if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
+            // Valueless flags are consumed before the "requires a value" guard
+            // below; otherwise `--lazy-load --port 9999` would swallow --port
+            // as this flag's value and then reject it as unknown.
+            if flag == "--lazy-load" {
+                lazyLoad = true
+                index += 1
+                continue
+            }
             guard index + 1 < input.count else {
                 throw ServerArgumentError.invalid("\(flag) requires a value")
             }
@@ -155,6 +191,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--expert-cache-slots must be one of \(RuntimeConfiguration.allowedExpertCacheSlots)")
                 }
                 expertCacheSlots = parsed
+            case "--idle-unload-seconds":
+                guard let parsed = Int(value), (0...86_400).contains(parsed) else {
+                    throw ServerArgumentError.invalid(
+                        "--idle-unload-seconds must be between 0 and 86400")
+                }
+                idleUnloadSeconds = parsed
             default:
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
@@ -173,7 +215,9 @@ public struct ServerArguments: Equatable, Sendable {
                                promptCacheDiskDirectory: promptCacheDiskDirectory,
                                promptCacheDiskMiB: promptCacheDiskMiB,
                                prefillChunkTokens: prefillChunkTokens,
-                               expertCacheSlots: expertCacheSlots)
+                               expertCacheSlots: expertCacheSlots,
+                               lazyLoad: lazyLoad,
+                               idleUnloadSeconds: idleUnloadSeconds)
     }
 }
 

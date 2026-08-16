@@ -53,6 +53,14 @@ enum ServerLog {
             + "prompt=\(promptTokens)")
     }
 
+    /// Model residency transitions under --lazy-load / --idle-unload-seconds.
+    /// Always logged rather than hidden behind a debug env var: a server that
+    /// silently dropped several GB is exactly what an operator needs to see in
+    /// the log when a later request is unexpectedly slow.
+    static func residency(_ transition: String) {
+        write("model \(transition)")
+    }
+
     private static func format(_ duration: Duration) -> String {
         let seconds = Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18

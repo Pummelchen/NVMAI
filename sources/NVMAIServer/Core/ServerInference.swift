@@ -419,7 +419,9 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// concise mode is off. Selected per quantization (see ConcisePrompt).
     private nonisolated let concisePrompt: String?
 
-    static func effectivePromptCacheMode(
+    /// A pure function of its two arguments, so a caller can reproduce the
+    /// effective cache mode for the startup banner without loading a model.
+    public static func effectivePromptCacheMode(
         requested: ServerPromptCacheMode,
         mtpEnabled: Bool
     ) -> ServerPromptCacheMode {
@@ -439,7 +441,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                             prefillChunkTokens requestedPrefillChunkTokens: Int? = nil,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             mtpModelDirectory: URL? = nil,
-                            mtpMemoryMiB: Int = StreamingMTPMemoryPlan.defaultBudgetMiB) async throws -> ServerModelSession {
+                            mtpMemoryMiB: Int = StreamingMTPMemoryPlan.defaultBudgetMiB,
+                            reusingContext: MetalContext? = nil) async throws -> ServerModelSession {
         let tokenizerFolder = GFTokenizer.tokenizerFolder(forModelDirectory: modelDirectory)
         guard let tokenizerFolder else {
             throw GFTokenizerError.missingToolTemplate
@@ -449,7 +452,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             throw GFTokenizerError.missingToolTemplate
         }
         let tokenizer = try await GFTokenizer.load(from: tokenizerFolder)
-        let context = try MetalContext()
+        // A caller managing model residency supplies its own context so one
+        // MTLCommandQueue and one compiled shader library survive across
+        // unload/reload cycles (MetalContext.deinit documents that queue
+        // teardown is not deinit-safe). Nil for every ordinary caller.
+        let context = try reusingContext ?? MetalContext()
         let loadRuntime = try RuntimeConfiguration(forceLogitsHead: true)
         let slotOverride = ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
