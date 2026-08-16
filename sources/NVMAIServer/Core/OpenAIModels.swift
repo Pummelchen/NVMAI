@@ -278,6 +278,28 @@ public struct ValidatedChatRequest: Sendable {
         self.maximumCompletionTokens = maximumCompletionTokens
         self.stripCLIPrompt = stripCLIPrompt
     }
+
+    /// The post-strip view of this request: the same request carrying the
+    /// messages and tools that were actually encoded into the prompt.
+    ///
+    /// The prompt cache must key on this view, not the raw request. Its
+    /// entries describe a KV range that was prefilled from the filtered
+    /// messages, and its continuation paths re-render the tail with the same
+    /// template — so matching on the raw messages would splice an unfiltered
+    /// tail onto a filtered prefix (see `ServerPromptCache`).
+    public func replacingMessages(
+        _ messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) -> ValidatedChatRequest {
+        ValidatedChatRequest(
+            messages: messages,
+            tools: tools,
+            stream: stream,
+            includeUsage: includeUsage,
+            generationConfig: generationConfig,
+            maximumCompletionTokens: maximumCompletionTokens,
+            stripCLIPrompt: stripCLIPrompt)
+    }
 }
 
 public enum OpenAIRequestValidator {

@@ -656,6 +656,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             filteredMessages = request.messages
             filteredTools = request.tools
         }
+        // The prompt cache keys on the post-strip view. Its entries describe a
+        // KV range prefilled from `filteredMessages`, and its text-continuation
+        // path re-renders the tail with the same template — so matching or
+        // publishing against the raw request would splice an unstripped tail
+        // onto a stripped prefix, silently losing the "-fast" alias's strip on
+        // every cached continuation turn.
+        let cacheRequest = request.replacingMessages(
+            filteredMessages,
+            tools: filteredTools)
         let needsToolTemplate = usesToolTemplate(
             messages: filteredMessages,
             tools: filteredTools)
@@ -684,7 +693,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         if promptCacheMode == .singlePrefix {
             switch promptCache.match(
                 domain: promptCacheDomain,
-                request: request,
+                request: cacheRequest,
                 renderedPromptIDs: promptIDs,
                 tokenizer: tokenizer) {
             case .miss:
@@ -707,7 +716,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else if promptCacheMode == .multiPrefix {
             switch promptCache.match(
                 domain: promptCacheDomain,
-                request: request,
+                request: cacheRequest,
                 renderedPromptIDs: promptIDs,
                 tokenizer: tokenizer) {
             case .miss:
@@ -982,7 +991,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else if promptCacheMode == .singlePrefix {
             let publication = promptCache.publish(
                 domain: promptCacheDomain,
-                request: request,
+                request: cacheRequest,
                 content: content,
                 calls: calls,
                 result: result,
@@ -992,7 +1001,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             let previousActive = activePromptCacheEntryID
             if let publication = promptCache.publish(
                 domain: promptCacheDomain,
-                request: request,
+                request: cacheRequest,
                 content: content,
                 calls: calls,
                 result: result,

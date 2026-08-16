@@ -235,6 +235,125 @@ struct ServerPromptCacheTests {
             cachedPromptTokens: prompt.count))
     }
 
+    /// Regression: the cache keys on the post-strip view of a request, so a
+    /// "<model>-fast" continuation re-renders its tail through CLIStrip too.
+    /// Keying on the raw request instead produced a bridge that still carried
+    /// the CLI's <system-reminder> scaffolding — an unstripped tail spliced
+    /// onto a stripped prefix, so the cached turn silently lost the alias's
+    /// strip and stopped reproducing a fresh prefill of the same request.
+    @Test func strippedContinuationBridgeDropsReminderScaffolding() async throws {
+        let tokenizer = try await GFTokenizer.load(from: TokenizerFixture.folder())
+        let bloat = GFTokenizer.Message(role: .system, content: "you are an agent")
+        let rawFirst = GFTokenizer.Message(
+            role: .user,
+            content: "first<system-reminder>\ncwd is /tmp\n</system-reminder>")
+        let rawSecond = GFTokenizer.Message(
+            role: .user,
+            content: "second<system-reminder>\nfile changed\n</system-reminder>")
+
+        // Turn 1, exactly as ServerInference composes it: strip, then key the
+        // cache on the filtered view that was actually encoded.
+        let firstStrip = CLIStrip.filter(messages: [bloat, rawFirst], tools: [])
+        let initial = request(messages: [bloat, rawFirst])
+            .replacingMessages(firstStrip.messages, tools: firstStrip.tools)
+        #expect(initial.messages.map(\.content) == ["first"])
+
+        let initialPrompt = tokenizer.encode(
+            try tokenizer.applyChatTemplate(initial.messages),
+            addBOS: false)
+        let kvBacked = initialPrompt + tokenizer.encode("answer", addBOS: false)
+        var cache = ServerPromptCache()
+        cache.publish(
+            domain: domain,
+            request: initial,
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: initialPrompt,
+                kvBacked: kvBacked,
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+
+        // Turn 2 arrives with the bloat and both reminder blocks intact.
+        let rawContinuation = [
+            bloat,
+            rawFirst,
+            GFTokenizer.Message(role: .assistant, content: "answer"),
+            rawSecond,
+        ]
+        let secondStrip = CLIStrip.filter(messages: rawContinuation, tools: [])
+        let continuation = request(messages: rawContinuation)
+            .replacingMessages(secondStrip.messages, tools: secondStrip.tools)
+        let rendered = tokenizer.encode(
+            try tokenizer.applyChatTemplate(continuation.messages),
+            addBOS: false)
+        let match = cache.match(
+            domain: domain,
+            request: continuation,
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+
+        guard case .hit(_, let effective, let cached) = match else {
+            Issue.record("expected text continuation hit on the stripped view")
+            return
+        }
+        // The bridge is the *stripped* user turn; the reminder block never
+        // reaches the model, and the raw turn would have produced a longer one.
+        #expect(cached == kvBacked.count)
+        #expect(effective == kvBacked
+            + tokenizer.encodeTextContinuation(userContent: "second"))
+        #expect(effective != kvBacked
+            + tokenizer.encodeTextContinuation(userContent: rawSecond.content ?? ""))
+
+        // And the shape of the defect this guards: an entry keyed on the raw
+        // messages still describes a KV range prefilled from the *stripped*
+        // ones, so its continuation bridge carries the reminder block — an
+        // unstripped tail on a stripped prefix.
+        var rawKeyed = ServerPromptCache()
+        rawKeyed.publish(
+            domain: domain,
+            request: request(messages: [bloat, rawFirst]),
+            content: "answer",
+            calls: [],
+            result: rawResult(
+                prompt: initialPrompt,
+                kvBacked: kvBacked,
+                boundary: tokenizer.endOfTurnID,
+                reason: .endOfTurn))
+        let rawMatch = rawKeyed.match(
+            domain: domain,
+            request: request(messages: rawContinuation),
+            renderedPromptIDs: rendered,
+            tokenizer: tokenizer)
+        guard case .hit(_, let rawEffective, _) = rawMatch else {
+            Issue.record("expected the raw-keyed cache to still hit")
+            return
+        }
+        #expect(rawEffective == kvBacked
+            + tokenizer.encodeTextContinuation(userContent: rawSecond.content ?? ""))
+        #expect(rawEffective != effective)
+    }
+
+    /// The post-strip view swaps only the messages and tools; every other
+    /// validated field must survive, or the cached turn would silently change
+    /// sampling or streaming behavior.
+    @Test func replacingMessagesPreservesTheRestOfTheRequest() {
+        let original = request(
+            messages: [GFTokenizer.Message(role: .user, content: "hi")],
+            tools: [])
+        let replaced = original.replacingMessages(
+            [GFTokenizer.Message(role: .user, content: "stripped")],
+            tools: [])
+
+        #expect(replaced.messages.map(\.content) == ["stripped"])
+        #expect(replaced.stream == original.stream)
+        #expect(replaced.includeUsage == original.includeUsage)
+        #expect(replaced.maximumCompletionTokens == original.maximumCompletionTokens)
+        #expect(replaced.stripCLIPrompt == original.stripCLIPrompt)
+        #expect(replaced.generationConfig.maxNewTokens
+            == original.generationConfig.maxNewTokens)
+    }
+
     private func request(
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition] = []
