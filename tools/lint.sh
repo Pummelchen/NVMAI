@@ -169,17 +169,33 @@ check_func_length() {
     echo "  ok (baseline created, $(echo "$current" | grep -c . ) entries)"
     return
   fi
-  # Compare on file:function only — a baselined function is allowed to exist,
-  # and Phase 2 shrinking it should not require a baseline edit.
-  new="$(comm -13 <(cut -d: -f1,2 "$BASELINE" | sort -u) \
-                  <(echo "$current" | cut -d: -f1,2 | sort -u))"
+  # Compare on file:function only, so shrinking a baselined function toward the
+  # limit does not churn the file.
+  local baseline_keys current_keys stale
+  baseline_keys="$(cut -d: -f1,2 "$BASELINE" | sort -u)"
+  current_keys="$(echo "$current" | grep -v '^$' | cut -d: -f1,2 | sort -u)"
+
+  new="$(comm -13 <(echo "$baseline_keys") <(echo "$current_keys"))"
   if [ -n "$new" ]; then
     echo "$new" | sed 's/^/  NEW: /'
     echo "  FAIL: shorten it, or update ${BASELINE#$ROOT/} with a reason in the PR"
     status=1
-  else
-    echo "  ok ($(echo "$current" | grep -c .) baselined, 0 new, $scanned scanned)"
+    return
   fi
+
+  # An exemption has to stay earned. Once a function is decomposed below the
+  # limit it drops out of `current`, and leaving its baseline row behind would
+  # let it silently grow back over the limit later under the old exemption.
+  stale="$(comm -23 <(echo "$baseline_keys") <(echo "$current_keys"))"
+  if [ -n "$stale" ]; then
+    echo "$stale" | sed 's/^/  STALE: /'
+    echo "  FAIL: these are no longer over $MAX_FUNC_LINES lines — drop them from"
+    echo "        ${BASELINE#$ROOT/} so the exemption cannot be reused."
+    status=1
+    return
+  fi
+
+  echo "  ok ($(echo "$current" | grep -c .) baselined, 0 new, $scanned scanned)"
 }
 
 case "$want" in
