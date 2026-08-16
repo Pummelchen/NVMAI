@@ -83,6 +83,21 @@ measure_functions() {
         scanned += 1
         indent, name = m[1], m[2]
 
+        # An inline opt-out in the contiguous comment block above, mirroring
+        # lint:allow-force. Preferred over a baseline row for a function that is
+        # long on purpose: the reason sits next to the code instead of in a
+        # separate file, so it is reviewed whenever the function is.
+        k = i - 1
+        exempt = false
+        while k >= 0 && lines[k] =~ /^\s*(\/\/|\/\/\/)/
+          if lines[k] =~ /lint:allow-long\s+\S/
+            exempt = true
+            break
+          end
+          k -= 1
+        end
+        next if exempt
+
         # Walk the (possibly multi-line) signature looking for the body brace.
         # Stop at the next declaration or at a closer no deeper than us, which
         # is what a bodyless protocol requirement runs into.
