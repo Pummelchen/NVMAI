@@ -57,3 +57,49 @@ process details.
 Keep each pull request narrow. Explain the behavior change, tests run, and any
 remaining limitation. By contributing, you agree that your work is licensed
 under the repository's [Apache License 2.0](LICENSE).
+
+## Releasing (maintainers)
+
+Every release is a tag *and* a published GitHub Release with prebuilt binaries.
+`tools/release.sh` does the whole sequence — 3.6 is the reference shape.
+
+```bash
+# 1. update the README callout ("New in X.Y", replacing the previous one)
+#    and promote the wiki Changelog's Unreleased section to the version
+git tag -a vX.Y -m "..."      # annotation is the starting point for the notes
+git push origin main vX.Y
+
+# 2. dry run: preconditions, gates, clean build, staged archive — no publish
+tools/release.sh vX.Y
+
+# 3. inspect the staged archive, then publish
+tools/release.sh vX.Y --publish --notes path/to/notes.md
+```
+
+The dry run is the default because publishing notifies watchers immediately.
+
+What the script enforces, and why each check is there:
+
+- **Clean tree, HEAD on the tag, tag pushed, no existing Release.** Cheap
+  guards against releasing something other than what you think you tagged.
+- **`tools/lint.sh`, the full serial suite, and the golden baseline.** The
+  baseline is skipped only when no model is installed, and the notes should say
+  so when it was — never skip it to make a mismatch go away.
+- **A clean scratch build.** An incremental `swift build` compiles nothing when
+  the tree is unchanged, so scanning its output for warnings passes vacuously.
+  The shipped binaries are always built fresh from the tagged commit.
+- **`--repo` on every `gh` call.** In a fork, `gh` defaults to the *parent*
+  repository: `gh release list` here lists drumih/turbo-fieldfare's releases,
+  and `gh release create` fails with a misleading "tag has not been pushed"
+  error. 3.6 was nearly published against the wrong repo because of this.
+
+The archive ships the six executables plus the `.bundle` resources carrying the
+Metal shader library — the runtime cannot load its kernels without them beside
+the executables — along with `LICENSE` and `THIRD_PARTY_NOTICES.md`. It contains
+no model weights.
+
+Binaries are **not code-signed or notarized**, and the bundled
+`README-binaries.txt` says so. Signing would need a Developer ID in CI; until
+then the release notes should keep pointing users at building from source or
+clearing the quarantine attribute themselves after checking the published
+SHA-256.
