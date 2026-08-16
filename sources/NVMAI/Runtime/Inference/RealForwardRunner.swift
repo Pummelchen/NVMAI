@@ -1230,28 +1230,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
 
-        struct LayerPrefillQKVViews {
-            let inputNorm: TensorView
-            let postAttention: TensorView
-            let router: TensorView
-            // Softmax-attention layers only (nil on linear-attention layers).
-            let q: TensorView?
-            let k: TensorView?
-            let v: TensorView?
-            let o: TensorView?
-            let qNorm: TensorView?
-            let kNorm: TensorView?
-            // Gated-DeltaNet linear-attention layers only.
-            let linQKV: TensorView?
-            let linZ: TensorView?
-            let linA: TensorView?
-            let linB: TensorView?
-            let linOut: TensorView?
-            let linConv: TensorView?
-            let linALog: TensorView?
-            let linDtBias: TensorView?
-            let linNorm: TensorView?
-        }
 
         let layerViews = try (0..<cfg.numLayers).map { L in
             let isFull = cfg.fullAttentionLayerMask[L] == 1
@@ -1308,159 +1286,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let t = tokens.count
         let emb = try model.embedding()
 
-        func encodeAffineProjection(commandBuffer: MTLCommandBuffer,
-                                  family: PrefillProjectionFamily,
-                                  weights: TensorView,
-                                  x: MTLBuffer,
-                                  y: MTLBuffer,
-                                  rows: Int,
-                                  columns: Int,
-                                  tokenCount: Int,
-                                  xStrideElements: Int,
-                                  yStrideElements: Int) throws {
-            if tokenCount >= 32,
-               family == .q || family == .kv || family == .o,
-               let candidate = prefillMPPAffineInt4 {
-                let path = try candidate.encode(
-                    commandBuffer: commandBuffer,
-                    weights: weights.buffer,
-                    weightsOffset: Int(weights.offset),
-                    scales: weights.buffer,
-                    scalesOffset: Int(weights.scaleOffset),
-                    biases: weights.buffer,
-                    biasesOffset: Int(weights.biasOffset),
-                    x: x,
-                    y: y,
-                    m: tokenCount,
-                    n: rows,
-                    k: columns)
-                if path == .affineThreadgroupF16 {
-                    return
-                }
-            }
-            if useTwoRowProjection && tokenCount == 2
-                && xStrideElements == columns && yStrideElements == rows {
-                if model.attentionWeightBits == 4 {
-                    try int4.encodeTwoRows(
-                        commandBuffer: commandBuffer,
-                        weights: weights.buffer,
-                        weightsOffset: Int(weights.offset),
-                        scales: weights.buffer,
-                        scalesOffset: Int(weights.scaleOffset),
-                        biases: weights.buffer,
-                        biasesOffset: Int(weights.biasOffset),
-                        x: x,
-                        y: y,
-                        m: UInt32(rows),
-                        n: UInt32(columns))
-                } else {
-                    try affine!.encodeTwoRows(
-                        commandBuffer: commandBuffer,
-                        weights: weights.buffer,
-                        weightsOffset: Int(weights.offset),
-                        scales: weights.buffer,
-                        scalesOffset: Int(weights.scaleOffset),
-                        biases: weights.buffer,
-                        biasesOffset: Int(weights.biasOffset),
-                        x: x,
-                        y: y,
-                        m: UInt32(rows),
-                        n: UInt32(columns))
-                }
-                return
-            }
-            if PrefillProjectionDispatchPolicy.selectedDispatch(
-                    for: family,
-                    chunkTokens: tokenCount) == .qmm {
-                try prefillQMM.encode(commandBuffer: commandBuffer,
-                                  weights: weights.buffer,
-                                  weightsOffset: Int(weights.offset),
-                                  scales: weights.buffer,
-                                  scalesOffset: Int(weights.scaleOffset),
-                                  biases: weights.buffer,
-                                  biasesOffset: Int(weights.biasOffset),
-                                  x: x,
-                                  y: y,
-                                  t: tokenCount,
-                                  n: rows,
-                                  k: columns)
-                return
-            }
-            for row in 0..<tokenCount {
-                try encodePrimaryGEMV(
-                    commandBuffer: commandBuffer,
-                    projection: weights,
-                    x: x,
-                    xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
-                    y: y,
-                    yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
-                    m: UInt32(rows),
-                    n: UInt32(columns))
-            }
-        }
-
-        func copyPrefillKV(commandBuffer: MTLCommandBuffer,
-                           source: MTLBuffer,
-                           destination: (buffer: MTLBuffer, offset: Int, stride: Int),
-                           sourceTokenOffset: Int,
-                           tokenCount: Int,
-                           bytesPerToken: Int) throws {
-            guard tokenCount > 0 else { return }
-            guard let blit = commandBuffer.makeBlitCommandEncoder() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            blit.copy(from: source,
-                      sourceOffset: sourceTokenOffset * bytesPerToken,
-                      to: destination.buffer,
-                      destinationOffset: destination.offset,
-                      size: tokenCount * bytesPerToken)
-            blit.endEncoding()
-        }
-
-        func copyPrefillKVToCache(commandBuffer: MTLCommandBuffer,
-                                  kv: KVCacheManager,
-                                  layer: Int,
-                                  startPosition: Int,
-                                  tokenCount: Int,
-                                  keySource: MTLBuffer,
-                                  valueSource: MTLBuffer,
-                                  bytesPerToken: Int) throws {
-            let capacity = kv.capacity(layer: layer)
-            let physicalStart = startPosition % capacity
-            let firstSpan = min(tokenCount, capacity - physicalStart)
-            let keyFirst = kv.kRange(layer: layer, start: startPosition, count: firstSpan)
-            let valueFirst = kv.vRange(layer: layer, start: startPosition, count: firstSpan)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: keySource,
-                              destination: keyFirst,
-                              sourceTokenOffset: 0,
-                              tokenCount: firstSpan,
-                              bytesPerToken: bytesPerToken)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: valueSource,
-                              destination: valueFirst,
-                              sourceTokenOffset: 0,
-                              tokenCount: firstSpan,
-                              bytesPerToken: bytesPerToken)
-            guard firstSpan < tokenCount else { return }
-
-            let secondCount = tokenCount - firstSpan
-            let secondStart = startPosition + firstSpan
-            let keySecond = kv.kRange(layer: layer, start: secondStart, count: secondCount)
-            let valueSecond = kv.vRange(layer: layer, start: secondStart, count: secondCount)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: keySource,
-                              destination: keySecond,
-                              sourceTokenOffset: firstSpan,
-                              tokenCount: secondCount,
-                              bytesPerToken: bytesPerToken)
-            try copyPrefillKV(commandBuffer: commandBuffer,
-                              source: valueSource,
-                              destination: valueSecond,
-                              sourceTokenOffset: firstSpan,
-                              tokenCount: secondCount,
-                              bytesPerToken: bytesPerToken)
-        }
 
         prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
 
@@ -1555,7 +1380,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.qkvDim)
+                                     yStrideElements: la.qkvDim,
+                                     useTwoRowProjection: useTwoRowProjection)
                 try encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: linZ,
@@ -1565,7 +1391,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.valueDim)
+                                     yStrideElements: la.valueDim,
+                                     useTwoRowProjection: useTwoRowProjection)
                 try encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: linA,
@@ -1575,7 +1402,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.numVHeads)
+                                     yStrideElements: la.numVHeads,
+                                     useTwoRowProjection: useTwoRowProjection)
                 try encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: linB,
@@ -1585,7 +1413,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: la.numVHeads)
+                                     yStrideElements: la.numVHeads,
+                                     useTwoRowProjection: useTwoRowProjection)
                 let convW = linConv
                 let tail = gdnState.convTailBuffer(layer: L)
                 try gdn.encodeConvPrefill(commandBuffer: cb,
@@ -1641,7 +1470,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: la.valueDim,
                                      tokenCount: t,
                                      xStrideElements: la.valueDim,
-                                     yStrideElements: D)
+                                     yStrideElements: D,
+                                     useTwoRowProjection: useTwoRowProjection)
             } else {
                 let qProjRows = cfg.attnOutputGate ? 2 * qDim : qDim
                 try encodeAffineProjection(commandBuffer: cb,
@@ -1653,7 +1483,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: qProjRows)
+                                     yStrideElements: qProjRows,
+                                     useTwoRowProjection: useTwoRowProjection)
                 try encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.k!,
@@ -1663,7 +1494,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: kvDim)
+                                     yStrideElements: kvDim,
+                                     useTwoRowProjection: useTwoRowProjection)
                 try encodeAffineProjection(commandBuffer: cb,
                                      family: .kv,
                                      weights: views.v!,
@@ -1673,7 +1505,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      columns: D,
                                      tokenCount: t,
                                      xStrideElements: D,
-                                     yStrideElements: kvDim)
+                                     yStrideElements: kvDim,
+                                     useTwoRowProjection: useTwoRowProjection)
 
                 // The attention input Q: the packed q_proj output is split
                 // into per-head query/gate halves for gated architectures.
@@ -1792,7 +1625,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                          columns: qDim,
                                          tokenCount: t,
                                          xStrideElements: qDim,
-                                         yStrideElements: D)
+                                         yStrideElements: D,
+                                         useTwoRowProjection: useTwoRowProjection)
             }
             // Plain pre-norm residual block: hidden += attention branch,
             // then one post-attention norm feeds router, shared expert,
@@ -3029,4 +2863,185 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
     }
 
+
+    // MARK: - Chunked prefill helpers
+
+    /// Per-layer tensor views resolved once before the chunk loop.
+    private struct LayerPrefillQKVViews {
+        let inputNorm: TensorView
+        let postAttention: TensorView
+        let router: TensorView
+        // Softmax-attention layers only (nil on linear-attention layers).
+        let q: TensorView?
+        let k: TensorView?
+        let v: TensorView?
+        let o: TensorView?
+        let qNorm: TensorView?
+        let kNorm: TensorView?
+        // Gated-DeltaNet linear-attention layers only.
+        let linQKV: TensorView?
+        let linZ: TensorView?
+        let linA: TensorView?
+        let linB: TensorView?
+        let linOut: TensorView?
+        let linConv: TensorView?
+        let linALog: TensorView?
+        let linDtBias: TensorView?
+        let linNorm: TensorView?
+    }
+
+    private func encodeAffineProjection(commandBuffer: MTLCommandBuffer,
+                              family: PrefillProjectionFamily,
+                              weights: TensorView,
+                              x: MTLBuffer,
+                              y: MTLBuffer,
+                              rows: Int,
+                              columns: Int,
+                              tokenCount: Int,
+                              xStrideElements: Int,
+                              yStrideElements: Int,
+                              useTwoRowProjection: Bool) throws {
+        if tokenCount >= 32,
+           family == .q || family == .kv || family == .o,
+           let candidate = prefillMPPAffineInt4 {
+            let path = try candidate.encode(
+                commandBuffer: commandBuffer,
+                weights: weights.buffer,
+                weightsOffset: Int(weights.offset),
+                scales: weights.buffer,
+                scalesOffset: Int(weights.scaleOffset),
+                biases: weights.buffer,
+                biasesOffset: Int(weights.biasOffset),
+                x: x,
+                y: y,
+                m: tokenCount,
+                n: rows,
+                k: columns)
+            if path == .affineThreadgroupF16 {
+                return
+            }
+        }
+        if useTwoRowProjection && tokenCount == 2
+            && xStrideElements == columns && yStrideElements == rows {
+            if model.attentionWeightBits == 4 {
+                try int4.encodeTwoRows(
+                    commandBuffer: commandBuffer,
+                    weights: weights.buffer,
+                    weightsOffset: Int(weights.offset),
+                    scales: weights.buffer,
+                    scalesOffset: Int(weights.scaleOffset),
+                    biases: weights.buffer,
+                    biasesOffset: Int(weights.biasOffset),
+                    x: x,
+                    y: y,
+                    m: UInt32(rows),
+                    n: UInt32(columns))
+            } else {
+                try affine!.encodeTwoRows(
+                    commandBuffer: commandBuffer,
+                    weights: weights.buffer,
+                    weightsOffset: Int(weights.offset),
+                    scales: weights.buffer,
+                    scalesOffset: Int(weights.scaleOffset),
+                    biases: weights.buffer,
+                    biasesOffset: Int(weights.biasOffset),
+                    x: x,
+                    y: y,
+                    m: UInt32(rows),
+                    n: UInt32(columns))
+            }
+            return
+        }
+        if PrefillProjectionDispatchPolicy.selectedDispatch(
+                for: family,
+                chunkTokens: tokenCount) == .qmm {
+            try prefillQMM.encode(commandBuffer: commandBuffer,
+                              weights: weights.buffer,
+                              weightsOffset: Int(weights.offset),
+                              scales: weights.buffer,
+                              scalesOffset: Int(weights.scaleOffset),
+                              biases: weights.buffer,
+                              biasesOffset: Int(weights.biasOffset),
+                              x: x,
+                              y: y,
+                              t: tokenCount,
+                              n: rows,
+                              k: columns)
+            return
+        }
+        for row in 0..<tokenCount {
+            try encodePrimaryGEMV(
+                commandBuffer: commandBuffer,
+                projection: weights,
+                x: x,
+                xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
+                y: y,
+                yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
+                m: UInt32(rows),
+                n: UInt32(columns))
+        }
+    }
+
+    private func copyPrefillKV(commandBuffer: MTLCommandBuffer,
+                       source: MTLBuffer,
+                       destination: (buffer: MTLBuffer, offset: Int, stride: Int),
+                       sourceTokenOffset: Int,
+                       tokenCount: Int,
+                       bytesPerToken: Int) throws {
+        guard tokenCount > 0 else { return }
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        blit.copy(from: source,
+                  sourceOffset: sourceTokenOffset * bytesPerToken,
+                  to: destination.buffer,
+                  destinationOffset: destination.offset,
+                  size: tokenCount * bytesPerToken)
+        blit.endEncoding()
+    }
+
+    private func copyPrefillKVToCache(commandBuffer: MTLCommandBuffer,
+                              kv: KVCacheManager,
+                              layer: Int,
+                              startPosition: Int,
+                              tokenCount: Int,
+                              keySource: MTLBuffer,
+                              valueSource: MTLBuffer,
+                              bytesPerToken: Int) throws {
+        let capacity = kv.capacity(layer: layer)
+        let physicalStart = startPosition % capacity
+        let firstSpan = min(tokenCount, capacity - physicalStart)
+        let keyFirst = kv.kRange(layer: layer, start: startPosition, count: firstSpan)
+        let valueFirst = kv.vRange(layer: layer, start: startPosition, count: firstSpan)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: keySource,
+                          destination: keyFirst,
+                          sourceTokenOffset: 0,
+                          tokenCount: firstSpan,
+                          bytesPerToken: bytesPerToken)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: valueSource,
+                          destination: valueFirst,
+                          sourceTokenOffset: 0,
+                          tokenCount: firstSpan,
+                          bytesPerToken: bytesPerToken)
+        guard firstSpan < tokenCount else { return }
+
+        let secondCount = tokenCount - firstSpan
+        let secondStart = startPosition + firstSpan
+        let keySecond = kv.kRange(layer: layer, start: secondStart, count: secondCount)
+        let valueSecond = kv.vRange(layer: layer, start: secondStart, count: secondCount)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: keySource,
+                          destination: keySecond,
+                          sourceTokenOffset: firstSpan,
+                          tokenCount: secondCount,
+                          bytesPerToken: bytesPerToken)
+        try copyPrefillKV(commandBuffer: commandBuffer,
+                          source: valueSource,
+                          destination: valueSecond,
+                          sourceTokenOffset: firstSpan,
+                          tokenCount: secondCount,
+                          bytesPerToken: bytesPerToken)
+    }
 }
