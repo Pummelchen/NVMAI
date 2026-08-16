@@ -633,199 +633,148 @@ extension Model {
                 detail: "manifest.quant is required by the executable runtime schema")
         }
 
-        func checkedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
-            let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
-            guard !overflow else {
-                throw ModelError.indexCorrupt(detail: "\(field) byte count overflows UInt64")
-            }
-            return value
-        }
-
-        func checkedIntMultiply(_ lhs: Int, _ rhs: Int, field: String) throws -> Int {
-            let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
-            guard !overflow else {
-                throw ModelError.indexCorrupt(detail: "\(field) dimension overflows Int")
-            }
-            return value
-        }
-
-        func entry(_ name: String) throws -> ResidentIndexEntry {
-            guard let e = residentIndex.entries[name] else {
-                throw ModelError.tensorNotFound(name: name)
-            }
-            return e
-        }
-
-        func requireBF16(_ name: String, count: Int) throws {
-            let e = try entry(name)
-            guard e.dtype == 1 else {
-                throw ModelError.indexCorrupt(detail: "\(name) is not BF16")
-            }
-            // Trailing zero dims encode a lower-rank tensor (e.g. a [2048]
-            // vector is stored as shape (2048, 0, 0, 0)); treat them as 1.
-            let dims = [e.shape.0, e.shape.1, e.shape.2, e.shape.3]
-            let elements = dims.reduce(1) { $0 * ($1 == 0 ? 1 : Int($1)) }
-            guard elements == count else {
-                throw ModelError.tensorSizeMismatch(
-                    name: name, expected: UInt64(count), actual: UInt64(elements))
-            }
-        }
-
-        func requireAffine(_ name: String, rows: Int, columns: Int,
-                           slot: ManifestQuantSlot) throws {
-            let e = try entry(name)
-            guard columns % slot.groupSize == 0 else {
-                throw ModelError.indexCorrupt(
-                    detail: "\(name) columns \(columns) not divisible by group size \(slot.groupSize)")
-            }
-            // Bit-packed affine weights: rows*cols*bits must pack into whole
-            // bytes (4-bit packs 2/byte, 6-bit packs across 32-bit words).
-            let elementBits = try checkedMultiply(
-                UInt64(rows) * UInt64(columns), UInt64(slot.weightBits),
-                field: name)
-            guard elementBits % 8 == 0 else {
-                throw ModelError.indexCorrupt(
-                    detail: "\(name) \(slot.weightBits)-bit layout does not pack into whole bytes")
-            }
-            let weightBytes = elementBits / 8
-            let auxBytes = try checkedMultiply(
-                UInt64(rows) * UInt64(columns / slot.groupSize), 2, field: name)
-            guard e.dtype == 0,                       // U32-packed weights
-                  e.sizeBytes == weightBytes,
-                  e.scaleOffset > 0, e.scaleSize == auxBytes,
-                  e.biasOffset > 0, e.biasSize == auxBytes else {
-                throw ModelError.tensorSizeMismatch(
-                    name: name, expected: weightBytes, actual: e.sizeBytes)
-            }
-        }
-
-        func affineSizes(rows: Int, columns: Int, slot: ManifestQuantSlot,
-                         field: String) throws -> (weight: UInt64, aux: UInt64, shape: (UInt32, UInt32)) {
-            guard columns % slot.groupSize == 0 else {
-                throw ModelError.indexCorrupt(
-                    detail: "\(field) has an invalid quant layout (group \(slot.groupSize), \(slot.weightBits)-bit)")
-            }
-            let elementBits = try checkedMultiply(
-                UInt64(rows) * UInt64(columns), UInt64(slot.weightBits),
-                field: field)
-            guard elementBits % 8 == 0 else {
-                throw ModelError.indexCorrupt(
-                    detail: "\(field) \(slot.weightBits)-bit layout does not pack into whole bytes")
-            }
-            let weightBytes = elementBits / 8
-            let auxBytes = try checkedMultiply(
-                UInt64(rows) * UInt64(columns / slot.groupSize), 2, field: field)
-            return (weightBytes, auxBytes, (UInt32(rows), UInt32(columns)))
-        }
+        let checks = RuntimeSchemaChecks(residentIndex: residentIndex, quant: quant)
 
         switch config.family {
         case .qwen36:
-            try requireAffine(
-                "language_model.model.embed_tokens.weight",
-                rows: config.vocabSize,
-                columns: config.hiddenSize,
-                slot: quant.embedding)
+            try checks.requireAffine(
+                                     "language_model.model.embed_tokens.weight",
+                                     rows: config.vocabSize,
+                                     columns: config.hiddenSize,
+                                     slot: quant.embedding)
             // The untied lm_head is quantized with the embedding slot layout
             // (padded to the same vocab rows). `Model.lmHeadWeightBits` falls
             // back to that slot, so the coupling is validated here — the
             // fallback is only reachable when this check already passed.
-            try requireAffine("language_model.lm_head.weight",
-                              rows: config.vocabSize,
-                              columns: config.hiddenSize,
-                              slot: quant.embedding)
+            try checks.requireAffine("language_model.lm_head.weight",
+                                     rows: config.vocabSize,
+                                     columns: config.hiddenSize,
+                                     slot: quant.embedding)
         case .qwen36MTP:
             // The MTP sidecar shares the target's embedding and lm_head; it
             // carries only the 2D->D projection and its two input norms.
-            try requireAffine("fc.weight",
-                              rows: config.hiddenSize,
-                              columns: 2 * config.hiddenSize,
-                              slot: quant.attention)
-            try requireBF16("pre_fc_norm_embedding.weight", count: config.hiddenSize)
-            try requireBF16("pre_fc_norm_hidden.weight", count: config.hiddenSize)
+            try checks.requireAffine("fc.weight",
+                                     rows: config.hiddenSize,
+                                     columns: 2 * config.hiddenSize,
+                                     slot: quant.attention)
+            try checks.requireBF16("pre_fc_norm_embedding.weight", count: config.hiddenSize)
+            try checks.requireBF16("pre_fc_norm_hidden.weight", count: config.hiddenSize)
         }
-        try requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
+        try checks.requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
 
+        try validateLayerSchema(checks: checks, layout: layout,
+                                config: config, quant: quant)
+    }
+
+    /// Per-layer tensor schema: shapes, dtypes and quant layouts for every
+    /// transformer layer, plus the packed-expert layout cross-check.
+    private static func validateLayerSchema(
+        checks: RuntimeSchemaChecks,
+        layout: PackedExpertsLayout,
+        config: ArchConfig,
+        quant: ManifestQuant
+    ) throws {
         // Qwen 3.6 schema, verified against the installed checkpoints:
         // every layer carries the layer norms, the router and the gated
         // shared expert; full-attention layers carry the gate-packed
         // [query; gate] q_proj, and gated-DeltaNet layers carry the
         // linear_attn bundle. The Qwen checkpoints keep no auxiliary
         // sandwich/scale tensors.
+        try validateLayerTensors(checks: checks, config: config, quant: quant)
+        try validateRoutedExpertLayout(checks: checks, layout: layout,
+                                       config: config, quant: quant)
+    }
+
+    /// Per-layer norms, router, shared expert, attention and GDN tensors.
+    private static func validateLayerTensors(
+        checks: RuntimeSchemaChecks,
+        config: ArchConfig,
+        quant: ManifestQuant
+    ) throws {
         for layer in 0..<config.numLayers {
             let prefix = "language_model.model.layers.\(layer)"
-            try requireBF16("\(prefix).input_layernorm.weight", count: config.hiddenSize)
-            try requireBF16("\(prefix).post_attention_layernorm.weight", count: config.hiddenSize)
-            try requireAffine("\(prefix).mlp.gate.weight",
-                              rows: config.numExperts, columns: config.hiddenSize,
-                              slot: quant.router)
+            try checks.requireBF16("\(prefix).input_layernorm.weight", count: config.hiddenSize)
+            try checks.requireBF16("\(prefix).post_attention_layernorm.weight", count: config.hiddenSize)
+            try checks.requireAffine("\(prefix).mlp.gate.weight",
+                                     rows: config.numExperts, columns: config.hiddenSize,
+                                     slot: quant.router)
             // The shared-expert scalar gate is quantized at the ROUTER's bit
             // width (8-bit on the target checkpoint, 4-bit on the MTP
             // sidecar), independent of the sharedExpert slot.
-            try requireAffine("\(prefix).mlp.shared_expert_gate.weight",
-                              rows: 1, columns: config.hiddenSize,
-                              slot: quant.router)
+            try checks.requireAffine("\(prefix).mlp.shared_expert_gate.weight",
+                                     rows: 1, columns: config.hiddenSize,
+                                     slot: quant.router)
             let shared = "\(prefix).mlp.shared_expert"
-            try requireAffine("\(shared).gate_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(shared).up_proj.weight",
-                              rows: config.intermediateSize, columns: config.hiddenSize,
-                              slot: quant.sharedExpert)
-            try requireAffine("\(shared).down_proj.weight",
-                              rows: config.hiddenSize, columns: config.intermediateSize,
-                              slot: quant.sharedExpert)
+            try checks.requireAffine("\(shared).gate_proj.weight",
+                                     rows: config.intermediateSize, columns: config.hiddenSize,
+                                     slot: quant.sharedExpert)
+            try checks.requireAffine("\(shared).up_proj.weight",
+                                     rows: config.intermediateSize, columns: config.hiddenSize,
+                                     slot: quant.sharedExpert)
+            try checks.requireAffine("\(shared).down_proj.weight",
+                                     rows: config.hiddenSize, columns: config.intermediateSize,
+                                     slot: quant.sharedExpert)
 
             if config.layerIsFull(layer) {
                 // Gate-packed [query ; gate] q_proj: 2 * heads * headDim rows.
-                let queryDimension = try checkedIntMultiply(
+                let queryDimension = try checks.checkedIntMultiply(
                     2 * config.numHeads, config.fullHeadDim,
                     field: "layer \(layer) query")
-                let kvDimension = try checkedIntMultiply(
+                let kvDimension = try checks.checkedIntMultiply(
                     config.numFullKVHeads, config.fullHeadDim,
                     field: "layer \(layer) key/value")
-                try requireBF16("\(prefix).self_attn.q_norm.weight",
-                                count: config.fullHeadDim)
-                try requireBF16("\(prefix).self_attn.k_norm.weight",
-                                count: config.fullHeadDim)
-                try requireAffine("\(prefix).self_attn.q_proj.weight",
-                                  rows: queryDimension, columns: config.hiddenSize,
-                                  slot: quant.attention)
-                try requireAffine("\(prefix).self_attn.k_proj.weight",
-                                  rows: kvDimension, columns: config.hiddenSize,
-                                  slot: quant.attention)
-                try requireAffine("\(prefix).self_attn.v_proj.weight",
-                                  rows: kvDimension, columns: config.hiddenSize,
-                                  slot: quant.attention)
-                try requireAffine("\(prefix).self_attn.o_proj.weight",
-                                  rows: config.hiddenSize,
-                                  columns: config.numHeads * config.fullHeadDim,
-                                  slot: quant.attention)
+                try checks.requireBF16("\(prefix).self_attn.q_norm.weight",
+                                       count: config.fullHeadDim)
+                try checks.requireBF16("\(prefix).self_attn.k_norm.weight",
+                                       count: config.fullHeadDim)
+                try checks.requireAffine("\(prefix).self_attn.q_proj.weight",
+                                         rows: queryDimension, columns: config.hiddenSize,
+                                         slot: quant.attention)
+                try checks.requireAffine("\(prefix).self_attn.k_proj.weight",
+                                         rows: kvDimension, columns: config.hiddenSize,
+                                         slot: quant.attention)
+                try checks.requireAffine("\(prefix).self_attn.v_proj.weight",
+                                         rows: kvDimension, columns: config.hiddenSize,
+                                         slot: quant.attention)
+                try checks.requireAffine("\(prefix).self_attn.o_proj.weight",
+                                         rows: config.hiddenSize,
+                                         columns: config.numHeads * config.fullHeadDim,
+                                         slot: quant.attention)
             } else if config.layerIsLinear(layer) {
                 let la = config.linearAttention
-                try requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
-                                  rows: la.qkvDim, columns: config.hiddenSize,
-                                  slot: quant.attention)
-                try requireAffine("\(prefix).linear_attn.in_proj_z.weight",
-                                  rows: la.valueDim, columns: config.hiddenSize,
-                                  slot: quant.attention)
-                try requireAffine("\(prefix).linear_attn.in_proj_a.weight",
-                                  rows: la.numVHeads, columns: config.hiddenSize,
-                                  slot: quant.attention)
-                try requireAffine("\(prefix).linear_attn.in_proj_b.weight",
-                                  rows: la.numVHeads, columns: config.hiddenSize,
-                                  slot: quant.attention)
-                try requireAffine("\(prefix).linear_attn.out_proj.weight",
-                                  rows: config.hiddenSize, columns: la.valueDim,
-                                  slot: quant.attention)
-                try requireBF16("\(prefix).linear_attn.conv1d.weight",
-                                count: la.qkvDim * la.convKernelSize)
-                try requireBF16("\(prefix).linear_attn.A_log", count: la.numVHeads)
-                try requireBF16("\(prefix).linear_attn.dt_bias", count: la.numVHeads)
-                try requireBF16("\(prefix).linear_attn.norm.weight",
-                                count: la.valueHeadDim)
+                try checks.requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
+                                         rows: la.qkvDim, columns: config.hiddenSize,
+                                         slot: quant.attention)
+                try checks.requireAffine("\(prefix).linear_attn.in_proj_z.weight",
+                                         rows: la.valueDim, columns: config.hiddenSize,
+                                         slot: quant.attention)
+                try checks.requireAffine("\(prefix).linear_attn.in_proj_a.weight",
+                                         rows: la.numVHeads, columns: config.hiddenSize,
+                                         slot: quant.attention)
+                try checks.requireAffine("\(prefix).linear_attn.in_proj_b.weight",
+                                         rows: la.numVHeads, columns: config.hiddenSize,
+                                         slot: quant.attention)
+                try checks.requireAffine("\(prefix).linear_attn.out_proj.weight",
+                                         rows: config.hiddenSize, columns: la.valueDim,
+                                         slot: quant.attention)
+                try checks.requireBF16("\(prefix).linear_attn.conv1d.weight",
+                                       count: la.qkvDim * la.convKernelSize)
+                try checks.requireBF16("\(prefix).linear_attn.A_log", count: la.numVHeads)
+                try checks.requireBF16("\(prefix).linear_attn.dt_bias", count: la.numVHeads)
+                try checks.requireBF16("\(prefix).linear_attn.norm.weight",
+                                       count: la.valueHeadDim)
             }
         }
 
+    }
+
+    /// Routed-expert tensor shapes cross-checked against the packed layout.
+    private static func validateRoutedExpertLayout(
+        checks: RuntimeSchemaChecks,
+        layout: PackedExpertsLayout,
+        config: ArchConfig,
+        quant: ManifestQuant
+    ) throws {
         let routedShapes: [(String, Int, Int)] = [
             ("gate", config.moeIntermediateSize, config.hiddenSize),
             ("up", config.moeIntermediateSize, config.hiddenSize),
@@ -837,7 +786,7 @@ extension Model {
                     detail: "routed layer \(layer.layer) has no experts")
             }
             for (role, rows, columns) in routedShapes {
-                let sizes = try affineSizes(
+                let sizes = try checks.affineSizes(
                     rows: rows, columns: columns,
                     slot: quant.routedExpert,
                     field: "routed layer \(layer.layer) \(role)")
@@ -880,3 +829,97 @@ extension Model {
     }
 
 }
+
+/// The schema checks `validateRuntimeSchema` runs, bound to the index and
+/// quant slots they read. Extracted from that function so the per-family and
+/// per-layer rules below read as rules rather than as one 250-line body.
+private struct RuntimeSchemaChecks {
+    let residentIndex: ResidentIndex
+    let quant: ManifestQuant
+
+    func checkedMultiply(_ lhs: UInt64, _ rhs: UInt64, field: String) throws -> UInt64 {
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else {
+            throw ModelError.indexCorrupt(detail: "\(field) byte count overflows UInt64")
+        }
+        return value
+    }
+
+    func checkedIntMultiply(_ lhs: Int, _ rhs: Int, field: String) throws -> Int {
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else {
+            throw ModelError.indexCorrupt(detail: "\(field) dimension overflows Int")
+        }
+        return value
+    }
+
+    func entry(_ name: String) throws -> ResidentIndexEntry {
+        guard let e = residentIndex.entries[name] else {
+            throw ModelError.tensorNotFound(name: name)
+        }
+        return e
+    }
+
+    func requireBF16(_ name: String, count: Int) throws {
+        let e = try entry(name)
+        guard e.dtype == 1 else {
+            throw ModelError.indexCorrupt(detail: "\(name) is not BF16")
+        }
+        // Trailing zero dims encode a lower-rank tensor (e.g. a [2048]
+        // vector is stored as shape (2048, 0, 0, 0)); treat them as 1.
+        let dims = [e.shape.0, e.shape.1, e.shape.2, e.shape.3]
+        let elements = dims.reduce(1) { $0 * ($1 == 0 ? 1 : Int($1)) }
+        guard elements == count else {
+            throw ModelError.tensorSizeMismatch(
+                name: name, expected: UInt64(count), actual: UInt64(elements))
+        }
+    }
+
+    func requireAffine(_ name: String, rows: Int, columns: Int,
+                       slot: ManifestQuantSlot) throws {
+        let e = try entry(name)
+        guard columns % slot.groupSize == 0 else {
+            throw ModelError.indexCorrupt(
+                detail: "\(name) columns \(columns) not divisible by group size \(slot.groupSize)")
+        }
+        // Bit-packed affine weights: rows*cols*bits must pack into whole
+        // bytes (4-bit packs 2/byte, 6-bit packs across 32-bit words).
+        let elementBits = try checkedMultiply(
+            UInt64(rows) * UInt64(columns), UInt64(slot.weightBits),
+            field: name)
+        guard elementBits % 8 == 0 else {
+            throw ModelError.indexCorrupt(
+                detail: "\(name) \(slot.weightBits)-bit layout does not pack into whole bytes")
+        }
+        let weightBytes = elementBits / 8
+        let auxBytes = try checkedMultiply(
+            UInt64(rows) * UInt64(columns / slot.groupSize), 2, field: name)
+        guard e.dtype == 0,                       // U32-packed weights
+              e.sizeBytes == weightBytes,
+              e.scaleOffset > 0, e.scaleSize == auxBytes,
+              e.biasOffset > 0, e.biasSize == auxBytes else {
+            throw ModelError.tensorSizeMismatch(
+                name: name, expected: weightBytes, actual: e.sizeBytes)
+        }
+    }
+
+    func affineSizes(rows: Int, columns: Int, slot: ManifestQuantSlot,
+                     field: String) throws -> (weight: UInt64, aux: UInt64, shape: (UInt32, UInt32)) {
+        guard columns % slot.groupSize == 0 else {
+            throw ModelError.indexCorrupt(
+                detail: "\(field) has an invalid quant layout (group \(slot.groupSize), \(slot.weightBits)-bit)")
+        }
+        let elementBits = try checkedMultiply(
+            UInt64(rows) * UInt64(columns), UInt64(slot.weightBits),
+            field: field)
+        guard elementBits % 8 == 0 else {
+            throw ModelError.indexCorrupt(
+                detail: "\(field) \(slot.weightBits)-bit layout does not pack into whole bytes")
+        }
+        let weightBytes = elementBits / 8
+        let auxBytes = try checkedMultiply(
+            UInt64(rows) * UInt64(columns / slot.groupSize), 2, field: field)
+        return (weightBytes, auxBytes, (UInt32(rows), UInt32(columns)))
+    }
+}
+
