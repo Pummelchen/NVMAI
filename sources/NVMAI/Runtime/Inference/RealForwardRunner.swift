@@ -1396,12 +1396,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
             : 1.0
-        struct PendingRoutedCommand {
-            let cb: MTLCommandBuffer
-            let sharedCB: MTLCommandBuffer?
-            let phase1HitCB: MTLCommandBuffer?
-            let encodeAndCommitNanos: UInt64
-        }
         var pendingRoutedCommand: PendingRoutedCommand?
 
         /// Drain a routed layer's command buffers, surfacing any `.error`
@@ -1412,42 +1406,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         /// are valid — recording them here (not only in the waitIfNeeded
         /// drain) makes NVMAI_KERNEL_STATS cover every layer instead of just
         /// the final layer of each token.
-        func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
-                                        waitIfNeeded: Bool) throws {
-            if waitIfNeeded {
-                if let sharedCB = pending.sharedCB {
-                    try waitForCompletion(sharedCB)
-                }
-                if let phase1HitCB = pending.phase1HitCB {
-                    try waitForCompletion(phase1HitCB)
-                }
-                try waitForCompletion(pending.cb)
-            } else if let err = pending.cb.error {
-                throw ModelError.commandBufferFailed(
-                    detail: "routed layer command buffer: \(err)")
-            }
-            if let sharedCB = pending.sharedCB, let err = sharedCB.error {
-                throw ModelError.commandBufferFailed(
-                    detail: "shared-expert command buffer: \(err)")
-            }
-            if let phase1HitCB = pending.phase1HitCB, let err = phase1HitCB.error {
-                throw ModelError.commandBufferFailed(
-                    detail: "routed phase-1 hit command buffer: \(err)")
-            }
-            if let sharedCB = pending.sharedCB {
-                recordKernelGPU(role: "shared_expert", sharedCB)
-            }
-            if let phase1HitCB = pending.phase1HitCB {
-                recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
-            }
-            recordKernelGPU(role: "moe_phase1_2_routed", pending.cb)
-            totalCb2Nanos &+= pending.encodeAndCommitNanos
-        }
-
-        func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
-            let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
-            for i in 0..<slots.count { ptr[i] = slots[i] }
-        }
 
         // Embed lookup + sqrt(H) fused.
         let emb = try model.embedding()
@@ -1558,253 +1516,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // CPU readback to fetch routed-expert blobs from disk. The expert
             // id list is reused host scratch (R16); the runner is single-flight
             // per generation, so it never aliases concurrent decode work.
-            let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
-                                                          capacity: cfg.topKExperts)
-            decodeExpertsScratch.removeAll(keepingCapacity: true)
-            decodeExpertsScratch.reserveCapacity(cfg.topKExperts)
-            for i in 0..<cfg.topKExperts {
-                decodeExpertsScratch.append(min(Int(idxPtr[i]), cfg.numExperts - 1))
-            }
-            let experts = decodeExpertsScratch
-
-            let routedOffsets = try model.routedExpertOffsets(layer: L)
-            let topK = UInt32(cfg.topKExperts)
-            let canPlanPhase1HitSplit =
-                cfg.topKExperts <= MoE.maxStreamedExperts
-            let plannedFetch = canPlanPhase1HitSplit
-                ? try model.planRoutedExperts(layer: L, experts: experts)
-                : nil
-            var phase1HitCB: MTLCommandBuffer?
-            var phase1HitSplitArgBuf: MTLBuffer?
-            decodeHitSplitRoutedBufsScratch.removeAll(keepingCapacity: true)
-            decodeHitSlotsScratch.removeAll(keepingCapacity: true)
-            decodeMissSlotsScratch.removeAll(keepingCapacity: true)
-            let phase1HitSlots = decodeHitSlotsScratch
-            let phase1MissSlots = decodeMissSlotsScratch
-
-            if let plan = plannedFetch {
-                let missSet = Set(plan.misses)
-                for index in 0..<cfg.topKExperts where !missSet.contains(index) {
-                    decodeHitSlotsScratch.append(UInt32(index))
-                }
-                for miss in plan.misses {
-                    decodeMissSlotsScratch.append(UInt32(miss))
-                }
-            }
-            func encodeRoutedPhase1Full(
-                _ cb: MTLCommandBuffer,
-                argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer]
-            ) throws {
-                try moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: cb,
-                                                        routedArgBuffer: argBuf,
-                                                        routedBlobs: routedBufs,
-                                                        routedOffsets: routedOffsets,
-                                                        x: routedX,
-                                                        acts: moeActs,
-                                                        d: D,
-                                                        f: FmoE,
-                                                        topK: topK)
-            }
-
-            func encodeRoutedPhase1Subset(
-                _ cb: MTLCommandBuffer,
-                argBuf: MTLBuffer,
-                routedBufs: [MTLBuffer],
-                activeSlots: MTLBuffer,
-                activeSlotIndices: [UInt32],
-                activeCount: UInt32
-            ) throws {
-                try moe.encodeRoutedPersistentPhase1SubsetU16Load(
-                    commandBuffer: cb,
-                    routedArgBuffer: argBuf,
-                    routedBlobs: routedBufs,
-                    routedOffsets: routedOffsets,
-                    x: routedX,
-                    acts: moeActs,
-                    activeSlots: activeSlots,
-                    activeSlotIndices: activeSlotIndices,
-                    activeCount: activeCount,
-                    d: D,
-                    f: FmoE,
-                    topK: topK)
-            }
-
-            if let plan = plannedFetch,
-               plan.hits > 0,
-               !plan.misses.isEmpty {
-                let plannedBlobs = try model.routedExpertBuffers(for: plan)
-                for blob in plannedBlobs {
-                    decodeHitSplitRoutedBufsScratch.append(blob.buffer)
-                }
-                phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
-                    routedBlobs: decodeHitSplitRoutedBufsScratch,
-                    topK: topK)
-                if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
-                    writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
-                    guard let cb = ctx.queue.makeCommandBuffer() else {
-                        throw ModelError.residentBufferWrapFailed
-                    }
-                    try encodeRoutedPhase1Subset(
-                        cb,
-                        argBuf: argBuf,
-                        routedBufs: decodeHitSplitRoutedBufsScratch,
-                        activeSlots: moeHitActiveSlots,
-                        activeSlotIndices: phase1HitSlots,
-                        activeCount: UInt32(phase1HitSlots.count))
-                    phase1HitCB = cb
-                }
-            }
-
-            // The shared dense MLP depends only on its normed input, not on
-            // the routed experts. Commit it without waiting so its GPU work
-            // overlaps the routed-expert pread. The routed CB follows it on
-            // the same queue, so the combine sees h1Buf.
-            guard let sharedCB = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            try shared.encode(commandBuffer: sharedCB,
-                              x: routedX,
-                              gate: sharedProj.gate,
-                              up: sharedProj.up,
-                              down: sharedProj.down,
-                              y: h1Buf,
-                              scratchGate: denseScratchGate,
-                              scratchUp: denseScratchUp,
-                              scratchAct: denseScratchAct)
-            if cfg.sharedExpertGated {
-                // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
-                let gateView = sharedProj.scalarGate!
-                try int8ScalarGate!.encode(commandBuffer: sharedCB,
-                                       weights: gateView.buffer,
-                                       weightsOffset: Int(gateView.offset),
-                                       scales: gateView.buffer,
-                                       scalesOffset: Int(gateView.scaleOffset),
-                                       biases: gateView.buffer,
-                                       biasesOffset: Int(gateView.biasOffset),
-                                       x: routedX,
-                                       y: sharedScalarGateBuf!,
-                                       m: 1, n: D)
-                try elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
-                                                    y: h1Buf,
-                                                    gate: sharedScalarGateBuf!,
-                                                    count: cfg.hiddenSize)
-            }
-            sharedCB.commit()
-            if let cb = phase1HitCB {
-                cb.commit()
-            }
-            if rdadviseEnabled && rdadvisePolicyMode != .off {
-                let requestedMisses = plannedFetch?.misses.count ?? experts.count
-                let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
-                    layer: L,
-                    missCount: requestedMisses)
-                if let skipped = shouldSkipRDAdvice(position: position,
-                                                    requestedMisses: requestedMisses,
-                                                    estimatedBytes: estimatedAdviceBytes,
-                                                    canOverlapUsefulGPUWork: true) {
-                    recordRDAdvice(skipped, wallNanos: 0)
-                } else {
-                    let tAdvice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                    let result: ExpertIOAdviceResult
-                    if let plannedFetch {
-                        result = try model.adviseRoutedExperts(plan: plannedFetch)
-                    } else {
-                        result = try model.adviseRoutedExperts(layer: L, experts: experts)
-                    }
-                    let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tAdvice
-                    recordRDAdvice(result, wallNanos: wallNanos)
-                    updateRDAdvicePolicy(after: result, position: position)
-                }
-            }
-
-            // Routed-expert pread — overlaps the shared MLP GPU work above.
-            let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            let blobs: [TensorView]
-            if let plannedFetch {
-                blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
-            } else {
-                blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
-            }
-            let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
-            totalIoNanos &+= layerIo
-            decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
-            for blob in blobs {
-                decodeRoutedBufsScratch.append(blob.buffer)
-            }
-            let routedBufs = decodeRoutedBufsScratch
-            let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            // The phase-2 reduce already folded the shared branch (h1Buf
-            // as its residual); the tail is a plain residual add.
-            let gTail: (MTLCommandBuffer) throws -> Void = { [self] cb in
-                try elementwise!.encodeResidualAdd(commandBuffer: cb,
-                                               hidden: hidden,
-                                               delta: h2Buf,
-                                               count: cfg.hiddenSize)
-            }
-            guard let routedCB = ctx.queue.makeCommandBuffer() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
-                ? phase1HitSplitArgBuf
-                : nil
-            let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
-                routedBlobs: routedBufs,
-                topK: topK)
-            if splitArgBuf != nil {
-                writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
-                try encodeRoutedPhase1Subset(
-                    routedCB,
-                    argBuf: argBuf,
-                    routedBufs: routedBufs,
-                    activeSlots: moeMissActiveSlots,
-                    activeSlotIndices: phase1MissSlots,
-                    activeCount: UInt32(phase1MissSlots.count))
-            } else {
-                try encodeRoutedPhase1Full(routedCB,
-                                           argBuf: argBuf,
-                                           routedBufs: routedBufs)
-            }
-            try moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
-                                                   routedArgBuffer: argBuf,
-                                                   routedBlobs: routedBufs,
-                                                   routedOffsets: routedOffsets,
-                                                   acts: moeActs,
-                                                   routingWeights: outWeights,
-                                                   residual: h1Buf,
-                                                   y: h2Buf,
-                                                   d: D,
-                                                   f: FmoE,
-                                                   topK: topK)
-            try gTail(routedCB)
-            routedCB.commit()
-            guard pendingRoutedCommand == nil else {
-                // The pipeline drains the previous layer's routed CB before
-                // queuing the next, so this is a logic error, not a user
-                // condition — but it must fail the generation, not trap.
-                throw ModelError.internalInconsistency(
-                    detail: "routed command-buffer pipeline not drained before queuing the next layer")
-            }
-            pendingRoutedCommand = PendingRoutedCommand(
-                cb: routedCB,
-                sharedCB: sharedCB,
-                phase1HitCB: phase1HitCB,
-                encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
-            totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
-            if ProcessInfo.processInfo.environment["NVMAI_LAYER_TRACE"] != nil,
-               position < 3 || position % 16 == 0 {
-                let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-                let attnUs = (attnCB.gpuEndTime - attnCB.gpuStartTime) * 1_000_000
-                let tailUs = (tailCB.gpuEndTime - tailCB.gpuStartTime) * 1_000_000
-                print("NVMAI layer pos=\(position) L=\(L) "
-                    + "body_us=\((now - tBodyStart) / 1000) "
-                    + "wait_us=\(waitNanos / 1000) io_us=\(layerIo / 1000) "
-                    + "cb1_us=\((tWait - tCb1Start) / 1000) "
-                    + "cb2_us=\((now - tCb2Start) / 1000) "
-                    + "gpu_attn_us=\(Int(attnUs)) gpu_tail_us=\(Int(tailUs)) "
-                    + "gpu_routed_us=\(Int(prevRoutedUs))")
-            }
-            continue
+            try await encodeDecodeRoutedMoE(
+                layer: L, position: position, sharedProj: sharedProj,
+                attnCB: attnCB, tailCB: tailCB,
+                pending: &pendingRoutedCommand,
+                bodyStart: tBodyStart, cb1Start: tCb1Start,
+                waitMark: tWait, waitNanos: waitNanos,
+                previousRoutedMicros: prevRoutedUs)
         }
         if let pending = pendingRoutedCommand {
             try finishPendingRoutedCommand(pending, waitIfNeeded: true)
@@ -3155,5 +2873,323 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // Plain pre-norm residual block: hidden += attention branch,
         // then one post-attention norm feeds router, shared expert,
         // and routed phase 1 (routedX doubles as moeX).
+    }
+
+    // MARK: - Decode routed-expert helpers
+
+    /// A routed-expert command whose completion is deferred to the next layer.
+    private struct PendingRoutedCommand {
+        let cb: MTLCommandBuffer
+        let sharedCB: MTLCommandBuffer?
+        let phase1HitCB: MTLCommandBuffer?
+        let encodeAndCommitNanos: UInt64
+    }
+
+    private func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
+                                    waitIfNeeded: Bool) throws {
+        if waitIfNeeded {
+            if let sharedCB = pending.sharedCB {
+                try waitForCompletion(sharedCB)
+            }
+            if let phase1HitCB = pending.phase1HitCB {
+                try waitForCompletion(phase1HitCB)
+            }
+            try waitForCompletion(pending.cb)
+        } else if let err = pending.cb.error {
+            throw ModelError.commandBufferFailed(
+                detail: "routed layer command buffer: \(err)")
+        }
+        if let sharedCB = pending.sharedCB, let err = sharedCB.error {
+            throw ModelError.commandBufferFailed(
+                detail: "shared-expert command buffer: \(err)")
+        }
+        if let phase1HitCB = pending.phase1HitCB, let err = phase1HitCB.error {
+            throw ModelError.commandBufferFailed(
+                detail: "routed phase-1 hit command buffer: \(err)")
+        }
+        if let sharedCB = pending.sharedCB {
+            recordKernelGPU(role: "shared_expert", sharedCB)
+        }
+        if let phase1HitCB = pending.phase1HitCB {
+            recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
+        }
+        recordKernelGPU(role: "moe_phase1_2_routed", pending.cb)
+        totalCb2Nanos &+= pending.encodeAndCommitNanos
+    }
+
+
+    private func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
+        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
+        for i in 0..<slots.count { ptr[i] = slots[i] }
+    }
+
+    /// Routed-expert stage of one decode layer: top-k readback, expert fetch,
+    /// phase-1/phase-2 encode, and the deferred completion hand-off.
+    ///
+    /// lint:allow-long one pipeline whose phases share the fetch plan, the
+    /// argument buffer and the slot scratch; the layer trace at the end reports
+    /// timings from every phase, so splitting it would mean threading those
+    /// back out purely to shorten a function.
+    private func encodeDecodeRoutedMoE(
+        layer L: Int,
+        position: Int,
+        sharedProj: LayerSharedExpertProjections,
+        attnCB: MTLCommandBuffer,
+        tailCB: MTLCommandBuffer,
+        pending pendingRoutedCommand: inout PendingRoutedCommand?,
+        bodyStart tBodyStart: UInt64,
+        cb1Start tCb1Start: UInt64,
+        waitMark tWait: UInt64,
+        waitNanos: UInt64,
+        previousRoutedMicros prevRoutedUs: Double
+    ) async throws {
+        let D    = UInt32(cfg.hiddenSize)
+        let FmoE = UInt32(cfg.moeIntermediateSize)
+        let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
+                                                      capacity: cfg.topKExperts)
+        decodeExpertsScratch.removeAll(keepingCapacity: true)
+        decodeExpertsScratch.reserveCapacity(cfg.topKExperts)
+        for i in 0..<cfg.topKExperts {
+            decodeExpertsScratch.append(min(Int(idxPtr[i]), cfg.numExperts - 1))
+        }
+        let experts = decodeExpertsScratch
+
+        let routedOffsets = try model.routedExpertOffsets(layer: L)
+        let topK = UInt32(cfg.topKExperts)
+        let canPlanPhase1HitSplit =
+            cfg.topKExperts <= MoE.maxStreamedExperts
+        let plannedFetch = canPlanPhase1HitSplit
+            ? try model.planRoutedExperts(layer: L, experts: experts)
+            : nil
+        var phase1HitCB: MTLCommandBuffer?
+        var phase1HitSplitArgBuf: MTLBuffer?
+        decodeHitSplitRoutedBufsScratch.removeAll(keepingCapacity: true)
+        decodeHitSlotsScratch.removeAll(keepingCapacity: true)
+        decodeMissSlotsScratch.removeAll(keepingCapacity: true)
+        let phase1HitSlots = decodeHitSlotsScratch
+        let phase1MissSlots = decodeMissSlotsScratch
+
+        if let plan = plannedFetch {
+            let missSet = Set(plan.misses)
+            for index in 0..<cfg.topKExperts where !missSet.contains(index) {
+                decodeHitSlotsScratch.append(UInt32(index))
+            }
+            for miss in plan.misses {
+                decodeMissSlotsScratch.append(UInt32(miss))
+            }
+        }
+        func encodeRoutedPhase1Full(
+            _ cb: MTLCommandBuffer,
+            argBuf: MTLBuffer,
+            routedBufs: [MTLBuffer]
+        ) throws {
+            try moe.encodeRoutedPersistentPhase1U16Load(commandBuffer: cb,
+                                                    routedArgBuffer: argBuf,
+                                                    routedBlobs: routedBufs,
+                                                    routedOffsets: routedOffsets,
+                                                    x: routedX,
+                                                    acts: moeActs,
+                                                    d: D,
+                                                    f: FmoE,
+                                                    topK: topK)
+        }
+
+        func encodeRoutedPhase1Subset(
+            _ cb: MTLCommandBuffer,
+            argBuf: MTLBuffer,
+            routedBufs: [MTLBuffer],
+            activeSlots: MTLBuffer,
+            activeSlotIndices: [UInt32],
+            activeCount: UInt32
+        ) throws {
+            try moe.encodeRoutedPersistentPhase1SubsetU16Load(
+                commandBuffer: cb,
+                routedArgBuffer: argBuf,
+                routedBlobs: routedBufs,
+                routedOffsets: routedOffsets,
+                x: routedX,
+                acts: moeActs,
+                activeSlots: activeSlots,
+                activeSlotIndices: activeSlotIndices,
+                activeCount: activeCount,
+                d: D,
+                f: FmoE,
+                topK: topK)
+        }
+
+        if let plan = plannedFetch,
+           plan.hits > 0,
+           !plan.misses.isEmpty {
+            let plannedBlobs = try model.routedExpertBuffers(for: plan)
+            for blob in plannedBlobs {
+                decodeHitSplitRoutedBufsScratch.append(blob.buffer)
+            }
+            phase1HitSplitArgBuf = moe.makeRoutedArgumentBuffer(
+                routedBlobs: decodeHitSplitRoutedBufsScratch,
+                topK: topK)
+            if let argBuf = phase1HitSplitArgBuf, plan.hits > 0, !plan.misses.isEmpty {
+                writeActiveSlots(phase1HitSlots, into: moeHitActiveSlots)
+                guard let cb = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                try encodeRoutedPhase1Subset(
+                    cb,
+                    argBuf: argBuf,
+                    routedBufs: decodeHitSplitRoutedBufsScratch,
+                    activeSlots: moeHitActiveSlots,
+                    activeSlotIndices: phase1HitSlots,
+                    activeCount: UInt32(phase1HitSlots.count))
+                phase1HitCB = cb
+            }
+        }
+
+        // The shared dense MLP depends only on its normed input, not on
+        // the routed experts. Commit it without waiting so its GPU work
+        // overlaps the routed-expert pread. The routed CB follows it on
+        // the same queue, so the combine sees h1Buf.
+        guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        try shared.encode(commandBuffer: sharedCB,
+                          x: routedX,
+                          gate: sharedProj.gate,
+                          up: sharedProj.up,
+                          down: sharedProj.down,
+                          y: h1Buf,
+                          scratchGate: denseScratchGate,
+                          scratchUp: denseScratchUp,
+                          scratchAct: denseScratchAct)
+        if cfg.sharedExpertGated {
+            // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
+            let gateView = sharedProj.scalarGate!
+            try int8ScalarGate!.encode(commandBuffer: sharedCB,
+                                   weights: gateView.buffer,
+                                   weightsOffset: Int(gateView.offset),
+                                   scales: gateView.buffer,
+                                   scalesOffset: Int(gateView.scaleOffset),
+                                   biases: gateView.buffer,
+                                   biasesOffset: Int(gateView.biasOffset),
+                                   x: routedX,
+                                   y: sharedScalarGateBuf!,
+                                   m: 1, n: D)
+            try elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
+                                                y: h1Buf,
+                                                gate: sharedScalarGateBuf!,
+                                                count: cfg.hiddenSize)
+        }
+        sharedCB.commit()
+        if let cb = phase1HitCB {
+            cb.commit()
+        }
+        if rdadviseEnabled && rdadvisePolicyMode != .off {
+            let requestedMisses = plannedFetch?.misses.count ?? experts.count
+            let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
+                layer: L,
+                missCount: requestedMisses)
+            if let skipped = shouldSkipRDAdvice(position: position,
+                                                requestedMisses: requestedMisses,
+                                                estimatedBytes: estimatedAdviceBytes,
+                                                canOverlapUsefulGPUWork: true) {
+                recordRDAdvice(skipped, wallNanos: 0)
+            } else {
+                let tAdvice = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                let result: ExpertIOAdviceResult
+                if let plannedFetch {
+                    result = try model.adviseRoutedExperts(plan: plannedFetch)
+                } else {
+                    result = try model.adviseRoutedExperts(layer: L, experts: experts)
+                }
+                let wallNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tAdvice
+                recordRDAdvice(result, wallNanos: wallNanos)
+                updateRDAdvicePolicy(after: result, position: position)
+            }
+        }
+
+        // Routed-expert pread — overlaps the shared MLP GPU work above.
+        let tIoStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        let blobs: [TensorView]
+        if let plannedFetch {
+            blobs = try await model.fetchRoutedExperts(plan: plannedFetch)
+        } else {
+            blobs = try await model.fetchRoutedExperts(layer: L, experts: experts)
+        }
+        let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
+        totalIoNanos &+= layerIo
+        decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
+        for blob in blobs {
+            decodeRoutedBufsScratch.append(blob.buffer)
+        }
+        let routedBufs = decodeRoutedBufsScratch
+        let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        // The phase-2 reduce already folded the shared branch (h1Buf
+        // as its residual); the tail is a plain residual add.
+        let gTail: (MTLCommandBuffer) throws -> Void = { [self] cb in
+            try elementwise!.encodeResidualAdd(commandBuffer: cb,
+                                           hidden: hidden,
+                                           delta: h2Buf,
+                                           count: cfg.hiddenSize)
+        }
+        guard let routedCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
+            ? phase1HitSplitArgBuf
+            : nil
+        let argBuf = splitArgBuf ?? moe.makeReusedRoutedArgumentBuffer(
+            routedBlobs: routedBufs,
+            topK: topK)
+        if splitArgBuf != nil {
+            writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
+            try encodeRoutedPhase1Subset(
+                routedCB,
+                argBuf: argBuf,
+                routedBufs: routedBufs,
+                activeSlots: moeMissActiveSlots,
+                activeSlotIndices: phase1MissSlots,
+                activeCount: UInt32(phase1MissSlots.count))
+        } else {
+            try encodeRoutedPhase1Full(routedCB,
+                                       argBuf: argBuf,
+                                       routedBufs: routedBufs)
+        }
+        try moe.encodeRoutedPersistentPhase2Reduce(commandBuffer: routedCB,
+                                               routedArgBuffer: argBuf,
+                                               routedBlobs: routedBufs,
+                                               routedOffsets: routedOffsets,
+                                               acts: moeActs,
+                                               routingWeights: outWeights,
+                                               residual: h1Buf,
+                                               y: h2Buf,
+                                               d: D,
+                                               f: FmoE,
+                                               topK: topK)
+        try gTail(routedCB)
+        routedCB.commit()
+        guard pendingRoutedCommand == nil else {
+            // The pipeline drains the previous layer's routed CB before
+            // queuing the next, so this is a logic error, not a user
+            // condition — but it must fail the generation, not trap.
+            throw ModelError.internalInconsistency(
+                detail: "routed command-buffer pipeline not drained before queuing the next layer")
+        }
+        pendingRoutedCommand = PendingRoutedCommand(
+            cb: routedCB,
+            sharedCB: sharedCB,
+            phase1HitCB: phase1HitCB,
+            encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+        totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
+        if ProcessInfo.processInfo.environment["NVMAI_LAYER_TRACE"] != nil,
+           position < 3 || position % 16 == 0 {
+            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            let attnUs = (attnCB.gpuEndTime - attnCB.gpuStartTime) * 1_000_000
+            let tailUs = (tailCB.gpuEndTime - tailCB.gpuStartTime) * 1_000_000
+            print("NVMAI layer pos=\(position) L=\(L) "
+                + "body_us=\((now - tBodyStart) / 1000) "
+                + "wait_us=\(waitNanos / 1000) io_us=\(layerIo / 1000) "
+                + "cb1_us=\((tWait - tCb1Start) / 1000) "
+                + "cb2_us=\((now - tCb2Start) / 1000) "
+                + "gpu_attn_us=\(Int(attnUs)) gpu_tail_us=\(Int(tailUs)) "
+                + "gpu_routed_us=\(Int(prevRoutedUs))")
+        }
     }
 }
