@@ -135,9 +135,22 @@ public enum VerifiedInstallReceiptReader {
             throw ModelError.trustedReceiptInvalid(detail: "manifest SHA mismatch")
         }
 
+        // A path mismatch is the expected outcome of moving or renaming an
+        // installed model, not evidence of tampering — and it is a hard error
+        // with no fallback, so the message has to carry the recovery. Without
+        // it the only visible option is a multi-gigabyte reinstall.
         let actualPath = directoryURL.standardizedFileURL.path
         guard receipt.modelDirectoryPath == actualPath else {
-            throw ModelError.trustedReceiptInvalid(detail: "model directory mismatch")
+            throw ModelError.trustedReceiptInvalid(
+                detail: """
+                    model directory mismatch: the receipt was issued for \
+                    \(receipt.modelDirectoryPath) but the model is now at \
+                    \(actualPath). Moving or renaming an installed model \
+                    invalidates its receipt. Re-issue it in place (re-hashes \
+                    the payload, no re-download) with:
+                      swift run -c release NVMAIRepack --verify-install \
+                    --input-gturbo \(actualPath)
+                    """)
         }
     }
 }

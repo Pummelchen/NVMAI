@@ -81,6 +81,13 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         try! RuntimeConfiguration()
     }
 
+    /// Production pins the FP16 sliding-window ring on. This is deliberately a
+    /// constant and not a stored option: `KVCacheManager` takes the flag as a
+    /// real parameter (tests construct it both ways to cover the non-ring
+    /// path), but the shipping runtime has exactly one supported setting, and
+    /// the value is part of `ServerPromptCacheDomain` — making it settable
+    /// would let two processes disagree about the layout of a persisted KV
+    /// snapshot. Read-only here is the guarantee, not an oversight.
     public var fp16RingEnabled: Bool { true }
     public var rdadviseEnabled: Bool { rdadvisePolicy != .off }
     public var prefillConfig: PrefillRuntimeConfig {

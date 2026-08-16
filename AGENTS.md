@@ -29,6 +29,21 @@ swift run -c release NVMAICLI \
 
 The installer streams the pinned model without staging the full source checkpoint. Set `HF_TOKEN` only if requested. The 4-bit download is about 19.5 GB; 6-bit and 8-bit require more. Cancellation preserves verified completed ranges; continue them with `--resume` or remove them with `--discard-partial --output <model.gturbo>`.
 
+An installed model's `verified-install.json` receipt is bound to the absolute
+path it was installed to, so **moving or renaming a model directory makes it
+fail to load** with `trusted receipt invalid: model directory mismatch`. This
+is not corruption and does not need a re-download — re-issue the receipt in
+place (re-hashes the payload against the manifest and rebinds it to the
+current path):
+
+```bash
+swift run -c release NVMAIRepack --verify-install --input-gturbo models/qwen3.6_35B_A3B_4Bit
+```
+
+Never hand-edit the receipt to match the new path: the path binding is what
+detects a moved or swapped directory, so editing it forges the attestation
+instead of re-establishing it.
+
 ## Local server
 
 Follow the [server guide](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server) for launch commands, health
