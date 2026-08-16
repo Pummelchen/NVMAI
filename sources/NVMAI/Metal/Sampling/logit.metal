@@ -100,11 +100,21 @@ void logit_softcap_softmax(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // -- Cross-SIMD merge in SIMD-group 0. Up to kLogitMaxSimdGroups partials.
-    // Defaults first (threadgroup 0, lane 0 overwrites below); this silences
-    // the sometimes-uninitialized diagnostic without changing the math —
-    // SIMD group 0 always exists in every dispatched threadgroup.
-    final_m     = -INFINITY;
-    final_inv_d = 0.0f;
+    // The defaults are written by thread 0 only — the same thread that writes
+    // the real values below, so no barrier is needed between them.
+    //
+    // Writing them from every thread (to silence the sometimes-uninitialized
+    // diagnostic) is a data race: a thread in another SIMD group can store the
+    // default *after* lane 0 of group 0 has stored the real value, leaving
+    // final_m = -inf and final_inv_d = 0. The normalize loop below then
+    // computes exp(z - -inf) * 0 = inf * 0 = NaN for every entry, so the whole
+    // probability row becomes NaN. Downstream, `sample`'s top-k reduction finds
+    // no finite mass, every slot collapses to the UINT_MAX sentinel, and the
+    // draw returns an out-of-range token id.
+    if (lid == 0) {
+        final_m     = -INFINITY;
+        final_inv_d = 0.0f;
+    }
     if (simd_group_id == 0) {
         float mp = (simd_lane_id < simdgroups) ? partial_m[simd_lane_id] : -INFINITY;
         float dp = (simd_lane_id < simdgroups) ? partial_d[simd_lane_id] : 0.0f;

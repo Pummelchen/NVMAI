@@ -315,7 +315,15 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func handleUnload(context: ChannelHandlerContext) {
         let contextBox = SendableContext(context)
         activeTask = childChannels.startTask {
-            let released = await self.backend.unload()
+            // Only a residency-managing backend has anything to release; a
+            // plain session reports false without the inference protocol
+            // needing to know residency exists.
+            let released: Bool
+            if let managing = self.backend as? any ResidencyManaging {
+                released = await managing.unload()
+            } else {
+                released = false
+            }
             self.writeJSON(contextBox.value, status: .ok,
                            object: ["status": "ok", "unloaded": released])
         }

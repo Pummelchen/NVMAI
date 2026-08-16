@@ -31,6 +31,31 @@ import NVMAIValidationSupport
         return Fp16Buffer.read(outBuf, count: v)
     }
 
+    /// The cross-SIMD merge publishes `final_m` / `final_inv_d` through
+    /// threadgroup memory. Seeding those defaults from every thread instead of
+    /// one races the real write: a late default store leaves final_m = -inf and
+    /// final_inv_d = 0, and the normalize loop then emits exp(z - -inf) * 0 =
+    /// NaN for the entire row.
+    ///
+    /// Repeat over vocab sizes that span the SIMD-group counts (one group, a
+    /// partial group, the full eight) so the merge path is exercised with
+    /// varying numbers of contributing groups, and assert the invariant every
+    /// consumer depends on: finite probabilities that sum to one.
+    @Test func probabilitiesStayFiniteAndNormalizedAcrossSimdGroupCounts() throws {
+        for v in [1, 31, 32, 33, 64, 200, 256, 257, 1024, 4096] {
+            var rng = SeedTree(0xF17E).key("softcap-finite-\(v)")
+            let logits = (0..<v).map { _ in Float16(rng.uniform(-40.0, 40.0)) }
+            for attempt in 0..<8 {
+                let probs = try Self.runKernel(logitsFp16: logits, v: v, softcap: 30.0)
+                #expect(probs.allSatisfy { $0.isFinite },
+                        "non-finite probability at v=\(v) attempt=\(attempt)")
+                let total = probs.reduce(0, +)
+                #expect(abs(total - 1.0) < 2e-2,
+                        "probabilities sum to \(total), not 1, at v=\(v) attempt=\(attempt)")
+            }
+        }
+    }
+
     @Test func randomLogits_matchesReference() throws {
         let v = 2048
         var rng = SeedTree(0x131).key("softcap-softmax-random")

@@ -264,17 +264,26 @@ public protocol ServerInferenceBackend: Sendable {
     var maximumContext: Int { get }
     func generate(_ request: ValidatedChatRequest,
                   onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion
-    /// Releases the model's memory on demand. Backends that do not manage
-    /// residency (a plain session) have nothing to release and return false.
-    func unload() async -> Bool
 }
 
 public extension ServerInferenceBackend {
     var maximumContext: Int {
         RuntimeConfiguration.supportedContextTokens.max() ?? 262_144
     }
+}
 
-    func unload() async -> Bool { false }
+/// A backend that owns the model's residency and can release it on demand.
+///
+/// Kept separate from `ServerInferenceBackend` rather than added to it with a
+/// `false`-returning default: exactly one backend manages residency, and the
+/// wrapper design exists so the HTTP layer stays unaware of loading at all.
+/// Folding it into the inference protocol would make every conforming type —
+/// including the plain session and every test stub — carry a member that only
+/// answers "not me".
+public protocol ResidencyManaging: Sendable {
+    /// Releases the model's memory, waiting for in-flight requests to drain
+    /// first. Returns true when a resident model was actually released.
+    func unload() async -> Bool
 }
 
 public actor ServerCoordinator {

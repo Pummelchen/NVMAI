@@ -22,7 +22,7 @@ import NVMAI
 /// has no deinit-safe cleanup, so tearing one down per unload would be unsafe;
 /// it also compiles the whole shader library, which would make every reload pay
 /// for a rebuild. It is small next to the weights.
-public actor ManagedModelBackend: ServerInferenceBackend {
+public actor ManagedModelBackend: ServerInferenceBackend, ResidencyManaging {
     /// Builds a session. Injectable so the residency logic can be tested
     /// against a stub without a model on disk.
     public typealias Loader =
