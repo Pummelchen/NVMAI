@@ -1312,8 +1312,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
             let prefillLayerStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            var prefillRouteEnd = prefillLayerStart
-            var prefillTileEnd = prefillLayerStart
             model.beginOpeningRoutedExpertStreamer(layer: L)
             let views = layerViews[L]
             let isLinear = cfg.layerIsLinear(L)
@@ -1404,7 +1402,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
         let D    = UInt32(cfg.hiddenSize)
-        let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
         let embedOutScale = cfg.embeddingScaledBySqrtHidden
             ? Float(cfg.hiddenSize).squareRoot()
