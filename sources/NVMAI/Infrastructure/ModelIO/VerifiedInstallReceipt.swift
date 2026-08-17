@@ -124,9 +124,12 @@ public enum VerifiedInstallReceiptReader {
         }
     }
 
-    public static func validateManifestBinding(_ receipt: VerifiedInstallReceipt,
-                                               directoryURL: URL,
-                                               manifestSha256: String) throws {
+    /// The integrity half of the binding: does this receipt describe *this*
+    /// manifest? Separated from the path binding because the two failures mean
+    /// different things — this one says the payload is not what was attested,
+    /// which is unrecoverable without a reinstall.
+    public static func validateManifestIntegrity(_ receipt: VerifiedInstallReceipt,
+                                                 manifestSha256: String) throws {
         guard receipt.schemaVersion == 1 else {
             throw ModelError.trustedReceiptInvalid(
                 detail: "unsupported schemaVersion \(receipt.schemaVersion)")
@@ -134,13 +137,30 @@ public enum VerifiedInstallReceiptReader {
         guard receipt.manifestSha256.lowercased() == manifestSha256.lowercased() else {
             throw ModelError.trustedReceiptInvalid(detail: "manifest SHA mismatch")
         }
+    }
+
+    /// The location half: was this receipt issued for this exact directory?
+    ///
+    /// A false result means the model was moved or renamed. The payload is
+    /// intact — only the attestation needs re-issuing — so callers that can
+    /// offer that should check this separately rather than treating it as
+    /// corruption.
+    public static func pathBindingMatches(_ receipt: VerifiedInstallReceipt,
+                                          directoryURL: URL) -> Bool {
+        receipt.modelDirectoryPath == directoryURL.standardizedFileURL.path
+    }
+
+    public static func validateManifestBinding(_ receipt: VerifiedInstallReceipt,
+                                               directoryURL: URL,
+                                               manifestSha256: String) throws {
+        try validateManifestIntegrity(receipt, manifestSha256: manifestSha256)
 
         // A path mismatch is the expected outcome of moving or renaming an
         // installed model, not evidence of tampering — and it is a hard error
         // with no fallback, so the message has to carry the recovery. Without
         // it the only visible option is a multi-gigabyte reinstall.
         let actualPath = directoryURL.standardizedFileURL.path
-        guard receipt.modelDirectoryPath == actualPath else {
+        guard pathBindingMatches(receipt, directoryURL: directoryURL) else {
             throw ModelError.trustedReceiptInvalid(
                 detail: """
                     model directory mismatch: the receipt was issued for \

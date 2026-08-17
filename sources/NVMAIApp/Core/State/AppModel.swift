@@ -124,7 +124,26 @@ public final class AppModel {
 
     public var isModelInstalled: Bool { installationStatus == .complete }
 
-    public var requiresModelInstallation: Bool { !isModelInstalled }
+    /// The payload is present and matches its manifest; only the receipt is
+    /// bound to the directory the model used to live in.
+    public var needsReattestation: Bool {
+        if case .needsReattestation = installationStatus { return true }
+        return false
+    }
+
+    /// Deliberately excludes `needsReattestation`. A moved model is not a
+    /// missing one — offering the installer here would put a multi-gigabyte
+    /// download in front of a user whose model is already on disk, which is
+    /// exactly what this state exists to prevent.
+    public var requiresModelInstallation: Bool {
+        !isModelInstalled && !needsReattestation
+    }
+
+    /// Re-issues the install receipt in place: re-hashes the payload against
+    /// the manifest and rebinds it to the current directory. No network.
+    public var canReattestModel: Bool {
+        needsReattestation && !isRunning && installTask == nil
+    }
 
     public var installDescriptor: AppModelInstallDescriptor { installer.descriptor }
 
@@ -387,6 +406,33 @@ public final class AppModel {
                     generation: generation)
             }
             await self?.clearLoadTask(generation: generation)
+        }
+    }
+
+    /// Re-issue the install receipt for a model that was moved or renamed.
+    ///
+    /// Re-hashes the payload against its manifest and rebinds the receipt to
+    /// the current directory. Local only — the alternative the app used to
+    /// offer for this state was a full re-download.
+    public func reattestModel() {
+        guard canReattestModel else { return }
+        let directory = URL(fileURLWithPath: modelPathText).standardizedFileURL
+        installGeneration &+= 1
+        let generation = installGeneration
+        installTask = Task { [weak self, installer] in
+            do {
+                try await installer.reattestInstall(outputDirectory: directory)
+            } catch {
+                guard let self, generation == self.installGeneration else { return }
+                self.installTask = nil
+                self.finishInstallFailure(error, generation: generation)
+                return
+            }
+            guard let self, generation == self.installGeneration else { return }
+            self.installTask = nil
+            // Re-probe rather than assuming success: the re-attestation only
+            // writes a receipt if the payload still matches its manifest.
+            self.installationStatus = AppModelInstallationProbe.status(at: directory)
         }
     }
 

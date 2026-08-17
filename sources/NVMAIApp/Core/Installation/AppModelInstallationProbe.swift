@@ -4,6 +4,12 @@ import NVMAI
 public enum AppModelInstallationStatus: Equatable, Sendable {
     case missing
     case partial(String)
+    /// The payload is complete and matches its manifest, but the install
+    /// receipt was issued for a different directory — the model was moved or
+    /// renamed. Re-attesting is a local re-hash, not a re-download, so this is
+    /// deliberately not `.partial`: treating it as an incomplete install would
+    /// offer the user a multi-gigabyte download for a model already on disk.
+    case needsReattestation(String)
     case complete
 }
 
@@ -50,10 +56,18 @@ public enum AppModelInstallationProbe {
             }
             let receipt = try VerifiedInstallReceiptReader.load(directoryURL: directory)
             let manifestHash = try Sha256Verifier.hashFile(at: manifestURL, chunkBytes: 65_536)
-            try VerifiedInstallReceiptReader.validateManifestBinding(
+            // Integrity first: a manifest mismatch means the payload is not
+            // what was attested, and no local action fixes that.
+            try VerifiedInstallReceiptReader.validateManifestIntegrity(
                 receipt,
-                directoryURL: directory,
                 manifestSha256: manifestHash)
+            // Location second, and separately: a receipt bound to another path
+            // means the directory moved, which a re-attestation fixes in place.
+            guard VerifiedInstallReceiptReader.pathBindingMatches(
+                receipt, directoryURL: directory) else {
+                return .needsReattestation(
+                    "the install receipt was issued for \(receipt.modelDirectoryPath)")
+            }
             return .complete
         } catch {
             return .partial("\(error)")

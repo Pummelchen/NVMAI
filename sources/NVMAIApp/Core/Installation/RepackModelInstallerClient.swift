@@ -132,6 +132,18 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
         task?.cancel()
     }
 
+    public func reattestInstall(outputDirectory: URL) async throws {
+        let directory = outputDirectory.standardizedFileURL
+        try await Task.detached(priority: .utility) {
+            // Same work as `NVMAIRepack --verify-install`: re-hash every file
+            // against the manifest and write a receipt bound to this path. The
+            // hashing is the point — the receipt is only re-issued if the
+            // payload still matches what it claims to be.
+            _ = try VerifiedInstallTool.run(
+                options: VerifyInstallOptions(inputGTurbo: directory.path))
+        }.value
+    }
+
     public func discardPartialInstall(outputDirectory: URL) async throws {
         let directory = outputDirectory.standardizedFileURL
         try await Task.detached(priority: .utility) { [runDiscard] in

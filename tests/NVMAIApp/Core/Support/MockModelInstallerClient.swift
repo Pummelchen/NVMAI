@@ -14,6 +14,7 @@ final class MockModelInstallerClient: AppModelInstallerClient, Sendable {
         var cancelCalled = false
         var cancellationAcknowledgementPending = false
         var discardCalled = false
+        var reattestCalled = false
     }
     private final class TaskState: Sendable {
         let value = Mutex(State())
@@ -26,6 +27,7 @@ final class MockModelInstallerClient: AppModelInstallerClient, Sendable {
         taskState.value.withLock { $0.cancellationAcknowledgementPending }
     }
     var discardCalled: Bool { taskState.value.withLock { $0.discardCalled } }
+    var reattestCalled: Bool { taskState.value.withLock { $0.reattestCalled } }
 
     init(events: [AppModelInstallEvent] = [],
          failure: Error? = nil,
@@ -109,6 +111,10 @@ final class MockModelInstallerClient: AppModelInstallerClient, Sendable {
 
     func discardPartialInstall(outputDirectory: URL) async throws {
         taskState.value.withLock { $0.discardCalled = true }
+    }
+
+    func reattestInstall(outputDirectory: URL) async throws {
+        taskState.value.withLock { $0.reattestCalled = true }
     }
 }
 
