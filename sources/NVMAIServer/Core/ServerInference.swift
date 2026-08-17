@@ -1182,11 +1182,26 @@ public actor ServerModelSession: ServerInferenceBackend {
                     entry.role, entry.millis, entry.millis / Double(tokens),
                     entry.count))
             }
+            // total_gpu_ms sums the roles, and roles overlap by design (the
+            // routed MoE buffer runs under the next layer's attention), so it
+            // can exceed the elapsed time. busy_ms merges the intervals, so
+            // busy/span is real occupancy: near 100% means GPU-bound and only
+            // cheaper kernels help; well under means idle gaps worth closing.
+            let occupancy = runner.kernelGPUOccupancy()
             print(String(format: "NVMAI kernel total_gpu_ms=%.3f "
                 + "gpu_share_of_decode=%.1f%%",
                 totalGPU,
                 result.decodeSeconds > 0
                     ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
+            print(String(format: "NVMAI kernel busy_ms=%.3f span_ms=%.3f "
+                + "occupancy=%.1f%% busy_share_of_decode=%.1f%% "
+                + "busy_per_token_ms=%.3f",
+                occupancy.busyMillis, occupancy.spanMillis,
+                occupancy.spanMillis > 0
+                    ? occupancy.busyMillis / occupancy.spanMillis * 100 : 0,
+                result.decodeSeconds > 0
+                    ? occupancy.busyMillis / (result.decodeSeconds * 1000) * 100 : 0,
+                occupancy.busyMillis / Double(tokens)))
         }
     }
 }

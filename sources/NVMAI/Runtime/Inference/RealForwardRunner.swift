@@ -983,6 +983,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             .sorted { $0.millis > $1.millis }
     }
 
+    /// Wall-clock span in which *any* recorded command buffer was on the GPU,
+    /// and the span from the first start to the last end.
+    ///
+    /// Per-role sums double-count: the decode path deliberately runs the routed
+    /// MoE buffer concurrently with the next layer's attention, so adding the
+    /// roles together can exceed the time that actually elapsed. Merging the
+    /// intervals answers the question the sums cannot -- whether the GPU is
+    /// saturated (busy ~= span, so the only gain left is cheaper kernels) or
+    /// idle in the gaps (busy << span, so there is overlap still to win).
+    public func kernelGPUOccupancy() -> (busyMillis: Double, spanMillis: Double) {
+        guard !kernelGPUTimings.isEmpty else { return (0, 0) }
+        let sorted = kernelGPUTimings.sorted { $0.start < $1.start }
+        var busy: TimeInterval = 0
+        var mergedStart = sorted[0].start
+        var mergedEnd = sorted[0].end
+        for t in sorted.dropFirst() {
+            if t.start > mergedEnd {
+                busy += mergedEnd - mergedStart
+                mergedStart = t.start
+                mergedEnd = t.end
+            } else if t.end > mergedEnd {
+                mergedEnd = t.end
+            }
+        }
+        busy += mergedEnd - mergedStart
+        let span = sorted.map(\.end).max()! - sorted[0].start
+        return (busy * 1000, span * 1000)
+    }
+
     private func shouldSkipRDAdvice(position: Int,
                                     requestedMisses: Int,
                                     estimatedBytes: UInt64,
