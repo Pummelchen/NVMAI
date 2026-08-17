@@ -2598,6 +2598,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
                 cb.commit()
                 try waitForCompletion(cb)
+                // Prefill had no occupancy instrumentation at all: these buffers
+                // never reached recordKernelGPU, so NVMAI_KERNEL_STATS reported
+                // only the decode tokens of a request and prefill looked idle.
+                recordKernelGPU(role: "prefill_attn_router", cb)
 
                 let routeCount = t * cfg.topKExperts
                 let idPtr = scratch.routeIDs.contents()
@@ -2698,6 +2702,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 }
                 sharedCB.commit()
                 try waitForCompletion(sharedCB)
+                recordKernelGPU(role: "prefill_shared_expert", sharedCB)
 
                 let metadata = try prefillGroupedMoE.makeStreamedMetadataBuffers(
                     device: ctx.device,
@@ -2722,6 +2727,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     withExtendedLifetime((pending.fetch, pending.argumentBuffer)) {
                         do {
                             try waitForCompletion(pending.commandBuffer)
+                            recordKernelGPU(role: "prefill_routed_tile",
+                                            pending.commandBuffer)
                         } catch {
                             // Rethrown after the fetched blobs are released.
                             pendingTileError = error
@@ -2876,6 +2883,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 withExtendedLifetime(metadata) {
                     do {
                         try waitForCompletion(tailCB)
+                        recordKernelGPU(role: "prefill_moe_reduce", tailCB)
                     } catch {
                         // Rethrown after `metadata` is released.
                         tailError = error

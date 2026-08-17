@@ -1059,6 +1059,114 @@ Measured both ways, output byte-identical (`6e38735501280dc0`, verified at width
 Opposite directions, both within the machine's noise. The policy is not the
 bottleneck and the change was reverted rather than shipping a knob for nothing.
 
+### Prefill instrumented: 97.4% GPU-busy, so the slot-cache lead was wrong
+
+`recordKernelGPU` now covers the prefill path -- `prefill_attn_router`,
+`prefill_routed_tile`, `prefill_shared_expert`, `prefill_moe_reduce`. Prefill was
+previously invisible to `NVMAI_KERNEL_STATS`, which reported only a request's
+decode tokens.
+
+Same 3752-token prefill:
+
+```
+occupancy 97.4%   busy 50,932 ms of span 52,312 ms
+
+prefill_attn_router    29,687 ms  (58%)    742 ms/layer, 40 buffers
+prefill_routed_tile    17,146 ms  (34%)    1023 tiles
+prefill_shared_expert   3,857 ms  (7.6%)    96 ms/layer
+prefill_moe_reduce        112 ms
+```
+
+**The GPU is busy 97.4% of prefill.** Nothing is waiting; prefill is
+GPU-compute-bound, not I/O-bound.
+
+That retracts the conclusion drawn above from the phase split. The 21,879 ms
+attributed to "expert fetch + tiles" is 17,146 ms of *GPU tile execution* plus only
+~4.8 s of actual fetch -- expert I/O is about **9% of prefill, not 42%**. A
+prefill-specific slot cache would therefore target 9% at absolute best, and was not
+built. The phase counters bracket wall time around a region; they do not separate
+GPU execution from CPU waiting, and reading them as if they did produced a
+confident wrong answer twice in this section.
+
+### What prefill is actually limited by
+
+Per layer the attention block is ~435 GFLOP (QKV 142, SDPA 230, O 63) and runs in
+742 ms: **~586 GFLOP/s**. The routed experts are ~7.4 TFLOP total in 17.1 s:
+**~435 GFLOP/s**. Both sit around 400-600 GFLOP/s against an M3 GPU peak near
+4 TFLOP/s, at 97.4% occupancy.
+
+So the target is kernel efficiency, and only kernel efficiency. Weight traffic is
+small at prefill widths (13.7 MB per layer for attention), the GPU is never idle,
+and the memory bus -- the wall that governs decode -- is irrelevant here.
+
+The next question is whether `prefillQMM` exploits `simdgroup_matrix` MMA well. If
+it does not, this is the one place in NVMAI where the mlx-dspark matmul insight
+genuinely applies: not at the 2-row decode width where it was first considered, but
+at prefill widths of 1024-4096 where the hardware's matrix units should dominate.
+That is where ANE's measured 8-17 TFLOP/s comes from, and it is a fair target for a
+GPU kernel too.
+
+## The recommendation, and the check that must come first
+
+Prefill is the one real opportunity, and for a long prompt it is large -- 53 s for
+3752 tokens today.
+
+But **do not start with Core ML.** The GPU is running prefill at 13% of its own
+peak, and the first question is why. If NVMAI's prefill kernels are simply
+inefficient at width 4096, fixing them is a contained kernel change that keeps the
+engine, the quantisation choice and the KV cache intact. Adopting Core ML means a
+second model artifact, all 256 experts resident, and handing the ANE-produced KV
+cache to the GPU decode path across two frameworks -- by far the harder route, and
+pointless if the GPU has 3-5x sitting in its own kernels.
+
+So: profile prefill's GPU roles at width 4096 first. Only if the GPU is genuinely
+near its ceiling does the Core ML prefill path become the right answer.
+
+## Prefill profiled: where the 14% of peak actually goes
+
+Profiling a 3752-token prefill (chunk 4096, 128 slots), the phase split is:
+
+```
+prefill 3752 tokens: 52,350 ms total
+  route readback + GPU: 30,334.5 ms  (58%)
+  expert fetch + tiles: 21,879.0 ms  (42%)
+  tail + residual:         136.6 ms
+  active experts/layer: 201.25 of 256
+```
+
+Two notes on reading this. The `NVMAI_KERNEL_STATS` roles are useless here -- their
+counts are 120 = 40 layers x 3 decode tokens, because prefill runs through
+`executePrefillChunk`, which never calls `recordKernelGPU`. Prefill has no
+occupancy instrumentation at all. And "route readback + GPU" is a coarse label
+covering the whole attention block, not just the router: RMSNorm, QKV, SDPA,
+O-projection and the residual are all inside it.
+
+**The compute half.** At 3752 tokens the SDPA is ~9.2 TFLOP and the projections
+~8.2 TFLOP, so ~17.4 TFLOP in 30.3 s -- about 574 GFLOP/s, ~14% of the M3 GPU's
+peak. Genuinely compute-bound and genuinely inefficient, cause not yet identified.
+
+**The I/O half.** 201 experts per layer are touched but only 128 slots exist, so
+73 evictions per layer per chunk minimum. 13.6 GB of expert reads in 21.9 s is
+0.62 GB/s -- disk speed, not memory speed. The cache is thrashing.
+
+### Tested and rejected: the q-family dispatch
+
+`selectedDispatch` returned `.repeatedGEMV` for the q family at *every* width,
+while `kv` and `o` batch through `.qmm` above 32 -- meaning one GEMV dispatch per
+row for the largest weight in the attention block (the packed query+gate
+projection), 4096 per layer at the default chunk. That looked like the answer.
+
+Measured both ways, output byte-identical (`6e38735501280dc0`, verified at width
+892 where the golden baseline's 25-token prompt cannot reach):
+
+| prompt | `.qmm` | `.repeatedGEMV` |
+| ---: | ---: | ---: |
+| 892 tokens | 9.964 s | 10.198 s |
+| 3752 tokens | 54.473 s | 52.105 s |
+
+Opposite directions, both within the machine's noise. The policy is not the
+bottleneck and the change was reverted rather than shipping a knob for nothing.
+
 ### The actionable finding: the slot cache is sized for decode
 
 Prefill needs 201 experts per layer; the cache holds 128. But prefill walks each
