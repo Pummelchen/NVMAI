@@ -175,6 +175,43 @@ is to requantise to 3-bit and check whether `busy_per_token` falls
 proportionally. If it does not, the GPU is not purely bandwidth-bound and every
 row below the first is optimistic.
 
+## Reshaping the weights: TRIED, NOTHING TO RECOVER
+
+Reducing precision is not an option -- NVMAI offers 4/6/8-bit as a user-facing
+quality choice -- so the lossless version of "move fewer bytes" is reshaping:
+same values, better arrangement. Two measurements say there is nothing there.
+
+Inlining each row's scales and biases next to its weights, so a row is one
+contiguous read instead of three streams from distant regions, measured -1 to
+-2%. The hardware prefetchers already handle three sequential streams.
+
+More decisively, the GPU is close to saturated. Measured on 4-bit, 128 slots,
+warm: 28.86 ms of GPU-busy per token against 1885 MiB of active weights, which
+is **68.5 GB/s**. The best pure streaming read this machine produces -- no
+compute, 6 threads, just summing bytes -- is 78 GB/s. So the GPU is at roughly
+88% of what the memory system actually delivers, not 68% of a nominal 100.
+
+A reshape pays when the layout causes wasted or inefficient reads. At 88% of
+achievable bandwidth there is no such waste left to reclaim.
+
+## Quant variants do not fit this machine
+
+Measured on the 24 GiB development machine, same prompt, warm:
+
+| quant | on disk | tok/s |
+| --- | ---: | ---: |
+| 4-bit | 18 GB | 18.83 |
+| 6-bit | 26 GB | 6.68 |
+| 8-bit | 34 GB | 1.64 |
+
+6-bit and 8-bit exceed RAM and page continuously; 8-bit occupancy fell to 16.9%,
+which is disk thrash rather than anything about the GPU. Treat any 6/8-bit
+throughput number from this machine as invalid for kernel work.
+
+This is also a product finding: the quality/speed choice is a cliff rather than
+a gradient on this hardware class, and selecting 8-bit costs 11x throughput.
+Worth a warning at model-selection time keyed to installed RAM.
+
 ## What this does not do
 
 Speculative decoding is not on this list and should not be revived by it. MTP
