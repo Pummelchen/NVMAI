@@ -16,43 +16,34 @@ seconds. (Introduced in v3.3; see the callout below for what is new in 3.5.)
 | OpenCode `run` | ~218 s | 5.9 s | **~37×** |
 | Qwen Code `-p` | >300 s (stalled) | 4.6 s | **>65×** |
 
-**New in 3.8 — performance investigation release**
+**New in 3.9 — streaming and memory release**
 
-A measured investigation into decode throughput. One real fix, new instrumentation
-that made it findable, and a documented ceiling so the next attempt starts from
-evidence rather than assumption.
+Four changes to how weights and context reach the GPU, all verified byte-identical
+against golden reference output on 4-bit and 8-bit.
 
-- **Decode is ~7% faster.** The shared dense MLP was encoded *after* the router
-  readback, so the GPU sat idle through the whole round trip before that work was
-  submitted — it depends only on the post-attention norm and could always have
-  been queued earlier. GPU idle fell from 19.9 to 16.7 ms/token and occupancy rose
-  from 57.9% to 61.1%, verified byte-identical against golden reference output.
-- **Instrumentation you can act on.** `NVMAI_KERNEL_STATS` now reports true GPU
-  occupancy by merging overlapping command-buffer intervals — the previous metric
-  summed them and could exceed 100% — plus per-transition gap attribution showing
-  *where* the GPU idles. `TURBO_FIELDFARE_PHASES` reports active experts per
-  layer, and `NVMAI_ROUTE_TRACE` dumps real per-layer routing.
-- **A C99/NEON expert kernel**, 3.4× faster than its Swift equivalent, with a new
-  `NVMAIKernelsC` target for hot loops where Swift's vector types do not lower
-  well. Validated against an independent reference. Not yet on the decode path —
-  see the ceiling below for why.
-- **The throughput ceiling is now known.** Batch-1 decode moves ~1.8 GB per token
-  and this hardware sustains ~64 GB/s, so ~36 tok/s is the maximum for 4-bit on an
-  M3. Measured, not estimated: eliminating GPU idle, running entirely on the ANE,
-  and running entirely on the CPU all converge on the same number, because none of
-  them is the bottleneck. Adding compute units *costs* throughput — CPU load
-  raises GPU-busy 45%, ANE load 89%, since every unit draws on one memory
-  controller.
-- **Expert-cache defaults are now derived per quantization** from a ~1 GB budget
-  and the model's own expert stride: 16 slots at 4-bit, 8 at 8-bit. The previous
-  fixed default of 64 slots was both slower and four times larger. An earlier
-  version of this note reported 6-bit and 8-bit at 6.7 and 1.6 tok/s; those figures
-  were taken at 64 slots and no longer apply.
+- **The default context no longer costs throughput.** KV storage was sized for
+  `--max-context`, so the shipped 262144 reserved 512 MiB per layer and 20.0 GiB
+  across 40 — lazily touched, but the mappings alone cost real time on a 24 GB
+  machine. It now starts at 8192 tokens and doubles on demand. The gap between
+  running at 8192 and at the 262144 default went from **1.63× to 1.02× — gone.**
+- **Expert reads bypass the page cache by default.** The slot budget is now the
+  machine's actual footprint rather than a figure the OS quietly supplements.
+  `NVMAI_BOUNDED_IO=0` restores the old behaviour.
+- **`--ram-budget` is the knob.** Give it a size (`8G`, `2G`, `512M`) and the slot
+  count is derived from it and the model's own expert stride. Defaults are derived
+  per quantization: 128 slots at 4-bit, 64 at 8-bit. `--expert-cache-slots` still
+  overrides.
+- **6-bit is withdrawn.** Its non-power-of-two packing measured 46.8 GB/s against 60
+  for both 4-bit and 8-bit, and a 26 GB model does not fit 24 GB. A 6-bit model now
+  refuses to load with an explanation rather than a generic error.
 
-Full method, including nine approaches that measured out negative and why:
-[performance investigation](https://github.com/Pummelchen/NVMAI/blob/main/docs/cpu-coexecution-plan.md).
+Also: a C99/NEON target for hot loops, a parallel expert reader, and instrumentation
+for GPU occupancy, per-transition idle attribution and real routing traces.
 
-689 tests / 124 suites.
+Method, every measurement, and the approaches that were tried and abandoned:
+[docs/v4-core-design.md](docs/v4-core-design.md).
+
+711 tests / 128 suites.
 
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit and
 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
@@ -91,10 +82,18 @@ measurable correctness loss on the sampled questions.
 
 ## Benchmarks
 
-Measured on M3 MacBook Pro, 24 GB, at the shipped defaults: `--max-context
-262144`, prompt cache off, and the expert-cache budget the engine derives for each
-quantization (16 slots at 4-bit, 8 at 8-bit — about 1 GB either way). Greedy,
-temperature 0. Prompt sizes are 25 / 452 / 3532 tokens.
+Measured on M3 MacBook Pro, 24 GB, `--max-context 262144`, prompt cache off,
+greedy, temperature 0, prompt sizes 25 / 452 / 3532 tokens.
+
+**These figures are from 3.8**, taken with the page-cache read policy and a 1 GB
+expert budget. 3.9 changes both defaults, and the machine used for this table is not
+currently quiet enough to re-measure honestly — absolute throughput here swings
+about 2× with thermal and memory state, which is itself documented in
+[docs/v4-core-design.md](docs/v4-core-design.md). The relative result quoted in the
+3.9 notes above (the default-context penalty going from 1.63× to 1.02×) is a
+same-conditions comparison and does not depend on machine state. Treat the table as
+a floor for 3.9 rather than a description of it, and re-measure on a quiet machine
+before quoting it.
 
 | | 4-bit | | 8-bit | |
 | --- | ---: | ---: | ---: | ---: |
