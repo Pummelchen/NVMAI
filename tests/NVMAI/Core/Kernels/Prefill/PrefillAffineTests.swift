@@ -8,7 +8,7 @@ import NVMAIValidationSupport
     private static func packAffineValues(bits: Int,
                                          rows: Int,
                                          columns: Int) -> [UInt8] {
-        precondition([4, 6, 8].contains(bits))
+        precondition([4, 8].contains(bits))
         let rowBytes = columns * bits / 8
         let mask = UInt32((1 << bits) - 1)
         var packed = [UInt8](repeating: 0, count: rows * rowBytes)
@@ -260,7 +260,7 @@ import NVMAIValidationSupport
         #expect(RelError.compute(actual: result, reference: reference) <= 0.0005)
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func affineTwoRowProjectionMatchesRepeatedGEMV(bits: Int) throws {
         let t = 2, n = 65, k = 128
         let groups = k / Quantization.groupSize
@@ -308,7 +308,7 @@ import NVMAIValidationSupport
                 "bits=\(bits)")
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func affineQMMMatchesRepeatedGEMV(bits: Int) throws {
         let t = 7
         let n = 65

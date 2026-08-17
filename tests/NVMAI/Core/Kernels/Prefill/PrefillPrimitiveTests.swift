@@ -114,7 +114,7 @@ import NVMAIValidationSupport
         #expect(blockRows == scalarRows)
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func affineEmbedBlockMatchesPerTokenEmbed(bits: Int) throws {
         let (packed, scales, biases) = Self.buildAffineTable(bits: bits)
         let tokens: [UInt32] = [3, 11, 2, 9, 14]

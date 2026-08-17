@@ -5,7 +5,7 @@ final class PrefillEmbedLookupInt4 {
     private let pso: MTLComputePipelineState
 
     init(context: MetalContext, weightBits: Int = 4) throws {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         self.pso = try context.pipeline(
             "prefill_embed_lookup_affine_block",
             constants: [MetalFunctionConstant(index: 78,
@@ -85,7 +85,7 @@ final class PrefillInt4QMM {
     private let pso: MTLComputePipelineState
 
     init(context: MetalContext, weightBits: Int = 4) throws {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         self.pso = try context.pipeline(
             "prefill_dequant_affine_qmm_f16_block",
             constants: [MetalFunctionConstant(index: 78,

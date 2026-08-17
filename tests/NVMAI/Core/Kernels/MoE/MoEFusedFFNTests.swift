@@ -14,7 +14,7 @@ import NVMAIValidationSupport
         let offsets: MoEExpertOffsets
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func affineRoutedPipelineSupportsQwenBits(bits: Int) throws {
         let blobs = (0..<Self.topK).map { _ in Self.makeConstantBlob(bits: bits) }
         let context = try MetalContext()

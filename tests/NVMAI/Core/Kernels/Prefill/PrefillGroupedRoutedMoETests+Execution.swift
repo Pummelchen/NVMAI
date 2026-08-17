@@ -5,7 +5,7 @@ import NVMAIValidationSupport
 @testable import NVMAI
 
 extension PrefillGroupedRoutedMoETests {
-  @Test(arguments: [4, 6, 8])
+  @Test(arguments: [4, 8])
   func streamedBatchedMatchesReferenceAcrossPartialMicrobatch(weightBits: Int) throws {
     let d = 64
     let f = 64

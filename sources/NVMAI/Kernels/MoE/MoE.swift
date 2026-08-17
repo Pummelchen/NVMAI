@@ -65,7 +65,7 @@ final class MoE {
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
-        precondition([4, 6, 8].contains(routedWeightBits))
+        precondition([4, 8].contains(routedWeightBits))
         precondition([4, 8].contains(routerWeightBits))
         let activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]

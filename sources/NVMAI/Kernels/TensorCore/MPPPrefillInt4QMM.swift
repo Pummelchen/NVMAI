@@ -31,7 +31,7 @@ final class MPPPrefillInt4QMM {
     private let unavailableReason: String
 
     init(context: MetalContext, weightBits: Int = 4) {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         do {
             let library = try Self.compileTensorOpsLibrary(device: context.device)
             let constants = MTLFunctionConstantValues()

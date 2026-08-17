@@ -361,7 +361,7 @@ final class PrefillGroupedRoutedMoE {
     init(context: MetalContext,
          siluActivation: Bool = false,
          weightBits: Int = 4) throws {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         var activationConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 78,
                                   value: .uint32(UInt32(weightBits)))

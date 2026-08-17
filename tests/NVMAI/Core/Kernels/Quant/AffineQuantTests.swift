@@ -30,7 +30,7 @@ import NVMAIValidationSupport
         return (bytes, values)
     }
 
-    @Test(arguments: [4, 6, 8])
+    @Test(arguments: [4, 8])
     func gemvDecodesPackedAffine(bits: Int) throws {
         let rows = 3, columns = 128
         let (packed, values) = Self.packed(bits: bits, rows: rows, columns: columns)
@@ -55,7 +55,7 @@ import NVMAIValidationSupport
         #expect(RelError.compute(actual: actual, reference: expected) < 0.002)
     }
 
-    @Test(arguments: [4, 6, 8])
+    @Test(arguments: [4, 8])
     func embeddingDecodesPackedAffine(bits: Int) throws {
         let rows = 3, columns = 128
         let (packed, values) = Self.packed(bits: bits, rows: rows, columns: columns)

@@ -49,7 +49,7 @@ enum SyntheticSnapshot {
     static func buildQwen(at dir: String,
                           weightBits: Int = 4,
                           seed: UInt64 = 0xC0FF_EE00_9A11_AB1E) throws -> Snapshot {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         try? FileManager.default.removeItem(atPath: dir)
         try FileManager.default.createDirectory(atPath: dir,
                                                 withIntermediateDirectories: true)

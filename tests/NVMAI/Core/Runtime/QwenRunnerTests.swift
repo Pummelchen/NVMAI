@@ -22,7 +22,7 @@ import NVMAIValidationSupport
         return (dir, ctx, runner)
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func decodeAndChunkedPrefillSupportHigherBitCheckpoints(bits: Int) async throws {
         let (dir, ctx, runner) = try makeRunner(weightBits: bits)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -42,7 +42,7 @@ import NVMAIValidationSupport
         #expect(values.allSatisfy { $0.isFinite })
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func higherBitPrefillThenDecodeMatchesPureDecode(bits: Int) async throws {
         let (dir, ctx, runner) = try makeRunner(weightBits: bits)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -66,7 +66,7 @@ import NVMAIValidationSupport
         }
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func higherBitMultiTokenPrefillMatchesPureDecode(bits: Int) async throws {
         let (dir, ctx, runner) = try makeRunner(weightBits: bits)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -189,7 +189,7 @@ import NVMAIValidationSupport
         #expect(runner.lastGreedyToken == reference)
     }
 
-    @Test(arguments: [4, 6, 8])
+    @Test(arguments: [4, 8])
     func inferenceStateSnapshotRestoresKVAndGDNExactly(bits: Int) async throws {
         let (dir, ctx, runner) = try makeRunner(weightBits: bits)
         defer { try? FileManager.default.removeItem(at: dir) }

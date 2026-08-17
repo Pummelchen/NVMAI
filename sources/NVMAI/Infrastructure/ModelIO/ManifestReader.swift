@@ -62,6 +62,11 @@ public struct Manifest: Decodable, Equatable, Sendable {
 }
 
 public enum ManifestReader {
+    /// Weight widths this build accepts. 6-bit was withdrawn: non-power-of-two
+    /// packing measured 46.8 GB/s against 60 for 4-bit and 8-bit, and a 26 GB
+    /// model does not fit a 24 GB machine.
+    public static let supportedWeightBits: Set<Int> = [4, 8]
+
     public static let defaultMaxBytes: UInt64 = 4 * 1024 * 1024
 
     /// Recognized flag keys. Anything else in `manifest.flags` is an error.
@@ -180,13 +185,26 @@ public enum ManifestReader {
             allowedRouterBits = [8]
         }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
-            ("embedding", quant.embedding, [4, 6, 8]),
-            ("attention", quant.attention, [4, 6, 8]),
+            ("embedding", quant.embedding, Self.supportedWeightBits),
+            ("attention", quant.attention, Self.supportedWeightBits),
             ("router", quant.router, allowedRouterBits),
-            ("sharedExpert", quant.sharedExpert, [4, 6, 8]),
-            ("routedExpert", quant.routedExpert, [4, 6, 8]),
+            ("sharedExpert", quant.sharedExpert, Self.supportedWeightBits),
+            ("routedExpert", quant.routedExpert, Self.supportedWeightBits),
         ]
         for (name, slot, allowedBits) in slots {
+            // 6-bit was withdrawn rather than deprecated, so say so instead of
+            // letting a previously working model fail as "unsupported
+            // quantization" with no route forward.
+            if slot.weightBits == 6 {
+                // Not `indexCorrupt`: the payload is intact and the user would
+                // otherwise be told to re-download a file that is fine.
+                throw ModelError.unsupportedArchitecture(detail: """
+                    6-bit models are no longer supported (\(name) is 6-bit). \
+                    Its packing is not a power of two, which measured 46.8 GB/s \
+                    against 60 for both 4-bit and 8-bit, and it does not fit \
+                    24 GB. Install the 4-bit or 8-bit build instead.
+                    """)
+            }
             guard allowedBits.contains(slot.weightBits),
                   slot.scheme.lowercased() == "affine",
                   slot.scaleType.lowercased() == "bf16",

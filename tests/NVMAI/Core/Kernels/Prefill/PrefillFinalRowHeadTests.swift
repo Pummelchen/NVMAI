@@ -136,7 +136,7 @@ import NVMAIValidationSupport
         #expect(rel <= 1e-4, "rel=\(rel) maxAbs=\(maxAbs)")
     }
 
-    @Test(arguments: [6, 8])
+    @Test(arguments: [8])
     func affineFinalRowHeadMatchesScalarOffsetPath(bits: Int) throws {
         let rows = 5
         let selectedRow = 3

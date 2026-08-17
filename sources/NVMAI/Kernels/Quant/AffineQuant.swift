@@ -41,7 +41,7 @@ final class AffineQuantGEMV {
     private let twoRowPipeline: MTLComputePipelineState
 
     init(context: MetalContext, weightBits: Int) throws {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         self.weightBits = weightBits
         self.pipeline = try context.pipeline(
             "affine_quant_gemv_simd",
@@ -111,7 +111,7 @@ final class AffineQuantEmbeddingLookup {
     private let pipeline: MTLComputePipelineState
 
     init(context: MetalContext, weightBits: Int) throws {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         self.weightBits = weightBits
         self.pipeline = try context.pipeline(
             "affine_quant_embedding_lookup",

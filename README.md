@@ -54,8 +54,8 @@ Full method, including nine approaches that measured out negative and why:
 
 689 tests / 124 suites.
 
-Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
-and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
+Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit and
+8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
 per-quantization terse system prompt for direct, lean answers. The fast alias
 is available on every quantization — how it works, the trade-off, and the full
 4/6/8-bit matrix are on the
@@ -128,7 +128,7 @@ quantization, mode, reasoning):
   command to connect a coding CLI afterwards. Once the server is up it
   prints the OpenAI API setup (base URL, API key, the chosen model ID) for
   pointing any OpenAI-compatible client at it. The server binds to
-  `127.0.0.1`: 4-bit → 8081, 6-bit → 8082, 8-bit → 8083.
+  `127.0.0.1`: 4-bit → 8081, 8-bit → 8083.
 - **`tools/cli_launcher.sh`** starts any of the three coding CLIs (Codex,
   Qwen Code, OpenCode): it stops any stale `NVMAIServer`, starts a fresh one
   via `server_launcher.sh` for the chosen quantization/mode/reasoning, wires
@@ -149,7 +149,7 @@ all prompts launches that configuration. Or pass them positionally, e.g.:
 
 ```bash
 tools/cli_launcher.sh codex fast 4 concise nothink   # Codex, fast alias, 4-bit, terse, no reasoning
-tools/cli_launcher.sh qwen full 6 default think      # Qwen Code, full agent, 6-bit, full answers, reasoning
+tools/cli_launcher.sh qwen full 8 default think      # Qwen Code, full agent, 8-bit, full answers, reasoning
 tools/server_launcher.sh qwen fast 4 concise think   # server only, foreground (Ctrl-C to stop)
 ```
 

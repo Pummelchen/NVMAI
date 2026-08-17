@@ -3,7 +3,7 @@ import NVMAIRepackCore
 
 private let usage = """
 Usage:
-  NVMAIRepack [--model <qwen36|qwen36-6bit|qwen36-8bit|qwen36-mtp>] --output <model.gturbo> [--overwrite] [--resume]
+  NVMAIRepack [--model <qwen36|qwen36-8bit|qwen36-mtp>] --output <model.gturbo> [--overwrite] [--resume]
   NVMAIRepack --discard-partial --output <model.gturbo>
   NVMAIRepack --verify-install --input-gturbo <model.gturbo>
   NVMAIRepack --help

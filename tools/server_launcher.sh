@@ -71,28 +71,25 @@ else
   esac
 fi
 
-# --- 3) quantization: 4-bit (default) / 6-bit / 8-bit ---
+# --- 3) quantization: 4-bit (default) / 8-bit ---  (6-bit withdrawn)
 quant="${3:-}"
 if [[ -z "$quant" ]]; then
   echo ""
   echo "Which quantization?"
   echo "  1) 4-bit"
-  echo "  2) 6-bit"
   echo "  3) 8-bit"
   printf "Choice [1-3] (default 1): "
   read -r quant_choice || exit 1
   case "${quant_choice:-1}" in
     1) quant=4bit ;;
-    2) quant=6bit ;;
     3) quant=8bit ;;
     *) echo "invalid choice: $quant_choice" >&2; exit 2 ;;
   esac
 fi
 case "$quant" in
   4|4bit) quant=4bit ;;
-  6|6bit) quant=6bit ;;
   8|8bit) quant=8bit ;;
-  *) echo "unknown quantization: $quant (4|6|8)" >&2; exit 2 ;;
+  *) echo "unknown quantization: $quant (4|8)" >&2; exit 2 ;;
 esac
 
 # --- 4) NVMAI mode: default (default) or concise (terse answers) ---
@@ -140,7 +137,6 @@ fi
 # --- resolve quantization -> model directory / port ---
 case "$quant" in
   4bit) MODEL_DIR="$BASE_DIR/models/qwen3.6_35B_A3B_4Bit"; PORT="${NVMAI_PORT:-8081}" ;;
-  6bit) MODEL_DIR="$BASE_DIR/models/qwen3.6_35B_A3B_6Bit"; PORT="${NVMAI_PORT:-8082}" ;;
   8bit) MODEL_DIR="$BASE_DIR/models/qwen3.6_35B_A3B_8Bit"; PORT="${NVMAI_PORT:-8083}" ;;
 esac
 

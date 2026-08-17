@@ -13,7 +13,7 @@ enum QwenToySynthetic {
 
     /// Build the toy directory in a temp dir and return its URL.
     static func write(weightBits: Int = 4) throws -> URL {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         let toy = ArchConfig.qwenToy()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-qwen-toy-\(UUID().uuidString)")
@@ -423,7 +423,7 @@ enum QwenToySynthetic {
     /// `pre_fc_norm_hidden.weight`). It deliberately carries NO
     /// embedding/lm_head — the runtime shares the target's.
     static func writeMTP(weightBits: Int = 4) throws -> URL {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         let toy = ArchConfig.qwenToyMTP()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("gturbo-qwen-mtp-toy-\(UUID().uuidString)")

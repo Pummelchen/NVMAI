@@ -86,9 +86,12 @@ struct QwenRepackPlannerTests {
         #expect(SourceFingerprint.modelID(forIndexSha256:
             "0b28df60e33753a14e816d3b31577ae2c93884c58430a4a6de6ae9ea483842ea")
             == "qwen3.6-35b-a3b-4bit")
+        // 6-bit was withdrawn, so its fingerprint no longer resolves. Asserting
+        // nil keeps the removal honest: a source quietly reappearing would fail
+        // here rather than shipping an unsupported quantization.
         #expect(SourceFingerprint.modelID(forIndexSha256:
             "eaea194dfb961e6a5215dcc6e4dd42d0df6efe8d8686161f2dd00634e0ef43fb")
-            == "qwen3.6-35b-a3b-6bit")
+            == nil)
         #expect(SourceFingerprint.modelID(forIndexSha256:
             "3db12edeebeb65cab9a6eeb63cd74be4e0c74139a75f672701290b98230501cf")
             == "qwen3.6-35b-a3b-8bit")
@@ -145,34 +148,6 @@ struct QwenRepackPlannerTests {
         #expect(RepackPlanner.classify(
             "model.layers.0.mlp.switch_mlp.gate_proj.weight",
             numLayers: 4, family: f) == .unknown)
-    }
-
-    @Test func sixBitPackedShapesUseScaleGrid() throws {
-        let snapshotDir = temporaryRoot("qwen-plan-6bit")
-        let outputDir = temporaryRoot("qwen-plan-6bit-out")
-        defer {
-            try? FileManager.default.removeItem(atPath: snapshotDir)
-            try? FileManager.default.removeItem(atPath: outputDir)
-        }
-        let snapshot = try SyntheticSnapshot.buildQwen(at: snapshotDir,
-                                                        weightBits: 6)
-        let metadata = try IndexLoader.load(snapshotDir: snapshotDir)
-        #expect(metadata.baseBits == 6)
-        let arch = try ArchInfo.load(
-            configPath: (snapshotDir as NSString).appendingPathComponent("config.json"))
-        let plan = try RepackPlanner.plan(
-            meta: metadata, arch: arch,
-            shardHeaders: [try parseHeader(path: snapshot.shardPath)],
-            outputDir: outputDir)
-        let embedding = try #require(plan.resident.entries.first {
-            $0.name == "language_model.model.embed_tokens.weight"
-        })
-        #expect(embedding.logicalShape4[1] == 128)
-        let routedWeight = try #require(plan.layers[0].subTensors.first {
-            $0.role == "gate" && $0.component == "weights"
-        })
-        #expect(routedWeight.logicalShape == [64, 128])
-        #expect(routedWeight.bitsForWeights == 6)
     }
 
     @Test func qwenPlanOrdersResidentsAndSlicesExperts() throws {

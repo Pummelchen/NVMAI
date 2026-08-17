@@ -227,7 +227,7 @@ private let mppTensorOpsAvailable: Bool = {
 
     @Test(.enabled(if: mppTensorOpsAvailable,
                    "Requires runtime MPP TensorOps support"),
-          arguments: [6, 8])
+          arguments: [8])
     func affineThreadgroupSupportsHigherBitWeights(bits: Int) throws {
         let context = try MetalContext()
         let candidate = MPPPrefillInt4QMM(context: context, weightBits: bits)

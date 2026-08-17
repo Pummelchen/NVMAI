@@ -47,18 +47,6 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 19_546_491_213,
         reserveBytes: 1_073_741_824)
 
-    public static let qwen36_6bit = SupportedModelSource(
-        name: "qwen36-6bit",
-        displayName: "Qwen3.6 35B-A3B 6-bit",
-        repoID: "mlx-community/Qwen3.6-35B-A3B-6bit",
-        revision: "cb7e092ef8efe540bc3672c8929c4adbe5f4f759",
-        sourceIndexSHA256:
-            "eaea194dfb961e6a5215dcc6e4dd42d0df6efe8d8686161f2dd00634e0ef43fb",
-        modelID: "qwen3.6-35b-a3b-6bit",
-        approximateDownloadBytes: 29_081_792_392,
-        installedBytes: 29_120_000_000,
-        reserveBytes: 1_073_741_824)
-
     public static let qwen36_8bit = SupportedModelSource(
         name: "qwen36-8bit",
         displayName: "Qwen3.6 35B-A3B 8-bit",
@@ -90,7 +78,7 @@ public struct SupportedModelSource: Sendable, Equatable {
     public static let `default` = qwen36
 
     public static let all: [SupportedModelSource] = [
-        qwen36, qwen36_6bit, qwen36_8bit, qwen36MTP,
+        qwen36, qwen36_8bit, qwen36MTP,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

@@ -116,7 +116,7 @@ import NVMAIValidationSupport
                                         d: Int,
                                         f: Int,
                                         weightBits: Int = 4) -> SyntheticExpertPool {
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         var allBytes: [UInt8] = []
         var offsets: MoEExpertOffsets?
         var stride = 0

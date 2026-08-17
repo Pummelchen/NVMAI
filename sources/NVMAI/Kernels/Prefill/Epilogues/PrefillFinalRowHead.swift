@@ -10,7 +10,7 @@ final class PrefillFinalRowHeadInt4 {
 
     init(context: MetalContext, maxD: Int = 2816, weightBits: Int = 4) throws {
         precondition(maxD > 0, "maxD must be positive")
-        precondition([4, 6, 8].contains(weightBits))
+        precondition([4, 8].contains(weightBits))
         self.rms = try RMSNorm(context: context)
         self.int4 = weightBits == 4 ? try DequantInt4GEMV(context: context) : nil
         self.affine = weightBits == 4
