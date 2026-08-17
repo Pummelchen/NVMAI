@@ -3034,13 +3034,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         for i in 0..<slots.count { ptr[i] = slots[i] }
     }
 
-    /// Routed-expert stage of one decode layer: top-k readback, expert fetch,
-    /// phase-1/phase-2 encode, and the deferred completion hand-off.
-    ///
-    /// lint:allow-long one pipeline whose phases share the fetch plan, the
-    /// argument buffer and the slot scratch; the layer trace at the end reports
-    /// timings from every phase, so splitting it would mean threading those
-    /// back out purely to shorten a function.
     /// Encodes the shared dense MLP and commits it immediately.
     ///
     /// It depends only on `routedX`, which `tailCB` produces, so it can be
@@ -3090,6 +3083,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return sharedCB
     }
 
+    /// Routed-expert stage of one decode layer: top-k readback, expert fetch,
+    /// phase-1/phase-2 encode, and the deferred completion hand-off.
+    ///
+    /// lint:allow-long one pipeline whose phases share the fetch plan, the
+    /// argument buffer and the slot scratch; the layer trace at the end reports
+    /// timings from every phase, so splitting it would mean threading those
+    /// back out purely to shorten a function.
     private func encodeDecodeRoutedMoE(
         layer L: Int,
         position: Int,
