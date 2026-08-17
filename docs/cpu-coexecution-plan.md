@@ -175,6 +175,65 @@ is to requantise to 3-bit and check whether `busy_per_token` falls
 proportionally. If it does not, the GPU is not purely bandwidth-bound and every
 row below the first is optimistic.
 
+## Killing the per-layer round trip: what it would take
+
+After the shared-MLP fix the idle is ~16.7 ms/token, and the bulk of it is one
+transition, `shared_expert -> moe_phase1_2_routed`, at 10.6 ms over ~35 layers.
+Roughly 5.6 ms of that is pread; the rest is a CPU round trip per layer of
+which only ~0.04 ms is actual CPU work.
+
+Two cheap attacks on it have now failed. Merging command buffers costs the
+CPU/GPU pipelining that committing `attnCB` early buys. Spinning instead of
+blocking costs GPU clocks. Neither touches the cause.
+
+The cause is that the CPU must see the routing before the experts can be
+dispatched -- not to encode the dispatch, which could be done with GPU-side
+indices, but to know which experts are *missing* and must be `pread` into
+slots. Streaming is what forces the readback. Indirect dispatch alone does not
+remove it: a kernel reading expert ids from a GPU buffer still cannot compute an
+expert whose weights are not resident.
+
+So the redesign is to stop streaming, and the enabler is already in the tree.
+`ResidentBuffer` mmaps its range `PROT_READ, MAP_PRIVATE` and wraps it with
+`makeBuffer(bytesNoCopy:)`, so the GPU already reads non-expert weights straight
+out of mmap'd file pages. Applying the same to `packed_experts/layer_NN.bin`
+would give the GPU the whole expert set addressably, with the OS page cache
+deciding residency:
+
+  - no pread, so the 5.6 ms goes
+  - no slot bookkeeping and no per-layer argument buffer rebuilt from routing
+  - no readback needed for correctness, so the round trip can go too, with the
+    MoE kernel indexing experts from the router's own GPU output
+
+Note what it also removes: at 128 slots the streamer allocates 128 x 1.688 MiB
+x 40 layers, about 8.4 GB of anonymous memory. `ResidentBuffer` already carries
+a comment recording that this hurts even when pinned. File-backed pages are
+evictable; anonymous ones are not.
+
+What it costs is the bounded-memory guarantee, which is a real property and not
+one to trade away casually -- it is why the streamer exists. On this machine an
+18 GB model against 24 GB of RAM mostly fits, and the 6/8-bit measurements
+above show exactly what happens when it does not. Any move here should keep the
+streaming path selectable rather than delete it.
+
+This is a substantial piece of work, not a patch: it changes how weights reach
+the GPU, and it needs the golden baseline plus a memory-pressure story before
+it could be trusted. Prototype narrowly first -- one layer, mmap'd zero-copy,
+output compared against the streamed path -- before touching the decode loop.
+
+### Smaller, and independent
+
+The server passes `forceLogitsHead: true` unconditionally
+(`ServerInference.swift`), so the fused greedy head never runs. It cannot as
+written: the head path is fixed when the runner is built while sampling
+parameters vary per request. For a temperature-0 request the fused head would
+do the argmax on the GPU instead of moving a full 151936-entry logit vector to
+the CPU to sample. That is worth part of `head_ms` (3.7 ms/token) and most of
+the `head_logits -> embed` gap (1.2 ms/token), but only for greedy requests --
+sampled ones still need the logits. The runner already accepts the mode per
+call (`PrefillOutputMode.greedyIfAvailable`); it is the construction-time flag
+that fixes it.
+
 ## An idle core is not a free resource
 
 Spinning on `MTLCommandBuffer.status` before parking looked like an obvious win:
