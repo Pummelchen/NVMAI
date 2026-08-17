@@ -1179,3 +1179,58 @@ expert I/O.
 This is the strongest v4.0 lead in this document: a contained change, a clear
 mechanism, and a memory cost of under half a gigabyte. It should be measured
 before any Core ML work, and before the compute half is investigated.
+
+## Prefill kernels: uniformly ~15% of peak, no hotspot
+
+Three corrections to earlier sections in this document, each from measurement.
+
+**NVMAI does use the GPU's matrix units.** An earlier note here claimed no MMA
+because `grep simdgroup_matrix` found nothing. Wrong API name: `tensorops.metal`
+uses Metal 4's `matmul2d<descriptor, execution_simdgroups<4>>` with 64x32x64 tiles,
+via `MPPPrefillInt4QMM`.
+
+**`selectedDispatch` is unreachable at prefill widths.** `encodeProjection` tries
+the MPP tensor path first for q, kv *and* o whenever `tokenCount >= 32`, and only
+falls through when that pipeline is unavailable. So the q-family dispatch
+experiment recorded above was testing dead code, which is why it measured nothing
+in either direction. The policy matters only below width 32 -- i.e. decode.
+
+**There is no hotspot.** Scaling the prompt, with the newly instrumented roles:
+
+| tokens | prefill s | attn ms | tile ms | attn/token |
+| ---: | ---: | ---: | ---: | ---: |
+| 452 | 6.89 | 1,440 | 2,169 | 3.186 |
+| 892 | 10.24 | 3,097 | 4,230 | 3.472 |
+| 1772 | 19.16 | 7,902 | 8,206 | 4.460 |
+| 3532 | 48.88 | 27,411 | 16,288 | 7.761 |
+
+Tokens x7.81 produces attention x19.03 -- n^1.44, against x7.81 for linear and
+x61 for quadratic. So the SDPA's quadratic term is real and growing but is not yet
+dominant at these lengths; at 3532 tokens SDPA (~204 GFLOP/layer) and the
+projections (~205 GFLOP/layer) are about equal. Tiles scale x7.51, cleanly linear,
+as expert work should.
+
+Converting to rates: projections ~600 GFLOP/s, SDPA ~600 GFLOP/s, routed experts
+~430 GFLOP/s. Uniform, at 97.4% GPU occupancy, against an M3 nominal peak near
+4 TFLOP/s.
+
+Nothing stands out, which is itself the finding: there is no single slow kernel to
+fix. Either ~600 GFLOP/s is close to what this GPU delivers for 4-bit dequant
+matmul -- plausible, since unpacking a nibble and applying a group scale and bias
+costs several ALU ops per weight on top of the two the matmul needs -- or every
+kernel shares one inefficiency.
+
+Distinguishing those needs GPU counters: ALU utilisation, occupancy, memory-stall
+cycles per kernel. That is Xcode's GPU capture, which cannot be driven from here.
+It is the next measurement and it is the last one that can be taken before writing
+kernels on a guess.
+
+### Where the ANE comparison stands after this
+
+The ANE measured 13 TFLOP/s on `qkv 2048->9216` at width 1024 against the GPU's
+~600 GFLOP/s across the whole attention block. That gap is large enough to survive
+most of the uncertainty above, and it is the strongest remaining argument for a
+Core ML prefill path. But it should not be acted on until the GPU counters explain
+the 15%: if the cause is 4-bit dequant ALU cost, the ANE wins because it
+decompresses in hardware, and Core ML is the answer. If the cause is a fixable
+kernel property, the GPU keeps prefill and the engine stays whole.
