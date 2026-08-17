@@ -16,29 +16,34 @@ seconds. (Introduced in v3.3; see the callout below for what is new in 3.5.)
 | OpenCode `run` | ~218 s | 5.9 s | **~37×** |
 | Qwen Code `-p` | >300 s (stalled) | 4.6 s | **>65×** |
 
-**New in 3.6**
+**New in 3.7 — Opus 5 audit release**
 
-- **Model residency.** `--lazy-load` binds the port immediately and defers the
-  load to the first inference request; `--idle-unload-seconds <n>` releases the
-  weights after `n` idle seconds and reloads transparently on the next request;
-  `POST /v1/models/unload` releases them on demand, draining in-flight requests
-  first. Measured on M3 24 GB, 4-bit: **2.9 MB idle → 5.7 GB loaded → 245 MB
-  after unload**. Both flags default to off, so existing invocations are
-  unchanged. See the [server guide](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server#model-residency).
-- **Correctness.** Fixed a data race in the softmax kernel that could NaN an
-  entire probability row and make the sampler emit an out-of-range token id.
-  The prompt cache now keys on the post-strip view of a request, so a `-fast`
-  conversation keeps its strip on cached follow-up turns instead of replaying
-  the CLI's `<system-reminder>` scaffolding.
-- **Operability.** A stale install receipt (from moving or renaming a model
-  directory) now names the one-line `--verify-install` recovery instead of
-  failing opaquely.
-- **Production gates.** `tools/lint.sh` (force-cast and function-length
-  ratchet) and a ThreadSanitizer CI job, both run by CI; the warning gate now
-  matches compiler diagnostics only. The superseded `tools/responses_bridge.py`
-  proxy is gone — the server has spoken the Responses API natively since 3.4.
+A full-codebase production audit by Claude Opus 5. Seven real bugs found and
+fixed, three enforcement gates added, and the reasoning behind the results
+written down rather than left implicit.
 
-680 tests / 121 suites.
+- **Correctness.** A data race in the softmax kernel could leave an entire
+  probability row `NaN`, after which the sampler returned an out-of-range token
+  id — a garbage token in production, not just a flaky test. The sampler's
+  selection maths (top-p, top-k, temperature, inverse-CDF) is now anchored to an
+  independent CPU reference; it previously agreed only with another GPU kernel.
+- **A moved model no longer looks like a missing one.** The install receipt is
+  bound to an absolute path, so moving or renaming a model folder made the Mac
+  app report it as not installed and offer a 19.5 GB re-download. It now offers
+  a local re-verify instead, which re-hashes what is already on disk.
+- **Enforcement.** `tools/lint.sh` gates force-casts, function length, and
+  `@unchecked Sendable` conformances. Both baselines are empty: every long
+  function and all 35 unchecked-Sendable conformances now carry a written
+  reason. A ThreadSanitizer job runs the suite in CI.
+- **Readability.** The four largest functions shrank from 994, 595, 467 and 253
+  lines to 186, 203, 186 and 40, verified byte-identical against golden
+  reference output on all three quantizations.
+
+Method and findings, including the candidate gaps that dissolved on inspection:
+[kernel validation audit](https://github.com/Pummelchen/NVMAI/wiki/Kernel-Validation-Audit)
+and [concurrency and resume review](https://github.com/Pummelchen/NVMAI/wiki/Concurrency-And-Resume-Review).
+
+685 tests / 123 suites.
 
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
