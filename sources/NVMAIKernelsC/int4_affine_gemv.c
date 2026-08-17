@@ -14,6 +14,10 @@
 #endif
 
 #define NVMAI_GROUP_SIZE 64
+// Groups per row for the shapes this kernel serves: 2048/64 = 32 for gate and
+// up, 512/64 = 8 for down. The bound is generous; wider rows fall back to the
+// per-row path rather than being wrong.
+#define NVMAI_MAX_GROUPS 256
 
 static inline float nvmai_bf16(uint16_t bits) {
     union { uint32_t u; float f; } c;
@@ -33,6 +37,21 @@ void nvmai_int4_affine_gemv(const uint8_t *weights,
 
 #if defined(__ARM_NEON)
     const uint8x16_t nibble_mask = vdupq_n_u8(0x0F);
+
+    // sum(x) over each group depends only on x, not on the row, so it is
+    // hoisted out of the row loop. Recomputing it per row cost 512 redundant
+    // passes for gate/up and 2048 for down.
+    float group_xsum[NVMAI_MAX_GROUPS];
+    const size_t xsum_groups = groups <= NVMAI_MAX_GROUPS ? groups : 0;
+    for (size_t g = 0; g < xsum_groups; ++g) {
+        const float *xg = x + g * NVMAI_GROUP_SIZE;
+        float32x4_t s = vdupq_n_f32(0.0f);
+        for (size_t i = 0; i < NVMAI_GROUP_SIZE; i += 4) {
+            s = vaddq_f32(s, vld1q_f32(xg + i));
+        }
+        group_xsum[g] = vaddvq_f32(s);
+    }
+
     for (size_t r = 0; r < rows; ++r) {
         const uint8_t *w_row = weights + r * row_bytes;
         const uint16_t *s_row = scales + r * groups;
@@ -44,6 +63,7 @@ void nvmai_int4_affine_gemv(const uint8_t *weights,
             const float *xg = x + g * NVMAI_GROUP_SIZE;
             float32x4_t dot = vdupq_n_f32(0.0f);
             float32x4_t xs = vdupq_n_f32(0.0f);
+            const int have_xsum = (xsum_groups != 0);
 
             // 32 bytes per group; 16 bytes -> 32 nibbles per iteration.
             for (size_t k = 0; k < NVMAI_GROUP_SIZE / 2; k += 16) {
@@ -77,14 +97,17 @@ void nvmai_int4_affine_gemv(const uint8_t *weights,
                     dot = vfmaq_f32(dot, q1, x1);
                     dot = vfmaq_f32(dot, q2, x2);
                     dot = vfmaq_f32(dot, q3, x3);
-                    xs = vaddq_f32(xs, x0);
-                    xs = vaddq_f32(xs, x1);
-                    xs = vaddq_f32(xs, x2);
-                    xs = vaddq_f32(xs, x3);
+                    if (!have_xsum) {
+                        xs = vaddq_f32(xs, x0);
+                        xs = vaddq_f32(xs, x1);
+                        xs = vaddq_f32(xs, x2);
+                        xs = vaddq_f32(xs, x3);
+                    }
                 }
             }
+            const float xsum = have_xsum ? group_xsum[g] : vaddvq_f32(xs);
             acc += nvmai_bf16(s_row[g]) * vaddvq_f32(dot)
-                 + nvmai_bf16(b_row[g]) * vaddvq_f32(xs);
+                 + nvmai_bf16(b_row[g]) * xsum;
         }
         out[r] = acc;
     }
