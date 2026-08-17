@@ -62,17 +62,40 @@ bound. That is the headroom a re-shard buys (Phase 2).
 
 ## Plan
 
-### Phase 0 -- Consolidate command buffers
+### Phase 0 -- Consolidate command buffers: TRIED, DOES NOT WORK
 
-182 command buffers per token (40 layers x ~4.5, plus head and embed), each
-carrying ~104 us of gap. Not every boundary has a CPU dependency:
-`attn_norm_qkv` -> `attn_softmax` -> `attn_tail_router` have none between them
-and can merge, as can `shared_expert` with `moe_phase1_2_routed`. Target ~100
-CBs/token.
+The original reasoning: 182 command buffers per token, each apparently
+carrying ~104 us of gap, and `attn_norm_qkv` -> `attn_tail_router` have no CPU
+work between them, so merging them should reclaim ~40 buffers per token.
 
-Estimated +12-15%. Do this first: it is the largest single item, and every
-co-execution design below adds rendezvous, which is cheaper on a path that is
-not already sync-saturated.
+Implemented and measured. It does not help. Interleaved A/B, 6 samples per arm,
+diagnostics on in both arms so `busy_per_token` could confirm the arms were
+thermally comparable (27.83 vs 27.64 ms, +0.7%):
+
+| arm | tok/s median | range |
+| --- | ---: | ---: |
+| split (current) | 21.02 | 18.32-22.27 |
+| merged | 20.06 | 19.61-20.79 |
+
+Merged is 4.6% slower by median and 2.4% by mean, which given split's sd of 1.4
+is not a significant difference -- but it is emphatically not the predicted
++12-15%, so the premise is falsified either way.
+
+The reason: committing `attnCB` early lets the GPU begin attention while the
+CPU is still encoding the tail. The split was buying CPU/GPU pipelining within
+the layer, and merging serialises encode-then-commit. The ~104 us figure came
+from dividing measured idle by buffer count, which silently assumed the idle
+*was* per-buffer overhead; most of it is dependency stall, and that does not
+shrink by issuing fewer, larger buffers.
+
+Do not retry this. If per-layer idle is attacked again, the target is the
+dependency chain (attention -> router readback -> expert fetch -> MoE), not the
+buffer count. Reverted in full; the reverted change is in the history if the
+measurement needs repeating.
+
+Phase 1 no longer depends on this. The worry was that adding a rendezvous to a
+sync-saturated path would be expensive; since the path turns out not to be
+sync-saturated -- fewer buffers did not help -- Phase 1 can go first.
 
 ### Phase 1 -- CPU computes a share of the routed experts
 
