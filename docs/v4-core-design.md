@@ -409,3 +409,72 @@ three orders of magnitude below a single slot.
 What exists is the C expert reader, the bounded-IO fill path, and the
 budget-derived slot defaults. Real, measured work, but the clean-sheet engine
 described earlier in this document is still a plan and not code.
+
+# Must survive the rewrite
+
+This document describes a decode loop, a streamer and a set of kernels. Read as a
+specification it would produce an engine that is faster and missing five shipped
+features, because none of them appear above. They are listed here with the
+interactions that make them the streamer's problem and not someone else's.
+
+All five are present and verified in v3.8 (`/v1/models` returns the `-fast` alias,
+`POST /v1/models/unload` returns 200, and the rest are exercised by the suite).
+Nothing has been dropped by the v4.0 work so far, which is additive.
+
+### 1. Follow-up prompt cache
+
+`--prompt-cache-mode off|single-prefix|multi-prefix`, plus `--prompt-cache-entries`,
+`--prompt-cache-memory-mib`, `--prompt-cache-disk`. The S12 direct-prefix path,
+S13/S14 text continuation and S15 live-KV checks.
+
+**Interaction:** a follow-up turn that hits S12 skips prefill entirely, so the
+expert access pattern jumps straight into decode with a cold slot cache and no
+prefill to warm it. The prefetcher in section 3 must not assume every request
+begins with a prefill that has already touched most experts.
+
+### 2. Concise mode
+
+`ConcisePrompt.prompt(for:)`, selected per quantization; `--concise` on the CLI.
+
+**Interaction:** it changes generated length (measured −55% to −61% answer tokens),
+which moves a request between the prompt-size regimes in the matrix above. It is
+also per-quantization, so it must survive the 6-bit removal without the 4-bit and
+8-bit prompts being disturbed.
+
+### 3. `-fast` alias and CLIStrip
+
+`/v1/models` advertises `<model>` and `<model>-fast`; `CLIStrip` drops agent
+boilerplate before prefill and logs its version and stats.
+
+**Interaction:** it exists to cut prompt length, and the matrix shows prompt length
+is worth ~2x in decode rate (13.61 tok/s short against 7.54 long at 4-bit). Any
+rewrite that changes where prefill happens has to keep the strip in front of it,
+and keep the version stamped in the log — a silent strip change would move every
+benchmark in this document.
+
+### 4. Idle unload by timer
+
+`--idle-unload-seconds <n>`, implying `--lazy-load`.
+
+**Interaction:** unloading discards the expert slots, so the next request pays a
+fully cold cache. Every hit-rate figure in this document assumes a warm one, and the
+8-slot measurement shows what a cold or thrashing cache costs — 4.49 tok/s against
+11.10. The reload path needs the prefetcher to refill deliberately rather than
+discovering each miss one layer at a time. Pair with `--prompt-cache-disk`, since
+unloading also discards the in-memory prefix cache.
+
+### 5. Unload by API
+
+`POST /v1/models/unload`, returning 200.
+
+**Interaction:** it can arrive mid-flight. Slot buffers, the C reader's descriptors
+and any queued prefetch must all be torn down without a read landing in freed
+memory. The reader owns its threads and joins them in `destroy`, which is why it
+does not hand out raw descriptors.
+
+### Acceptance
+
+A v4.0 candidate is not done until all five behave as they do in v3.8: the alias
+appears in `/v1/models`, the unload endpoint returns 200 and actually frees, the
+idle timer fires, concise mode still shortens answers by roughly half, and a
+follow-up turn still hits the prefix cache instead of re-prefilling.

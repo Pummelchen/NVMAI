@@ -43,9 +43,11 @@ evidence rather than assumption.
   them is the bottleneck. Adding compute units *costs* throughput — CPU load
   raises GPU-busy 45%, ANE load 89%, since every unit draws on one memory
   controller.
-- **Known limitation.** On a 24 GB machine the 6-bit and 8-bit models exceed RAM
-  and page continuously: 6.7 and 1.6 tok/s against 4-bit's 18.8. Prefer 4-bit
-  unless your machine has comfortable headroom over the model size.
+- **Expert-cache defaults are now derived per quantization** from a ~1 GB budget
+  and the model's own expert stride: 16 slots at 4-bit, 8 at 8-bit. The previous
+  fixed default of 64 slots was both slower and four times larger. An earlier
+  version of this note reported 6-bit and 8-bit at 6.7 and 1.6 tok/s; those figures
+  were taken at 64 slots and no longer apply.
 
 Full method, including nine approaches that measured out negative and why:
 [performance investigation](https://github.com/Pummelchen/NVMAI/blob/main/docs/cpu-coexecution-plan.md).
@@ -89,81 +91,31 @@ measurable correctness loss on the sampled questions.
 
 ## Benchmarks
 
-**Decode-rate reference (NVMAI 3.2 build).** Measured on M3 24 GB, 3.2 build
-(64 expert-cache slots + resident pin + MoE phase-1 rewrite). Concise-mode
-answer tokens: temp 0, deterministic, 8 chat questions, 512-token cap (`+` =
-baseline hit the cap, so its true total is higher). Full measurement history:
-[Optimization-Journey](https://github.com/Pummelchen/NVMAI/wiki/Optimization-Journey).
+Measured on M3 MacBook Pro, 24 GB, at the shipped defaults: `--max-context
+262144`, prompt cache off, and the expert-cache budget the engine derives for each
+quantization (16 slots at 4-bit, 8 at 8-bit — about 1 GB either way). Greedy,
+temperature 0. Prompt sizes are 25 / 452 / 3532 tokens.
 
-#### 4-bit
+| | 4-bit | | 8-bit | |
+| --- | ---: | ---: | ---: | ---: |
+| prompt | prefill | decode | prefill | decode |
+| short (25 tok) | 2.50 s | **13.61 tok/s** | 4.34 s | **5.64 tok/s** |
+| medium (452 tok) | 6.04 s | 12.46 tok/s | 11.19 s | 4.94 tok/s |
+| long (3532 tok) | 47.15 s | 7.54 tok/s | 61.84 s | 3.83 tok/s |
+| expert-cache RAM | | 1.05 GB | | 1.00 GB |
 
-| Stat | Value |
-| --- | --- |
-| Decode, 256-token greedy essay (interleaved A/B) | **11.91 / 11.45 tok/s** (64 slots + pin) |
-| — reference: 32 slots + pin | 10.76 / 10.19 tok/s (+11.5%) |
-| Decode, 512-token greedy essay | 14.37 tok/s |
-| Routed MoE phase-1 GPU | 10.60 ms/token |
-| Long-gen 512-token (code-gen) | 7.32 tok/s |
-| Throughput envelope (digit / count / essay / coding) | 14.48 / 11.34 / 9.33 / 8.05 tok/s |
-| 2×2 cache × MTP matrix (off×off / on×off / off×on) | 9.58 / 11.17 / 6.77 tok/s |
-| Concise mode — answer tokens (8-question set) | 3,788+ → **1,480** (−61%) |
-| — concise prompt | standard (4-bit) |
+Both quantizations stream routed experts from SSD inside that ~1 GB budget, which
+is the point of the project: a 35B MoE that leaves the machine usable. Prefill is
+GPU-bound (97.4% occupancy at maximum clocks), so it is insensitive to the cache
+budget; decode is bound by memory bandwidth.
 
-#### 6-bit
+Larger expert caches are **slower**, not faster, at the shipped 262144 context —
+4-bit measures 13.61 tok/s at 1 GB against 9.85 at 4 GB — because the KV
+reservation is already large enough that extra slot memory pushes the machine into
+pressure. Full matrix (2 quantizations × 5 budgets × 2 cache policies × 3 prompt
+sizes) and the reasoning behind every default:
+[docs/v4-core-design.md](docs/v4-core-design.md).
 
-| Stat | Value |
-| --- | --- |
-| Decode, 256-token greedy essay (interleaved A/B) | **7.55 / 7.34 tok/s** (64 slots + pin) |
-| — reference: 32 slots + pin | 6.20 / 6.68 tok/s (+15.5%) |
-| Decode, 512-token greedy essay | 7.26 tok/s |
-| Routed MoE phase-1 GPU | 20.34 ms/token |
-| Long-gen 512-token (code-gen) | 4.54 tok/s |
-| Throughput envelope (digit / count / essay / coding) | 6.63 / 6.21 / 6.00 / 5.04 tok/s |
-| 2×2 cache × MTP matrix (off×off / on×off / off×on) | 4.44 / 4.34 / 4.12 tok/s |
-| Concise mode — answer tokens (8-question set) | 3,714+ → **1,680** (−55%) |
-| — concise prompt | standard (6-bit) |
-
-#### 8-bit
-
-| Stat | Value |
-| --- | --- |
-| Decode, 256-token greedy essay (interleaved A/B) | **6.66 / 6.44 tok/s** (64 slots + pin) |
-| — reference: 32 slots + pin | 5.46 / 5.74 tok/s (+17%) |
-| Decode, 512-token greedy essay | 5.84 tok/s |
-| Routed MoE phase-1 GPU | 16.81 ms/token |
-| Long-gen 512-token (code-gen) | 3.66 tok/s |
-| Throughput envelope (digit / count / essay / coding) | 5.56 / 5.33 / 4.90 / 3.90 tok/s |
-| 2×2 cache × MTP matrix (off×off / on×off / off×on) | 3.19 / 3.55 / 3.15 tok/s |
-| Concise mode — answer tokens (8-question set) | 3,635+ → **1,570** (−57%) |
-| — concise prompt | standard (8-bit) |
-
-#### Coding-CLI 72-combo benchmark (in progress)
-
-The 72-combo harness (`benchmark/combos.sh`) runs 3 coding CLIs (Codex, Qwen
-Code, OpenCode) × 2 models (`full` / `-fast`) × 3 quantizations × 2 modes
-(default/concise) × 2 reasoning (off/on), ordered fastest-first. Prompt:
-`difference of swift and c++ in detail` (4-bit M3 24 GB). Decode = completion
-tokens ÷ wall time, so `full` rows include the large agent-prompt prefill
-while `fast` rows are near-pure decode. **Partial — 23 of 72 combos** (the run
-was stopped and is resumable with `bash benchmark/combos.sh`). The table lists
-the combos at ≥ 5.0 tok/s. Answer Quality is the rubric score (correctness 40
-/ coverage 30 / structure 20 / examples 10), judging only the final answer
-text:
-
-| tok/s | Config | CLI | Model | Wall (s) | Comp. tok | Answer Quality |
-| ---: | --- | --- | --- | ---: | ---: | ---: |
-| 11.9 | 4-bit default, no thinking | Qwen Code | fast | 377.0 | 4,478 | 90 |
-| 11.4 | 4-bit concise, no thinking | Qwen Code | fast | 254.4 | 2,888 | 87 |
-| 11.0 | 4-bit default, no thinking | OpenCode | fast | 410.8 | 4,521 | 91 |
-| 11.0 | 4-bit default, no thinking | Codex | fast | 360.9 | 3,982 | 88 |
-| 10.9 | 4-bit concise, no thinking | OpenCode | fast | 227.8 | 2,494 | 83 |
-| 10.6 | 4-bit concise, no thinking | Codex | fast | 257.3 | 2,724 | 78 |
-| 6.0 | 6-bit concise, no thinking | Qwen Code | fast | 365.9 | 2,193 | 82 |
-| 5.8 | 6-bit concise, no thinking | OpenCode | fast | 464.4 | 2,695 | 82 |
-| 5.8 | 6-bit concise, thinking | Qwen Code | fast | 461.9 | 2,684 | 82 |
-| 5.7 | 6-bit concise, thinking | OpenCode | fast | 487.8 | 2,757 | 81 |
-| 5.7 | 6-bit concise, no thinking | Codex | fast | 390.4 | 2,215 | 80 |
-| 5.5 | 6-bit concise, thinking | Codex | fast | 457.7 | 2,500 | 81 |
 
 ## Launchers
 
