@@ -175,6 +175,34 @@ is to requantise to 3-bit and check whether `busy_per_token` falls
 proportionally. If it does not, the GPU is not purely bandwidth-bound and every
 row below the first is optimistic.
 
+## An idle core is not a free resource
+
+Spinning on `MTLCommandBuffer.status` before parking looked like an obvious win:
+`waitUntilCompleted` needs an OS wakeup after the GPU signals, gap attribution
+put ~0.25 ms per layer in exactly that window, and seven cores sit idle while
+the orchestrator waits. Interleaved A/B, 400 us budget:
+
+| spin | tok/s | busy/token | occupancy |
+| ---: | ---: | ---: | ---: |
+| 0 (blocking) | 21.43, 21.27 | 27.26, 27.09 | 58.4%, 57.6% |
+| 400 us | 17.77, 18.78 | 29.99, 30.03 | 53.3%, 56.4% |
+
+15-17% slower, and `busy_per_token` rose 10%. That second number is the point:
+the GPU's own compute slowed down. CPU and GPU share a package power budget on
+this SoC, so occupying a core makes the GPU downclock.
+
+This qualifies the bandwidth measurement above. A 6-thread *streaming read*
+sustained 45-60 GB/s during inference without slowing the GPU; a tight polling
+loop on one core cost 10% of GPU throughput. The difference is power draw, not
+bandwidth. Any plan that spends CPU cycles has to be measured with
+`busy_per_token` reported, because the cost lands somewhere the tok/s number
+alone will not explain.
+
+It also puts a caveat on Phase 1 that was not there when it was written. The
+CPU expert kernel is a dense NEON loop across several cores -- far closer to
+the spin than to the streaming read. Its ~6% estimate assumes the GPU keeps its
+clocks, and this says that assumption needs testing before the work is trusted.
+
 ## Reshaping the weights: TRIED, NOTHING TO RECOVER
 
 Reducing precision is not an option -- NVMAI offers 4/6/8-bit as a user-facing
