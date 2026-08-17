@@ -1234,3 +1234,50 @@ Core ML prefill path. But it should not be acted on until the GPU counters expla
 the 15%: if the cause is 4-bit dequant ALU cost, the ANE wins because it
 decompresses in hardware, and Core ML is the answer. If the cause is a fixable
 kernel property, the GPU keeps prefill and the engine stays whole.
+
+## Answered: the GPU is at maximum clocks and still delivers ~600 GFLOP/s
+
+Xcode 16 is installed here, so this *was* measurable after all -- `xcrun xctrace
+record --template 'Metal System Trace' --launch` runs headlessly, and an earlier
+claim in this document that GPU counters were unreachable was simply wrong.
+
+Time-weighted GPU performance state from an 81 s trace covering a full prefill:
+
+| window | state |
+| --- | --- |
+| model load (0-45 s) | Minimum 98.4%, Medium 1.6% |
+| **prefill (52-62 s)** | **Maximum 88.9%**, Minimum 9.0%, Medium 2.1% |
+| thermal state, whole trace | **Nominal** |
+
+So during prefill the GPU runs at its **maximum** DVFS state, thermals never leave
+Nominal, occupancy is 97.4%, and the achieved rate is still ~600 GFLOP/s.
+
+**That closes the 15%-of-peak question. Nothing is throttling, waiting or idle.**
+The nominal ~4 TFLOP/s figure is fp32 FMA throughput; NVMAI's kernels unpack a
+nibble and apply a per-group scale and bias for *every* weight, several ALU ops on
+top of the two the multiply-accumulate needs. At max clocks with the GPU saturated,
+~600 GFLOP/s of useful matmul is what that costs.
+
+The consequence is that prefill has no GPU-side fix. There is no slow kernel, no
+stall, no undersized cache and no clock headroom. Going faster requires either
+fewer ALU ops per weight -- which means changing the weight format, and the 4/8-bit
+choice is a user-facing quality decision -- or a unit that decompresses in
+hardware.
+
+### Which reverses the recommendation
+
+The precondition set earlier -- "do not start with Core ML until the counters
+explain the 15%" -- has now been met, and the answer favours Core ML. The ANE
+reaches 13 TFLOP/s on `qkv 2048->9216` at width 1024 precisely because it
+decompresses low-bit weights in hardware and never pays NVMAI's dequant ALU cost.
+That is an architectural advantage, not a tuning difference, and it is the only
+measured path to faster prefill.
+
+For a 3752-token prompt prefill is 53 s today. That is the largest single
+user-visible cost anywhere in NVMAI, and it is the one place where the three-unit
+research produced a real opportunity rather than negative knowledge.
+
+What a Core ML prefill path still has to solve, unchanged: all 256 experts resident
+as a stacked tensor with a per-token gather, and handing the ANE-produced KV cache
+to the GPU decode path across two frameworks. Those are the hard parts. But they
+are now worth attempting, which they were not before this measurement.
