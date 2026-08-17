@@ -165,17 +165,47 @@ generator consuming the entire 3.2 GB/s and starving NVMAI's own fetches; it is
 contention from an external hog, not a cost the engine pays for using its own
 bandwidth. Budget the disk as a shared finite resource, but do not fear the threads.
 
-### 3. Predictive prefetch, since routing cannot be known early
+### 3. Predictive prefetch: PROVABLY CANNOT WORK
 
-Expert choice for layer L is only known after layer L-1 completes, so nothing can
-be prefetched from the current token's routing. But consecutive tokens share
-**38%** of a layer's experts (measured over 383 tokens), and the working set over a
-128-token window is 131 of 256 experts per layer.
+The idea was to prefetch layer L's experts using the *previous* token's routing for
+the same layer, available 40 layers early, on the strength of 38% measured
+token-to-token expert reuse.
 
-So prefetch from the *previous token's* routing for the same layer, which is
-available 40 layers early. A wrong guess costs a wasted read on an otherwise idle
-disk; a right guess removes a stall. With 3.2 GB/s and 5x headroom, speculative
-reads are close to free — this is what the surplus bandwidth is for.
+It cannot reduce a single miss, and the reason is structural rather than empirical.
+One token touches 8 experts per layer, so a token can never evict a cache of 16 or
+more. An expert used at layer L in token N-1 is therefore still resident at token N.
+**The predictable set and the miss set are disjoint by construction** -- prediction
+can only ever fetch what is already there.
+
+Replayed against the real 383-token routing trace, simulating an LRU cache per
+layer:
+
+| slots | miss rate | misses previous-token prediction would catch |
+| ---: | ---: | ---: |
+| 16 | 52.1% | **0.00%** |
+| 128 | 10.3% | **0.00%** |
+
+Zero at both budgets, as the argument requires. The 38% reuse figure is real but it
+is already fully exploited by the cache; what remains as misses is precisely the
+part no previous-token signal describes.
+
+Do not build this. Any prefetch scheme has to predict experts the cache has *not*
+recently held, which the routing trace gives no basis for.
+
+### 2b. Queue depth: already present, and bounded by the dependency chain
+
+The other half of the streaming plan was to keep the I/O queue non-empty. Within a
+layer this already happens: `executeExpertCachePlan` collects every miss and hands
+them to the reader as one batch, which its four threads service in parallel -- worth
+1.4-1.6x at 4-8 misses over serial `pread`.
+
+Across layers it is impossible. Layer L+1's experts are not known until layer L's
+router has run, so there is nothing legitimate to queue ahead. The only work
+available to overlap the fetch is the shared MLP, which is already committed before
+the fetch is issued.
+
+So section 2 is done to the extent the dependency chain permits, and section 3 is
+withdrawn. What is left of the streaming plan is item 4 below.
 
 ### 4. Remove the per-layer CPU round trip from decode
 
