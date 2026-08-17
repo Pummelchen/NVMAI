@@ -46,12 +46,15 @@ public final class KVCacheManager {
     public let config: ArchConfig
     public let maxContext: Int
     public let fp16RingEnabled: Bool
+    /// Retained so `reserve` can allocate; init-only allocation was the previous
+    /// invariant and growth deliberately relaxes it.
+    private let device: MTLDevice
 
-    private let kBuffers: [MTLBuffer]
-    private let vBuffers: [MTLBuffer]
+    private var kBuffers: [MTLBuffer]
+    private var vBuffers: [MTLBuffer]
     private let strides:  [Int]         // bytes per token, per layer
     private let kinds:    [LayerKind]
-    private let capacityTokens: [Int]
+    private var capacityTokens: [Int]
 
     public private(set) var position: Int = 0
 
@@ -65,6 +68,7 @@ public final class KVCacheManager {
                 maxPrefillChunkTokens: Int = 128) throws {
         precondition(maxContext > 0, "maxContext must be positive")
         precondition(maxPrefillChunkTokens > 0, "maxPrefillChunkTokens must be positive")
+        self.device = device
         self.config = config
         self.maxContext = maxContext
         let ringEnabled = fp16RingEnabled
@@ -114,7 +118,17 @@ public final class KVCacheManager {
             }
             let isFull = maskValue != 0
             let stride = isFull ? fullStride : swaStride
-            let capacity = ringEnabled && !isFull ? swaCapacity : maxContext
+            // Linear layers start at `initialCapacityTokens` and grow on demand
+            // rather than reserving `maxContext` up front. At 262144 tokens a
+            // full reservation is 512 MiB per layer, 20 GiB across 40 -- lazily
+            // touched, so it barely shows in RSS, but on a 24 GB machine the
+            // mappings alone cost throughput: the same 25-token prompt measured
+            // 13.80 s of decode at maxContext 8192 against 22.44 s at 262144.
+            // Growing keeps a short conversation at a short conversation's cost
+            // while leaving the advertised limit reachable.
+            let capacity = ringEnabled && !isFull
+                ? swaCapacity
+                : min(maxContext, Self.initialCapacityTokens)
             let length = capacity * stride
 
             guard let kBuf = device.makeBuffer(length: length, options: .storageModeShared) else {
@@ -139,6 +153,53 @@ public final class KVCacheManager {
         self.strides  = st
         self.kinds    = kd
         self.capacityTokens = caps
+    }
+
+    /// Tokens each linear layer is sized for before any growth.
+    ///
+    /// 8192 because it measured as fast as any smaller reservation and holds an
+    /// ordinary conversation without a single grow. Capacity doubles from here.
+    public static let initialCapacityTokens = 8_192
+
+    /// Grows linear layers so every one can hold `tokens`, copying what is
+    /// already stored.
+    ///
+    /// Must be called before writing at a position beyond the current capacity.
+    /// Ring-backed SWA layers are never grown -- their capacity is the window and
+    /// is deliberate. Capacity doubles, so a conversation reaching the advertised
+    /// 262144 limit pays five copies in total rather than one per token.
+    ///
+    /// Buffers are `storageModeShared`, so the copy is a plain `memcpy`; callers
+    /// fetch buffers through the accessors at use time and never cache them
+    /// across tokens, which is what makes swapping them safe here.
+    public func reserve(tokens: Int) throws {
+        let needed = min(max(tokens, 1), maxContext)
+        for layer in 0..<kinds.count {
+            guard kinds[layer] != .linear else { continue }
+            if fp16RingEnabled && kinds[layer] == .swa { continue }
+            let current = capacityTokens[layer]
+            guard current < needed else { continue }
+            var target = current
+            while target < needed { target *= 2 }
+            target = min(target, maxContext)
+
+            let stride = strides[layer]
+            let length = target * stride
+            guard let newK = device.makeBuffer(length: length, options: .storageModeShared),
+                  let newV = device.makeBuffer(length: length, options: .storageModeShared) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            newK.label = "kv.K.layer\(layer)"
+            newV.label = "kv.V.layer\(layer)"
+            let usedBytes = min(current, position) * stride
+            if usedBytes > 0 {
+                memcpy(newK.contents(), kBuffers[layer].contents(), usedBytes)
+                memcpy(newV.contents(), vBuffers[layer].contents(), usedBytes)
+            }
+            kBuffers[layer] = newK
+            vBuffers[layer] = newV
+            capacityTokens[layer] = target
+        }
     }
 
     public func layerKind(_ layer: Int) -> LayerKind { kinds[layer] }

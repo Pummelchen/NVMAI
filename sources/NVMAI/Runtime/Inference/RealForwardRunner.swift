@@ -1343,6 +1343,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill cursor \(kvPosition) != startPosition \(startPosition)")
         }
+        // KV grows on demand rather than reserving maxContext, so make room for
+        // this chunk before anything writes into it.
+        try kv?.reserve(tokens: startPosition + tokens.count)
         guard startPosition >= 0, startPosition + tokens.count <= maxContext else {
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill range [\(startPosition), \(startPosition + tokens.count)) exceeds maxContext \(maxContext)")
@@ -1527,6 +1530,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw PrefillError.prefillCursorMismatch(
                 "produce cursor \(kvPosition) != position \(position)")
         }
+        try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
