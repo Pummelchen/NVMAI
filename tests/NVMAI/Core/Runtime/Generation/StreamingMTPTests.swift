@@ -4,17 +4,29 @@ import Foundation
 
 @Suite struct StreamingMTPTests {
     @Test func defaultPlanFitsStrictBudget() throws {
+        let slots = StreamingMTPMemoryPlan.expertSlots
         let plan = try StreamingMTPMemoryPlan(
             residentTensorBytes: 43 * 1_048_576,
             expertStrideBytes: 1_769_472,
             targetRollbackBytes: 62 * 1_048_576,
             scratchBytes: 8 * 1_048_576)
-        #expect(plan.streamedExpertCacheBytes == 8 * 1_769_472)
+        #expect(plan.streamedExpertCacheBytes == slots * 1_769_472)
         #expect(plan.draftKVBytes == 128 * 1_048_576)
         // The default budget (384 MiB) must cover the sum of every component.
-        #expect(plan.requiredBytes == 43 * 1_048_576 + 8 * 1_769_472
+        #expect(plan.requiredBytes == 43 * 1_048_576 + slots * 1_769_472
             + 128 * 1_048_576 + 62 * 1_048_576 + 8 * 1_048_576)
         #expect(plan.requiredBytes < plan.budgetBytes)
+    }
+
+    @Test func expertSlotDefaultIsWithinTheAllowedSet() {
+        #expect(StreamingMTPMemoryPlan.allowedExpertSlots
+            .contains(StreamingMTPMemoryPlan.defaultExpertSlots))
+        // The env override is read once into a `let`, so a test cannot flip it
+        // in-process. What it can pin is that an unset/invalid override leaves
+        // the default in force, which is the property callers depend on.
+        #expect(StreamingMTPMemoryPlan.expertSlots
+            == StreamingMTPMemoryPlan.defaultExpertSlots
+            || ProcessInfo.processInfo.environment["NVMAI_MTP_EXPERT_SLOTS"] != nil)
     }
 
     @Test func oversizedResidentDesignIsRejected() {

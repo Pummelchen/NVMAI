@@ -8,7 +8,31 @@ public struct StreamingMTPMemoryPlan: Sendable, Equatable {
     public static let allowedBudgetMiB = 256...512
     public static let defaultBudgetMiB = 384
     public static let defaultDraftKVTokens = 65_536
-    public static let expertSlots = 8
+    public static let defaultExpertSlots = 8
+    public static let allowedExpertSlots = [8, 16, 24, 32, 64]
+
+    /// Routed-expert cache slots for the MTP sidecar, which is a 1-layer MoE
+    /// with 256 experts. Tunable because it shipped hard-coded and nothing in
+    /// the build could measure the alternative -- the target model has had
+    /// `--expert-cache-slots` all along, and the sidecar not having an
+    /// equivalent is why this value went unexamined for so long.
+    ///
+    /// The default stays at 8: an interleaved A/B (4 samples each, warmup
+    /// discarded) measured 8 slots at 6.202 tok/s (sd 0.26) against 32 slots
+    /// at 6.008 (sd 0.35) -- no gain, and 32 costs another 42 MiB of the
+    /// budget. Sequential sweeps appear to show 32 winning by ~11%, but that
+    /// is page-cache warming from running the configs in order; measure this
+    /// interleaved or not at all.
+    ///
+    /// Read once: the plan is constructed per session and the value must not
+    /// change under a running decoder.
+    public static let expertSlots: Int = {
+        guard let raw = ProcessInfo.processInfo.environment["NVMAI_MTP_EXPERT_SLOTS"],
+              let value = Int(raw), allowedExpertSlots.contains(value) else {
+            return defaultExpertSlots
+        }
+        return value
+    }()
 
     public let budgetBytes: Int
     public let residentTensorBytes: Int

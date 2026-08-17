@@ -633,7 +633,32 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     /// Verify `[confirmed, draft]` in the existing batched prefill path. The
     /// two target logits and target hidden rows are produced from one 40-layer
-    /// backbone traversal, which is the source of MTP's decode speedup.
+    /// backbone traversal, which is where MTP's decode speedup would come from.
+    ///
+    /// It does not currently come out ahead, and the reason is structural
+    /// rather than a tuning problem. On a sparse MoE the cost of a verify pass
+    /// tracks the *union* of the experts its rows route to, not the row count:
+    /// rows sharing an expert ride along on one weight read (the grouping in
+    /// `PrefillMoEGrouping` sorts by expert so this already happens), rows that
+    /// do not each pay in full. Measured on Qwen3.6-35B-A3B, 40 layers,
+    /// topK=8 of 256:
+    ///
+    ///     width 1   8.00 experts/layer   cost 1.000x
+    ///     width 2  12.68 experts/layer   cost 1.585x   <- verifyGreedyPair
+    ///
+    /// Against that, acceptance of 57.4% emits 1.574 tokens per pass. Cost
+    /// 1.585 versus benefit 1.574: the two cancel, and every other per-pass
+    /// overhead turns it into a net loss (~0.85x end to end).
+    ///
+    /// Widening the block does not rescue it. Benefit is a geometric series
+    /// capped at 1/(1-p) = 2.35, while the union keeps growing -- measured
+    /// 5.18x at width 13 and 11.25x at width 42. Width 2 is the closest this
+    /// model ever gets to break-even, and it still misses.
+    ///
+    /// So the lever is acceptance, not the verify path: p must exceed ~0.585
+    /// merely to break even. Faster projections cannot help -- the attention
+    /// side already amortizes across both rows via `useTwoRowProjection`, and
+    /// the expert side is bounded by the union above, not by matmul shape.
     func verifyGreedyPair(_ tokens: [Int32],
                           startPosition: Int) async throws -> TargetPairVerification {
         guard tokens.count == 2 else {
@@ -1308,6 +1333,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         var prefillRouteNanos: UInt64 = 0
         var prefillTileNanos: UInt64 = 0
         var prefillTailNanos: UInt64 = 0
+        var prefillActiveExperts: UInt64 = 0
 
         for L in 0..<cfg.numLayers {
             try Task.checkCancellation()
@@ -1364,7 +1390,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 layerStart: prefillLayerStart,
                 routeNanos: &prefillRouteNanos,
                 tileNanos: &prefillTileNanos,
-                tailNanos: &prefillTailNanos)
+                tailNanos: &prefillTailNanos,
+                activeExperts: &prefillActiveExperts)
         }
 
         if prefillProfile {
@@ -1373,6 +1400,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             print("  route readback + GPU: \(String(format: "%.1f", Double(prefillRouteNanos) / 1e6)) ms")
             print("  expert fetch + tiles: \(String(format: "%.1f", Double(prefillTileNanos) / 1e6)) ms")
             print("  tail + residual:      \(String(format: "%.1f", Double(prefillTailNanos) / 1e6)) ms")
+            let perLayer = Double(prefillActiveExperts) / Double(max(1, cfg.numLayers))
+            print("  active experts/layer: \(String(format: "%.2f", perLayer))"
+                + " (topK=\(cfg.topKExperts), max possible \(t * cfg.topKExperts))")
         }
 
         if writeFinalHead {
@@ -2435,7 +2465,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         layerStart prefillLayerStart: UInt64,
         routeNanos prefillRouteNanos: inout UInt64,
         tileNanos prefillTileNanos: inout UInt64,
-        tailNanos prefillTailNanos: inout UInt64
+        tailNanos prefillTailNanos: inout UInt64,
+        activeExperts prefillActiveExperts: inout UInt64
     ) async throws {
         var prefillRouteEnd = prefillLayerStart
         var prefillTileEnd = prefillLayerStart
@@ -2506,6 +2537,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
                 prefillRouteEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                 prefillRouteNanos &+= prefillRouteEnd - prefillLayerStart
+                // One group per *distinct* expert this chunk touches. For a
+                // 1-token chunk this is topK; for a speculative 2-token verify
+                // it is the union of the two tokens' routes, which is what
+                // decides whether the extra row rides along on weights the
+                // first row already pulled in or pays for its own.
+                prefillActiveExperts &+= UInt64(routes.groups.count)
 
                 guard let sharedCB = ctx.queue.makeCommandBuffer() else {
                     throw ModelError.residentBufferWrapFailed
