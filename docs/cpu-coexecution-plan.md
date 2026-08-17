@@ -355,6 +355,54 @@ tokens emitted per pass (1.574), and wider blocks diverge because benefit is
 capped at 1/(1-p) while the union grows unbounded. Adding CPU capacity does not
 change that ratio.
 
+## mlx-dspark: what transfers and what does not
+
+`https://github.com/ARahim3/mlx-dspark` reports roughly 1.3x on this same model
+with EAGLE-family drafters (DSpark, semi-autoregressive) and a block-diffusion
+variant (DFlash), plus a small-M quantised matmul and hardware-aware cap
+calibration. Only one part of that is worth taking here.
+
+**The drafter transfers.** NVMAI's MTP problem is acceptance, not
+implementation: break-even needs p > 0.585 and the current drafter reaches
+0.574, missing by 1.1 points. A trained EAGLE-family drafter attacks exactly
+that. Running their acceptance range through the union costs measured here:
+
+| acceptance | B(2) | vs C(2)=1.585 | net |
+| ---: | ---: | ---: | ---: |
+| 0.574 (today) | 1.574 | below | 0.99x, 0.85x with overheads |
+| 0.75 | 1.75 | above | ~1.10x |
+| 0.80 | 1.80 | above | ~1.14x |
+
+Widening still does not pay even at p=0.80 -- width 3 gives ~1.16x, width 4
+~1.15x -- because C(t) keeps climbing while B(t) saturates at 1/(1-p). So the
+ceiling is ~1.15-1.3x, which is where their published figure lands. Two
+independent derivations agreeing is the best evidence available that the model
+above is sound.
+
+**The small-M matmul does not transfer.** This was the first hypothesis in this
+investigation and measurement killed it. The 2-row verify already amortises
+through `useTwoRowProjection` -- one weight read feeding both rows -- and the
+expert side is bounded by how many *distinct* experts must be read, not by
+matmul shape. A better tile does not reduce the union.
+
+**Block diffusion is a worse fit here than in a dense model.** DFlash-style
+block drafting pays the union tax at every additional width, and the measured
+curve is brutal for it: 5.18x at width 13, 11.25x at width 42, against benefit
+capped at 2.35. Techniques that amortise well on dense models fight this
+architecture.
+
+**Priority.** The drafter is a real 1.15-1.3x but it is an ML project -- port
+or train an EAGLE-family drafter for Qwen3.6, with model-quality risk and a new
+artifact to validate. Against that, ~16.7 ms of GPU idle remains in a ~47 ms
+token; closing it is worth up to 1.78x, is pure engineering, and part is
+already banked. The two are independent and multiply, so finish the idle work
+first and stack the drafter afterwards if it is still wanted.
+
+One caveat on provenance: the description of their approach comes from reading
+the repository earlier in this work, not from a fresh review. The numbers drawn
+from NVMAI's own measurements stand on their own; their internals should be
+re-verified before any port is committed to.
+
 ## Risks
 
 **Numerics.** CPU fp32 accumulation will not match the GPU bit-for-bit, so the
