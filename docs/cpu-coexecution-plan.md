@@ -737,3 +737,52 @@ Closing that gap is entirely a matter of keeping the GPU fed: 16.7 ms of the
 So a v4.0 should be a single-minded attack on GPU idle and kernel bandwidth
 efficiency, with no CPU or ANE participation at all. 1.71x is the credible target;
 2x needs the kernel efficiency to be there as well.
+
+## 100% ANE, no GPU: a different route to the same ceiling
+
+Worth asking, because the objection to ANE was contention, and running *only* on
+ANE has no contention. Measured with a 64-layer 2048x2048 fp16 stack (512 MiB of
+weights, far past overhead-bound):
+
+| batch | ANE | CPU |
+| ---: | ---: | ---: |
+| 1 | **64.3 GB/s** | **63.8 GB/s** |
+| 8 | 64.4 | 48.7 |
+| 64 | 62.7 (4010 GFLOP/s) | 30.1 |
+
+At batch 1 the ANE and the CPU are indistinguishable, 64.3 against 63.8 GB/s.
+That is the whole story: batch-1 decode reads every weight exactly once and reuses
+nothing, so it is purely bandwidth-bound and the compute unit does not matter. The
+ANE's 4 TFLOP/s only shows up at batch 64, where reuse exists. It never exceeds
+~64 GB/s of weight streaming at any batch size.
+
+NVMAI's GPU achieves ~65 GB/s during its busy window. **The ANE and the GPU hit
+the same wall, because it is the same wall.**
+
+So an all-ANE engine would land at 1.8 GB / 64 GB/s = 28 ms/token, about 36 tok/s.
+That is a legitimate architecture for reaching it -- Core ML executes the whole
+graph without the per-layer CPU round trips that produce NVMAI's 16.7 ms of idle,
+so the idle would be absent by construction rather than engineered away. But it is
+the *same* 36 tok/s that eliminating GPU idle reaches, from the opposite direction.
+
+It would also cost: no weight streaming, so the whole model resident (viable only
+if Core ML's 4-bit palettisation holds ~18 GB, and worse for the 6/8-bit
+variants); the MoE expressed as a gather over all 256 stacked experts, whose ANE
+efficiency is unknown; and NVMAI's engine, prompt cache and quantisation choice
+replaced wholesale.
+
+### The corrected ceiling
+
+An earlier estimate here used 78 GB/s -- the pure CPU streaming-read peak -- to
+put the ceiling at 43 tok/s. That was wrong: no path that also *computes* reaches
+78. Every compute path measured lands at 62-65 GB/s, whether GPU, ANE or CPU.
+
+So the real ceiling for 4-bit on this M3 is **1.8 GB / ~64 GB/s = 28 ms/token,
+about 36 tok/s**, against 21 measured. Maximum available gain is **1.71x**, and it
+is entirely the GPU idle. Three independent routes -- eliminate the idle, run
+all-ANE, or run all-CPU -- converge on the same 36 tok/s, which is what a
+bandwidth ceiling looks like from the inside.
+
+**2x is not achievable on this hardware with this model at 4-bit.** Not by
+redesign, not by using every unit, not by compression. The remaining 1.71x is
+real and worth building; the last 0.3x does not exist.
