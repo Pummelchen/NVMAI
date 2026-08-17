@@ -508,3 +508,72 @@ A v4.0 candidate is not done until all five behave as they do in v3.8: the alias
 appears in `/v1/models`, the unload endpoint returns 200 and actually frees, the
 idle timer fires, concise mode still shortens answers by roughly half, and a
 follow-up turn still hits the prefix cache instead of re-prefilling.
+
+# Item 7: ANE prefill prototype — measured, and it is worth building
+
+Two questions had to be answered before a Core ML prefill path could be taken
+seriously: whether a per-token top-8-of-256 expert gather is expressible at all,
+and how a real attention block actually performs. Both are now measured.
+
+## The expert gather is expressible
+
+`mb.gather` over all 256 experts stacked as one tensor converts and runs on the
+`CPU_AND_NE` path. Two toolchain notes for whoever picks this up, because both cost
+an hour: `gather` needs `opset_version=ct.target.iOS17` or the compiler demands a
+`validate_indices` parameter the MIL builder refuses to emit, and
+`scaled_dot_product_attention` needs iOS18.
+
+So expressibility is not the blocker. **Residency is.** A Core ML graph holds its
+weights; there is no streaming. All 256 experts across 40 layers is 32.2B
+parameters, roughly 16 GB palettised to 4 bits, which must be resident — on a 24 GB
+machine that is the configuration measured at 0.2 GB/s of thrash earlier in this
+document. A full-model Core ML prefill therefore contradicts the streaming
+architecture that is the point of the project.
+
+## Attention alone, which needs no expert residency, is 15-19x faster
+
+One Qwen 3.6 attention block built in MIL -- RMSNorm, packed q+gate/k/v projection
+(2048 -> 9216), GQA broadcast from 2 kv heads to 16, SDPA, output projection
+(4096 -> 2048) -- 4-bit palettised, marginal cost taken as a slope over 1 and 3
+repetitions:
+
+| width | NVMAI GPU (derived) | ANE (measured) | ratio |
+| ---: | ---: | ---: | ---: |
+| 256 | ~28.9 ms/block | **1.50 ms** | 19.2x |
+| 1024 | ~138.8 ms/block | **8.99 ms** | 15.4x |
+
+The GPU column is derived from the measured 742 ms/block at 3532 tokens, split
+equally between projections and SDPA at that width (they are ~205 GFLOP each) and
+rescaled linearly and quadratically respectively. The ANE figure at width 1024
+works out to ~8.5 TFLOP/s, consistent with the 8-17 TFLOP/s measured on isolated
+shapes, so the two independent measurements agree.
+
+**Why prefill and not decode.** The decode hybrid was rejected because alternating
+ANE and GPU costs 40 handoffs *per token*. Prefill alternates 40 times per *chunk*,
+and the shipped chunk is 4096 tokens -- the same overhead amortised across four
+thousand tokens instead of one. The objection simply does not apply here.
+
+## What it would be worth
+
+Attention is 29,687 ms of a 52,350 ms prefill, 57%. Even discounting the measured
+ratio to 10x, prefill for a 3532-token prompt goes from 52.4 s to ~25.6 s, a **2.0x**
+end-to-end improvement on the largest user-visible cost in NVMAI.
+
+## What is not solved
+
+- **The KV cache handoff.** ANE-produced K and V must be consumable by the GPU
+  decode path. Two frameworks, two allocations; this is the real engineering.
+- **A second weight artifact.** Attention weights only, 1.31 GiB at 4-bit, as a
+  palettised `.mlpackage` alongside the `.gturbo`. Installer and receipt work.
+- **The prototype is simplified.** No RoPE, no output gate, GQA by `tile` rather
+  than a proper broadcast, and no KV write. Those add work, so treat 15-19x as an
+  upper bound -- which is why the estimate above discounts to 10x.
+- **Power.** ANE load measured +89% GPU-busy when both run concurrently. In prefill
+  they would alternate rather than overlap, so this may not apply, but it is
+  unmeasured.
+
+## Recommendation
+
+Worth building, after item 2. It is the only remaining change measured to be worth
+more than 1.5x, and unlike item 2 it cannot produce silently wrong decode output --
+a broken prefill path fails loudly or produces visibly wrong text.
