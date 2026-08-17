@@ -473,3 +473,73 @@ interleaved retest.
 
 `NVMAI_KERNEL_STATS=1` reports merged GPU occupancy; `TURBO_FIELDFARE_PHASES=1`
 reports per-chunk route/tile/tail split and active experts per layer.
+
+## Lossless compression: the experts are 54.7% exactly zero
+
+Question asked: can lossless compression cut the bytes moved from SSD, and
+across the bus between RAM, CPU and GPU? Measured on the installed models, and
+the answer splits sharply by tensor.
+
+**Attention and other non-expert weights are incompressible.** Sampling 64 MiB
+of `model_weights.bin`, 100% of 64-code groups need all 4 bits. Dense, as
+expected. Nothing to win, and these are the *larger* consumer at ~900 MiB/token.
+
+**Expert weights are not just compressible, they are largely zero.** In
+`layer_00`'s first expert, 8960 of 16384 gate groups (54.7%) have every code
+zero -- and in all 8960 the bias is exactly 0.0, so those weights are not
+merely constant, they are exactly zero. Whole rows: 183-297 of 512 per expert.
+The same 54.7% appears at 4-bit, 6-bit and 8-bit, so this is structure in the
+model rather than an artifact of quantisation.
+
+Entropy backs it up: the 4-bit code stream carries 3.010 bits of information per
+code, with code 0 taking 44.6% of all codes. General-purpose compressors reach
+57-62% of original on the weight stream; the scale stream compresses to 37%.
+
+### Why this is better than compression
+
+A group whose codes are all zero contributes `scale * sum(q*x) + bias * sum(x)`
+= `0 + 0` -- exactly nothing. So it does not need decompressing, it needs
+skipping: no 32-byte load, no nibble unpack, no FMAs. And `sum(x)` per group is
+already precomputed since the hoist in 5d85661, so even a constant-but-nonzero
+group would cost a single multiply-add.
+
+Two ways to take it:
+
+**Runtime bitmap, no format change.** Scan each expert once at load time and
+build one bit per group ("all codes zero"). About 2 KiB per tensor, 0.4%
+overhead. The kernel consults it and skips those groups. This removes 54.7% of
+expert weight *reads* and arithmetic without touching the `.gturbo` format or
+the installer. It does not shrink the file or the resident slot, so the pread
+cost stays.
+
+**Repack, for the full win.** Store only the non-zero groups plus the bitmap and
+a per-row base offset. Expert weights drop to roughly 46% of current size, which
+changes what fits in RAM:
+
+| quant | experts now | packed | total now | total packed |
+| --- | ---: | ---: | ---: | ---: |
+| 4-bit | 16.88 GiB | ~7.8 | 18.19 | ~9.1 |
+| 6-bit | 24.38 | ~11.2 | 26.25 | ~13.1 |
+| 8-bit | 31.88 | ~14.7 | 34.32 | ~17.1 |
+
+That is the interesting column. 6-bit and 8-bit are currently unusable on a
+24 GiB machine -- 6.68 and 1.64 tok/s against 4-bit's 18.83, because they page
+continuously. Packed, both would fit, which turns the quality/speed choice back
+into a gradient instead of the cliff measured above.
+
+### Expected gain on 4-bit
+
+Experts are ~540 MiB of the ~1800 MiB read per token. Removing 54.7% of that is
+~295 MiB, a 16% cut in total bytes. The GPU is bandwidth-bound at ~88% of
+achievable, so GPU-busy should fall roughly in step: 27.6 -> ~23 ms, taking the
+token from 47.3 to ~43 ms, about +10%.
+
+Both routes are *exactly* lossless -- the same codes and the same arithmetic
+come out, so the golden baseline must stay byte-identical. That makes it
+unusually well-tested for a change of this size: if output moves at all, the
+implementation is wrong.
+
+Unverified assumption worth stating: this is measured on `layer_00` expert 0 and
+spot-checked at three quantisations. Sparsity per expert ranged 35.7-58.0% in
+the three sampled, so the 54.7% figure is one expert's, not a model-wide mean.
+A full scan across all 40 layers should precede any repack work.
