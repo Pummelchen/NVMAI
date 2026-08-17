@@ -585,3 +585,50 @@ achievable.
 
 Not worth building. The 7% ceiling is set by the quantiser having already done
 the compression well.
+
+## The decisive measurement: CPU work makes the GPU 45% slower
+
+Everything above assumed the idle cores were close to free, on the strength of a
+streaming-read test that pulled 45-60 GB/s during inference without hurting the
+GPU. That test was wrong about the workload. Running the *actual* CPU expert
+kernel (8 threads, int4 dequant + GEMV) as a load generator during decode:
+
+| CPU load | tok/s | GPU busy/token |
+| --- | ---: | ---: |
+| off | 19.886 | 27.335 ms |
+| 8 threads of real dequant work | 15.387 | **39.608 ms** |
+
+GPU-busy rose **44.9%** and throughput fell 22.6%. A sequential streaming read is
+prefetch-friendly and low-power; a dequant kernel is neither, and it competes
+with the GPU for both the memory controller and the package power budget.
+
+This kills CPU co-execution outright, and the arithmetic shows why it cannot be
+recovered by tuning the split. At best the CPU absorbs ~32% of the work, but the
+GPU then does the remaining 68% at 0.69x speed -- slower overall than the GPU
+doing all of it alone. There is no split ratio that wins.
+
+Phase 1 and Phase 2 above are therefore dead, not deferred. The CPUExpertFFN
+kernel and NVMAIKernelsC target remain in the tree because they are correct,
+tested, and cheap to keep, but nothing should call them from the decode path.
+
+### What this leaves for a 2x
+
+Three resources were nominated. Measured:
+
+- **CPU cores**: net negative (above). Not idle capacity -- competing capacity.
+- **ANE**: unreachable. Core ML only, no forced placement, fp16/int8 only, and a
+  statically compiled graph cannot express per-token expert routing.
+- **Memory bus**: only 38% utilised *averaged over the token*, but that average
+  is dragged down by the idle. During the 27.6 ms the GPU is actually working it
+  pulls ~65 GB/s against ~78 GB/s achievable on this machine -- 83%. The bus is
+  not the slack it appears to be.
+
+So the only real slack is the idle itself, 16.7 ms of a 47.3 ms token. Driving it
+to zero yields 27.6 ms/token, 36 tok/s, **1.71x** -- and that is the credible
+ceiling.
+
+2x needs 23.65 ms/token. Reaching it requires the idle *and* raising GPU
+bandwidth efficiency from ~65 to ~78 GB/s during compute, roughly +20% on the
+kernels themselves. Whether that headroom exists is unmeasured; the GPU is
+already at 83% of what a pure CPU streaming read achieves, so it is a narrow
+target, not an obvious one.
