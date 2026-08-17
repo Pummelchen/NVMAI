@@ -1013,3 +1013,61 @@ pointless if the GPU has 3-5x sitting in its own kernels.
 
 So: profile prefill's GPU roles at width 4096 first. Only if the GPU is genuinely
 near its ceiling does the Core ML prefill path become the right answer.
+
+## Prefill profiled: where the 14% of peak actually goes
+
+Profiling a 3752-token prefill (chunk 4096, 128 slots), the phase split is:
+
+```
+prefill 3752 tokens: 52,350 ms total
+  route readback + GPU: 30,334.5 ms  (58%)
+  expert fetch + tiles: 21,879.0 ms  (42%)
+  tail + residual:         136.6 ms
+  active experts/layer: 201.25 of 256
+```
+
+Two notes on reading this. The `NVMAI_KERNEL_STATS` roles are useless here -- their
+counts are 120 = 40 layers x 3 decode tokens, because prefill runs through
+`executePrefillChunk`, which never calls `recordKernelGPU`. Prefill has no
+occupancy instrumentation at all. And "route readback + GPU" is a coarse label
+covering the whole attention block, not just the router: RMSNorm, QKV, SDPA,
+O-projection and the residual are all inside it.
+
+**The compute half.** At 3752 tokens the SDPA is ~9.2 TFLOP and the projections
+~8.2 TFLOP, so ~17.4 TFLOP in 30.3 s -- about 574 GFLOP/s, ~14% of the M3 GPU's
+peak. Genuinely compute-bound and genuinely inefficient, cause not yet identified.
+
+**The I/O half.** 201 experts per layer are touched but only 128 slots exist, so
+73 evictions per layer per chunk minimum. 13.6 GB of expert reads in 21.9 s is
+0.62 GB/s -- disk speed, not memory speed. The cache is thrashing.
+
+### Tested and rejected: the q-family dispatch
+
+`selectedDispatch` returned `.repeatedGEMV` for the q family at *every* width,
+while `kv` and `o` batch through `.qmm` above 32 -- meaning one GEMV dispatch per
+row for the largest weight in the attention block (the packed query+gate
+projection), 4096 per layer at the default chunk. That looked like the answer.
+
+Measured both ways, output byte-identical (`6e38735501280dc0`, verified at width
+892 where the golden baseline's 25-token prompt cannot reach):
+
+| prompt | `.qmm` | `.repeatedGEMV` |
+| ---: | ---: | ---: |
+| 892 tokens | 9.964 s | 10.198 s |
+| 3752 tokens | 54.473 s | 52.105 s |
+
+Opposite directions, both within the machine's noise. The policy is not the
+bottleneck and the change was reverted rather than shipping a knob for nothing.
+
+### The actionable finding: the slot cache is sized for decode
+
+Prefill needs 201 experts per layer; the cache holds 128. But prefill walks each
+layer exactly once, so unlike decode it does not need 40 layers of slots resident
+simultaneously -- a prefill-specific single-layer cache of 256 slots costs
+256 x 1.688 MiB = **432 MiB**, against the 17.3 GB that 256 slots x 40 layers
+would cost. That removes the eviction entirely for the 42% of prefill that is
+expert I/O.
+
+This is the strongest v4.0 lead in this document: a contained change, a clear
+mechanism, and a memory cost of under half a gigabyte. It should be measured
+before any Core ML work, and before the compute half is investigated.
