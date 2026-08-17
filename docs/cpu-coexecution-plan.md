@@ -566,3 +566,22 @@ The SSD-to-RAM leg is the only one where the architecture applies at all, and
 there it reduces to compressed-at-rest, since an SSD can only return stored
 bytes. That buys 8% fewer disk bytes for a decompressor 20x slower than the read
 path it replaces.
+
+### nvCOMP specifically
+
+Cannot be tried: nvCOMP is CUDA-only. Verified on this machine -- Apple M3, no
+CUDA toolchain, and no `nvidia-nvcomp` distribution exists for any non-CUDA
+platform. The equivalent here would be writing an entropy-decode kernel in
+Metal, which is what nvCOMP's ANS codec does on NVIDIA hardware.
+
+The entropy measurement already bounds what that could win. At 3.712 of 4 bits
+per code, the floor for *any* lossless codec is 92.8% of current size. zlib
+measured 92.0%, i.e. already at that floor -- which also means there is no
+inter-symbol structure left for a cleverer codec to exploit. So a perfect Metal
+ANS decoder saves ~7% of bytes: GPU-busy 27.6 -> 25.6 ms, token 47.3 -> 45.3,
+about +4% at the absolute ceiling and before subtracting the shader ALU the
+decode itself costs on a kernel that is already bandwidth-bound at 88% of
+achievable.
+
+Not worth building. The 7% ceiling is set by the quantiser having already done
+the compression well.
