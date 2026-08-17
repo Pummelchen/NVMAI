@@ -1193,6 +1193,11 @@ public actor ServerModelSession: ServerInferenceBackend {
                 totalGPU,
                 result.decodeSeconds > 0
                     ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
+            for gap in runner.kernelGPUGaps().prefix(8) {
+                print(String(
+                    format: "NVMAI gap %@ total_ms=%.1f per_token_ms=%.3f count=%d",
+                    gap.transition, gap.millis, gap.millis / Double(tokens), gap.count))
+            }
             print(String(format: "NVMAI kernel busy_ms=%.3f span_ms=%.3f "
                 + "occupancy=%.1f%% busy_share_of_decode=%.1f%% "
                 + "busy_per_token_ms=%.3f",

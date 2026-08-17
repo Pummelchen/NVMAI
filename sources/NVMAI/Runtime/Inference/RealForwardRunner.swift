@@ -1012,6 +1012,37 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return (busy * 1000, span * 1000)
     }
 
+    /// Where the GPU's idle time actually sits, attributed to the transition
+    /// it falls in.
+    ///
+    /// `kernelGPUOccupancy` says how much idle there is; this says where. Each
+    /// gap between one buffer finishing and the next starting is charged to the
+    /// pair of roles it separates, so "attn_tail_router -> moe_phase1_2_routed"
+    /// accumulates the wait for the router readback and expert fetch, while
+    /// "moe_phase1_2_routed -> attn_norm_qkv" accumulates the per-layer
+    /// turnaround. Without this the only way to pick a target is to divide
+    /// total idle by a buffer count and assume the quotient means something,
+    /// which is exactly the reasoning that produced a failed optimisation.
+    public func kernelGPUGaps() -> [(transition: String, millis: Double, count: Int)] {
+        guard kernelGPUTimings.count > 1 else { return [] }
+        let sorted = kernelGPUTimings.sorted { $0.start < $1.start }
+        var acc: [String: (millis: Double, count: Int)] = [:]
+        var previous = sorted[0]
+        for current in sorted.dropFirst() {
+            // Overlapping buffers contribute no gap; advance the frontier to
+            // whichever end is later so a long buffer does not manufacture one.
+            let gap = current.start - previous.end
+            if gap > 0 {
+                let key = "\(previous.role)->\(current.role)"
+                acc[key, default: (0, 0)].millis += gap * 1000
+                acc[key]!.count += 1
+            }
+            if current.end > previous.end { previous = current }
+        }
+        return acc.map { (transition: $0.key, millis: $0.value.millis, count: $0.value.count) }
+            .sorted { $0.millis > $1.millis }
+    }
+
     private func shouldSkipRDAdvice(position: Int,
                                     requestedMisses: Int,
                                     estimatedBytes: UInt64,
@@ -1565,6 +1596,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 attentionCB.commit()
             }
             tailCB.commit()
+            // Queued before the wait below, not after: the GPU runs the shared
+            // MLP while the CPU blocks on tailCB for the routing.
+            let sharedCB = try encodeAndCommitSharedExpert(layer: L)
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try waitForCompletion(tailCB)
             recordKernelGPU(role: "attn_norm_qkv", attnCB)
@@ -1588,6 +1622,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             try await encodeDecodeRoutedMoE(
                 layer: L, position: position, sharedProj: sharedProj,
                 attnCB: attnCB, tailCB: tailCB,
+                sharedCB: sharedCB,
                 pending: &pendingRoutedCommand,
                 bodyStart: tBodyStart, cb1Start: tCb1Start,
                 waitMark: tWait, waitNanos: waitNanos,
@@ -3006,12 +3041,62 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// argument buffer and the slot scratch; the layer trace at the end reports
     /// timings from every phase, so splitting it would mean threading those
     /// back out purely to shorten a function.
+    /// Encodes the shared dense MLP and commits it immediately.
+    ///
+    /// It depends only on `routedX`, which `tailCB` produces, so it can be
+    /// queued the moment `tailCB` is committed -- before the router readback,
+    /// not after it. Both sit on the same queue, so the GPU runs this while the
+    /// CPU is blocked waiting for `tailCB` to report the routing.
+    ///
+    /// That ordering is the whole point. Encoding it after the readback left a
+    /// measured 7.88 ms/token of GPU idle in the
+    /// `attn_tail_router -> shared_expert` transition -- 0.197 ms per layer of
+    /// command-buffer round trip during which the GPU had nothing queued, and
+    /// the largest single component of decode's idle time.
+    private func encodeAndCommitSharedExpert(layer L: Int) throws -> MTLCommandBuffer {
+        let sharedProj = sharedExpertProjections[L]
+        let D = UInt32(cfg.hiddenSize)
+        guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        try shared.encode(commandBuffer: sharedCB,
+                          x: routedX,
+                          gate: sharedProj.gate,
+                          up: sharedProj.up,
+                          down: sharedProj.down,
+                          y: h1Buf,
+                          scratchGate: denseScratchGate,
+                          scratchUp: denseScratchUp,
+                          scratchAct: denseScratchAct)
+        if cfg.sharedExpertGated {
+            // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
+            let gateView = sharedProj.scalarGate!
+            try int8ScalarGate!.encode(commandBuffer: sharedCB,
+                                   weights: gateView.buffer,
+                                   weightsOffset: Int(gateView.offset),
+                                   scales: gateView.buffer,
+                                   scalesOffset: Int(gateView.scaleOffset),
+                                   biases: gateView.buffer,
+                                   biasesOffset: Int(gateView.biasOffset),
+                                   x: routedX,
+                                   y: sharedScalarGateBuf!,
+                                   m: 1, n: D)
+            try elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
+                                                y: h1Buf,
+                                                gate: sharedScalarGateBuf!,
+                                                count: cfg.hiddenSize)
+        }
+        sharedCB.commit()
+        return sharedCB
+    }
+
     private func encodeDecodeRoutedMoE(
         layer L: Int,
         position: Int,
         sharedProj: LayerSharedExpertProjections,
         attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
+        sharedCB: MTLCommandBuffer,
         pending pendingRoutedCommand: inout PendingRoutedCommand?,
         bodyStart tBodyStart: UInt64,
         cb1Start tCb1Start: UInt64,
@@ -3119,41 +3204,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
         }
 
-        // The shared dense MLP depends only on its normed input, not on
-        // the routed experts. Commit it without waiting so its GPU work
-        // overlaps the routed-expert pread. The routed CB follows it on
-        // the same queue, so the combine sees h1Buf.
-        guard let sharedCB = ctx.queue.makeCommandBuffer() else {
-            throw ModelError.residentBufferWrapFailed
-        }
-        try shared.encode(commandBuffer: sharedCB,
-                          x: routedX,
-                          gate: sharedProj.gate,
-                          up: sharedProj.up,
-                          down: sharedProj.down,
-                          y: h1Buf,
-                          scratchGate: denseScratchGate,
-                          scratchUp: denseScratchUp,
-                          scratchAct: denseScratchAct)
-        if cfg.sharedExpertGated {
-            // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
-            let gateView = sharedProj.scalarGate!
-            try int8ScalarGate!.encode(commandBuffer: sharedCB,
-                                   weights: gateView.buffer,
-                                   weightsOffset: Int(gateView.offset),
-                                   scales: gateView.buffer,
-                                   scalesOffset: Int(gateView.scaleOffset),
-                                   biases: gateView.buffer,
-                                   biasesOffset: Int(gateView.biasOffset),
-                                   x: routedX,
-                                   y: sharedScalarGateBuf!,
-                                   m: 1, n: D)
-            try elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
-                                                y: h1Buf,
-                                                gate: sharedScalarGateBuf!,
-                                                count: cfg.hiddenSize)
-        }
-        sharedCB.commit()
         if let cb = phase1HitCB {
             cb.commit()
         }
