@@ -143,19 +143,33 @@ fi
 
 [ -n "$NOTES" ] || die "--publish needs --notes <file> (see the previous release for the shape)"
 [ -f "$NOTES" ] || die "notes file not found: $NOTES"
-# Hard failure, not a warning. --publish rebuilds the archive, so a checksum
-# copied from a dry run will not match what ships, and a release whose notes
-# quote the wrong SHA-256 is worse than one quoting none: it tells a careful
-# user their download is corrupt. 3.7 shipped this way for a few minutes.
-if ! grep -q "$SHA" "$NOTES"; then
-  die "the notes do not quote this archive's sha256 ($SHA); update them and re-run"
+
+# A release whose notes quote the wrong SHA-256 is worse than one quoting none:
+# it tells a careful user their download is corrupt. 3.7 shipped that way for a
+# few minutes, which is why this is enforced.
+#
+# But the notes cannot hard-code the digest either. --publish rebuilds from
+# scratch, so the binaries carry fresh mtimes and the archive hashes differently
+# than any dry run -- the value is unknowable when the notes are written. So the
+# notes carry the literal SHA256_PENDING and it is filled in here, which makes
+# the invariant hold by construction instead of by a check nothing can satisfy.
+RENDERED_NOTES="$STAGE_ROOT/notes-rendered.md"
+if grep -q 'SHA256_PENDING' "$NOTES"; then
+  sed "s/SHA256_PENDING/$SHA/g" "$NOTES" > "$RENDERED_NOTES" \
+    || die "failed to render notes"
+  echo "  filled SHA256_PENDING with $SHA"
+else
+  cp "$NOTES" "$RENDERED_NOTES"
+fi
+if ! grep -q "$SHA" "$RENDERED_NOTES"; then
+  die "the notes neither contain SHA256_PENDING nor quote this archive's sha256 ($SHA)"
 fi
 
 step "publish"
 gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
   --repo "$REPO" \
   --title "NVMAI $VERSION" \
-  --notes-file "$NOTES" \
+  --notes-file "$RENDERED_NOTES" \
   --latest || die "gh release create failed"
 gh release view "$TAG" --repo "$REPO" --json url,assets \
   --jq '"  \(.url)\n  assets: \([.assets[].name] | join(", "))"'
