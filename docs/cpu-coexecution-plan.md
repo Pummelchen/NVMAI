@@ -852,3 +852,73 @@ exploit, and it also decompresses 4-bit weights in hardware. The GPU is the only
 one that can run arbitrary kernels, any dtype, and dynamic control flow -- which is
 what a per-token top-8-of-256 MoE router requires. For NVMAI's decode path neither
 is faster, because neither is the bottleneck.
+
+# v4.0 research: GPU vs ANE per workload
+
+Benchmarked rather than assumed. ANE measured through Core ML at NVMAI's exact
+shapes with 4-bit palettised weights, so bytes-moved matches what the GPU reads.
+Per-op cost is the *marginal* cost from a slope (N and 2N repetitions of the op in
+one graph), which removes Core ML's ~1 ms fixed invocation overhead. GPU figures
+are NVMAI's own `NVMAI_KERNEL_STATS` roles, divided by 40 layers.
+
+## ANE efficiency collapses with tensor size
+
+| op | ANE ms/op | weight (4-bit) | GB/s |
+| --- | ---: | ---: | ---: |
+| qkv_proj 2048->9216 | 0.1414 | 9.0 MiB | 66.7 |
+| o_proj 4096->2048 | 0.0682 | 4.0 MiB | 61.5 |
+| router 2048->256 | 0.0053 | 0.2 MiB | 49.3 |
+| expert_gate 2048->512 | 0.0204 | 0.5 MiB | 25.7 |
+| expert_down 512->2048 | 0.0453 | 0.5 MiB | **11.6** |
+| lm_head 2048->248320 | 3.9677 | 242.5 MiB | 64.1 |
+
+This is the single most useful result for v4.0. The ANE reaches 62-67 GB/s on
+tensors of 4 MiB and up, and falls to 12-26 GB/s below 1 MiB. `expert_down` is the
+worst at 11.6 GB/s -- a 5.7x efficiency gap against `qkv_proj` for the same class
+of operation, and note it is worse than `expert_gate` despite identical byte count,
+so the narrow 512-wide input hurts as much as the small size.
+
+**NVMAI's MoE is built entirely from 0.5 MiB tensors.** That is precisely the
+regime where the ANE is weakest.
+
+## Where each unit wins
+
+| workload | GPU (measured) | ANE (measured) | winner |
+| --- | ---: | ---: | --- |
+| routed MoE, 8 experts/layer | 0.244 ms | 0.689 ms | **GPU 2.8x** |
+| shared expert FFN | 0.054 ms | 0.086 ms | **GPU 1.6x** |
+| o_proj + router | 0.063 ms | 0.074 ms | GPU 1.2x |
+| lm_head (once per token) | 4.386 ms | 3.968 ms | ANE 1.1x |
+
+The GPU wins decisively on everything the MoE is made of, which is 44% of its busy
+time. The ANE is marginally better on `lm_head`, the one genuinely large tensor in
+the model.
+
+**Caveat that has to be stated:** the GPU's `attn_norm_qkv` role (0.348 ms/layer)
+is a composite -- RMSNorm, QKV projection, RoPE, the SDPA itself and the output
+gate -- while the ANE figure above is the projection alone. They are not
+comparable, so the QKV comparison is deliberately absent from the table. Settling
+it needs either a decomposed GPU role or a Core ML graph covering the whole
+attention block. Until then, no claim either way.
+
+## What this means for v4.0
+
+A hybrid split is what the per-op numbers suggest: ANE for `lm_head`, GPU for
+everything else. Best case that is 0.42 ms/token of the 47.3 ms budget, under 1%.
+
+Any larger split runs into two measured walls. Alternating ANE and GPU per layer
+costs 40 handoffs per token at 0.2-0.3 ms each -- 8-12 ms, larger than anything it
+could save. And concurrent execution is worse than serial: ANE load raises GPU-busy
+89%, because both draw on one memory controller.
+
+So v4.0 stays GPU-only. The ANE research resolves to a single 1% opportunity that
+is not worth the integration risk, and its real value is negative knowledge --
+nobody needs to revisit this.
+
+## 6-bit is dropped in v4.0
+
+Decided, and the measurements support it. Palettised at 6 bits the ANE reaches
+46.8 GB/s against 60 for both 4-bit and 8-bit, and is only 0.12 ms faster than
+8-bit despite storing 25% fewer bytes -- the signature of a non-power-of-two
+packing being padded. On a 24 GiB machine 6-bit also does not fit, measuring
+6.7 tok/s against 4-bit's 18.8. It was costing users twice.
