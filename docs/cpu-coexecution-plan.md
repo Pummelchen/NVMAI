@@ -248,10 +248,45 @@ mmap degrades to disk speed rather than degrading gracefully, and there is no
 knob to bound it. The slot cache bounds it by construction. That is the
 property being traded, and it is why the streaming path should stay selectable.
 
-The next prototype has to replicate the real access pattern -- top-8 of 256 per
-layer, with the routing correlation actual tokens produce -- rather than a full
-sweep. Until that is measured, neither "mmap is fine" nor "mmap thrashes" is
-supported for the operating point that matters.
+### Second prototype: the real access pattern, measured
+
+`NVMAI_ROUTE_TRACE=<path>` dumps `position layer e0..e7` for every decode layer,
+so the question can be answered from what decode actually does rather than from
+a synthetic sweep. A 383-token generation at 4-bit, 128 slots:
+
+| | |
+| --- | --- |
+| lifetime distinct experts/layer | min 139, median 189, max 255 of 256 |
+| lifetime working set | **12.87 GiB of 16.88** |
+| experts shared with the previous token | 3.01 of 8 (**38% reuse**) |
+| 8-token window | 33.9 experts/layer -> 2.23 GiB |
+| 32-token window | 76.1 -> 5.01 GiB |
+| 128-token window | 131.4 (peak 232) -> 8.66 GiB |
+
+This settles the question the full sweep could not. A normal-length generation
+touches 76% of every expert weight in the model, and routing turns over fast
+enough that only 38% of a layer's experts survive to the next token. The
+working set is not a small hot subset that would sit comfortably in page cache;
+it grows steadily with generation length toward the whole 16.9 GiB.
+
+So on a 24 GiB machine an unbounded mmap would need ~13 GiB of expert pages
+resident alongside everything else, and more for longer outputs. That is inside
+RAM but not comfortably, and the failure mode past it is the 0.2 GB/s measured
+above rather than graceful degradation. The slot cache bounds the same working
+set to 8.4 GiB and reaches ~92% hits precisely because 128 slots covers the
+mean of a 128-token window (131 experts/layer) even though not its peak (232).
+
+The honest conclusion is that mmap is not the clear win the per-byte numbers
+suggested. It reads 43% faster and avoids duplicating file pages into anonymous
+slots, but it gives up the bound on a working set that this trace shows runs to
+most of the model. Worth doing as a *selectable* mode for machines with headroom
+over the model size; not worth doing as a replacement.
+
+A replay harness driving both paths from the trace was attempted and is not
+finished -- it holds the 8.4 GiB of slots while also mapping 16.9 GiB and never
+frees between modes, so it thrashes the host rather than measuring it. The
+trace and the analysis above stand on their own; a corrected harness would
+refine the comparison rather than change the conclusion.
 
 ### The fused greedy head: TRIED, IT IS SLOWER
 

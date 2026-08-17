@@ -960,6 +960,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let kernelGPUTimingsEnabled =
         ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil
 
+    /// Open file descriptor for NVMAI_ROUTE_TRACE, or -1. Opened once and
+    /// never closed: the runner lives as long as the process, and a decode
+    /// loop is the wrong place to manage a diagnostic file's lifetime.
+    private let routeTraceFD: Int32 = {
+        guard let path = ProcessInfo.processInfo.environment["NVMAI_ROUTE_TRACE"],
+              !path.isEmpty else { return -1 }
+        return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+    }()
+
     public func resetKernelGPUTimings() {
         kernelGPUTimings.removeAll(keepingCapacity: true)
     }
@@ -1041,6 +1050,37 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         return acc.map { (transition: $0.key, millis: $0.value.millis, count: $0.value.count) }
             .sorted { $0.millis > $1.millis }
+    }
+
+    // MARK: - Routing trace (NVMAI_ROUTE_TRACE)
+
+    /// Appends `position layer e0 e1 ... e7` for one decode layer.
+    ///
+    /// Which experts a token actually routes to is the input to every question
+    /// about how expert weights should reach the GPU -- how large the working
+    /// set really is, how much reuse there is between consecutive tokens, and
+    /// therefore whether a residency scheme that is not the slot cache could
+    /// hold it. Synthetic access patterns answer none of that: a full sweep of
+    /// the expert file measures thrash that decode never causes, and a random
+    /// pattern measures the opposite. This dumps the real thing so a replay can
+    /// be driven by it.
+    ///
+    /// Off unless `NVMAI_ROUTE_TRACE` names a file. Diagnostic only.
+    private func recordRouteTrace(layer: Int, position: Int, experts: [Int]) {
+        guard routeTraceFD >= 0 else { return }
+        var line = "\(position) \(layer)"
+        for expert in experts { line += " \(expert)" }
+        line += "\n"
+        let bytes = Array(line.utf8)
+        var written = 0
+        while written < bytes.count {
+            let n = bytes.withUnsafeBytes { raw -> Int in
+                write(routeTraceFD, raw.baseAddress!.advanced(by: written),
+                      bytes.count - written)
+            }
+            if n <= 0 { break }
+            written += n
+        }
     }
 
     private func shouldSkipRDAdvice(position: Int,
@@ -3114,6 +3154,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             decodeExpertsScratch.append(min(Int(idxPtr[i]), cfg.numExperts - 1))
         }
         let experts = decodeExpertsScratch
+        recordRouteTrace(layer: L, position: position, experts: experts)
 
         let routedOffsets = try model.routedExpertOffsets(layer: L)
         let topK = UInt32(cfg.topKExperts)
