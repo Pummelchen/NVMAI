@@ -3,15 +3,28 @@ import NVMAIKernelsC
 
 /// Reads routed-expert blocks from a packed layer file, in parallel.
 ///
-/// v3.x fetched cache misses one at a time on the calling thread and reached
-/// ~0.62 GB/s. Measured against a 16.88 GiB working set -- larger than this
-/// machine's page cache, so the numbers are the device's rather than RAM's:
+/// Device ceiling, measured against a 16.88 GiB working set -- deliberately larger
+/// than this machine's page cache, so the numbers are the disk's and not RAM's:
 ///
 ///     1 thread   2.43 GB/s
 ///     4 threads  3.92 GB/s
 ///     8 threads  3.92 GB/s   (saturated)
 ///
-/// So concurrency was the whole gap, not the SSD. Four readers is the knee.
+/// Four readers is the knee.
+///
+/// What this is *not*: a fix for v3.x's fetch rate. That path already parallelises
+/// through `DispatchQueue.concurrentPerform` and runs at ~2.6-2.8 GB/s, 66-72% of
+/// the ceiling. And at decode's actual batch size this pool is no faster than a
+/// plain `pread` -- at 128 slots the hit rate is ~92%, so a layer fetches about one
+/// expert, and one read is one read:
+///
+///     batch 1   pool 3.41 GB/s   serial 3.44
+///     batch 4   pool 5.36        serial 3.80
+///     batch 8   pool 5.95        serial 3.69
+///
+/// The pool earns its keep only at 4-8 misses per batch, which is what a *smaller*
+/// slot cache produces. It exists to make a low-RAM configuration viable, not to
+/// speed up the current one.
 ///
 /// `bypassCache` (the default) keeps expert reads out of the unified buffer cache.
 /// That is a footprint decision rather than a speed one: streaming 16.88 GiB with

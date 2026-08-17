@@ -9,6 +9,79 @@ Every number below is measured on the development machine (M3, 4P+4E, 24 GB,
 ~64 GB/s achievable memory bandwidth, ~3.2 GB/s SSD). Method and derivations are
 in [cpu-coexecution-plan.md](cpu-coexecution-plan.md).
 
+## CORRECTION: the premise this document was written on was wrong
+
+The first version of this design claimed the SSD was 5x under-used -- 0.62 GB/s
+achieved against 3.2 available -- and built its core bet on recovering that. That
+figure was an arithmetic error of the same kind already documented in
+[cpu-coexecution-plan.md](cpu-coexecution-plan.md): 13.6 GB of expert reads divided
+by the whole 21.9 s "expert fetch + tiles" phase, when only ~4.8 s of that phase is
+fetch and the other 17.1 s is GPU tile execution. **The real prefill fetch rate is
+~2.83 GB/s.** Decode's is ~2.6 GB/s (14.65 MiB/token in 5.6 ms).
+
+Against a measured device ceiling of 3.92 GB/s that is 66-72%, not 16%. There is
+roughly **1.4x** of streaming headroom, not 6x.
+
+Two further corrections follow from it:
+
+**Decode already parallelises its fills.** `executeExpertCachePlan` has used
+`DispatchQueue.concurrentPerform` since v3.x, with a recorded +28% when it landed.
+The serial fetch this design proposed to fix does not exist.
+
+**A parallel pool does nothing at decode's batch size.** At 128 slots the hit rate
+is ~92%, so decode fetches about *one* expert per layer, and one read is one read:
+
+| batch | pool | serial pread |
+| ---: | ---: | ---: |
+| 1 | 3.41 GB/s | 3.44 |
+| 4 | 5.36 | 3.80 |
+| 8 | 5.95 | 3.69 |
+
+The pool is worth 1.4-1.6x only at 4-8 misses per batch. So it does not speed up
+today's configuration at all. What it does is make a *smaller* cache viable, since
+smaller caches miss more often and therefore fetch in bigger batches. That is still
+useful, but it is a different claim than the one this document was built on.
+
+## The measured RAM/throughput curve
+
+Directly measured on v3.8, no new code, 192 tokens each:
+
+| slots | declared RAM | tok/s | io ms/token | bytes/token |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 0.53 GB | 14.48 | 25.22 | 316.4 MiB |
+| 16 | 1.05 GB | 15.17 | 23.47 | 226.7 MiB |
+| 32 | 2.11 GB | 15.96 | 20.67 | 153.1 MiB |
+| 64 | 4.22 GB | 17.46 | 14.17 | 68.7 MiB |
+| 128 | 8.44 GB | **20.93** | 6.18 | 14.7 MiB |
+
+So the trade is real and not free: 4x less RAM costs 24% of throughput, 16x less
+costs 31%.
+
+### And the curve is flattered by the page cache
+
+316 MiB/token in 25.2 ms is **12.5 GB/s -- three times the device ceiling.** Those
+reads are not reaching the disk; the unified buffer cache is holding what the slot
+cache does not, using memory that the "declared RAM" column does not count.
+
+**So shrinking the slot cache does not reduce the machine's memory footprint. It
+relocates it into the page cache**, where it is invisible to the budget and evicted
+on the OS's terms rather than the engine's.
+
+This is the central design question for v4.0, and it is now sharp rather than
+assumed:
+
+- **Page cache allowed** — small slot counts stay fast (the curve above) but total
+  RAM use is not actually bounded, which defeats the stated purpose.
+- **`F_NOCACHE`** — the slot budget becomes the true and only footprint, verified:
+  streaming 16.88 GiB with it on left the machine at 78% free. But then every miss
+  is a real 3.92 GB/s disk read rather than a 12.5 GB/s cache hit, so the curve
+  above gets materially worse and has to be re-measured.
+
+The honest position is that **the cost of a genuinely bounded footprint has never
+been measured**, because v3.x has always been quietly leaning on the page cache. The
+next increment is to wire the `F_NOCACHE` reader in and measure the true curve. Only
+then is there a basis for choosing a default budget.
+
 ## What the measurements say the limits are
 
 | resource | measured ceiling | what NVMAI 3.8 achieves |
