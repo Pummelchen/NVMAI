@@ -525,3 +525,44 @@ a full scan should precede any repack") and the case was built anyway. The scan
 took four minutes. Sample breadth before building an economic case on a number,
 and weight the theory: a 4-bit affine quantiser producing near-uniform codes was
 the expected result, and it is what the model does everywhere except layer 0.
+
+### Compress-in-transit as an architecture
+
+The idea considered separately from storage format: a reader decides what is
+needed, a feeder gathers it, compresses losslessly, ships the compressed package,
+and the destination decompresses. Sound engineering -- it is what nvCOMP does
+over PCIe -- and it fails here for three independent reasons, any one sufficient.
+
+**1. The payload does not compress.** 92% on a representative layer (above). The
+4-bit affine quantiser already *is* the compression, and at 3.71 of 4 bits of
+entropy it is close to its own limit. A second lossless layer on top of a
+near-entropy-limit encoding has nothing left to take.
+
+**2. The decompressor is far too slow.** Measured on a representative layer,
+64 MiB sample:
+
+| codec | ratio | decompress |
+| --- | ---: | ---: |
+| zlib-1 | 92.3% | 0.51 GB/s |
+| zlib-6 | 91.9% | 0.53 GB/s |
+| lzma | 92.5% | 0.04 GB/s |
+
+Expert bytes alone are 540 MiB/token, which at 21 tok/s is 11.9 GB/s sustained,
+and the GPU reads at ~68 GB/s effective. Eight cores of zlib is ~4 GB/s -- three
+times too slow to feed even the current rate, before counting that occupying all
+eight cores downclocks the GPU (measured above at -15%). A much faster codec
+(LZ4 class, ~4 GB/s/core) would reach ~32 GB/s across eight cores, still under
+the GPU's read rate, to save 8% of bytes. The arithmetic never closes.
+
+**3. On unified memory there is no CPU-to-GPU transfer to compress.** This is the
+structural point. The architecture assumes a discrete GPU where a copy crosses a
+link that compression can shrink. Apple Silicon has no such copy: the GPU cores
+read the same physical RAM through the same memory controller the CPU uses. There
+is no interposable step between "RAM" and "GPU" to put a codec in. Reducing
+GPU-to-RAM traffic requires the data to sit compressed *in RAM* and be decoded
+*inside the shader*, which is the per-group scheme that measured 0% available.
+
+The SSD-to-RAM leg is the only one where the architecture applies at all, and
+there it reduces to compressed-at-rest, since an SSD can only return stored
+bytes. That buys 8% fewer disk bytes for a decompressor 20x slower than the read
+path it replaces.
