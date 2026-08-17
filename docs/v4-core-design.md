@@ -1,0 +1,185 @@
+# NVMAI v4.0 — core design
+
+Clean-sheet rewrite of the inference core, targeting the physical limits of an
+M3 MacBook Pro **while streaming weights from SSD**. Streaming is not a fallback
+here; it is the product. The goal is a 35B MoE running with a small, declared RAM
+footprint so the rest of the machine stays usable.
+
+Every number below is measured on the development machine (M3, 4P+4E, 24 GB,
+~64 GB/s achievable memory bandwidth, ~3.2 GB/s SSD). Method and derivations are
+in [cpu-coexecution-plan.md](cpu-coexecution-plan.md).
+
+## What the measurements say the limits are
+
+| resource | measured ceiling | what NVMAI 3.8 achieves |
+| --- | ---: | ---: |
+| memory bandwidth (compute path) | ~64 GB/s | ~65 GB/s during decode — **at the limit** |
+| **SSD, expert-sized reads** | **~3.2 GB/s** | **~0.62 GB/s — 5x headroom** |
+| GPU clocks during work | Maximum DVFS, Nominal thermals | already maxed |
+| GPU occupancy, prefill | — | 97.4% — saturated |
+| GPU occupancy, decode | — | 61% — 16.7 ms/token idle |
+
+Two of those are already at the wall. The other two are the design targets: **SSD
+bandwidth is 5x under-used, and decode leaves 16.7 ms of every 47 ms token idle.**
+
+SSD detail, because the whole architecture rests on it:
+
+| pattern | 1 thread | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| sequential 1.688 MiB reads | 2.03 GB/s | 3.03 | **3.21** | 3.17 |
+| random 1.688 MiB reads | 2.19 GB/s | 2.99 | **3.16** | 3.19 |
+
+Random is as fast as sequential — NVMe does not care about locality at expert
+granularity, so the streamer never needs to reorder for locality. And parallelism
+matters: 4 concurrent readers are 1.6x one reader.
+
+## The design idea: trade SSD bandwidth for RAM
+
+At 4-bit, decode reads 540 MiB of expert weights per token. The slot cache absorbs
+most of it; whatever misses comes from SSD. So for a cache achieving hit rate `H`:
+
+```
+disk bytes/token = 540 MiB x (1 - H)
+disk time/token  = that / 3.2 GB/s
+GPU time/token   = ~28 ms   (memory-bus bound, irreducible)
+```
+
+Disk time stays **fully hidden behind GPU compute** as long as
+`540 MiB x (1-H) / 3.2 GB/s < 28 ms`, i.e. **H > ~83%**.
+
+v3.8 reaches 92% with 128 slots per layer, which is 128 x 1.688 MiB x 40 =
+**8.4 GB of RAM** — a third of the machine, which contradicts the point of the
+project. But it only needs 83%, and the whole gap between 0.62 and 3.2 GB/s is
+currently being spent buying hit rate that a faster streamer would not need.
+
+**So the core bet: fix streaming bandwidth, then spend the surplus on shrinking the
+RAM budget rather than on speed.** Same tok/s, a fraction of the footprint.
+
+## Core architecture
+
+### 1. RAM budget is an input, not an outcome
+
+The engine takes a declared budget (`--ram-budget 2G`) and derives everything from
+it: slot counts per layer, prefetch depth, KV reservation. It reports the resulting
+predicted hit rate and disk load at startup, and refuses budgets that cannot hold
+the resident tensors.
+
+This inverts v3.x, where slot count was the knob and RAM was whatever fell out.
+
+### 2. Streaming that actually uses the disk
+
+The current path gets 0.62 GB/s against 3.2 available. Three causes to remove:
+
+- **Serialised fetch.** Misses are fetched per layer, in order, on the calling
+  thread. Four concurrent readers measure 1.6x one. Use a small I/O thread pool.
+- **No depth.** A fetch is issued when the miss is discovered, so the disk is idle
+  between layers. Keep a queue always non-empty.
+- **Blocking on the critical path.** The layer loop waits for its own fetch.
+
+I/O threads are the one CPU work that is safe here, and this was verified rather
+than assumed. Running a saturating `pread` load during decode:
+
+| load | tok/s | GPU busy/token |
+| --- | ---: | ---: |
+| none | 22.125 | 29.106 ms |
+| pread I/O | 18.856 | 31.247 ms (**+7.4%**) |
+| *CPU dequant, for contrast* | *-22.6%* | *+44.9%* |
+
+GPU-busy rises **7.4%** under heavy I/O against **44.9%** under heavy compute, so
+I/O threads are roughly six times gentler on GPU clocks -- they block in the kernel
+instead of burning ALU. The 14.8% throughput drop in that test is the load
+generator consuming the entire 3.2 GB/s and starving NVMAI's own fetches; it is
+contention from an external hog, not a cost the engine pays for using its own
+bandwidth. Budget the disk as a shared finite resource, but do not fear the threads.
+
+### 3. Predictive prefetch, since routing cannot be known early
+
+Expert choice for layer L is only known after layer L-1 completes, so nothing can
+be prefetched from the current token's routing. But consecutive tokens share
+**38%** of a layer's experts (measured over 383 tokens), and the working set over a
+128-token window is 131 of 256 experts per layer.
+
+So prefetch from the *previous token's* routing for the same layer, which is
+available 40 layers early. A wrong guess costs a wasted read on an otherwise idle
+disk; a right guess removes a stall. With 3.2 GB/s and 5x headroom, speculative
+reads are close to free — this is what the surplus bandwidth is for.
+
+### 4. Remove the per-layer CPU round trip from decode
+
+Decode's 16.7 ms/token of idle is dominated by one transition, and the cause is
+that the CPU must see the routing before experts can be dispatched. Two halves:
+
+- **The dispatch half** goes away with GPU-side expert indexing: the MoE kernel
+  reads expert ids from the router's own output buffer via an argument buffer
+  covering the resident slots, so no readback is needed to *encode* the work.
+- **The residency half** cannot go away while streaming — something must decide
+  what to fetch. But it can move off the critical path: the kernel processes
+  resident experts immediately and writes a miss list; the I/O pool services it
+  asynchronously; a fixup pass completes the stragglers. At a 92% hit rate that
+  makes the synchronous stall a 8%-of-layers event instead of every layer.
+
+This is the one genuinely hard piece and the reason v4.0 is a rewrite rather than
+a patch.
+
+### 5. C99 for hot loops, Swift for structure
+
+Established in 3.8: moving the int4 GEMV to C99/NEON was **2.9x**, and hoisting a
+redundant per-group sum added another 16-20%. Swift's `SIMD8<Float>` does not lower
+to vector loads. So: Swift owns lifetime, actors, and orchestration; `NVMAIKernelsC`
+owns anything with a per-weight inner loop. Metal owns the GPU.
+
+Not a blanket rewrite — Swift costs ~4.6 ms of a 47 ms token, and most of that is
+Metal API calls that C would pay identically.
+
+## What is deliberately not in v4.0
+
+- **CPU co-execution.** Measured net negative: 8 threads of dequant work raise
+  GPU-busy 45% and cost 22.6% throughput. Same memory controller, same power.
+- **ANE during decode.** Worse: −45.4%, GPU-busy +89%.
+- **Compression.** The payload sits at 93% of its entropy limit; zlib recovers 6%
+  and decompresses at 0.53 GB/s against an 11.9 GB/s requirement.
+- **Speculative decoding / MTP.** Verify cost tracks the expert union (1.585x at
+  width 2) and cancels the 1.574 tokens emitted. Needs acceptance >0.585 to break
+  even at all.
+- **6-bit.** Dropped. Non-power-of-two packing measured 46.8 GB/s against 60 for
+  both 4-bit and 8-bit.
+
+## Quantisation: both, streamed
+
+4-bit and 8-bit are both first-class and both streamed; the user picks quality and
+the engine streams whatever they picked. 8-bit doubles expert bytes per token
+(1020 MiB vs 540), so at a fixed RAM budget it needs roughly double the disk
+bandwidth for the same hit rate — which is exactly why the 5x streaming headroom
+matters. 8-bit at 3.2 GB/s needs H > ~91% to stay hidden, against 4-bit's 83%.
+
+The v3.8 measurement of 8-bit at 1.6 tok/s is **not** evidence against this: that
+run used a 128-slot cache and let the page cache fill, i.e. it was competing for
+RAM rather than streaming within a budget. 8-bit under a declared budget with a
+working streamer is untested and is a v4.0 acceptance target.
+
+## Targets
+
+| | v3.8 measured | v4.0 target | basis |
+| --- | ---: | ---: | --- |
+| decode, 4-bit | 21 tok/s | **32-36** | remove 16.7 ms idle; bus ceiling is 36 |
+| RAM for that | 8.4 GB slots | **~2 GB** | H>83% suffices once disk runs at 3.2 GB/s |
+| decode, 8-bit | 1.6 (thrashing) | **12-18** | streamed within budget, H>91% |
+| prefill, 4-bit | 70 tok/s | unchanged | GPU saturated at max clocks |
+
+Decode's 36 tok/s is a hard ceiling from 1.8 GB/token ÷ 64 GB/s and cannot be
+exceeded on this machine by any means measured. The real v4.0 win is reaching it
+**at a quarter of the RAM**, and making 8-bit usable at all.
+
+## Prefill: prototype, do not commit
+
+Prefill is GPU-saturated at maximum clocks — 97.4% occupancy, ~600 GFLOP/s, no
+kernel fix available, because 4-bit dequant costs several ALU ops per weight on top
+of the multiply-accumulate. The ANE reaches 13 TFLOP/s on the same shape because it
+decompresses in hardware.
+
+That is a real architectural advantage and worth a narrow prototype: one attention
+block as an fp16/palettised Core ML ML Program, verified on-ANE via the Core ML
+Instrument, measuring (a) achieved rate at width 1024+, (b) whether the KV cache can
+be handed to the GPU decode path, (c) whether a 256-expert gather is expressible.
+
+Not on the v4.0 critical path. Decode and the streamer are.
