@@ -39,6 +39,41 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     ]
     public static let maximumContextTokens = 262_144
     public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
+
+    /// Target bytes for the routed-expert slot cache when no count is given.
+    ///
+    /// Benchmarked at the shipped `--max-context 262144`, and the result is
+    /// counter-intuitive: **a smaller cache is faster.** 4-bit at a 1 GiB budget
+    /// reached 13.61 tok/s against 9.85 at 4 GiB and 8.78 at 8 GiB on a short
+    /// prompt, and the ordering held on long prompts and in both cache modes. The
+    /// reason is that a 262144-token KV reservation is already large, so slot
+    /// memory beyond this point pushes the machine into pressure and costs more
+    /// than the extra hit rate returns.
+    ///
+    /// An earlier sweep suggested the opposite -- 128 slots beating 8 -- but it ran
+    /// at `--max-context 8192`, where the KV reservation leaves far more headroom.
+    /// Do not re-tune this against a reduced context.
+    public static let defaultExpertCacheBudgetBytes = 1 << 30
+
+    /// Slots that fit `budgetBytes`, snapped to the nearest supported count.
+    ///
+    /// Deriving from the stride rather than hard-coding a number per quantisation
+    /// keeps 4-bit and 8-bit on the same rule: 1 GiB lands on 16 slots at a
+    /// 1.688 MiB stride and 8 slots at 3.188 MiB, which are the measured optima
+    /// for each.
+    public static func expertCacheSlots(
+        expertStrideBytes: UInt64,
+        layers: Int,
+        budgetBytes: Int = defaultExpertCacheBudgetBytes) -> Int {
+        guard expertStrideBytes > 0, layers > 0 else {
+            return allowedExpertCacheSlots.first ?? 8
+        }
+        let perSlot = Double(expertStrideBytes) * Double(layers)
+        let wanted = Double(budgetBytes) / perSlot
+        return allowedExpertCacheSlots.min {
+            abs(Double($0) - wanted) < abs(Double($1) - wanted)
+        } ?? 8
+    }
     public static let allowedPrefillChunkTokens = [
         32, 64, 128, 256, 512, 1_024, 2_048, 4_096,
     ]

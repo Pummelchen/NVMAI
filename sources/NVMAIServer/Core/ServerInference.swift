@@ -423,6 +423,9 @@ public actor ServerModelSession: ServerInferenceBackend {
     // Long prompts are prefilled chunk by chunk — small enough to keep expert
     // reads tight.
     public nonisolated let prefillChunkTokens: Int
+    /// Routed-expert slots per layer actually in force, so the ready banner can
+    /// report the streaming budget rather than leaving the user to infer it.
+    public nonisolated let expertCacheSlots: Int
     private let maxContext: Int
     public nonisolated let promptCacheMode: ServerPromptCacheMode
     private let promptCacheDomain: ServerPromptCacheDomain
@@ -478,9 +481,26 @@ public actor ServerModelSession: ServerInferenceBackend {
         let loadRuntime = try RuntimeConfiguration(forceLogitsHead: true)
         let slotOverride = ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
-        // Precedence: --expert-cache-slots flag, then the env override, then
-        // the production default (64).
-        let loadSlots = requestedExpertCacheSlots ?? slotOverride ?? loadRuntime.expertCacheSlots
+        // Precedence: --expert-cache-slots flag, then the env override, then a
+        // count derived from the model's own expert stride against a 1 GiB budget.
+        //
+        // Derived rather than fixed because the right count depends on the
+        // quantisation: 1 GiB is 16 slots at 4-bit and 8 at 8-bit, which are the
+        // measured optima for each. The previous fixed default of 64 was slower
+        // *and* larger than either -- benchmarked at the shipped 262144 context,
+        // 4-bit managed 9.85 tok/s at 64 slots against 13.61 at 16.
+        let derivedSlots: Int
+        if let manifest = try? ManifestReader.load(directoryURL: modelDirectory,
+                                                  expecting: .qwen36_35B_A3B) {
+            derivedSlots = RuntimeConfiguration.expertCacheSlots(
+                expertStrideBytes: manifest.expertStride,
+                layers: manifest.arch.numLayers)
+        } else {
+            // Unreadable manifest means the load below will fail with a better
+            // message than anything this could throw, so pick the safe small end.
+            derivedSlots = RuntimeConfiguration.allowedExpertCacheSlots.first ?? 8
+        }
+        let loadSlots = requestedExpertCacheSlots ?? slotOverride ?? derivedSlots
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
@@ -582,6 +602,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                                   mtpDecoder: mtpDecoder,
                                   scratch: scratch,
                                   prefillConfig: runtime.prefillConfig,
+                                  expertCacheSlots: loadSlots,
                                   maxContext: maxContext,
                                   promptCacheMode: effectivePromptCacheMode,
                                   promptCacheDomain: promptCacheDomain,
@@ -598,6 +619,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                  mtpDecoder: StreamingMTPDecoder?,
                  scratch: RawCompletionScratch,
                  prefillConfig: PrefillRuntimeConfig,
+                 expertCacheSlots: Int,
                  maxContext: Int,
                  promptCacheMode: ServerPromptCacheMode,
                  promptCacheDomain: ServerPromptCacheDomain,
@@ -613,6 +635,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.scratch = scratch
         self.prefillConfig = prefillConfig
         self.prefillChunkTokens = prefillConfig.chunkTokens
+        self.expertCacheSlots = expertCacheSlots
         self.maxContext = maxContext
         self.promptCacheMode = promptCacheMode
         self.promptCacheDomain = promptCacheDomain

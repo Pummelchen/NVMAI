@@ -10,13 +10,19 @@ public struct ModelSessionFacts: Sendable, Equatable {
     public let modelID: String
     public let prefillChunkTokens: Int
     public let promptCacheMode: ServerPromptCacheMode
+    /// Routed-expert slots per layer in force, so the banner can state the
+    /// streaming budget instead of leaving the user to infer it from a flag they
+    /// may not have passed.
+    public let expertCacheSlots: Int
 
     public init(modelID: String,
                 prefillChunkTokens: Int,
-                promptCacheMode: ServerPromptCacheMode) {
+                promptCacheMode: ServerPromptCacheMode,
+                expertCacheSlots: Int = 0) {
         self.modelID = modelID
         self.prefillChunkTokens = prefillChunkTokens
         self.promptCacheMode = promptCacheMode
+        self.expertCacheSlots = expertCacheSlots
     }
 }
 
