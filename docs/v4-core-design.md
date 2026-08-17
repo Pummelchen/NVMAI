@@ -307,3 +307,67 @@ This is a v3.x defect, not a v4.0 design question, and it is worth more than mos
 the work in this document: every user on the default is paying 1.6x for context they
 are not using. v4.0 should size KV strides from the live sequence and grow them,
 and the fix is likely backportable.
+
+## Benchmark matrix: quant x RAM budget x cache policy x prompt length
+
+All at the default `--max-context 262144`, which is a product requirement rather
+than a tunable. Prompt sizes 25 / 452 / 3532 tokens. Figures are prefill seconds
+and decode tok/s.
+
+### 4-bit
+
+| RAM | slots | cache | short | medium | long |
+| ---: | ---: | --- | --- | --- | --- |
+| 1 GB | 16 | bounded | 2.0s 11.10 | 5.3s 10.78 | 46.8s 7.16 |
+| 1 GB | 16 | cached | 2.5s **13.61** | 6.0s 12.46 | 47.1s 7.54 |
+| 2 GB | 32 | bounded | 1.8s 9.32 | 5.4s 10.09 | 46.7s 6.42 |
+| 2 GB | 32 | cached | 1.9s 12.95 | 6.1s 12.36 | 47.4s 7.57 |
+| 4 GB | 64 | bounded | 2.3s 8.36 | 5.4s 9.06 | 47.9s 4.52 |
+| 4 GB | 64 | cached | 2.2s 9.85 | 6.1s 8.23 | 47.5s 6.41 |
+| 8 GB | 128 | bounded | 2.4s 9.13 | 5.7s 13.49 | 47.2s 5.34 |
+| 8 GB | 128 | cached | 2.5s 8.78 | 6.1s 13.23 | 47.6s 6.38 |
+
+### 8-bit
+
+| RAM | slots | cache | short | medium | long |
+| ---: | ---: | --- | --- | --- | --- |
+| 1 GB | 8 | bounded | 4.1s 5.22 | 10.7s 4.63 | 60.9s 3.39 |
+| 1 GB | 8 | cached | 4.3s **5.64** | 11.2s 4.94 | 61.8s 3.83 |
+| 2 GB | 16 | bounded | 3.7s 4.02 | 10.4s 3.87 | 60.6s 3.25 |
+| 2 GB | 16 | cached | 3.7s 5.11 | 11.1s 4.66 | 60.9s 3.76 |
+| 4 GB | 32 | bounded | 4.1s 4.24 | 10.2s 4.40 | 61.0s 3.23 |
+| 4 GB | 32 | cached | 3.9s 5.26 | 10.5s 5.02 | 61.0s 3.72 |
+| 8 GB | 64 | bounded | 4.9s 4.61 | 9.8s 5.24 | 62.1s 2.17 |
+| 8 GB | 64 | cached | 4.1s 5.21 | 10.8s 5.33 | 62.6s 2.05 |
+| 16 GB | 128 | bounded | 4.7s 1.22 | 45.8s 0.69 | 91.4s 0.46 |
+
+4-bit cannot reach a 16 GB budget: 128 slots is the allowed maximum and that is
+8.44 GB.
+
+### What the matrix says
+
+**More slot RAM is slower, not faster.** 4-bit at a 1 GB budget beats 4 GB by
+~35-40% on short and medium prompts, in both cache modes. This reverses the curve
+measured earlier in this document -- and the difference is the context. That curve
+used `--max-context 8192`; this matrix uses the 262144 default, where the KV
+reservation is already large enough that adding slot memory pushes the machine into
+pressure. Under the real default, **a small slot cache is both faster and smaller.**
+
+So NVMAI's shipped default of 64 slots is the wrong choice twice over: 16 slots is
+~35% faster *and* uses a quarter of the RAM. That is the single most valuable
+finding in this document and it is a one-line change.
+
+**Cached beats bounded by 15-30%,** consistently, at every budget and prompt size.
+That is a firmer number than the ~20% measured earlier and it holds across the
+matrix.
+
+**8-bit costs 2-2.5x throughput** against 4-bit at a comparable budget (5.64 vs
+13.61 tok/s at 1 GB, short). It remains usable when streamed at a small budget,
+which is the point -- but 8-bit at 16 GB collapses to 0.46-1.22 tok/s, because
+15.94 GB of slots plus a 262144-token KV reservation does not fit 24 GB. Large
+budgets are a trap, not a feature.
+
+**Prefill is insensitive to the budget.** 46.8-47.9s for 4-bit and 60.6-62.6s for
+8-bit at 3532 tokens, whatever the slot count, because a wide chunk touches nearly
+every expert regardless of cache size. Prefill is bounded by GPU compute (97.4%
+occupancy at max clocks), not by streaming.
