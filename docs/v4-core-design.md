@@ -371,3 +371,41 @@ budgets are a trap, not a feature.
 8-bit at 3532 tokens, whatever the slot count, because a wide chunk touches nearly
 every expert regardless of cache size. Prefill is bounded by GPU compute (97.4%
 occupancy at max clocks), not by streaming.
+
+## The floor: 8 slots collapses, so 16 is a true peak
+
+Filling in the sub-1 GiB gap for 4-bit, bounded:
+
+| slots | RAM | short | medium | long |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 0.53 GB | 4.49 | 4.33 | 3.69 |
+| **16** | **1.05 GB** | **11.10** | **10.78** | **7.16** |
+| 32 | 2.11 GB | 9.32 | 10.09 | 6.42 |
+| 64 | 4.22 GB | 8.36 | 9.06 | 4.52 |
+| 128 | 8.44 GB | 9.13 | 13.49 | 5.34 |
+
+8 slots is 2.5x worse than 16, and prefill degrades too (49.2 s against 46.8 s).
+The mechanism is exact: with 8 slots and topK=8 the cache holds precisely one
+layer's active set, so every layer evicts the previous one, and at 38% measured
+token-to-token expert reuse the hit rate goes to nearly zero.
+
+So the 16-slot default sits on a genuine peak -- it collapses below and degrades
+above -- rather than being merely the smallest value tested.
+
+### And 8 slots is a hard floor, not a convention
+
+One slot holds one expert for one layer: 67.5 MiB at 4-bit and 127.5 MiB at 8-bit
+across 40 layers. Below topK=8 slots, `executeExpertCachePlan` trips
+`precondition(plan.experts.count <= slotCount)` -- it crashes rather than degrading.
+So 540 MiB (4-bit) and 1020 MiB (8-bit) are the minimum footprints achievable
+without restructuring the MoE plan, and budgets in the tens or hundreds of KiB are
+three orders of magnitude below a single slot.
+
+## Scope check: v4.0 is currently a 1.4% delta on v3.8
+
+    10 files changed, 606 insertions(+), 6 deletions(-)
+    total source: 43,512 lines  ->  98.6% unchanged
+
+What exists is the C expert reader, the bounded-IO fill path, and the
+budget-derived slot defaults. Real, measured work, but the clean-sheet engine
+described earlier in this document is still a plan and not code.
