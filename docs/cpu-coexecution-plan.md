@@ -632,3 +632,47 @@ bandwidth efficiency from ~65 to ~78 GB/s during compute, roughly +20% on the
 kernels themselves. Whether that headroom exists is unmeasured; the GPU is
 already at 83% of what a pure CPU streaming read achieves, so it is a narrow
 target, not an obvious one.
+
+## ANE: the blocker is the dependency chain, not the API
+
+Corrections to the earlier dismissal, which was right in conclusion but thin on
+detail. `MLModelConfiguration.computeUnits = .cpuAndNeuralEngine` does let you
+*exclude* the GPU, even though no `.neuralEngineOnly` exists, so placement is
+more controllable than "you cannot request ANE" suggested. `MLComputePlan`
+exposes per-operation supported and preferred devices programmatically, and the
+Core ML Instrument verifies which block actually executed -- both better than
+inferring from timings. And current MPSGraph documentation does claim CPU, GPU
+and Neural Engine, though `MPSGraphDeviceType` publicly exposes only `.metal`,
+so ANE use there is framework-managed rather than directed.
+
+None of that changes the outcome for this model, because the obstacle is not
+reaching the ANE. It is that only half the network can go there.
+
+Attention is the ANE-shaped part: dense, static shapes, ~11.7 ms/token of GPU
+work, and non-expert weights are only 1.31 GiB at 4-bit -- about 2.6 GiB at int8,
+which fits. Stateful Core ML models can even hold the KV cache now.
+
+The routed experts cannot follow it. At int8 they are ~34 GB against 24 GB of
+RAM, and expert selection changes every token while a Core ML graph is compiled
+statically -- expressing top-8-of-256 would mean materialising all 256.
+
+So attention on ANE and MoE on GPU forces the two to alternate, 40 times per
+token, 80 handoffs. Measured per-layer GPU round trips already cost 0.2-0.3 ms,
+and a Core ML invocation is not cheaper. That is ~12 ms/token of handoff against
+11.7 ms of work moved -- negative before anything else is counted.
+
+And there is now a further reason for doubt. CPU load was measured to raise
+GPU-busy by 44.9% through shared package power; the ANE sits on the same die and
+the same budget. It is more efficient per operation for the ops it supports, so
+the penalty may be smaller, but "the ANE is idle therefore free" is the same
+assumption that proved false for the cores.
+
+The honest summary: for a *dense* model the ANE would be a real third resource.
+For a sparse MoE with per-token routing it cannot hold the half that dominates,
+and the alternation that follows costs more than it saves. Not an API limit, and
+not something a v4.0 rewrite changes.
+
+Untested, and testable if wanted: build one attention block as an fp16 Core ML
+ML Program, confirm with the Core ML Instrument that it lands on ANE, then run it
+in a loop during decode and watch `busy_per_token` -- the same harness that
+settled the CPU question. That needs `coremltools`, which is not installed here.
