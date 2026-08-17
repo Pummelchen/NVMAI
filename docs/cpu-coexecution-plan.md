@@ -676,3 +676,64 @@ Untested, and testable if wanted: build one attention block as an fp16 Core ML
 ML Program, confirm with the Core ML Instrument that it lands on ANE, then run it
 in a loop during decode and watch `busy_per_token` -- the same harness that
 settled the CPU question. That needs `coremltools`, which is not installed here.
+
+## Measured: ANE load costs twice what CPU load costs
+
+The ANE question was previously closed by argument. Now measured. Built an fp16
+Core ML ML Program (24 stacked 2048x2048 linears, batch 64) with coremltools,
+confirmed it reaches the ANE -- `CPU_AND_NE` runs it in 3.31 ms against 6.24 ms
+for `CPU_ONLY`, 1.88x, at 3.9 TFLOP/s -- then ran it in a loop during decode:
+
+| load | tok/s | GPU busy/token |
+| --- | ---: | ---: |
+| none | 20.43 | 27.26 ms |
+| ANE at 3.9 TFLOP/s | 11.15 | **51.62 ms** |
+
+GPU-busy **+89.3%**, throughput **-45.4%**. Two samples per arm, tight
+(27.34/27.19 idle, 49.69/53.56 loaded). Twice the damage the CPU load did.
+
+The mechanism is visible in the load generator itself: 192 MiB of fp16 weights
+per call at 3.31 ms is ~58 GB/s of memory traffic. The ANE was not merely drawing
+power, it was consuming most of the bus.
+
+Caveat: driving it through Core ML from Python means some CPU marshalling is
+included, so this is ANE-plus-some-CPU rather than ANE alone. The effect is
+nearly double the pure-CPU case, so the ANE contribution dominates.
+
+## Why every one of these attempts failed the same way
+
+The three resources were nominated as idle: cores, ANE, bus. The unifying result
+is that **only one of them was ever the constraint, and it is the bus.**
+
+NVMAI moves ~1.8 GB per token. This machine delivers ~78 GB/s in practice. That
+sets an 23 ms/token floor -- and during the 27.6 ms the GPU actually works, it
+already pulls ~65 GB/s, 83% of that. Compute units are idle; *bandwidth* is not.
+
+Every failed idea in this document is the same mistake in different clothing:
+
+- CPU expert co-execution: adds a second bus consumer. -22.6%.
+- ANE offload: adds a faster bus consumer. -45.4%.
+- Compression: would reduce bus traffic, but the payload is at 93% of its entropy
+  limit, so there is nothing to remove.
+- Reshaping: would improve bus efficiency, but it is already at 88% of achievable.
+- Spinning: trades bus-idle CPU cycles for GPU clocks. -15%.
+
+Adding compute to a bandwidth-bound pipeline on a shared memory system cannot
+help, and adding *fast* compute hurts more than slow compute. That is why the
+two-GPU analogy does not carry: two discrete cards bring their own memory and
+their own bandwidth. Everything on an M3 shares one controller.
+
+### What this means for a v4.0
+
+The ceiling is set by bytes / bandwidth, and both terms are fixed -- bytes by the
+user's quantisation choice, bandwidth by the silicon. 1.8 GB at 78 GB/s is 23 ms,
+so ~43 tok/s is the hard maximum for 4-bit on this machine, against 21 measured.
+
+Closing that gap is entirely a matter of keeping the GPU fed: 16.7 ms of the
+47.3 ms token is idle. Eliminate all of it and the result is 27.6 ms, 36 tok/s,
+1.71x. The remaining step to 43 tok/s requires the GPU's own kernels to move from
+65 to 78 GB/s, +20% on kernel bandwidth efficiency, which is unmeasured.
+
+So a v4.0 should be a single-minded attack on GPU idle and kernel bandwidth
+efficiency, with no CPU or ANE participation at all. 1.71x is the credible target;
+2x needs the kernel efficiency to be there as well.
