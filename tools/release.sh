@@ -143,7 +143,13 @@ fi
 
 [ -n "$NOTES" ] || die "--publish needs --notes <file> (see the previous release for the shape)"
 [ -f "$NOTES" ] || die "notes file not found: $NOTES"
-grep -q "$SHA" "$NOTES" || echo "  warning: the notes do not mention this archive's sha256"
+# Hard failure, not a warning. --publish rebuilds the archive, so a checksum
+# copied from a dry run will not match what ships, and a release whose notes
+# quote the wrong SHA-256 is worse than one quoting none: it tells a careful
+# user their download is corrupt. 3.7 shipped this way for a few minutes.
+if ! grep -q "$SHA" "$NOTES"; then
+  die "the notes do not quote this archive's sha256 ($SHA); update them and re-run"
+fi
 
 step "publish"
 gh release create "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" \
