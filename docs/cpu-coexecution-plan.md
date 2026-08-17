@@ -922,3 +922,94 @@ Decided, and the measurements support it. Palettised at 6 bits the ANE reaches
 8-bit despite storing 25% fewer bytes -- the signature of a non-power-of-two
 packing being padded. On a 24 GiB machine 6-bit also does not fit, measuring
 6.7 tok/s against 4-bit's 18.8. It was costing users twice.
+
+## The width axis changes the answer: prefill is compute-bound
+
+Everything above concerns decode. Prefill is a different machine.
+
+NVMAI prefill throughput against chunk width, 3752-token prompt, 4-bit, 128 slots:
+
+| chunk | prefill | tok/s | ms/token |
+| ---: | ---: | ---: | ---: |
+| 128 | 82.76 s | 45.3 | 22.06 |
+| 512 | 64.88 s | 57.8 | 17.29 |
+| 1024 | 57.24 s | 65.5 | 15.26 |
+| 2048 | 53.75 s | 69.8 | 14.33 |
+| 4096 (default) | 53.43 s | **70.2** | 14.24 |
+
+Monotonic and saturating -- the shipped default of 4096 is already optimal, and
+larger chunks win because the expert union grows sublinearly, so reads amortise
+over more tokens.
+
+The important number is the byte budget:
+
+| | expert bytes/token | ms/token |
+| --- | ---: | ---: |
+| decode (width 1) | 540 MiB | 47.3 |
+| prefill (width 4096) | **4.22 MiB** | 14.24 |
+
+128x fewer bytes for only 3.3x less time. **Prefill is not bandwidth-bound; it is
+compute-bound.** At ~2.75B active parameters that is ~5.5 GFLOP/token, so 14.24 ms
+is roughly **400-500 GFLOP/s -- about 13% of the M3 GPU's peak.**
+
+### ANE at prefill widths
+
+Marginal per-op cost, 4-bit palettised, NVMAI's real shapes, with a nonlinearity
+between repetitions so `sum(W_i x)` cannot be folded to `(sum W_i) x`:
+
+| shape | width 1 | width 256 | width 1024 |
+| --- | ---: | ---: | ---: |
+| qkv 2048->9216 | 247 GFLOP/s | 14250 | **13129** |
+| expert_gate 2048->512 | 78 | 15065 | **16640** |
+| expert_down 512->2048 | 34 | 7845 | **8223** |
+
+The ANE goes from useless at width 1 (34-247 GFLOP/s) to **8-17 TFLOP/s** at
+prefill widths -- a 100x swing driven entirely by weight reuse. Against NVMAI's
+~400-500 GFLOP/s GPU prefill, the dense-matmul portion is 20-30x faster on ANE.
+
+Treat the absolute figures with some caution: 13-16 TFLOP/s brushes the M3 ANE's
+rated ~18 TOPS, which is only consistent if 4-bit palettised weights take an
+int8 datapath. The *ratio* is robust regardless -- width 1 to width 1024 is a 100x
+change measured on the same harness.
+
+## Switching costs, measured
+
+This is what decides whether any hybrid is viable:
+
+| transition | cost | per token at decode | per token at prefill |
+| --- | ---: | ---: | ---: |
+| GPU per-layer round trip | 0.2-0.3 ms | 8-12 ms (40x) | negligible |
+| Core ML invocation | ~0.16 ms | 6.4 ms (40x) | 0.00004 ms (1 per 4096) |
+
+Same overhead, opposite verdict. A per-layer handoff during decode costs more than
+the work it moves; one handoff per prefill chunk is amortised over 4096 tokens and
+is free. **That, not the compute, is why decode must stay GPU-only and prefill is
+worth revisiting.**
+
+## Three-way summary
+
+| workload | width | bound by | best unit |
+| --- | ---: | --- | --- |
+| decode, routed MoE | 1 | bandwidth | GPU (2.8x over ANE, 2.1x over CPU) |
+| decode, everything else | 1 | bandwidth | GPU; all units within ~7% |
+| lm_head | 1 | bandwidth | tie (ANE 1.1x) |
+| **prefill** | **4096** | **compute** | **ANE, 20-30x on dense matmul** |
+
+CPU is excluded throughout: it never wins a workload, and loading it costs the GPU
+45%.
+
+## The recommendation, and the check that must come first
+
+Prefill is the one real opportunity, and for a long prompt it is large -- 53 s for
+3752 tokens today.
+
+But **do not start with Core ML.** The GPU is running prefill at 13% of its own
+peak, and the first question is why. If NVMAI's prefill kernels are simply
+inefficient at width 4096, fixing them is a contained kernel change that keeps the
+engine, the quantisation choice and the KV cache intact. Adopting Core ML means a
+second model artifact, all 256 experts resident, and handing the ANE-produced KV
+cache to the GPU decode path across two frameworks -- by far the harder route, and
+pointless if the GPU has 3-5x sitting in its own kernels.
+
+So: profile prefill's GPU roles at width 4096 first. Only if the GPU is genuinely
+near its ceiling does the Core ML prefill path become the right answer.
