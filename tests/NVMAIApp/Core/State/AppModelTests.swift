@@ -329,3 +329,66 @@ import Testing
         return condition()
     }
 }
+
+@Suite("Moved model recovery")
+struct MovedModelRecoveryTests {
+    /// The state must be both *reachable* and *actionable*.
+    ///
+    /// Excluding `.needsReattestation` from `requiresModelInstallation` stops
+    /// the app offering a re-download — but on its own that only hides the
+    /// wrong remedy. If nothing else is offered the user is left with a moved
+    /// model, no installer, and no way forward. These two assertions are the
+    /// pair: the installer is suppressed AND the recovery is available.
+    @MainActor
+    @Test func aMovedModelSuppressesTheInstallerAndOffersRecovery() throws {
+        let original = try makeCompleteModelInstall("recovery")
+        defer { try? FileManager.default.removeItem(at: original) }
+        let moved = original.deletingLastPathComponent()
+            .appendingPathComponent("nvmai-recovery-\(UUID().uuidString).gturbo")
+        try FileManager.default.moveItem(at: original, to: moved)
+        defer { try? FileManager.default.removeItem(at: moved) }
+
+        let installer = MockModelInstallerClient()
+        let model = AppModel(modelDirectory: moved, installer: installer)
+
+        #expect(model.needsReattestation)
+        #expect(!model.requiresModelInstallation,
+                "a moved model must not be offered the installer")
+        #expect(model.canReattestModel,
+                "suppressing the installer without offering recovery strands the user")
+        #expect(!model.isModelInstalled)
+    }
+
+    @MainActor
+    @Test func reattestingReprobesRatherThanAssumingSuccess() async throws {
+        let original = try makeCompleteModelInstall("reprobe")
+        defer { try? FileManager.default.removeItem(at: original) }
+        let moved = original.deletingLastPathComponent()
+            .appendingPathComponent("nvmai-reprobe-\(UUID().uuidString).gturbo")
+        try FileManager.default.moveItem(at: original, to: moved)
+        defer { try? FileManager.default.removeItem(at: moved) }
+
+        let installer = MockModelInstallerClient()
+        let model = AppModel(modelDirectory: moved, installer: installer)
+        model.reattestModel()
+        try await waitUntilTrue { installer.reattestCalled }
+
+        // The mock does not write a receipt, so the re-probe must still report
+        // the model as needing attestation rather than trusting the call.
+        try await waitUntilTrue { model.installTaskIsIdleForTesting }
+        #expect(model.needsReattestation,
+                "re-attestation must be confirmed by re-probing, not assumed")
+    }
+
+    private func waitUntilTrue(
+        _ predicate: @MainActor () -> Bool,
+        timeout: Duration = .seconds(5)
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if await MainActor.run(body: predicate) { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("condition not met within \(timeout)")
+    }
+}

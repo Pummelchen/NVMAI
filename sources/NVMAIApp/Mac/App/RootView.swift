@@ -31,6 +31,7 @@ struct RootView: View {
         }
         .tint(NVMAIMacTheme.accentColor)
         .animation(.smooth(duration: 0.3), value: model.requiresModelInstallation)
+        .animation(.smooth(duration: 0.3), value: model.needsReattestation)
         .animation(.smooth(duration: 0.25), value: model.error)
         .animation(.smooth(duration: 0.2), value: model.presentation.conversationAction)
         .transaction { transaction in
@@ -44,6 +45,11 @@ struct RootView: View {
         Group {
             if model.requiresModelInstallation {
                 ModelInstallView(model: model)
+            } else if model.needsReattestation {
+                // A moved model is complete but unattested. It must not fall
+                // through to the conversation view: loading would fail on the
+                // receipt, and the installer is the wrong remedy.
+                ModelReattestationView(model: model)
             } else {
                 conversationView
             }

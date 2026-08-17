@@ -414,6 +414,9 @@ public final class AppModel {
     /// Re-hashes the payload against its manifest and rebinds the receipt to
     /// the current directory. Local only — the alternative the app used to
     /// offer for this state was a full re-download.
+    /// Test hook: has the re-attestation task finished?
+    var installTaskIsIdleForTesting: Bool { installTask == nil }
+
     public func reattestModel() {
         guard canReattestModel else { return }
         let directory = URL(fileURLWithPath: modelPathText).standardizedFileURL
