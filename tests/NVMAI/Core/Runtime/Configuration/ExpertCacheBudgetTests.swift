@@ -81,3 +81,45 @@ import Testing
         }
     }
 }
+
+/// `--ram-budget` is the user-facing knob, so its parser has to accept what people
+/// type and reject what they mistype -- a silently misparsed size would produce a
+/// tiny cache and a 2.2x throughput loss with no error.
+@Suite struct BudgetParsingTests {
+    @Test func acceptsTheUnitsUsersType() {
+        #expect(RuntimeConfiguration.parseBudgetBytes("8G") == 8 << 30)
+        #expect(RuntimeConfiguration.parseBudgetBytes("2g") == 2 << 30)
+        #expect(RuntimeConfiguration.parseBudgetBytes("512M") == 512 << 20)
+        #expect(RuntimeConfiguration.parseBudgetBytes("8GiB") == 8 << 30)
+        #expect(RuntimeConfiguration.parseBudgetBytes("1024KB") == 1024 << 10)
+        #expect(RuntimeConfiguration.parseBudgetBytes(" 4G ") == 4 << 30)
+        #expect(RuntimeConfiguration.parseBudgetBytes("1073741824") == 1 << 30)
+    }
+
+    @Test func acceptsFractionalSizes() {
+        #expect(RuntimeConfiguration.parseBudgetBytes("1.5G") == Int(1.5 * Double(1 << 30)))
+        #expect(RuntimeConfiguration.parseBudgetBytes("0.5G") == 1 << 29)
+    }
+
+    @Test func rejectsWhatWouldSilentlyShrinkTheCache() {
+        for bad in ["", " ", "bogus", "G", "-2G", "0", "0G", "abcG", "2X", "2GG"] {
+            #expect(RuntimeConfiguration.parseBudgetBytes(bad) == nil,
+                    "\(bad.debugDescription) should not parse")
+        }
+    }
+
+    /// The knob has to move the outcome, and monotonically.
+    @Test func budgetDrivesTheSlotCount() {
+        let stride = UInt64(1_769_472)
+        let one = RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: stride, layers: 40, budgetBytes: 1 << 30)
+        let four = RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: stride, layers: 40, budgetBytes: 4 << 30)
+        let eight = RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: stride, layers: 40, budgetBytes: 8 << 30)
+        #expect(one == 16)
+        #expect(four == 64)
+        #expect(eight == 128)
+        #expect(one < four && four < eight)
+    }
+}

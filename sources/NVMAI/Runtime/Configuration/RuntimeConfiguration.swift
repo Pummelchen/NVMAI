@@ -67,6 +67,31 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// the shipped `--max-context`, never a reduced one.
     public static let defaultExpertCacheBudgetBytes = 8 << 30
 
+    /// Parses a RAM budget such as `2G`, `512M`, `8GiB` or a plain byte count.
+    ///
+    /// Accepts the sizes users actually type. Returns nil for anything
+    /// unparseable or non-positive, so a typo becomes an argument error rather
+    /// than a silently tiny cache.
+    public static func parseBudgetBytes(_ text: String) -> Int? {
+        let raw = text.trimmingCharacters(in: .whitespaces).uppercased()
+        guard !raw.isEmpty else { return nil }
+        let multipliers: [(String, Int)] = [
+            ("GIB", 1 << 30), ("MIB", 1 << 20), ("KIB", 1 << 10),
+            ("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10),
+            ("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10),
+        ]
+        for (suffix, scale) in multipliers where raw.hasSuffix(suffix) {
+            let number = String(raw.dropLast(suffix.count))
+                .trimmingCharacters(in: .whitespaces)
+            guard let value = Double(number), value > 0 else { return nil }
+            let bytes = value * Double(scale)
+            guard bytes.isFinite, bytes >= 1, bytes < Double(Int.max) else { return nil }
+            return Int(bytes)
+        }
+        guard let plain = Int(raw), plain > 0 else { return nil }
+        return plain
+    }
+
     /// Slots that fit `budgetBytes`, snapped to the nearest supported count.
     ///
     /// Deriving from the stride rather than hard-coding a number per quantisation

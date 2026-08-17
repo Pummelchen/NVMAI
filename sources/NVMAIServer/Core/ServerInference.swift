@@ -461,6 +461,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                             promptCacheDiskLimitBytes: Int = 8_192 * 1_048_576,
                             prefillChunkTokens requestedPrefillChunkTokens: Int? = nil,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
+                            expertCacheBudgetBytes: Int? = nil,
                             mtpModelDirectory: URL? = nil,
                             mtpMemoryMiB: Int = StreamingMTPMemoryPlan.defaultBudgetMiB,
                             reusingContext: MetalContext? = nil) async throws -> ServerModelSession {
@@ -494,7 +495,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                                                   expecting: .qwen36_35B_A3B) {
             derivedSlots = RuntimeConfiguration.expertCacheSlots(
                 expertStrideBytes: manifest.expertStride,
-                layers: manifest.arch.numLayers)
+                layers: manifest.arch.numLayers,
+                budgetBytes: expertCacheBudgetBytes
+                    ?? RuntimeConfiguration.defaultExpertCacheBudgetBytes)
         } else {
             // Unreadable manifest means the load below will fail with a better
             // message than anything this could throw, so pick the safe small end.

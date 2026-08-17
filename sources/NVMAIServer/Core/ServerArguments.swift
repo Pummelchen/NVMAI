@@ -18,6 +18,10 @@ public struct ServerArguments: Equatable, Sendable {
     public let promptCacheDiskMiB: Int
     public let prefillChunkTokens: Int?
     public let expertCacheSlots: Int?
+    /// Bytes the routed-expert cache may use. Slots are derived from it and the
+    /// model's own expert stride, so this is the knob and the slot count is the
+    /// outcome. `--expert-cache-slots` still wins if both are given.
+    public let expertCacheBudgetBytes: Int?
     /// Defer the model load to the first inference request.
     public let lazyLoad: Bool
     /// Release the weights after this many idle seconds; 0 disables unloading.
@@ -67,6 +71,14 @@ public struct ServerArguments: Equatable, Sendable {
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
                              override: NVMAI_EXPERT_CACHE_SLOTS.
+      --ram-budget <size>    Bytes the routed-expert cache may use, e.g. 8G,
+                             2G, 512M. Slots are derived from this and the
+                             model's expert stride, so this is the knob and
+                             the slot count is the result. Default 8G, which
+                             holds the measured routing working set; smaller
+                             budgets are markedly slower because expert reads
+                             bypass the page cache and have no fallback.
+                             --expert-cache-slots overrides this.
       --lazy-load            Bind the port immediately and defer the model load
                              to the first inference request (default off).
       --idle-unload-seconds <n>
@@ -96,6 +108,7 @@ public struct ServerArguments: Equatable, Sendable {
         var promptCacheDiskMiB = 8_192
         var prefillChunkTokens: Int?
         var expertCacheSlots: Int?
+        var expertCacheBudgetBytes: Int?
         var lazyLoad = false
         var idleUnloadSeconds = 0
         var index = 0
@@ -194,6 +207,12 @@ public struct ServerArguments: Equatable, Sendable {
                         "--expert-cache-slots must be one of \(RuntimeConfiguration.allowedExpertCacheSlots)")
                 }
                 expertCacheSlots = parsed
+            case "--ram-budget":
+                guard let parsed = RuntimeConfiguration.parseBudgetBytes(value) else {
+                    throw ServerArgumentError.invalid(
+                        "--ram-budget must be a positive size such as 2G, 512M or a byte count")
+                }
+                expertCacheBudgetBytes = parsed
             case "--idle-unload-seconds":
                 guard let parsed = Int(value), (0...86_400).contains(parsed) else {
                     throw ServerArgumentError.invalid(
@@ -219,6 +238,7 @@ public struct ServerArguments: Equatable, Sendable {
                                promptCacheDiskMiB: promptCacheDiskMiB,
                                prefillChunkTokens: prefillChunkTokens,
                                expertCacheSlots: expertCacheSlots,
+                               expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,
                                idleUnloadSeconds: idleUnloadSeconds)
     }

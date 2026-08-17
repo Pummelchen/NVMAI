@@ -28,6 +28,7 @@ do {
         promptCacheDiskLimitBytes: arguments.promptCacheDiskMiB * 1_048_576,
         prefillChunkTokens: arguments.prefillChunkTokens,
         expertCacheSlots: arguments.expertCacheSlots,
+        expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
         mtpModelDirectory: arguments.mtpModel.map {
             URL(fileURLWithPath: $0).standardizedFileURL
         },

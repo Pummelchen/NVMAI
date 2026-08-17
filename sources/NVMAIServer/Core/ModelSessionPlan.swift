@@ -41,6 +41,8 @@ public struct ModelSessionPlan: Sendable {
     public let promptCacheDiskLimitBytes: Int
     public let prefillChunkTokens: Int?
     public let expertCacheSlots: Int?
+    /// Bytes the routed-expert cache may use; slots are derived from it.
+    public let expertCacheBudgetBytes: Int?
     public let mtpModelDirectory: URL?
     public let mtpMemoryMiB: Int
 
@@ -53,6 +55,7 @@ public struct ModelSessionPlan: Sendable {
                 promptCacheDiskLimitBytes: Int,
                 prefillChunkTokens: Int?,
                 expertCacheSlots: Int?,
+                expertCacheBudgetBytes: Int? = nil,
                 mtpModelDirectory: URL?,
                 mtpMemoryMiB: Int) {
         self.modelDirectory = modelDirectory
@@ -64,6 +67,7 @@ public struct ModelSessionPlan: Sendable {
         self.promptCacheDiskLimitBytes = promptCacheDiskLimitBytes
         self.prefillChunkTokens = prefillChunkTokens
         self.expertCacheSlots = expertCacheSlots
+        self.expertCacheBudgetBytes = expertCacheBudgetBytes
         self.mtpModelDirectory = mtpModelDirectory
         self.mtpMemoryMiB = mtpMemoryMiB
     }
@@ -81,6 +85,7 @@ public struct ModelSessionPlan: Sendable {
             promptCacheDiskLimitBytes: promptCacheDiskLimitBytes,
             prefillChunkTokens: prefillChunkTokens,
             expertCacheSlots: expertCacheSlots,
+            expertCacheBudgetBytes: expertCacheBudgetBytes,
             mtpModelDirectory: mtpModelDirectory,
             mtpMemoryMiB: mtpMemoryMiB,
             reusingContext: reusingContext)
