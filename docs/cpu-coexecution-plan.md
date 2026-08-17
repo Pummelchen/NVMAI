@@ -218,8 +218,40 @@ streaming path selectable rather than delete it.
 
 This is a substantial piece of work, not a patch: it changes how weights reach
 the GPU, and it needs the golden baseline plus a memory-pressure story before
-it could be trusted. Prototype narrowly first -- one layer, mmap'd zero-copy,
-output compared against the streamed path -- before touching the decode loop.
+it could be trusted.
+
+### First prototype: the mechanism works, the memory story is unresolved
+
+A standalone Metal program reading the packed expert files three ways, same
+bytes each time:
+
+| source | throughput |
+| --- | ---: |
+| one layer (432 MiB), pread into anonymous memory | 282.4 GB/s |
+| one layer, zero-copy mmap | **404.3 GB/s** |
+| all 40 layers mapped, full sweep (16.9 GiB) | 0.2 GB/s |
+
+The first two settle the mechanism: the GPU reads mmap'd file pages 43% faster
+than the pread'd anonymous slots used today, so there is no penalty for
+dropping the copy. (Both are far above bus rate because a 432 MiB layer stays
+resident and the kernel is a trivial streaming read; the comparison between
+them is what matters, not the absolute.)
+
+The third is the open question, and it is not as damning as it looks. Touching
+all 16.9 GiB per pass thrashes a 24 GiB machine -- 83 s, and a second pass at
+89 s with no caching benefit. But decode never does that. It reads 8 of 256
+experts per layer, and the locality is high enough that 128 slots already hit
+~92%. So this measures a worst case that the access pattern does not produce.
+
+What it does establish is the failure mode: when the working set exceeds RAM,
+mmap degrades to disk speed rather than degrading gracefully, and there is no
+knob to bound it. The slot cache bounds it by construction. That is the
+property being traded, and it is why the streaming path should stay selectable.
+
+The next prototype has to replicate the real access pattern -- top-8 of 256 per
+layer, with the routing correlation actual tokens produce -- rather than a full
+sweep. Until that is measured, neither "mmap is fine" nor "mmap thrashes" is
+supported for the operating point that matters.
 
 ### The fused greedy head: TRIED, IT IS SLOWER
 
