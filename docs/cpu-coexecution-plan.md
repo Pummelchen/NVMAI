@@ -108,12 +108,23 @@ The CPU reads expert weights straight from the mmap'd file, so its share also
 skips the pread into a GPU slot -- removing part of the 7.8 ms I/O and the
 1.0 ms rdadvise along with the compute.
 
-Balance point: CPU at 17.1 GiB/s does all 8 experts of a layer in 0.773 ms
-(30.9 ms/token for all 40 layers), while the GPU's whole routed-MoE role is
-9.8 ms/token. Giving the CPU everything would make it the critical path, so the
-split should be tuned, starting near 3-4 experts of 8 and measured.
+**Corrected estimate: ~6%, not the +25-40% first written here.** The original
+figure came from checking that the CPU could do a layer inside the per-layer
+budget. It can. What it never checked was whether the CPU is *faster than the
+GPU already is* at the same work. It is not:
 
-Estimated +25-40% on top of Phase 0. This is the main event.
+| | per expert |
+| --- | ---: |
+| GPU (`moe_phase1_2_routed`, 9.764 ms/token over 320 evals) | 0.031 ms |
+| CPU, all 8 cores (0.516 ms/layer over 8) | 0.065 ms |
+
+The GPU is 2.1x faster than all eight cores combined, measured with the GPU
+otherwise idle -- under contention the CPU is worse still. Moving work from the
+faster unit to the slower one only pays at the balance point: the expert phase
+drops from 0.205 ms/layer to 0.139 ms, which is 2.6 ms/token, about 6%.
+
+Worth doing as a cheap win once the plumbing exists, but it is not the main
+event, and nothing here scales to 2x.
 
 ### Phase 2 -- Re-shard for a CPU-friendly layout
 
@@ -128,6 +139,41 @@ container. It does not need a re-download; it is a repack of installed weights.
 
 Estimated +10-15% beyond Phase 1, and it is the phase that makes the split
 tunable rather than fixed by dequant cost.
+
+## The ceiling, and what a 2x would actually require
+
+Adding parallel compute units cannot double throughput here, and the reason is
+arithmetic rather than engineering. At 21 tok/s a token is 47.6 ms: 27.6 ms of
+GPU-busy and 20 ms of idle. Doubling means 23.8 ms/token, which is less than
+the GPU's own work. Even with the idle driven to zero -- infinite CPU, a
+perfect ANE, no stalls -- the result is 36 tok/s, 1.7x. That bounds every
+"use more units" idea in this document.
+
+Decode at batch 1 is a serial dependency chain: layer L+1 needs layer L's
+output, and within a layer the experts need the attention result. There is no
+independent work to run alongside. Only the expert set can be split, and that
+is the 6% above.
+
+The lever that does reach 2x is moving fewer bytes. Per token the model reads
+roughly 1.8 GB -- attention ~900 MB, experts 540 MB, lm_head ~240 MB, shared
+~120 MB. At ~100 GB/s that is an 18 ms floor, so 4-bit caps out near 55 tok/s
+and we are at 21, using about 39% of the bus.
+
+| change | GPU busy | plausible total | tok/s |
+| --- | ---: | ---: | ---: |
+| now (4-bit) | 27.6 ms | 47.6 | 21 |
+| + CPU expert split | 25.0 | 45.0 | 22 |
+| 3-bit | 20.7 | ~33 | ~30 |
+| 3-bit + idle halved | 20.7 | ~26 | ~38 |
+| 2-bit experts / 3-bit attention + idle halved | ~15 | ~22 | ~45 |
+
+Two things follow. Attention is the largest consumer, not the experts, so
+byte-cutting should start there. And the table assumes GPU time scales with
+bytes; that is consistent with the measured per-role rates (~55-65 GB/s across
+attention and MoE alike) but it is an assumption, and the cheap way to test it
+is to requantise to 3-bit and check whether `busy_per_token` falls
+proportionally. If it does not, the GPU is not purely bandwidth-bound and every
+row below the first is optimistic.
 
 ## What this does not do
 
