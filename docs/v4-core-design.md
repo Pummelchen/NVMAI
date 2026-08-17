@@ -256,3 +256,54 @@ Instrument, measuring (a) achieved rate at width 1024+, (b) whether the KV cache
 be handed to the GPU decode path, (c) whether a 256-expert gather is expressible.
 
 Not on the v4.0 critical path. Decode and the streamer are.
+
+## Bounded footprint: the cost, finally measured
+
+The page cache was purged (`sudo purge`, run by the user -- it cannot be driven
+from here) and both arms were matched on slot count *and* context size, which the
+first attempt was not:
+
+| 32 slots, default context | wall, 192 tokens | process RSS |
+| --- | ---: | ---: |
+| cached | 26.43 / 23.20 / 22.82 s | 1.82 GB |
+| bounded (`F_NOCACHE`) | 29.05 / 29.06 / 29.18 s | 3.74 GB |
+
+**A bounded footprint costs ~20%.** An earlier reading of this put it at 2.3x; that
+gap was mostly context size rather than cache policy, and the corrected figure is
+the one to design against.
+
+Note the RSS inversion, which is the whole point rather than an anomaly. Bounded is
+*higher* because `F_NOCACHE` forces every expert into our own slots, where it is
+counted. Cached is lower because it leans on the unified buffer cache, which does
+not appear in process RSS at all. So bounded's 3.74 GB is the true machine cost,
+while cached's 1.82 GB is 1.82 GB **plus** whatever the OS decided to hold. For a
+project whose purpose is leaving RAM free, the honest number is the one you can
+account for.
+
+20% for a footprint that is actually bounded is a good trade, and `NVMAI_BOUNDED_IO`
+should become the default in v4.0.
+
+## Separately: the default context costs 1.6x throughput
+
+Found while matching the arms above, and unrelated to streaming:
+
+| `--max-context` | wall, 192 tokens | RSS |
+| ---: | ---: | ---: |
+| 8192 | 15.42 / **13.80** s | 3.68 GB |
+| 32768 | 15.72 / 14.19 s | 2.67 GB |
+| 262144 (default) | 25.92 / **22.44** s | 1.84 GB |
+
+Same 32 slots, same 25-token prompt, same 192 generated tokens. **Reserving 262144
+tokens of context makes decode ~1.6x slower than reserving 8192**, on a conversation
+that uses neither.
+
+The mechanism is that KV strides are sized by `max-context` rather than by the
+sequence, so attention walks a buffer two orders of magnitude larger than the data
+in it -- every access lands in a different page and the locality is gone. RSS
+falling as context grows is consistent with that: more of the reservation is never
+touched.
+
+This is a v3.x defect, not a v4.0 design question, and it is worth more than most of
+the work in this document: every user on the default is paying 1.6x for context they
+are not using. v4.0 should size KV strides from the live sequence and grow them,
+and the fix is likely backportable.
