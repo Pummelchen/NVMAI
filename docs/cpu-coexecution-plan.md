@@ -786,3 +786,34 @@ bandwidth ceiling looks like from the inside.
 **2x is not achievable on this hardware with this model at 4-bit.** Not by
 redesign, not by using every unit, not by compression. The remaining 1.71x is
 real and worth building; the last 0.3x does not exist.
+
+## ANE at 4/6/8-bit: hardware decompression, same ceiling, and a 6-bit anomaly
+
+Same 64-layer 2048x2048 stack, batch 1, weights palettised with Core ML:
+
+| format | ms/call | stored weights | GB/s of stored bytes |
+| --- | ---: | ---: | ---: |
+| fp16 | 8.47 | 512 MiB | 63.4 |
+| 8-bit | 4.43 | 256 MiB | 60.6 |
+| 6-bit | 4.31 | 192 MiB | **46.8** |
+| 4-bit | 2.22 | 128 MiB | 60.4 |
+
+**The ANE decompresses low-bit weights in hardware.** Time tracks *stored* bytes,
+not fp16-equivalent size: fp16 to 4-bit is 4x fewer bytes and 3.8x faster. That is
+textbook bandwidth-bound scaling and it independently confirms the central thesis
+of this document -- bytes are the constraint, and nothing else is.
+
+**And the ceiling is the same.** 60-63 GB/s of stored bytes at every bit width,
+against the GPU's ~65 GB/s. So an all-ANE engine at 4-bit lands at 1.8 GB /
+60 GB/s = 30 ms/token, ~33 tok/s -- marginally *worse* than the 36 tok/s the GPU
+route reaches. The ANE is not a faster path, it is an equivalent one with a small
+penalty.
+
+**6-bit is the outlier and it is actionable.** 46.8 GB/s against 60 for both 4-bit
+and 8-bit, and only 0.12 ms faster than 8-bit despite storing 25% fewer bytes.
+That is the signature of a non-power-of-two packing being padded or unpacked
+inefficiently. Worth checking whether NVMAI's own 6-bit GPU path has the same
+shape: the earlier 6-bit measurement (6.68 tok/s) was dominated by the model not
+fitting RAM, so a packing inefficiency would have been invisible underneath it. If
+present, 6-bit users are paying twice -- once for not fitting, once for the
+packing.
