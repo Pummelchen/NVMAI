@@ -5,6 +5,9 @@ import Synchronization
 /// Routes frames from the decode service socket to waiting requestors.
 /// A background task reads frames and deposits them in a Mutex-protected
 /// dictionary. waiters use a DispatchSemaphore to block until events arrive.
+/// unchecked-invariant: the per-request waiter table is guarded by its lock.
+/// The socket reader delivers replies while generation tasks register and
+/// await them, so both sides contend on the same table.
 final class DecodeServiceResponseRouter: @unchecked Sendable {
     private struct State {
         var pending: [UUID: [DecodeServiceEvent]] = [:]

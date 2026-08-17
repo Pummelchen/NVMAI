@@ -142,6 +142,8 @@ public struct MTPDecodeBatch: Sendable, Equatable {
 /// rejected draft is rolled back to the GPU checkpoint captured immediately
 /// after the confirmed boundary row.
 public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
+    /// unchecked-invariant: owns two RealForwardRunners and is driven by one
+    /// task at a time, inheriting their exclusive-ownership rule.
     @unchecked Sendable {
     public let target: RealForwardRunner
     let draft: RealForwardRunner

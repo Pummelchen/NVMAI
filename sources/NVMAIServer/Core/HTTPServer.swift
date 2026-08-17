@@ -119,6 +119,11 @@ public actor NVMAIHTTPServer {
     }
 }
 
+/// unchecked-invariant: NIO calls every ChannelInboundHandler method on the
+/// channel's own event loop, so the handler's per-request state is already
+/// serialised. The one exception is `activeTask`, which the SSE drainer and the
+/// backpressure path touch from the cooperative pool -- that field is guarded by
+/// `taskLock`.
 private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -446,6 +451,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     /// Streaming item bookkeeping for one /v1/responses turn (message item
     /// announced, function-call output indices).
+    /// unchecked-invariant: one instance per request, created on the event
+    /// loop and mutated only from the request's own generation task. It is
+    /// never shared between requests, so its counters need no locking.
     private final class ResponsesItemState: @unchecked Sendable {
         var messageAnnounced = false
         var toolCount = 0
@@ -1209,6 +1217,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
 /// Bounded FIFO of pre-encoded SSE frames for one stream, with a cap that
 /// fails the stream when a slow reader outruns the drainer (S4).
+/// unchecked-invariant: every field is guarded by `lock`. The queue is written
+/// from the generation task and drained from the event loop, which is exactly
+/// why the lock is here rather than relying on loop confinement.
 private final class SSEOutbox: @unchecked Sendable {
     private let lock = NSLock()
     private var frames: [Data] = []
@@ -1371,6 +1382,11 @@ private final class ChildChannelRegistry: Sendable {
     }
 }
 
+/// unchecked-invariant: a transport for one `ChannelHandlerContext` across a
+/// `@Sendable` boundary. The context itself is NOT thread-safe -- every use of
+/// `.value` below hops back to the channel's event loop first (writeJSON,
+/// writeHeartbeat, and `.eventLoop` which is itself immutable). The box makes
+/// the capture legal; the event-loop hop is what makes it correct.
 private final class SendableContext: @unchecked Sendable {
     let value: ChannelHandlerContext
 
@@ -1389,6 +1405,9 @@ private final class RequestPhaseState: Sendable {
     }
 }
 
+/// unchecked-invariant: every field is guarded by `lock`. Start/stop are
+/// driven from the generation task while the heartbeat fires on the event loop,
+/// so both sides contend and neither can rely on loop confinement.
 private final class StreamState: @unchecked Sendable {
     private let lock = NSLock()
     private var started = false

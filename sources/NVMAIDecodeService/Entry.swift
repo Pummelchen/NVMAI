@@ -212,6 +212,9 @@ import NVMAIDecodeProtocol
         case failure(Error)
     }
 
+    /// unchecked-invariant: the single backing field is guarded by `lock`. The
+    /// load task writes the phase while the command loop reads it to answer
+    /// status queries.
     private final class LoadPhaseReporter: @unchecked Sendable {
         private let lock = NSLock()
         private var _phaseLabel: String?
@@ -222,6 +225,10 @@ import NVMAIDecodeProtocol
         }
     }
 
+    /// unchecked-invariant: every stored property is guarded by `lock`. The
+    /// session is shared between the command loop and the in-flight load and
+    /// generation tasks, which is why the accessors are lock-wrapped rather
+    /// than the type being an actor -- the command loop needs synchronous reads.
     private final class ServiceSession: @unchecked Sendable {
         private let lock = NSLock()
         private var _activeGenerationID: UUID?

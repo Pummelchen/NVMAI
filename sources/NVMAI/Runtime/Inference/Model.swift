@@ -27,6 +27,8 @@ public enum ExpertStreamingMode: Sendable {
 /// `MTLBuffer`; routed expert weights live behind per-layer streaming
 /// backends opened lazily on first touch.
 public struct Model {
+    /// unchecked-invariant: all `let`, holding two read-only TensorViews and
+    /// their bit widths. @unchecked only because TensorView is.
     struct SharedTargetWeights: @unchecked Sendable {
         let embedding: TensorView
         let lmHead: TensorView

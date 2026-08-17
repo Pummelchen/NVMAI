@@ -56,6 +56,9 @@ public enum RemoteRangeTransfer {
     }
 }
 
+/// unchecked-invariant: one delegate per range transfer. URLSession serialises
+/// its callbacks onto the delegate queue, so the accumulating buffer is only
+/// touched from that queue and read once the task finishes.
 private final class RemoteRangeTransferDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let targetPath: String
     private let expectation: RemoteRangeExpectation

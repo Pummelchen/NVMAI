@@ -1,6 +1,10 @@
 import Foundation
 import NVMAIDecodeProtocol
 
+/// unchecked-invariant: `commands` and `closed` are only touched while holding
+/// `condition`. The queue is a hand-off between the socket reader and the
+/// command runner, so the NSCondition provides both the mutual exclusion and
+/// the blocking wait.
 final class DecodeCommandQueue: @unchecked Sendable {
     private let condition = NSCondition()
     private var commands: [DecodeServiceCommand] = []

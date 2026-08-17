@@ -1,6 +1,9 @@
 import Darwin
 import Foundation
 
+/// unchecked-invariant: the peak counter is guarded by its lock. Sampling is
+/// called from the generation task while the UI reads the peak, so both sides
+/// contend.
 public final class AppMemorySampler: @unchecked Sendable {
     private let lock = NSLock()
     private var peak: UInt64 = 0

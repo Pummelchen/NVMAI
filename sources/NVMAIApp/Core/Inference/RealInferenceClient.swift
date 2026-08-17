@@ -55,6 +55,9 @@ final class GenerationTaskRegistry: Sendable {
 /// loop the CLI uses (`runRawCompletion`, BOS + verbatim encode, no chat
 /// template) behind the `AppInferenceClient` event stream, with an explicit
 /// load lifecycle so the resident weights stay warm across generations.
+/// unchecked-invariant: owns one RealForwardRunner and drives it from a single
+/// generation task at a time, inheriting the runner's exclusive-ownership
+/// rule. The app serialises load/generate/unload through AppModel.
 public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Sendable {
     private let session: RealInferenceSession
     private let memorySampler: AppMemorySampler

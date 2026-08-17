@@ -62,6 +62,9 @@ public actor ServerTerminationSignals {
 }
 
 /// Shared first-signal bookkeeping across the per-signal dispatch sources.
+/// unchecked-invariant: `delivered` is guarded by `lock`. Signal handlers can
+/// fire on any thread and may fire more than once, so the flag exists to make
+/// the first delivery win and the rest no-ops.
 private final class SignalState: @unchecked Sendable {
     private let lock = NSLock()
     private var delivered = false

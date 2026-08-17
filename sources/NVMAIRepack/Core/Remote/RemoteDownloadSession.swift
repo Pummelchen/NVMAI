@@ -20,6 +20,9 @@ public struct RemoteDownloadSessionPolicy: Sendable, Equatable {
     }
 }
 
+/// unchecked-invariant: stores only `let` configuration and a URLSession,
+/// which Foundation documents as safe to use from multiple threads. Per-request
+/// mutable state lives in the delegates, not here.
 public final class RemoteDownloadSession: @unchecked Sendable {
     public let policy: RemoteDownloadSessionPolicy
 
@@ -94,6 +97,9 @@ struct RemoteDownloadSessionConfigurationSnapshot: Equatable {
     let hasURLCache: Bool
 }
 
+/// unchecked-invariant: one delegate per request. URLSession serialises its
+/// callbacks onto the session's delegate queue, so the recorded redirect is
+/// written by one callback and read after the task completes.
 private final class MetadataRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var policy: RemoteMetadataRedirectPolicy

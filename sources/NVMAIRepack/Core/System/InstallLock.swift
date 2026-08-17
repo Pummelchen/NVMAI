@@ -54,6 +54,9 @@ public struct RemoteInstallPaths: Sendable, Equatable {
     }
 }
 
+/// unchecked-invariant: both stored properties are `let`. @unchecked is only
+/// needed because the type holds a raw file descriptor; the flock it owns is
+/// released in `deinit` and the descriptor is never reassigned.
 public final class InstallLock: @unchecked Sendable {
     public let paths: RemoteInstallPaths
     private let descriptor: Int32

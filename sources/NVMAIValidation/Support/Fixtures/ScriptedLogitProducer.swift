@@ -7,6 +7,8 @@ import Synchronization
 /// stack. The `step` closure maps `(inputToken, callIndex)` to a logit spec, so
 /// token-keyed automata can script deterministic greedy sequences regardless of
 /// how many tokens the prompt prefilled.
+/// unchecked-invariant: a test fixture replaying a fixed script, driven by one
+/// test at a time. Not used in production.
 public final class ScriptedLogitProducer: LogitProducer, @unchecked Sendable {
     public enum Step: Sendable {
         case argmax(Int32)

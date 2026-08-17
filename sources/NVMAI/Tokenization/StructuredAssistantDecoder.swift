@@ -5,6 +5,10 @@ public enum StructuredAssistantEvent: Equatable, Sendable {
     case toolCall(ParsedToolCall)
 }
 
+/// unchecked-invariant: one decoder per generation, driven only from that
+/// generation's task. Its channel/tool-token state is a running parse of a
+/// single token stream and would be meaningless shared, so exclusive
+/// ownership -- not locking -- is what makes it safe.
 public final class StructuredAssistantDecoder: @unchecked Sendable {
     private enum Channel {
         case thought

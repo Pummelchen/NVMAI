@@ -3,6 +3,10 @@ import NVMAI
 import NVMAIAppCore
 import NVMAIDecodeProtocol
 
+/// unchecked-invariant: `state` is only read or written while holding
+/// `condition`. Inference publishes events from the generation task while the
+/// writer drains on its own thread, and the condition also carries the wake-up
+/// that keeps streaming latency off the batch window.
 final class DecodeServiceOutbox: @unchecked Sendable {
     private struct PrefillProgress {
         var done: Int

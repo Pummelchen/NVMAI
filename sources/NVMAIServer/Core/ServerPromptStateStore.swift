@@ -47,6 +47,9 @@ enum ServerPromptStateStoreError: Error, CustomStringConvertible {
 /// guarded by `state`; all disk writes are serialized on `diskQueue` so
 /// concurrent saves (a later generation's snapshot while an earlier write is
 /// still in flight) never interleave file operations or clobber each other.
+/// unchecked-invariant: see the concurrency note above -- in-memory
+/// bookkeeping is guarded by `state`, and every disk write is serialized on
+/// `diskQueue` so concurrent saves cannot interleave file operations.
 final class ServerPromptStateStore: @unchecked Sendable {
     private struct DiskMetadata: Codable {
         static let currentVersion = 1

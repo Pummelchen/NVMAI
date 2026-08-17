@@ -49,6 +49,10 @@ public struct MetalFunctionConstant: Hashable, Sendable {
 /// `@unchecked Sendable`: device/queue/library are immutable and Metal objects
 /// are thread-safe for encoding; the pipeline cache is the only mutable state
 /// and is lock-guarded.
+/// unchecked-invariant: device, queue and library are set once in `init` and
+/// never reassigned; MTLDevice and MTLCommandQueue are documented as safe to
+/// use from multiple threads. The pipeline cache behind them is the only
+/// mutable state and is guarded by its own lock.
 public final class MetalContext: @unchecked Sendable {
     public let device:  MTLDevice
     public let queue:   MTLCommandQueue

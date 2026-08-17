@@ -12,6 +12,10 @@ public enum LayerKind: Sendable { case swa, full, linear }
 /// A read view the attention kernels bind. `offset` stays 0; ring-enabled SWA
 /// layers expose the physical start slot for diagnostics while kernels map
 /// logical positions with the supplied ring capacity.
+/// unchecked-invariant: every stored property is a `let`. The type is only
+/// @unchecked because MTLBuffer is not Sendable; the struct itself is a
+/// read-only descriptor of a range, and callers that write through it are
+/// serialised by whoever owns the buffer.
 public struct KVView: @unchecked Sendable {
     public let buffer: MTLBuffer
     /// Byte offset of logical position 0. Always 0 under linear storage.

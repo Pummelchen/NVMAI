@@ -5,6 +5,9 @@ import NVMAI
 import NVMAIDecodeProtocol
 
 public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
+/// unchecked-invariant: talks to the decode service over a socket and keeps no
+/// mutable inference state of its own; the reply table it uses is owned by
+/// DecodeServiceResponseRouter, which guards it with a lock.
     AppInferenceMemoryReporting, AppInferenceTranscriptReporting, @unchecked Sendable {
     /// Explicit connection lifecycle state: a dead connection is never reused;
     /// the next operation relaunches the service (bounded retry in

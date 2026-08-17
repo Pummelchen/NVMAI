@@ -29,6 +29,9 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
 /// NVMAI owns the minimal chat framing because the upstream
 /// `tokenizer_config.json` has no `chat_template`. Literal control-token text in
 /// user content is accepted as a trusted-input research-runtime limitation.
+/// unchecked-invariant: immutable after `load`. The stored token ids and the
+/// underlying swift-transformers tokenizer are never mutated afterwards, so
+/// concurrent encode/decode calls only read.
 public struct GFTokenizer: @unchecked Sendable {
     /// Nominal BOS. This is `<|endoftext|>` (the config's unused
     /// `bos_token_id`); it is never prepended — see `encode(_:addBOS:)`.

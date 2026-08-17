@@ -18,6 +18,9 @@ do {
 
 // Keep the cancellable task off the top-level executor so the blocking signal
 // bridge cannot prevent it from starting.
+/// unchecked-invariant: a hand-off box between the top-level task and the
+/// blocking signal wait, published exactly once before the semaphore is
+/// signalled and read only after -- the semaphore is the ordering.
 final class RunBox: @unchecked Sendable {
     var code: Int32 = 0
     var task: Task<Void, Never>?

@@ -34,7 +34,7 @@ public struct RawDecodeResult: Sendable {
 /// slot) and sampler. A warm session reuses them for every token, avoiding
 /// per-token Metal buffer allocation.
 ///
-/// `@unchecked Sendable`: the buffers and sampler are exclusively owned by one
+/// unchecked-invariant: the buffers and sampler are exclusively owned by one
 /// generation at a time — the single-in-flight guard upstream is the contract.
 public struct RawCompletionScratch: @unchecked Sendable {
     let logits: MTLBuffer

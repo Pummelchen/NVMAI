@@ -4,6 +4,8 @@ import Foundation
 /// constructed (e.g. the bundled service executable path is unavailable).
 /// Every operation fails with the recorded error so the app stays interactive
 /// and surfaces the problem in the UI instead of crashing at launch (D4).
+/// unchecked-invariant: holds one `let` error and no mutable state; every
+/// method fails with it. Immutable by construction.
 public final class UnavailableInferenceClient: AppModelLifecycleClient, @unchecked Sendable {
     private let failure: AppInferenceError
 
