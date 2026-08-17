@@ -221,18 +221,33 @@ the GPU, and it needs the golden baseline plus a memory-pressure story before
 it could be trusted. Prototype narrowly first -- one layer, mmap'd zero-copy,
 output compared against the streamed path -- before touching the decode loop.
 
-### Smaller, and independent
+### The fused greedy head: TRIED, IT IS SLOWER
 
-The server passes `forceLogitsHead: true` unconditionally
-(`ServerInference.swift`), so the fused greedy head never runs. It cannot as
-written: the head path is fixed when the runner is built while sampling
-parameters vary per request. For a temperature-0 request the fused head would
-do the argmax on the GPU instead of moving a full 151936-entry logit vector to
-the CPU to sample. That is worth part of `head_ms` (3.7 ms/token) and most of
-the `head_logits -> embed` gap (1.2 ms/token), but only for greedy requests --
-sampled ones still need the logits. The runner already accepts the mode per
-call (`PrefillOutputMode.greedyIfAvailable`); it is the construction-time flag
-that fixes it.
+The server passes `forceLogitsHead: true` unconditionally, so the fused greedy
+head never runs there, and it looked like free throughput for temperature-0
+requests: the argmax happens on the GPU instead of moving a 151936-entry logit
+vector to the CPU, which should save part of `head_ms` (3.7 ms/token) and most
+of the `head_logits -> embed` gap (1.2 ms/token).
+
+The CLI already selects it (`forceLogitsHead: !config.isPureGreedy`), so the
+comparison needs no code change -- t=0 takes the fused path, t=0.7 the logits
+path, same binary. Interleaved:
+
+| head | tok/s | mean |
+| --- | --- | ---: |
+| logits (t=0.7) | 12.892, 12.446 | 12.67 |
+| fused greedy (t=0) | 12.377, 12.206 | 12.29 |
+
+The fused head is ~3% *slower*, and that is with the sampling work included on
+the logits side. Avoiding the transfer does not pay for whatever the fused
+kernel gives up -- most likely a full-vocabulary argmax inside one dispatch
+against a plain GEMV the CPU then reduces.
+
+So there is nothing to move to the server, which is the useful outcome: making
+the head path per-request would have meant changing the sampling contract in
+`RawCompletion`, shared by the CLI, the server and the decode service, and the
+golden baseline is greedy-only so it would not have covered the sampled path
+that change puts at risk.
 
 ## An idle core is not a free resource
 
