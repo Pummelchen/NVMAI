@@ -1,4 +1,5 @@
 import Foundation
+import NVMAIKernelsC
 
 /// CPU evaluation of one routed expert, reading the packed `.gturbo` expert
 /// block directly.
@@ -72,13 +73,10 @@ public enum CPUExpertFFN {
     /// same rounding choices at the group level: one scale multiply and one
     /// bias multiply per group of 64, rather than dequantising each weight.
     ///
-    /// Throughput note: this runs at 1.19 ms per production expert (d=2048,
-    /// f=512) single-threaded under `-O`, against 0.49 ms for the equivalent
-    /// C/NEON loop -- 2.3x off. The gap is here, in building `q` and `xv`
-    /// element by element; `SIMD8<Float>(a, b, c, ...)` does not lower to a
-    /// vector load the way `vld1q_u8` plus shift/mask does. Closing it means
-    /// an intrinsics kernel behind this same signature, which is worth doing
-    /// before the split ratio is tuned, since the ratio depends on this number.
+    /// The body lives in `NVMAIKernelsC` because Swift's vector types do not
+    /// lower well here: an equivalent `SIMD8<Float>` version ran 2.3x slower
+    /// (1.19 ms vs 0.49 ms per production expert), spending the difference on
+    /// scalar inserts to build each vector rather than on arithmetic.
     @inline(__always)
     private static func gemv(weights: UnsafePointer<UInt8>,
                              scales: UnsafePointer<UInt16>,
@@ -87,44 +85,7 @@ public enum CPUExpertFFN {
                              rows: Int,
                              n: Int,
                              out: UnsafeMutablePointer<Float>) {
-        let groups = n / groupSize
-        let rowBytes = n / 2
-        for r in 0..<rows {
-            let wRow = weights + r * rowBytes
-            let sRow = scales + r * groups
-            let bRow = biases + r * groups
-            var acc: Float = 0
-            for g in 0..<groups {
-                let s = bf16(sRow[g])
-                let b = bf16(bRow[g])
-                var dot = SIMD8<Float>()
-                var xsum = SIMD8<Float>()
-                let byteBase = g * (groupSize / 2)
-                let xBase = g * groupSize
-                var k = 0
-                while k < groupSize / 2 {
-                    let b0 = wRow[byteBase + k]
-                    let b1 = wRow[byteBase + k + 1]
-                    let b2 = wRow[byteBase + k + 2]
-                    let b3 = wRow[byteBase + k + 3]
-                    let q = SIMD8<Float>(
-                        Float(b0 & 0x0F), Float(b0 >> 4),
-                        Float(b1 & 0x0F), Float(b1 >> 4),
-                        Float(b2 & 0x0F), Float(b2 >> 4),
-                        Float(b3 & 0x0F), Float(b3 >> 4))
-                    let xv = SIMD8<Float>(
-                        x[xBase + k * 2 + 0], x[xBase + k * 2 + 1],
-                        x[xBase + k * 2 + 2], x[xBase + k * 2 + 3],
-                        x[xBase + k * 2 + 4], x[xBase + k * 2 + 5],
-                        x[xBase + k * 2 + 6], x[xBase + k * 2 + 7])
-                    dot.addProduct(q, xv)
-                    xsum += xv
-                    k += 4
-                }
-                acc += s * dot.sum() + b * xsum.sum()
-            }
-            out[r] = acc
-        }
+        nvmai_int4_affine_gemv(weights, scales, biases, x, rows, n, out)
     }
 
     @inline(__always)

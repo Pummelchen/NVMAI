@@ -25,10 +25,20 @@ let package = Package(
             name: "NVMAIFormat",
             path: "sources/NVMAIFormat"
         ),
+        // C99 + NEON for the inner loops where Swift's vector types do not
+        // lower well. Kept deliberately small: one file, one entry point,
+        // covered by the same tests as the Swift path it replaced. No custom
+        // flags -- -O3 measured the same as SwiftPM's release default (0.675
+        // vs 0.680 ms), so it is not worth the unsafeFlags constraint.
+        .target(
+            name: "NVMAIKernelsC",
+            path: "sources/NVMAIKernelsC"
+        ),
         .target(
             name: "NVMAI",
             dependencies: [
                 "NVMAIFormat",
+                "NVMAIKernelsC",
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "sources/NVMAI",
