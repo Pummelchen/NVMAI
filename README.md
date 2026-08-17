@@ -16,34 +16,41 @@ seconds. (Introduced in v3.3; see the callout below for what is new in 3.5.)
 | OpenCode `run` | ~218 s | 5.9 s | **~37×** |
 | Qwen Code `-p` | >300 s (stalled) | 4.6 s | **>65×** |
 
-**New in 3.7 — Opus 5 audit release**
+**New in 3.8 — performance investigation release**
 
-A full-codebase production audit by Claude Opus 5. Seven real bugs found and
-fixed, three enforcement gates added, and the reasoning behind the results
-written down rather than left implicit.
+A measured investigation into decode throughput. One real fix, new instrumentation
+that made it findable, and a documented ceiling so the next attempt starts from
+evidence rather than assumption.
 
-- **Correctness.** A data race in the softmax kernel could leave an entire
-  probability row `NaN`, after which the sampler returned an out-of-range token
-  id — a garbage token in production, not just a flaky test. The sampler's
-  selection maths (top-p, top-k, temperature, inverse-CDF) is now anchored to an
-  independent CPU reference; it previously agreed only with another GPU kernel.
-- **A moved model no longer looks like a missing one.** The install receipt is
-  bound to an absolute path, so moving or renaming a model folder made the Mac
-  app report it as not installed and offer a 19.5 GB re-download. It now offers
-  a local re-verify instead, which re-hashes what is already on disk.
-- **Enforcement.** `tools/lint.sh` gates force-casts, function length, and
-  `@unchecked Sendable` conformances. Both baselines are empty: every long
-  function and all 35 unchecked-Sendable conformances now carry a written
-  reason. A ThreadSanitizer job runs the suite in CI.
-- **Readability.** The four largest functions shrank from 994, 595, 467 and 253
-  lines to 186, 203, 186 and 40, verified byte-identical against golden
-  reference output on all three quantizations.
+- **Decode is ~7% faster.** The shared dense MLP was encoded *after* the router
+  readback, so the GPU sat idle through the whole round trip before that work was
+  submitted — it depends only on the post-attention norm and could always have
+  been queued earlier. GPU idle fell from 19.9 to 16.7 ms/token and occupancy rose
+  from 57.9% to 61.1%, verified byte-identical against golden reference output.
+- **Instrumentation you can act on.** `NVMAI_KERNEL_STATS` now reports true GPU
+  occupancy by merging overlapping command-buffer intervals — the previous metric
+  summed them and could exceed 100% — plus per-transition gap attribution showing
+  *where* the GPU idles. `TURBO_FIELDFARE_PHASES` reports active experts per
+  layer, and `NVMAI_ROUTE_TRACE` dumps real per-layer routing.
+- **A C99/NEON expert kernel**, 3.4× faster than its Swift equivalent, with a new
+  `NVMAIKernelsC` target for hot loops where Swift's vector types do not lower
+  well. Validated against an independent reference. Not yet on the decode path —
+  see the ceiling below for why.
+- **The throughput ceiling is now known.** Batch-1 decode moves ~1.8 GB per token
+  and this hardware sustains ~64 GB/s, so ~36 tok/s is the maximum for 4-bit on an
+  M3. Measured, not estimated: eliminating GPU idle, running entirely on the ANE,
+  and running entirely on the CPU all converge on the same number, because none of
+  them is the bottleneck. Adding compute units *costs* throughput — CPU load
+  raises GPU-busy 45%, ANE load 89%, since every unit draws on one memory
+  controller.
+- **Known limitation.** On a 24 GB machine the 6-bit and 8-bit models exceed RAM
+  and page continuously: 6.7 and 1.6 tok/s against 4-bit's 18.8. Prefer 4-bit
+  unless your machine has comfortable headroom over the model size.
 
-Method and findings, including the candidate gaps that dissolved on inspection:
-[kernel validation audit](https://github.com/Pummelchen/NVMAI/wiki/Kernel-Validation-Audit)
-and [concurrency and resume review](https://github.com/Pummelchen/NVMAI/wiki/Concurrency-And-Resume-Review).
+Full method, including nine approaches that measured out negative and why:
+[performance investigation](https://github.com/Pummelchen/NVMAI/blob/main/docs/cpu-coexecution-plan.md).
 
-685 tests / 123 suites.
+689 tests / 124 suites.
 
 Native Swift and Metal inference for **Qwen 3.6 35B-A3B** in 4-bit, 6-bit,
 and 8-bit quantization on Apple M1-M5 systems. Optional concise mode injects a
