@@ -80,12 +80,21 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     private let fd: Int32
 
-    /// Bounded-footprint reader, non-nil when `NVMAI_BOUNDED_IO` is set.
+    /// Bounded-footprint reader. On by default; `NVMAI_BOUNDED_IO=0` opts out.
     ///
-    /// Opens its own F_NOCACHE descriptors so expert reads never enter the
-    /// unified buffer cache. That makes the slot budget the machine's true
-    /// footprint, which is the point of streaming, at the cost of every miss
-    /// being a real device read instead of a page-cache hit.
+    /// Opens its own F_NOCACHE descriptors so expert reads never enter the unified
+    /// buffer cache. That makes the slot budget the machine's true footprint,
+    /// which is the whole point of streaming a 35B model on 24 GB.
+    ///
+    /// It is not free. Measured against the page-cache path it costs 15-30% of
+    /// decode throughput, because every miss becomes a real device read instead of
+    /// a cache hit -- and the cost is worst exactly where the hit rate is lowest
+    /// (-40% at the 8-slot floor against -18% at 16 slots).
+    ///
+    /// It is the default anyway. The page-cache path is faster only by borrowing
+    /// memory it never declares: process RSS looks smaller while the OS holds the
+    /// difference, so "a 35B model in 1 GB" stops being true. A footprint you can
+    /// account for is the product; throughput is what is being traded for it.
     private let boundedReader: ParallelExpertReader?
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
@@ -172,7 +181,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         // Best-effort: if the reader cannot be created, fall through to the
         // cached path rather than failing the load. A footprint policy is not
         // worth refusing to run over.
-        if ProcessInfo.processInfo.environment["NVMAI_BOUNDED_IO"] != nil {
+        if ProcessInfo.processInfo.environment["NVMAI_BOUNDED_IO"] != "0" {
             self.boundedReader = try? ParallelExpertReader(
                 path: layout.path,
                 expertStride: Int(layout.expertStride),

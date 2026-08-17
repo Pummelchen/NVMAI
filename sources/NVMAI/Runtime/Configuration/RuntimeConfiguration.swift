@@ -42,18 +42,30 @@ public struct RuntimeConfiguration: Sendable, Equatable {
 
     /// Target bytes for the routed-expert slot cache when no count is given.
     ///
-    /// Benchmarked at the shipped `--max-context 262144`, and the result is
-    /// counter-intuitive: **a smaller cache is faster.** 4-bit at a 1 GiB budget
-    /// reached 13.61 tok/s against 9.85 at 4 GiB and 8.78 at 8 GiB on a short
-    /// prompt, and the ordering held on long prompts and in both cache modes. The
-    /// reason is that a 262144-token KV reservation is already large, so slot
-    /// memory beyond this point pushes the machine into pressure and costs more
-    /// than the extra hit rate returns.
+    /// 8 GiB, which is a third of a 24 GB machine and deliberate. The slot cache
+    /// has to hold the routing working set, and a routing trace over 383 real
+    /// tokens measured **131 distinct experts per layer** across a 128-token
+    /// window. 128 slots is the first budget that holds it.
     ///
-    /// An earlier sweep suggested the opposite -- 128 slots beating 8 -- but it ran
-    /// at `--max-context 8192`, where the KV reservation leaves far more headroom.
-    /// Do not re-tune this against a reduced context.
-    public static let defaultExpertCacheBudgetBytes = 1 << 30
+    /// Because expert reads bypass the page cache (see `ParallelExpertReader`),
+    /// there is no second cache to fall back on: whatever the slots do not hold is
+    /// fetched from SSD every token. That makes the curve a cliff rather than a
+    /// slope. Measured, 4-bit, short prompt, bounded:
+    ///
+    ///      16 slots  1.05 GB   8.73 tok/s   io 49.4 ms
+    ///      32 slots  2.11 GB   8.94         io 41.3
+    ///      64 slots  4.22 GB   9.91         io 28.3
+    ///     128 slots  8.44 GB  18.91         io  7.2
+    ///
+    /// A smaller budget does not trade throughput gently for memory -- it falls off
+    /// by 2.2x while saving RAM that the OS would otherwise have to hold anyway.
+    ///
+    /// This inverts under the page-cache policy, where the OS holds the working set
+    /// and slot memory is redundant pressure: 4-bit measured 13.61 tok/s at 16
+    /// slots against 8.78 at 128. So this constant is only correct while expert
+    /// reads bypass the cache. Re-tune it if that ever changes, and re-tune it at
+    /// the shipped `--max-context`, never a reduced one.
+    public static let defaultExpertCacheBudgetBytes = 8 << 30
 
     /// Slots that fit `budgetBytes`, snapped to the nearest supported count.
     ///
