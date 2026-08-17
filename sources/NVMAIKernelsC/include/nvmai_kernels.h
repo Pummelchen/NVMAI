@@ -4,6 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Re-exported so the Swift module surfaces every C entry point.
+#include "nvmai_expert_io.h"
+
 /// `out[r] = sum_i (q[r][i] * scale[r][g(i)] + bias[r][g(i)]) * x[i]`
 ///
 /// Affine INT4 GEMV over a `rows`-by-`n` matrix in the packed `.gturbo`
