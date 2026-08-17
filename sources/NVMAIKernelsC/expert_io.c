@@ -24,7 +24,8 @@ struct nvmai_expert_reader {
     pthread_cond_t work_done;    // outstanding hit zero
 
     // Current batch. Valid only while outstanding > 0.
-    const uint32_t *expert_ids;
+    const uint32_t *expert_ids;   // one of these two is non-NULL
+    const uint64_t *offsets;
     void *const *destinations;
     size_t count;
     size_t next_index;           // claimed by workers
@@ -35,9 +36,9 @@ struct nvmai_expert_reader {
 };
 
 /// Reads one expert with `pread`, looping because a short read is legal.
-static int read_one(int fd, void *dst, size_t stride, uint32_t expert) {
+static int read_one(int fd, void *dst, size_t stride, uint64_t byte_offset) {
     unsigned char *out = (unsigned char *)dst;
-    off_t base = (off_t)expert * (off_t)stride;
+    off_t base = (off_t)byte_offset;
     size_t done = 0;
     while (done < stride) {
         ssize_t got = pread(fd, out + done, stride - done, base + (off_t)done);
@@ -82,11 +83,13 @@ static void *worker_main(void *arg) {
             break;
         }
         size_t index = r->next_index++;
-        uint32_t expert = r->expert_ids[index];
+        uint64_t offset = r->offsets != NULL
+            ? r->offsets[index]
+            : (uint64_t)r->expert_ids[index] * (uint64_t)r->expert_stride;
         void *dst = r->destinations[index];
         pthread_mutex_unlock(&r->lock);
 
-        int rc = read_one(fd, dst, r->expert_stride, expert);
+        int rc = read_one(fd, dst, r->expert_stride, offset);
 
         pthread_mutex_lock(&r->lock);
         if (rc != 0 && r->first_errno == 0) {
@@ -203,18 +206,13 @@ void nvmai_expert_reader_destroy(nvmai_expert_reader *r) {
     free(r);
 }
 
-int nvmai_expert_reader_fetch(nvmai_expert_reader *r,
-                              const uint32_t *expert_ids,
-                              void *const *destinations,
-                              size_t count) {
-    if (r == NULL || (count > 0 && (expert_ids == NULL || destinations == NULL))) {
-        return EINVAL;
-    }
-    if (count == 0) {
-        return 0;
-    }
-
+static int submit_batch(nvmai_expert_reader *r,
+                        const uint32_t *expert_ids,
+                        const uint64_t *offsets,
+                        void *const *destinations,
+                        size_t count) {
     pthread_mutex_lock(&r->lock);
+    r->offsets = offsets;
     r->expert_ids = expert_ids;
     r->destinations = destinations;
     r->count = count;
@@ -232,9 +230,32 @@ int nvmai_expert_reader_fetch(nvmai_expert_reader *r,
     r->count = 0;
     r->next_index = 0;
     r->expert_ids = NULL;
+    r->offsets = NULL;
     r->destinations = NULL;
     pthread_mutex_unlock(&r->lock);
     return rc;
+}
+
+int nvmai_expert_reader_fetch(nvmai_expert_reader *r,
+                              const uint32_t *expert_ids,
+                              void *const *destinations,
+                              size_t count) {
+    if (r == NULL || (count > 0 && (expert_ids == NULL || destinations == NULL))) {
+        return EINVAL;
+    }
+    if (count == 0) { return 0; }
+    return submit_batch(r, expert_ids, NULL, destinations, count);
+}
+
+int nvmai_expert_reader_fetch_offsets(nvmai_expert_reader *r,
+                                     const uint64_t *offsets,
+                                     void *const *destinations,
+                                     size_t count) {
+    if (r == NULL || (count > 0 && (offsets == NULL || destinations == NULL))) {
+        return EINVAL;
+    }
+    if (count == 0) { return 0; }
+    return submit_batch(r, NULL, offsets, destinations, count);
 }
 
 int nvmai_expert_reader_threads(const nvmai_expert_reader *r) {

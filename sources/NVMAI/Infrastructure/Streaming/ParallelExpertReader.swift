@@ -112,4 +112,28 @@ public final class ParallelExpertReader {
             throw Failure.readFailed(errno: status)
         }
     }
+
+    /// As `fetch(experts:into:)` but with absolute byte offsets.
+    ///
+    /// The streamer's regions carry a per-layer base and a container offset, so an
+    /// expert index alone would address the wrong layer.
+    public func fetch(offsets: [UInt64],
+                      into destinations: [UnsafeMutableRawPointer]) throws {
+        precondition(offsets.count == destinations.count,
+                     "offsets and destinations must be the same length")
+        guard !offsets.isEmpty else { return }
+        let status = destinations.withUnsafeBufferPointer { dst in
+            dst.withMemoryRebound(to: UnsafeMutableRawPointer?.self) { rebound in
+                offsets.withUnsafeBufferPointer { offs in
+                    nvmai_expert_reader_fetch_offsets(handle,
+                                                      offs.baseAddress,
+                                                      rebound.baseAddress,
+                                                      offsets.count)
+                }
+            }
+        }
+        if status != 0 {
+            throw Failure.readFailed(errno: status)
+        }
+    }
 }

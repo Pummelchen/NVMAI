@@ -79,6 +79,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public let cachePolicy: ExpertCachePolicy
 
     private let fd: Int32
+
+    /// Bounded-footprint reader, non-nil when `NVMAI_BOUNDED_IO` is set.
+    ///
+    /// Opens its own F_NOCACHE descriptors so expert reads never enter the
+    /// unified buffer cache. That makes the slot budget the machine's true
+    /// footprint, which is the point of streaming, at the cost of every miss
+    /// being a real device read instead of a page-cache hit.
+    private let boundedReader: ParallelExpertReader?
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
 
@@ -159,6 +167,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 throw StreamerError.bufferWrapFailed
             }
             buffers.append(buffer)
+        }
+
+        // Best-effort: if the reader cannot be created, fall through to the
+        // cached path rather than failing the load. A footprint policy is not
+        // worth refusing to run over.
+        if ProcessInfo.processInfo.environment["NVMAI_BOUNDED_IO"] != nil {
+            self.boundedReader = try? ParallelExpertReader(
+                path: layout.path,
+                expertStride: Int(layout.expertStride),
+                threads: 4,
+                bypassCache: true)
+        } else {
+            self.boundedReader = nil
         }
 
         self.slotPointers = pointers
@@ -330,6 +351,37 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         // the bookkeeping, guarded by a small lock. Measured on the 4-bit M3:
         // IO wall 41.2 -> 30.9 ms/token and decode 9.98 -> 12.80 tok/s (+28%)
         // with the idle CPU cores doing the fills in parallel.
+        // Bounded-footprint fill: F_NOCACHE reads through a persistent pool, so
+        // the slot cache is the machine's only copy of expert weights and the
+        // declared budget is the real footprint. The concurrentPerform path below
+        // leaves reads in the unified buffer cache, which measured 12.5 GB/s at 8
+        // slots -- three times the device ceiling, i.e. the page cache silently
+        // holding what the slots do not, in memory the budget never counted.
+        if let reader = boundedReader, !plan.misses.isEmpty {
+            var offsets: [UInt64] = []
+            var destinations: [UnsafeMutableRawPointer] = []
+            offsets.reserveCapacity(plan.misses.count)
+            destinations.reserveCapacity(plan.misses.count)
+            for index in plan.misses {
+                let expert = plan.experts[index]
+                let regionOffset = layout.expertOffset(layer: plan.layer, expert: expert)
+                guard regionOffset + layout.expertStride <= layout.streamSize else {
+                    throw StreamerError.offsetOutOfRange(regionOffset)
+                }
+                offsets.append(layout.streamOffset + regionOffset)
+                destinations.append(slotPointers[plan.assignedSlots[index]])
+            }
+            try reader.fetch(offsets: offsets, into: destinations)
+            cacheLock.lock()
+            for index in plan.misses {
+                let slot = plan.assignedSlots[index]
+                slotPendingFill[slot] = false
+                slotExpert[slot] = plan.experts[index]
+                slotLastUse[slot] = useClock
+            }
+            cacheLock.unlock()
+            return expertCachePlanBuffers(plan)
+        }
         if ProcessInfo.processInfo.environment["NVMAI_PARALLEL_IO"] != "0",
            plan.misses.count > 1 {
             let firstError = Mutex<Error?>(nil)

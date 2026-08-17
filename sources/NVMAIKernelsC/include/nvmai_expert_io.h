@@ -54,6 +54,16 @@ int nvmai_expert_reader_fetch(nvmai_expert_reader *reader,
                               void *const *destinations,
                               size_t count);
 
+/// As `nvmai_expert_reader_fetch`, but the caller supplies absolute byte offsets.
+///
+/// Callers that lay experts out as `index * stride` can use the id form; the
+/// streamer cannot, because its regions carry a per-layer base and a container
+/// offset, so an id would silently address the wrong layer.
+int nvmai_expert_reader_fetch_offsets(nvmai_expert_reader *reader,
+                                     const uint64_t *offsets,
+                                     void *const *destinations,
+                                     size_t count);
+
 /// Threads actually in use, after clamping.
 int nvmai_expert_reader_threads(const nvmai_expert_reader *reader);
 
