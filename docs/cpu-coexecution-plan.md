@@ -817,3 +817,38 @@ shape: the earlier 6-bit measurement (6.68 tok/s) was dominated by the model not
 fitting RAM, so a packing inefficiency would have been invisible underneath it. If
 present, 6-bit users are paying twice -- once for not fitting, once for the
 packing.
+
+## GPU vs ANE, measured head to head
+
+Identical workload -- 64 chained [B x 2048] x [2048 x 2048] fp16 matmuls, 512 MiB
+of weights -- through each unit's optimised framework path: MPSMatrixMultiplication
+for the GPU, Core ML for the ANE.
+
+| batch | GPU | ANE |
+| ---: | --- | --- |
+| 1 | 8.99 ms, 59.7 GB/s, 60 GFLOP/s | 8.34 ms, 64.3 GB/s, 64 GFLOP/s |
+| 8 | 8.45 ms, 63.5 GB/s, 508 GFLOP/s | 8.34 ms, 64.4 GB/s, 515 GFLOP/s |
+| 64 | 16.96 ms, 31.7 GB/s, 2026 GFLOP/s | 8.57 ms, 62.7 GB/s, 4010 GFLOP/s |
+
+The answer depends entirely on arithmetic intensity, and the crossover is sharp.
+
+**At batch 1 they are the same**, within 7%. Both sit at ~60-64 GB/s of weight
+reads and neither exceeds 64 GFLOP/s, because a single-row matmul reuses no weight
+and the memory system decides the outcome. This is the regime NVMAI decode lives
+in, which is why swapping units changes nothing.
+
+**At batch 64 the ANE is 2x faster** -- 4010 against 2026 GFLOP/s -- and notably
+it holds 62.7 GB/s while the GPU's effective weight bandwidth collapses to
+31.7 GB/s, meaning the GPU has become compute-bound where the ANE has not.
+
+Caveat on the GPU column: this is MPSMatrixMultiplication with one encode per
+layer, not a hand-tuned kernel, and MPS is known to be weak on small-M shapes. The
+batch-64 GPU figure is therefore a floor, not the GPU's ceiling. The batch-1 and
+batch-8 rows are safe, since both units are bandwidth-bound there and the result is
+a tie either way.
+
+Practical reading: the ANE is the better dense-matmul engine once there is reuse to
+exploit, and it also decompresses 4-bit weights in hardware. The GPU is the only
+one that can run arbitrary kernels, any dtype, and dynamic control flow -- which is
+what a per-token top-8-of-256 MoE router requires. For NVMAI's decode path neither
+is faster, because neither is the bottleneck.
