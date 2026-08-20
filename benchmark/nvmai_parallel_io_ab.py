@@ -10,7 +10,7 @@ import time
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "qwen3.6_35B_A3B_4Bit")
+MODEL = os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit")
 PORT = 8110
 PROMPT = "Write a detailed essay about the history of computing."
 
@@ -41,7 +41,7 @@ def run(mode):
         time.sleep(0.05)
 
     payload = json.dumps({
-        "model": "qwen3.6-35b-a3b",
+        "model": "ornith-1.5-35b-a3b",
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": 0, "top_p": 0.95, "top_k": 20,
         "presence_penalty": 0.0, "max_completion_tokens": 512, "stream": True,

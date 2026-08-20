@@ -38,14 +38,9 @@ MODEL_PATHS = {
         4: ROOT / "models/ornith-1.5_35B_A3B_4Bit",
         8: ROOT / "models/ornith-1.5_35B_A3B_8Bit",
     },
-    "qwen": {
-        4: ROOT / "models/qwen3.6_35B_A3B_4Bit",
-        8: ROOT / "models/qwen3.6_35B_A3B_8Bit",
-    },
 }
 MTP_PATHS = {
     "ornith": ROOT / "models/ornith-1.5_35B_A3B_MTP_4Bit",
-    "qwen": ROOT / "models/qwen3.6_35B_A3B_MTP_4Bit",
 }
 PROCESS_PATTERN = (
     "NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|"

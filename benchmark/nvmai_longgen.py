@@ -48,7 +48,7 @@ def run_quant(model_path, label):
         time.sleep(0.05)
 
     payload = json.dumps({
-        "model": "qwen3.6-35b-a3b",
+        "model": "ornith-1.5-35b-a3b",
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": 0, "top_p": 0.95, "top_k": 20,
         "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,
@@ -88,9 +88,7 @@ def run_quant(model_path, label):
 
 def main():
     models = sys.argv[1:] or [
-        os.path.join(BASE, "models", "qwen3.6_35B_A3B_4Bit"),
-        os.path.join(BASE, "models", "qwen3.6_35B_A3B_6Bit"),
-        os.path.join(BASE, "models", "qwen3.6_35B_A3B_8Bit"),
+        os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit"),
     ]
     for model in models:
         label = "4bit" if "6bit" not in model and "8bit" not in model else (

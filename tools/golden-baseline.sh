@@ -4,7 +4,7 @@
 # pass". Phase 2 of the production audit needs this before RealForwardRunner
 # is decomposed.
 #
-#   tools/golden-baseline.sh [4|6|8 ...]     # default: 4
+#   tools/golden-baseline.sh [4|8 ...]       # default: Ornith 4-bit
 #   tools/golden-baseline.sh --check [...]   # compare against the stored file
 #
 # Determinism comes from greedy decoding: --temperature 0 with a fixed seed and
@@ -37,22 +37,28 @@ fi
 
 # AGENTS.md: never run alongside another model process, and never terminate one
 # we did not start. Refuse rather than race.
-if pgrep -f 'NVMAIServer|NVMAIMac|NVMAIDecodeService|mlx_lm' >/dev/null 2>&1; then
+if pgrep -f 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
   echo "a model process is already running; stop it yourself, then re-run" >&2
   exit 3
 fi
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$OUT_DIR" "$ROOT/.build"
 status=0
 
 for q in "${quants[@]}"; do
-  model="$ROOT/models/qwen3.6_35B_A3B_${q}Bit"
+  case "$q" in
+    4|8) ;;
+    *) echo "unsupported Ornith baseline quantization: $q (expected 4 or 8)" >&2
+       status=1; continue ;;
+  esac
+  model="$ROOT/models/ornith-1.5_35B_A3B_${q}Bit"
   if [ ! -f "$model/verified-install.json" ]; then
-    echo "skip ${q}-bit: no verified install at ${model#$ROOT/}" >&2
+    echo "missing ${q}-bit baseline model: no verified install at ${model#$ROOT/}" >&2
+    status=1
     continue
   fi
-  file="$OUT_DIR/qwen3.6-35b-a3b-${q}bit.txt"
-  work="$(mktemp)"
+  file="$OUT_DIR/ornith-1.5-35b-a3b-${q}bit.txt"
+  work="$(mktemp "$ROOT/.build/golden-baseline.XXXXXX")"
 
   echo "== ${q}-bit =="
   # --quiet keeps the timing footer out of the compared text; only the

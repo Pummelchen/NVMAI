@@ -1,8 +1,9 @@
 # NVMAI
 
 Swift and Metal inference for compatible Qwen3.5-MoE 35B-A3B text models on
-Apple Silicon. Pinned installers support Qwen 3.6 and Ornith 1.5 in 4-bit and
-8-bit; 6-bit is a withdrawn legacy format.
+Apple Silicon. Pinned installers support Ornith 1.5 and Qwen 3.6 in 4-bit and
+8-bit; Ornith 1.5 4-bit is the default baseline and 6-bit is a withdrawn
+legacy format.
 
 ## Scope
 
@@ -18,13 +19,12 @@ Mac app.
 [GitHub Wiki](https://github.com/Pummelchen/NVMAI/wiki).
 
 ```bash
-swift run -c release NVMAIRepack --model qwen36 --output models/qwen3.6_35B_A3B_4Bit
-swift run -c release NVMAIRepack --model ornith15 --output models/ornith-1.5_35B_A3B_4Bit
-swift run -c release NVMAIRepack --model qwen36 --output models/qwen3.6_35B_A3B_4Bit --resume
+swift run -c release NVMAIRepack --output models/ornith-1.5_35B_A3B_4Bit
+swift run -c release NVMAIRepack --model ornith15 --output models/ornith-1.5_35B_A3B_4Bit --resume
 swift build -c release
 .build/release/NVMAIMac
 swift run -c release NVMAICLI \
-  --model models/qwen3.6_35B_A3B_4Bit \
+  --model models/ornith-1.5_35B_A3B_4Bit \
   --prompt "The capital of France is" \
   --max-new 64
 ```
@@ -39,7 +39,7 @@ place (re-hashes the payload against the manifest and rebinds it to the
 current path):
 
 ```bash
-swift run -c release NVMAIRepack --verify-install --input-gturbo models/qwen3.6_35B_A3B_4Bit
+swift run -c release NVMAIRepack --verify-install --input-gturbo models/ornith-1.5_35B_A3B_4Bit
 ```
 
 Never hand-edit the receipt to match the new path: the path binding is what
@@ -72,9 +72,10 @@ and no new function over 120 lines (existing ones are listed in
 `tools/func-length-baseline.txt`; drop a row when its function shrinks below
 the limit, or the gate fails on the stale exemption).
 
-`tools/golden-baseline.sh --check 4` compares greedy, fixed-seed generation
-against `benchmark/golden/`. It is the only check that exercises real
-inference, so run it for any change to the runtime or the model-load path —
+`tools/golden-baseline.sh --check 4` compares greedy, fixed-seed Ornith 1.5
+4-bit generation against `benchmark/golden/`. It is the default real-model
+baseline and the only check that exercises real inference, so run it for any
+change to the runtime or the model-load path —
 the unit tests never load a model. It counts as a model run: apply the
 preconditions above first. A baseline is valid for one (machine, build, model)
 triple; re-capture only for a deliberate numerics change, never to make a

@@ -106,11 +106,11 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case Self.qwen36_6bit.repoID: return "qwen3.6_35B_A3B_6Bit"
         case Self.qwen36_8bit.repoID: return "qwen3.6_35B_A3B_8Bit"
         case Self.qwen36.repoID: return "qwen3.6_35B_A3B_4Bit"
-        default: return "qwen3.6_35B_A3B_4Bit"
+        default: return "ornith-1.5_35B_A3B_4Bit"
         }
     }
 
-    /// The descriptor the app products select at launch. Defaults to Qwen 3.6
+    /// The descriptor the app products select at launch. Defaults to Ornith 1.5
     /// 4-bit. `TURBO_FIELDFARE_MODEL` in the environment wins; otherwise the
     /// persisted `defaults write NVMAI model <selector>` preference applies.
     public static var selected: AppModelInstallDescriptor {
@@ -126,7 +126,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case "qwen36-8bit": return .qwen36_8bit
         case "ornith15": return .ornith15
         case "ornith15-8bit": return .ornith15_8bit
-        default: return .qwen36
+        default: return .ornith15
         }
     }
 }

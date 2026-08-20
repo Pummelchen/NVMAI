@@ -103,7 +103,7 @@ public struct SupportedModelSource: Sendable, Equatable {
         reserveBytes: 536_870_912)
 
     /// Default source when no `--model` selector is given.
-    public static let `default` = qwen36
+    public static let `default` = ornith15
 
     public static let all: [SupportedModelSource] = [
         qwen36, qwen36_8bit, ornith15, ornith15_8bit, qwen36MTP,

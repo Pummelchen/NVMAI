@@ -39,7 +39,7 @@ import Testing
     @Test func instructionsAndDeveloperMergeIntoOneLeadingSystemMessage() throws {
         let request = try decode("""
         {
-          "model": "qwen3.6-35b-a3b",
+          "model": "ornith-1.5-35b-a3b",
           "instructions": "You are a coding agent.",
           "input": [
             {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Be precise."}]},

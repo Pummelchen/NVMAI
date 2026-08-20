@@ -12,7 +12,7 @@ Usage:
   NVMAIRepack --help
 
 The installer streams the selected Qwen 3.6 or text-only Ornith 1.5 checkpoint
-(default: Qwen 4-bit) from Hugging Face and repackages it without materializing
+(default: Ornith 4-bit) from Hugging Face and repackages it without materializing
 the source checkpoint on disk. Set HF_TOKEN only if Hugging Face requests
 authentication. A cancelled or interrupted download can be continued with
 --resume or removed with --discard-partial.

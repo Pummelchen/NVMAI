@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
-MODEL="qwen3.6-35b-a3b"
+MODEL="ornith-1.5-35b-a3b"
 # The "<model>-fast" alias serves the same weights with the CLI-strip
 # heuristic enabled per request (chat-only speed): system prompts, tool
 # definitions, and <system-reminder> scaffolding are dropped before prefill.
@@ -234,8 +234,8 @@ EOF
     # OpenCode reads the built-in openai provider override in its global
     # config (baseURL -> NVMAI), so no per-run config is written here. The
     # global config lists both the base model and the "-fast" alias; pick
-    # the matching one in the TUI ("Qwen 3.6 35B-A3B (fast)" for the
-    # chat-only speed mode, "Qwen 3.6 35B-A3B" for the full agent loop).
+    # the matching one in the TUI ("Ornith 1.5 35B-A3B (fast)" for the
+    # chat-only speed mode, "Ornith 1.5 35B-A3B" for the full agent loop).
     if ! grep -q "$BASE_URL" "$HOME/.config/opencode/opencode.jsonc" 2>/dev/null; then
       echo "WARNING: opencode global config does not point the openai provider at $BASE_URL" >&2
     fi

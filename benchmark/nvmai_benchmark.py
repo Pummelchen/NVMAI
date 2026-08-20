@@ -39,7 +39,7 @@ MTP_STATS_RE = re.compile(
     r"mtp drafted=(\d+) accepted=(\d+) acceptance=([0-9.]+)% "
     r"target_passes=(\d+) emitted_per_pass=([0-9.]+)")
 
-MODEL_ID = "qwen3.6-35b-a3b"
+MODEL_ID = "ornith-1.5-35b-a3b"
 
 PROMPTS = [
     ("Basic fact", "What is the capital of France? Answer with only the city.", "Paris"),
@@ -468,8 +468,8 @@ def main():
     base_dir = os.path.abspath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)), ".."))
     main_model = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        base_dir, "models", "qwen3.6_35B_A3B_4Bit")
-    mtp_model = os.path.join(base_dir, "models", "qwen3.6_35B_A3B_MTP_4Bit")
+        base_dir, "models", "ornith-1.5_35B_A3B_4Bit")
+    mtp_model = os.path.join(base_dir, "models", "ornith-1.5_35B_A3B_MTP_4Bit")
 
     quant_label = "4bit"
     if "6bit" in main_model:

@@ -11,7 +11,8 @@
 > experts SSD-streamed with the same bounded-memory design. Ornith's native MTP
 > draft is available as an optional experimental sidecar; current M3 benchmarks
 > do not show a speed benefit. Vision is not included, and Qwen 3.6 remains
-> supported.
+> supported. **Ornith 1.5 4-bit is now the default installer, app, launcher,
+> benchmark, and real-inference test baseline.**
 
 [![Published Ornith 1.5 benchmark overview](assets/stats.png)](https://ornith.ai/ornith_1_5.html)
 

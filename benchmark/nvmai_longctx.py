@@ -21,7 +21,7 @@ import http.client
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "qwen3.6_35B_A3B_4Bit")
+MODEL = os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit")
 PORT = 8091
 def build_prompt():
     try:
@@ -69,7 +69,7 @@ def request(messages, max_new, label):
     """Stream one request; returns dict incl. chunk_times (t_since_start,
     cum_chars) per recv."""
     payload = json.dumps({
-        "model": "qwen3.6-35b-a3b",
+        "model": "ornith-1.5-35b-a3b",
         "messages": messages,
         "temperature": 0,
         "top_p": 0.95,

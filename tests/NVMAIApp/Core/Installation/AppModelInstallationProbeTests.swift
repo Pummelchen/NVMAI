@@ -27,7 +27,7 @@ import Testing
         #expect(AppModelInstallationProbe.status(at: url) == .complete)
         #expect(AppModelInstallationProbe.status(
             at: url,
-            descriptor: .qwen36) == .complete)
+            descriptor: .ornith15) == .complete)
     }
 
     /// A receipt bound to another path used to report `.partial`, which the app

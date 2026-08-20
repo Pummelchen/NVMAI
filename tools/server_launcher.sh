@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
 BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
-MODEL="qwen3.6-35b-a3b"
+MODEL="ornith-1.5-35b-a3b"
 # The "<model>-fast" alias is served alongside the base model name by the
 # same server; the fast alias applies the CLI-strip heuristic per request
 # (chat-only speed) instead of the base model's agentic tool loop.
@@ -136,8 +136,8 @@ fi
 
 # --- resolve quantization -> model directory / port ---
 case "$quant" in
-  4bit) MODEL_DIR="$BASE_DIR/models/qwen3.6_35B_A3B_4Bit"; PORT="${NVMAI_PORT:-8081}" ;;
-  8bit) MODEL_DIR="$BASE_DIR/models/qwen3.6_35B_A3B_8Bit"; PORT="${NVMAI_PORT:-8083}" ;;
+  4bit) MODEL_DIR="$BASE_DIR/models/ornith-1.5_35B_A3B_4Bit"; PORT="${NVMAI_PORT:-8081}" ;;
+  8bit) MODEL_DIR="$BASE_DIR/models/ornith-1.5_35B_A3B_8Bit"; PORT="${NVMAI_PORT:-8083}" ;;
 esac
 
 if [[ "$mode_suffix" == "_concise" ]]; then

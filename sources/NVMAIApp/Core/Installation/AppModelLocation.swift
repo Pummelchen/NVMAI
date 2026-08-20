@@ -25,7 +25,7 @@ enum AppModelLocation {
                         currentDirectoryURL: URL,
                         applicationSupportURL: URL,
                         fileExists: (String) -> Bool,
-                        installDirectoryName: String = "qwen3.6_35B_A3B_4Bit") -> URL {
+                        installDirectoryName: String = "ornith-1.5_35B_A3B_4Bit") -> URL {
         if let explicitURL {
             return absoluteURL(explicitURL, relativeTo: currentDirectoryURL)
         }

@@ -4,7 +4,7 @@ import Testing
 
 @Suite struct MacAppSettingsTests {
     @Test func settingsFileLivesBesideModelDirectory() {
-        let model = URL(fileURLWithPath: "/tmp/NVMAI/qwen3.6_35B_A3B_4Bit",
+        let model = URL(fileURLWithPath: "/tmp/NVMAI/ornith-1.5_35B_A3B_4Bit",
                         isDirectory: true)
         #expect(MacAppSettingsFileStore.fileURL(forModelDirectory: model).path
             == "/tmp/NVMAI/mac-app-settings.json")
@@ -13,7 +13,7 @@ import Testing
     @Test func missingFileCreatesReadableDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
+        let model = root.appendingPathComponent("ornith-1.5_35B_A3B_4Bit", isDirectory: true)
 
         let settings = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: model)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
@@ -31,7 +31,7 @@ import Testing
     @Test func malformedFileFallsBackToDefaultsWithoutOverwriting() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
+        let model = root.appendingPathComponent("ornith-1.5_35B_A3B_4Bit", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         try Data("not json".utf8).write(to: fileURL)
 
@@ -46,7 +46,7 @@ import Testing
     @Test func invalidValuesAreReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
+        let model = root.appendingPathComponent("ornith-1.5_35B_A3B_4Bit", isDirectory: true)
         let invalid = MacAppSettings(contextTokens: 123)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         try JSONEncoder().encode(invalid).write(to: fileURL)
@@ -141,7 +141,7 @@ import Testing
     @Test func invalidNewlineShortcutIsReplacedWithDefaults() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let model = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
+        let model = root.appendingPathComponent("ornith-1.5_35B_A3B_4Bit", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
         let invalid = Data("""
         {
@@ -168,7 +168,7 @@ import Testing
     @Test func appModelLoadsAndSavesPersistedSettings() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("ornith-1.5_35B_A3B_4Bit", isDirectory: true)
         try FileManager.default.createDirectory(
             at: modelDirectory,
             withIntermediateDirectories: true)
@@ -223,7 +223,7 @@ import Testing
     @Test func newlineShortcutPersistsImmediately() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("ornith-1.5_35B_A3B_4Bit", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
             settingsPersistenceEnabled: true)
@@ -239,7 +239,7 @@ import Testing
     @Test func showPromptExamplesPersistsImmediately() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let modelDirectory = root.appendingPathComponent("qwen3.6_35B_A3B_4Bit", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("ornith-1.5_35B_A3B_4Bit", isDirectory: true)
         let model = AppModel(
             modelDirectory: modelDirectory,
             settingsPersistenceEnabled: true)

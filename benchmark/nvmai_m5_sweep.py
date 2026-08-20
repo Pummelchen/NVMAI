@@ -13,7 +13,7 @@ the default sweeps are 6 slots + 5 chunks = 11 runs. Pick one sweep to halve
 that, or trim the lists with --slots / --chunks.
 
 Usage:
-  python3 benchmark/nvmai_m5_sweep.py --model models/qwen3.6_35B_A3B_4Bit
+  python3 benchmark/nvmai_m5_sweep.py --model models/ornith-1.5_35B_A3B_4Bit
   python3 benchmark/nvmai_m5_sweep.py --model ... --sweep slots
   python3 benchmark/nvmai_m5_sweep.py --model ... --sweep chunk --prompt-tokens 22800
   python3 benchmark/nvmai_m5_sweep.py --model ... --slots 32,64,128 --chunks 512,4096

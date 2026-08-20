@@ -72,8 +72,10 @@ grep -q 'Test run with .* passed' "$STAGE_ROOT.testlog" 2>/dev/null \
 
 # The golden baseline is the only check that exercises real inference. Skip it
 # only when no model is installed — never to make a mismatch go away.
-if compgen -G "$ROOT/models/qwen3.6_35B_A3B_*Bit/verified-install.json" >/dev/null; then
+if [ -f "$ROOT/models/ornith-1.5_35B_A3B_4Bit/verified-install.json" ]; then
   "$SCRIPT_DIR/golden-baseline.sh" --check 4 || die "golden baseline mismatch"
+elif compgen -G "$ROOT/models/*/verified-install.json" >/dev/null; then
+  die "Ornith 1.5 4-bit baseline model is not installed"
 else
   echo "  no installed model; skipping golden baseline (state this in the notes)"
 fi
