@@ -37,8 +37,9 @@
 
 - **Follow-up cache:** Exact live and multi-prefix prompt-state reuse avoids
   repeating compatible prefill work across conversation turns.
-- **Concise mode:** An optional terse system prompt reduces unnecessary
-  generated tokens and response time without changing model weights.
+- **Concise mode:** The launch scripts enable a terse system prompt by default
+  to reduce unnecessary generated tokens and response time without changing
+  model weights; standard mode remains selectable.
 - **Fast alias:** The chat-only `-fast` model alias strips coding-agent
   boilerplate before prefill for quicker direct answers, while the base alias
   preserves tools and agent loops.

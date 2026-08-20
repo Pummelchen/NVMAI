@@ -11,8 +11,10 @@
 # With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
 # (fast/full), then the quantization, then default/concise mode, then
 # reasoning off/on. Every choice has a default (codex / full / 4-bit /
-# default / thinking on), so pressing Enter through the prompts launches
-# that configuration. Stops any stale NVMAIServer on the port and starts a
+# concise / thinking on), so pressing Enter through the prompts launches
+# that configuration. The server runtime is pinned to native 262,144-token
+# context, multi-prefix cache, 8-bit KV, and MTP off. Stops any stale
+# NVMAIServer on the port and starts a
 # fresh one in the foreground (Ctrl-C to stop). Once the server is up it
 # prints the OpenAI API setup (base URL, API key, the chosen model ID) so
 # any OpenAI-compatible client can be pointed at it. The server binds to
@@ -92,7 +94,7 @@ case "$quant" in
   *) echo "unknown quantization: $quant (4|8)" >&2; exit 2 ;;
 esac
 
-# --- 4) NVMAI mode: default (default) or concise (terse answers) ---
+# --- 4) NVMAI mode: concise (default) or standard ---
 if [[ -n "${4:-}" ]]; then
   case "$4" in
     default|1) mode_suffix="" ; mode_word=default ;;
@@ -102,11 +104,11 @@ if [[ -n "${4:-}" ]]; then
 else
   echo ""
   echo "Which NVMAI mode?"
-  echo "  1) Default"
-  echo "  2) Concise (terse answers)"
-  printf "Choice [1-2] (default 1): "
+  echo "  1) Standard"
+  echo "  2) Concise (terse answers, default)"
+  printf "Choice [1-2] (default 2): "
   read -r mode_choice || exit 1
-  case "${mode_choice:-1}" in
+  case "${mode_choice:-2}" in
     1) mode_suffix="" ; mode_word=default ;;
     2) mode_suffix="_concise" ; mode_word=concise ;;
     *) echo "invalid choice: $mode_choice" >&2; exit 2 ;;
@@ -190,7 +192,10 @@ echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
 "$BINARY" \
   --model "$MODEL_DIR" \
   --port "$PORT" \
-  --prompt-cache-mode multi-prefix &
+  --max-context 262144 \
+  --rope-scaling none \
+  --prompt-cache-mode multi-prefix \
+  --kv-bits 8 &
 server_pid=$!
 
 for _ in $(seq 1 120); do
@@ -223,6 +228,7 @@ echo "  Base URL:   http://127.0.0.1:${PORT}/v1"
 echo "  API key:    any value (the server does not authenticate)"
 echo "  Model:      $api_model $api_model_note"
 echo "  Endpoints:  POST /v1/chat/completions, POST /v1/responses"
+echo "  Runtime:    context 262144 | KV 8-bit | cache on | MTP off"
 echo ""
 echo "Or let the CLI launcher wire Codex / Qwen Code / OpenCode for you:"
 echo "  tools/cli_launcher.sh $cli $model_word $quant $mode_word $think_word"
