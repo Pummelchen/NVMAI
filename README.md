@@ -8,8 +8,10 @@
 > [!IMPORTANT]
 > NVMAI now supports text-only **Ornith-1.5-35B-A3B** installation and inference
 > in 4-bit and 8-bit. It reuses the verified Qwen3.5-MoE runtime and keeps routed
-> experts SSD-streamed with the same bounded-memory design. Vision and Ornith
-> MTP are not included in this first integration; Qwen 3.6 remains supported.
+> experts SSD-streamed with the same bounded-memory design. Ornith's native MTP
+> draft is available as an optional experimental sidecar; current M3 benchmarks
+> do not show a speed benefit. Vision is not included, and Qwen 3.6 remains
+> supported.
 
 [![Published Ornith 1.5 benchmark overview](assets/stats.png)](https://ornith.ai/ornith_1_5.html)
 

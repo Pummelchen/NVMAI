@@ -417,7 +417,8 @@ public final class RemoteStreamingRepacker {
                           partialDir: paths.partialDirectory,
                           metadata: snapshot.metadata,
                           expertStride: expertStride,
-                          resolvedCommit: snapshot.resolvedCommit)
+                          resolvedCommit: snapshot.resolvedCommit,
+                          modelIDOverride: nil)
 
         try Task.checkCancellation()
         if try Posix.entryKind(paths.finalDirectory) == .directory {
@@ -671,7 +672,8 @@ public final class RemoteStreamingRepacker {
                                partialDir: String,
                                metadata: IndexLoader.SourceMetadata,
                                expertStride: UInt64,
-                               resolvedCommit: String) throws {
+                               resolvedCommit: String,
+                               modelIDOverride: String?) throws {
         // Determine quantization bits from actual tensor data, not hardcoded
         var bits = GTurboJSON.QuantBitWidths(
             embedding: 4,
@@ -719,7 +721,7 @@ public final class RemoteStreamingRepacker {
         }
         let data = try GTurboJSON.encodeManifest(
             plan: plan,
-            modelID: plan.matchedModelID ?? "unknown/snapshot",
+            modelID: modelIDOverride ?? plan.matchedModelID ?? "unknown/snapshot",
             sourceSnapshotHash: "sha256:" + metadata.indexSha256Hex,
             files: files,
             expertsPerLayer: plan.layers.first(where: { $0.expertsPerLayer > 0 })?.expertsPerLayer ?? 0,
@@ -745,5 +747,214 @@ public final class RemoteStreamingRepacker {
         try writeSmall(path: tmpReceiptPath, data: receipt)
         try Posix.rename(from: tmpReceiptPath, to: receiptPath)
         try Posix.fsyncDirectory(partialDir)
+    }
+}
+
+public extension RemoteStreamingRepacker {
+    /// Repack an already-complete local affine safetensors snapshot through
+    /// the same planner, file layout, hashing, and trusted-receipt path as a
+    /// pinned remote install. Local imports intentionally do not support
+    /// resume: the source is already present, so a failed attempt is removed
+    /// atomically and can be restarted without network transfer.
+    static func runLocalSnapshot(
+        options local: LocalSnapshotRepackOptions,
+        audit: RepackAudit = RepackAudit(),
+        progress: @escaping @Sendable (ModelInstallProgress) -> Void = { _ in }
+    ) async throws -> RemoteStreamingRepackResult {
+        let source = try LocalSnapshotLoader.load(directory: local.inputSnapshotDir)
+        let worker = RemoteStreamingRepacker(
+            options: RemoteStreamingRepackOptions(
+                repoID: "local/snapshot",
+                revision: String(source.metadata.indexSha256Hex.prefix(40)),
+                outputDir: local.outputDir,
+                requireKnownSource: false,
+                rangeChunkBytes: local.rangeChunkBytes,
+                writeTileBytes: local.writeTileBytes,
+                minFreeReserveBytes: local.minFreeReserveBytes,
+                overwrite: local.overwrite),
+            audit: audit)
+        return try await worker.runLocalPrepared(
+            source: source,
+            local: local,
+            progress: progress)
+    }
+
+    private func runLocalPrepared(
+        source: LocalSnapshot,
+        local: LocalSnapshotRepackOptions,
+        progress: @escaping @Sendable (ModelInstallProgress) -> Void
+    ) async throws -> RemoteStreamingRepackResult {
+        try validateOptions()
+        try validateLocalModelID(local.modelID)
+        let installLock = try InstallLock.acquire(outputDirectory: local.outputDir)
+        defer { withExtendedLifetime(installLock) {} }
+        let paths = installLock.paths
+        try validateLocalDestination(paths: paths, overwrite: local.overwrite)
+        let (plan, rangePlan, outputBytes) = try prepareLocalPlan(
+            source: source, local: local, paths: paths, progress: progress)
+        configureLocalAudit(source: source, plan: plan)
+        try await executeLocalCopy(source: source,
+                                   local: local,
+                                   paths: paths,
+                                   plan: plan,
+                                   rangePlan: rangePlan,
+                                   outputBytes: outputBytes,
+                                   progress: progress)
+        return RemoteStreamingRepackResult(
+            outputDir: local.outputDir,
+            resolvedCommit: String(source.metadata.indexSha256Hex.prefix(40)),
+            plan: plan,
+            rangeRequestCount: 0,
+            remoteBytesToDownload: rangePlan.remoteBytesToDownload,
+            remoteGapBytesDownloaded: 0,
+            remoteRetryCount: 0,
+            reusedBytes: 0,
+            downloadedThisRunBytes: rangePlan.remoteBytesToDownload,
+            dryRun: false)
+    }
+
+    private func validateLocalModelID(_ modelID: String) throws {
+        guard !modelID.isEmpty,
+              modelID.utf8.count <= 256,
+              !modelID.contains(where: { $0.isWhitespace }) else {
+            throw RepackError.configurationInvalid(
+                detail: "local snapshot model ID must be non-empty and contain no whitespace")
+        }
+    }
+
+    private func validateLocalDestination(paths: RemoteInstallPaths,
+                                          overwrite: Bool) throws {
+        if try Posix.entryKind(paths.finalDirectory) == .directory,
+           !overwrite {
+            throw RepackError.configurationInvalid(
+                detail: "output directory already exists: \(paths.finalDirectory)")
+        }
+        guard try Posix.entryKind(paths.partialDirectory) == .absent,
+              try Posix.entryKind(paths.checkpointFile) == .absent else {
+            throw RepackError.installStateIncompatible(
+                detail: "saved remote download exists; resume or discard it first")
+        }
+    }
+
+    private func prepareLocalPlan(
+        source: LocalSnapshot,
+        local: LocalSnapshotRepackOptions,
+        paths: RemoteInstallPaths,
+        progress: @escaping @Sendable (ModelInstallProgress) -> Void
+    ) throws -> (RepackPlan, RangeCopyPlan, UInt64) {
+        progress(.downloadingMetadata)
+        let plan = try RepackPlanner.plan(
+            meta: source.metadata,
+            arch: source.arch,
+            shardHeaders: source.shardHeaders,
+            outputDir: paths.partialDirectory)
+        let rangePlan = try RangeCopyPlanner.plan(
+            repackPlan: plan,
+            rangeChunkBytes: local.rangeChunkBytes,
+            layoutMode: "identity",
+            layoutOrderSha256: nil)
+        let outputBytes = plan.resident.totalSize
+            + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
+        progress(.planning(downloadBytes: rangePlan.remoteBytesToDownload,
+                           outputBytes: outputBytes))
+        let diskRequirement = try DiskSpaceChecker.requireAvailable(
+            path: paths.parentDirectory,
+            bytes: outputBytes,
+            reserveBytes: local.minFreeReserveBytes)
+        progress(.checkingDisk(diskRequirement))
+        try Task.checkCancellation()
+        return (plan, rangePlan, outputBytes)
+    }
+
+    private func configureLocalAudit(source: LocalSnapshot, plan: RepackPlan) {
+        audit.remoteRepoID = "local/snapshot"
+        audit.remoteRequestedRevision = source.metadata.indexSha256Hex
+        audit.remoteResolvedCommit = String(source.metadata.indexSha256Hex.prefix(40))
+        audit.remoteRangeStreamingSupported = false
+        audit.remoteGapBytesDownloaded = 0
+        audit.sourceSnapshotSha256 = source.metadata.indexSha256Hex
+        audit.bitWidthOverridesHonored = source.metadata.bitsOverrides.count
+        audit.tensorsDroppedMultimodal = plan.excludedMultimodalTensorNames
+        audit.packedExpertLayoutMode = "identity"
+    }
+
+    private func executeLocalCopy(
+        source: LocalSnapshot,
+        local: LocalSnapshotRepackOptions,
+        paths: RemoteInstallPaths,
+        plan: RepackPlan,
+        rangePlan: RangeCopyPlan,
+        outputBytes: UInt64,
+        progress: @escaping @Sendable (ModelInstallProgress) -> Void
+    ) async throws {
+        do {
+            progress(.reservingOutput(bytes: outputBytes))
+            try createOutputFiles(plan: plan, paths: paths)
+            let provider = LocalSourceByteProvider(
+                snapshotDirectory: local.inputSnapshotDir,
+                writeTileBytes: local.writeTileBytes)
+            progress(.copyingPayload(reusedBytes: 0,
+                                     downloadedThisRunBytes: 0,
+                                     totalBytes: rangePlan.remoteBytesToDownload))
+            try await provider.copyBatch(
+                rangePlan.coalescedCopies,
+                completedRangeIDs: [],
+                partialDirectory: paths.partialDirectory,
+                temporaryPath: paths.rangeTemporaryFile,
+                audit: audit,
+                progress: { bytes in
+                    progress(.copyingPayload(
+                        reusedBytes: 0,
+                        downloadedThisRunBytes: bytes,
+                        totalBytes: rangePlan.remoteBytesToDownload))
+                },
+                commit: { _ in })
+
+            try recordOutputFile(relativePath: "model_weights.bin",
+                                 path: plan.resident.path,
+                                 progress: progress)
+            for layer in plan.layers where layer.expertsPerLayer > 0 {
+                let relative = "packed_experts/"
+                    + (layer.path as NSString).lastPathComponent
+                try recordOutputFile(relativePath: relative,
+                                     path: layer.path,
+                                     progress: progress)
+            }
+            let layoutPath = ((paths.partialDirectory as NSString)
+                .appendingPathComponent("packed_experts") as NSString)
+                .appendingPathComponent("layout.json")
+            let expertStride = plan.layers.first(where: {
+                $0.expertsPerLayer > 0
+            })?.expertStride ?? 0
+            let layoutData = try GTurboJSON.encodeLayout(
+                plan: plan,
+                expertStride: expertStride)
+            try writeSmall(path: layoutPath, data: layoutData)
+            try GTurboLayoutValidator.validate(path: layoutPath, plan: plan)
+            try recordOutputFile(relativePath: "packed_experts/layout.json",
+                                 path: layoutPath,
+                                 progress: progress)
+            progress(.finalizing)
+            try writeManifest(
+                plan: plan,
+                partialDir: paths.partialDirectory,
+                metadata: source.metadata,
+                expertStride: expertStride,
+                resolvedCommit: String(source.metadata.indexSha256Hex.prefix(40)),
+                modelIDOverride: local.modelID)
+
+            if try Posix.entryKind(paths.finalDirectory) == .directory {
+                try Posix.renameSwap(paths.partialDirectory, paths.finalDirectory)
+                try Posix.fsyncDirectory(paths.parentDirectory)
+                try? FileManager.default.removeItem(atPath: paths.partialDirectory)
+            } else {
+                try Posix.rename(from: paths.partialDirectory,
+                                 to: paths.finalDirectory)
+                try Posix.fsyncDirectory(paths.parentDirectory)
+            }
+        } catch {
+            try? FileManager.default.removeItem(atPath: paths.partialDirectory)
+            throw error
+        }
     }
 }

@@ -27,7 +27,8 @@ enum IndexLoader {
 
         let weightMap: [String: String]
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: indexPath))
+            let data = try Posix.readBoundedData(
+                indexPath, maximumBytes: 4 * 1024 * 1024)
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let m = root["weight_map"] as? [String: String] else {
                 throw RepackError.indexJsonInvalid(path: indexPath, detail: "no weight_map")
@@ -46,7 +47,8 @@ enum IndexLoader {
         var baseMode = "affine"
         var overrides: [String: QuantSpec] = [:]
         do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: configPath))
+            let data = try Posix.readBoundedData(
+                configPath, maximumBytes: 1024 * 1024)
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
             }

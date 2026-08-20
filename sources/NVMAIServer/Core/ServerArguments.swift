@@ -47,7 +47,7 @@ public struct ServerArguments: Equatable, Sendable {
     usage: NVMAIServer --model <completed .gturbo directory> [options]
 
       --model <dir>          Required model directory.
-      --mtp-model <dir>      Optional native Qwen3.6 MTP sidecar directory.
+      --mtp-model <dir>      Optional native Qwen/Ornith MTP sidecar directory.
       --mtp-memory-mib <MiB> Strict incremental MTP budget, 256...512
                              (default 384).
       --port <1...65535>     Loopback port (default 8080).

@@ -111,7 +111,7 @@ public enum StreamingMTPError: Error, Equatable, CustomStringConvertible {
         case .memoryBudgetExceeded(let required, let budget):
             "MTP requires \(required) bytes, exceeding its \(budget)-byte budget"
         case .targetMustBeQwen36:
-            "MTP target must be Qwen3.6 35B-A3B"
+            "MTP target must be a compatible Qwen3.5-MoE 35B-A3B model"
         case .sidecarMustBeQwen36MTP:
             "MTP sidecar has the wrong architecture"
         case .greedyOnly:

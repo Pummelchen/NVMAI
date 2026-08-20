@@ -102,7 +102,7 @@ void residual_add_fp16(
     hidden[tid] = half(float(hidden[tid]) + float(delta[tid]));
 }
 
-// Row-wise concatenation used by Qwen3.6 MTP's 4096 -> 2048 adapter.
+// Row-wise concatenation used by Qwen3.5-MoE MTP's 4096 -> 2048 adapter.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void concat_rows_fp16(
     device const half* lhs  [[buffer(0)]],

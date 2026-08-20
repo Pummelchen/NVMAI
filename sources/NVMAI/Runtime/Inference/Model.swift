@@ -193,7 +193,9 @@ public struct Model {
         guard config.family == .qwen36MTP,
               target.config.family == .qwen36,
               config.hiddenSize == target.config.hiddenSize,
-              config.vocabSize == target.config.vocabSize else {
+              config.vocabSize == target.config.vocabSize,
+              Self.mtpLineagesAreCompatible(sidecarID: modelID,
+                                             targetID: target.modelID) else {
             throw ModelError.indexCorrupt(
                 detail: "MTP sidecar is incompatible with the target model")
         }
@@ -213,6 +215,27 @@ public struct Model {
                         lmHead: try target.lmHead(),
                         embeddingBits: target.embeddingWeightBits,
                         lmHeadBits: target.lmHeadWeightBits))
+    }
+
+    /// The Qwen3.5-MoE tensor contract is shared by Qwen 3.6 and Ornith 1.5,
+    /// but their trained embeddings and heads are not interchangeable. Keep
+    /// synthetic and privately named compatible checkpoints usable while
+    /// rejecting a known cross-model pairing before any generation begins.
+    static func mtpLineagesAreCompatible(sidecarID: String,
+                                         targetID: String) -> Bool {
+        func lineage(_ modelID: String) -> String? {
+            let normalized = modelID.lowercased()
+            if normalized.contains("ornith-1.5") { return "ornith-1.5" }
+            if normalized.contains("qwen3.6") || normalized.hasPrefix("qwen-") {
+                return "qwen3.6"
+            }
+            return nil
+        }
+        guard let sidecar = lineage(sidecarID),
+              let target = lineage(targetID) else {
+            return true
+        }
+        return sidecar == target
     }
 
     // MARK: - Per-head attention norms (Q/K only)

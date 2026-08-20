@@ -239,6 +239,136 @@ enum SyntheticSnapshot {
         return Snapshot(shardPath: shardPath)
     }
 
+    /// Tiny one-layer native-MTP sidecar with the same flattened tensor names
+    /// used by both Qwen and locally prepared Ornith snapshots.
+    static func buildQwenMTP(at dir: String,
+                             weightBits: Int = 4,
+                             seed: UInt64 = 0x0A11_CE55_1DE0_0001) throws -> Snapshot {
+        precondition([4, 8].contains(weightBits))
+        try? FileManager.default.removeItem(atPath: dir)
+        try FileManager.default.createDirectory(atPath: dir,
+                                                withIntermediateDirectories: true)
+        let arch = QwenArch()
+        var rng = SplitMix64(seed: seed)
+        var tensors: [(String, String, [Int], [UInt8])] = []
+        let prefix = "layers.0"
+        appendQuantizedWeight(name: "fc", outerShape: [arch.hidden],
+                              innerLogical: 2 * arch.hidden, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        for name in ["pre_fc_norm_embedding.weight", "pre_fc_norm_hidden.weight"] {
+            appendUnquantizedBF16(name: name, shape: [arch.hidden],
+                                  into: &tensors, rng: &rng)
+        }
+        appendQuantizedWeight(name: prefix + ".self_attn.q_proj",
+                              outerShape: [2 * arch.numHeads * arch.headDim],
+                              innerLogical: arch.hidden, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        for projection in ["k_proj", "v_proj"] {
+            appendQuantizedWeight(name: prefix + ".self_attn." + projection,
+                                  outerShape: [arch.numKVHeads * arch.headDim],
+                                  innerLogical: arch.hidden, bits: weightBits,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        }
+        appendQuantizedWeight(name: prefix + ".self_attn.o_proj",
+                              outerShape: [arch.hidden],
+                              innerLogical: arch.numHeads * arch.headDim,
+                              bits: weightBits, groupSize: arch.groupSize,
+                              into: &tensors, rng: &rng)
+        for name in ["q_norm.weight", "k_norm.weight"] {
+            appendUnquantizedBF16(name: prefix + ".self_attn." + name,
+                                  shape: [arch.headDim], into: &tensors, rng: &rng)
+        }
+        appendQuantizedWeight(name: prefix + ".mlp.gate",
+                              outerShape: [arch.numExperts],
+                              innerLogical: arch.hidden, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        appendQuantizedWeight(name: prefix + ".mlp.shared_expert_gate",
+                              outerShape: [1], innerLogical: arch.hidden,
+                              bits: weightBits, groupSize: arch.groupSize,
+                              into: &tensors, rng: &rng)
+        for role in ["gate_proj", "up_proj"] {
+            appendQuantizedWeight(name: prefix + ".mlp.shared_expert." + role,
+                                  outerShape: [arch.sharedIntermediate],
+                                  innerLogical: arch.hidden, bits: weightBits,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        }
+        appendQuantizedWeight(name: prefix + ".mlp.shared_expert.down_proj",
+                              outerShape: [arch.hidden],
+                              innerLogical: arch.sharedIntermediate, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        for role in ["gate_proj", "up_proj"] {
+            appendQuantizedWeight(name: prefix + ".mlp.switch_mlp." + role,
+                                  outerShape: [arch.numExperts, arch.moeIntermediate],
+                                  innerLogical: arch.hidden, bits: weightBits,
+                                  groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        }
+        appendQuantizedWeight(name: prefix + ".mlp.switch_mlp.down_proj",
+                              outerShape: [arch.numExperts, arch.hidden],
+                              innerLogical: arch.moeIntermediate, bits: weightBits,
+                              groupSize: arch.groupSize, into: &tensors, rng: &rng)
+        for name in ["input_layernorm.weight", "post_attention_layernorm.weight"] {
+            appendUnquantizedBF16(name: prefix + "." + name,
+                                  shape: [arch.hidden], into: &tensors, rng: &rng)
+        }
+        appendUnquantizedBF16(name: "norm.weight", shape: [arch.hidden],
+                              into: &tensors, rng: &rng)
+
+        let shardName = "model.safetensors"
+        let shardPath = (dir as NSString).appendingPathComponent(shardName)
+        try writeShard(path: shardPath, tensors: tensors)
+        let textConfig: [String: Any] = [
+            "hidden_size": arch.hidden,
+            "moe_intermediate_size": arch.moeIntermediate,
+            "shared_expert_intermediate_size": arch.sharedIntermediate,
+            "num_attention_heads": arch.numHeads,
+            "num_key_value_heads": arch.numKVHeads,
+            "head_dim": arch.headDim,
+            "vocab_size": arch.vocab,
+            "num_hidden_layers": arch.numLayers,
+            "num_experts": arch.numExperts,
+            "num_experts_per_tok": arch.topK,
+            "mtp_num_hidden_layers": 1,
+            "mtp_use_dedicated_embeddings": false,
+            "layer_types": arch.layerTypes,
+            "rope_parameters": [
+                "rope_theta": 10_000_000.0,
+                "rope_type": "default",
+                "partial_rotary_factor": 0.25,
+            ],
+            "linear_num_key_heads": arch.linearNumKHeads,
+            "linear_num_value_heads": arch.linearNumVHeads,
+            "linear_key_head_dim": arch.linearKeyHeadDim,
+            "linear_value_head_dim": arch.linearValueHeadDim,
+            "linear_conv_kernel_dim": arch.linearConvKernelSize,
+            "attn_output_gate": true,
+            "tie_word_embeddings": false,
+            "hidden_act": "silu",
+        ]
+        let config: [String: Any] = [
+            "model_type": "qwen3_5_mtp",
+            "quantization": [
+                "bits": weightBits,
+                "group_size": arch.groupSize,
+                "mode": "affine",
+            ],
+            "text_config": textConfig,
+        ]
+        try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("config.json")))
+        let weightMap = Dictionary(uniqueKeysWithValues: tensors.map {
+            ($0.0, shardName)
+        })
+        let index: [String: Any] = [
+            "metadata": ["format": "mlx"],
+            "weight_map": weightMap,
+        ]
+        try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+            .write(to: URL(fileURLWithPath:
+                (dir as NSString).appendingPathComponent("model.safetensors.index.json")))
+        return Snapshot(shardPath: shardPath)
+    }
+
     // MARK: - Tensor builders
 
     private static func appendQuantizedWeight(name: String,

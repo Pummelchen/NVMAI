@@ -73,6 +73,18 @@ import Foundation
         #expect(statistics.emittedTokensPerTargetPass == 1.5)
     }
 
+    @Test func modelLineageRejectsCrossModelWeightSharing() {
+        #expect(Model.mtpLineagesAreCompatible(
+            sidecarID: "ornith-1.5-35b-a3b-mtp-4bit",
+            targetID: "ornith-1.5-35b-a3b-8bit"))
+        #expect(Model.mtpLineagesAreCompatible(
+            sidecarID: "qwen3.6-35b-a3b-mtp-4bit",
+            targetID: "qwen3.6-35b-a3b-4bit"))
+        #expect(!Model.mtpLineagesAreCompatible(
+            sidecarID: "ornith-1.5-35b-a3b-mtp-4bit",
+            targetID: "qwen3.6-35b-a3b-4bit"))
+    }
+
     // MARK: - Toy sidecar integration (T27)
 
     /// The MTP sidecar toy mirrors the real installed sidecar schema: it

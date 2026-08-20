@@ -203,7 +203,8 @@ public struct ArchConfig: Sendable, Equatable {
             convKernelSize: 4)
     )
 
-    /// Native one-layer Qwen3.6 MTP draft. Its 65,536-token KV cache is at most
+    /// Native one-layer Qwen3.5-MoE MTP draft for compatible Qwen/Ornith
+    /// targets. Its 65,536-token KV cache is at most
     /// 128 MiB in FP16 and smaller with compressed storage; truncating draft
     /// context can only lower acceptance because every emitted token is still
     /// verified by the full target.

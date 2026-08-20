@@ -6,6 +6,7 @@ private let supportedModelNames = SupportedModelSource.all.map(\.name).joined(se
 private let usage = """
 Usage:
   NVMAIRepack [--model <\(supportedModelNames)>] --output <model.gturbo> [--overwrite] [--resume]
+  NVMAIRepack --input-snapshot <affine-safetensors-dir> --model-id <id> --output <model.gturbo> [--overwrite]
   NVMAIRepack --discard-partial --output <model.gturbo>
   NVMAIRepack --verify-install --input-gturbo <model.gturbo>
   NVMAIRepack --help
@@ -15,16 +16,23 @@ The installer streams the selected Qwen 3.6 or text-only Ornith 1.5 checkpoint
 the source checkpoint on disk. Set HF_TOKEN only if Hugging Face requests
 authentication. A cancelled or interrupted download can be continued with
 --resume or removed with --discard-partial.
+
+--input-snapshot imports a completed local MLX-affine safetensors snapshot.
+It is intended for reproducibly derived sidecars such as Ornith's native MTP
+draft and does not support --resume because no network payload is involved.
 """
 
 private struct Arguments {
     var model = SupportedModelSource.default
+    var modelExplicit = false
     var output: String?
     var overwrite = false
     var resume = false
     var discardPartial = false
     var verifyInstall = false
     var inputGTurbo: String?
+    var inputSnapshot: String?
+    var localModelID: String?
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -56,15 +64,20 @@ private struct Arguments {
                         + SupportedModelSource.all.map(\.name).joined(separator: ", "))
                 }
                 parsed.model = source
+                parsed.modelExplicit = true
                 index += 2
-            case "--output", "--input-gturbo":
+            case "--output", "--input-gturbo", "--input-snapshot", "--model-id":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
                 }
                 if flag == "--output" {
                     parsed.output = values[index + 1]
-                } else {
+                } else if flag == "--input-gturbo" {
                     parsed.inputGTurbo = values[index + 1]
+                } else if flag == "--input-snapshot" {
+                    parsed.inputSnapshot = values[index + 1]
+                } else {
+                    parsed.localModelID = values[index + 1]
                 }
                 index += 2
             default:
@@ -79,8 +92,33 @@ private struct Arguments {
             guard parsed.output != nil else {
                 throw ParseError.missingRequired("--output")
             }
-            guard parsed.inputGTurbo == nil, !parsed.overwrite, !parsed.verifyInstall else {
+            guard parsed.inputGTurbo == nil,
+                  parsed.inputSnapshot == nil,
+                  parsed.localModelID == nil,
+                  !parsed.modelExplicit,
+                  !parsed.overwrite,
+                  !parsed.verifyInstall else {
                 throw ParseError.invalidMode("--discard-partial only accepts --output")
+            }
+            return parsed
+        }
+        if parsed.inputSnapshot != nil || parsed.localModelID != nil {
+            guard parsed.inputSnapshot != nil else {
+                throw ParseError.missingRequired("--input-snapshot")
+            }
+            guard parsed.localModelID != nil else {
+                throw ParseError.missingRequired("--model-id")
+            }
+            guard parsed.output != nil else {
+                throw ParseError.missingRequired("--output")
+            }
+            guard !parsed.modelExplicit,
+                  parsed.inputGTurbo == nil,
+                  !parsed.resume,
+                  !parsed.discardPartial,
+                  !parsed.verifyInstall else {
+                throw ParseError.invalidMode(
+                    "local snapshot import accepts only --input-snapshot, --model-id, --output, and --overwrite")
             }
             return parsed
         }
@@ -157,6 +195,26 @@ private func run(_ values: [String]) async -> Int32 {
             return 0
         } catch {
             printError("verification failed: \(error)")
+            return 1
+        }
+    }
+
+    if let input = arguments.inputSnapshot,
+       let modelID = arguments.localModelID,
+       let output = arguments.output {
+        do {
+            let result = try await RemoteStreamingRepacker.runLocalSnapshot(
+                options: LocalSnapshotRepackOptions(
+                    inputSnapshotDir: input,
+                    outputDir: output,
+                    modelID: modelID,
+                    overwrite: arguments.overwrite))
+            print("Imported local snapshot")
+            print("Source fingerprint: \(result.resolvedCommit)")
+            print("Model: \(result.outputDir)")
+            return 0
+        } catch {
+            printError("local import failed: \(error)")
             return 1
         }
     }

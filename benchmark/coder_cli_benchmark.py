@@ -5,7 +5,7 @@ Round ``coder`` runs Codex, Qwen Code, OpenCode, and (through the adjacent
 loopback adapter) Claude Code against Ornith 4-bit and 8-bit with fixed short,
 medium, and long prompts.  Round ``features`` uses direct OpenAI requests to
 isolate prompt-cache, fast-alias, and concise-mode behavior on Ornith, then
-checks MTP off/on against the supported Qwen target.  Results are resumable and
+checks Ornith's native MTP off/on. Results are resumable and
 kept below .build by default.
 """
 
@@ -43,7 +43,10 @@ MODEL_PATHS = {
         8: ROOT / "models/qwen3.6_35B_A3B_8Bit",
     },
 }
-MTP_PATH = ROOT / "models/qwen3.6_35B_A3B_MTP_4Bit"
+MTP_PATHS = {
+    "ornith": ROOT / "models/ornith-1.5_35B_A3B_MTP_4Bit",
+    "qwen": ROOT / "models/qwen3.6_35B_A3B_MTP_4Bit",
+}
 PROCESS_PATTERN = (
     "NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|"
     "swiftpm-testing-helper|mlx_lm|mlx-lm"
@@ -208,7 +211,7 @@ def start_server(*, output: pathlib.Path, family: str, quant: int, port: int,
         "--prompt-cache-memory-mib", "256" if cache else "0",
     ]
     if mtp:
-        command += ["--mtp-model", str(MTP_PATH), "--mtp-memory-mib", "384"]
+        command += ["--mtp-model", str(MTP_PATHS[family]), "--mtp-memory-mib", "384"]
     env = os.environ.copy()
     # Coding-client answers are the measured artifact. Keep reasoning tokens
     # out of the visible response so every client can be judged against the
@@ -748,8 +751,8 @@ def run_feature_case(*, args: argparse.Namespace, output: pathlib.Path,
 
 def run_feature_round(args: argparse.Namespace, output: pathlib.Path,
                       prompts: dict[str, str], results: pathlib.Path) -> None:
-    # Ornith: all supported cache/fast/concise combinations. MTP is not mixed
-    # into these rows because the installed Ornith sources omit its draft layer.
+    # Ornith: all supported cache/fast/concise combinations. MTP stays out of
+    # this matrix so every control has one independently attributable change.
     # Each case gets a fresh server so a previous prompt cannot warm the first
     # request of a later cache-enabled cell.
     ornith_cases = itertools.product(
@@ -788,33 +791,33 @@ def run_feature_round(args: argparse.Namespace, output: pathlib.Path,
         finally:
             server.stop()
 
-    # MTP: off/on must use the matching Qwen target and draft sidecar. Run both
-    # target quantizations; target verification preserves correctness.
+    # Native Ornith MTP: off/on against both target quantizations. The one-layer
+    # draft shares the matching target embedding and head at runtime.
     for quant, mtp, prompt_name in itertools.product(
         args.quantizations, (False, True), args.prompts
     ):
         if args.limit is not None and args.executed >= args.limit:
             return
         key = feature_key(
-            family="qwen", quant=quant, cache=False, mtp=mtp, fast=False,
+            family="ornith", quant=quant, cache=False, mtp=mtp, fast=False,
             concise=False, prompt_name=prompt_name,
         )
         if key in done:
             print(f"SKIP {key}", flush=True)
             continue
         port = 18280 + quant
-        label = f"features-qwen-q{quant}-mtp{int(mtp)}-{prompt_name}"
+        label = f"features-ornith-q{quant}-mtp{int(mtp)}-{prompt_name}"
         server = start_server(
-            output=output, family="qwen", quant=quant, port=port,
+            output=output, family="ornith", quant=quant, port=port,
             cache=False, concise=False, mtp=mtp, label=label,
         )
         try:
-            model = manifest_api_model(MODEL_PATHS["qwen"][quant])
+            model = manifest_api_model(MODEL_PATHS["ornith"][quant])
             base_url = f"http://127.0.0.1:{port}/v1"
             offset = server.log_path.stat().st_size
             run_feature_case(
                 args=args, output=output, results=results, prompts=prompts,
-                family="qwen", quant=quant, cache=False, fast=False,
+                family="ornith", quant=quant, cache=False, fast=False,
                 concise=False, mtp=mtp, prompt_name=prompt_name,
                 base_url=base_url, model=model, server=server, log_offset=offset,
             )
@@ -854,7 +857,7 @@ def main() -> int:
         (prompt_dir / f"{name}.txt").write_text(prompt)
     required = [MODEL_PATHS["ornith"][quant] for quant in args.quantizations]
     if args.round in ("features", "all"):
-        required += [MODEL_PATHS["qwen"][quant] for quant in args.quantizations] + [MTP_PATH]
+        required += [MTP_PATHS["ornith"]]
     environment = preflight(required)
     binaries = client_binaries()
     environment["client_versions"] = {
