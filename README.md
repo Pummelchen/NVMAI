@@ -1,11 +1,12 @@
-<img width="1122" height="1402" alt="image" src="https://github.com/user-attachments/assets/b807e4e2-f26f-4cae-9998-3a7fdbe03290" />
+<img width="1122" height="1402" alt="image" src="https://github.com/user-attachments/assets/ae5aedef-92f2-48bb-9bce-325d188d49e3" />
+
 
 # NVMAI
 
-## Ornith 1.5 roadmap
+## Ornith 1.5 Roadmap
 
 > [!IMPORTANT]
-> NVMAI plans to adopt **Ornith-1.5-35B-A3B** as its next default model.
+> NVMAI v4.0 plans to adopt **Ornith-1.5-35B-A3B** as its next default model.
 > Qwen 3.6 35B-A3B remains the supported model until the Ornith integration is
 > implemented, validated, and benchmarked.
 
