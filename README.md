@@ -23,18 +23,15 @@ and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
 
 ## Benchmarks
 
-This historical run used a base M3 MacBook Pro with 24 GB, a 30-request coding
-workload, 4K context, prompt cache off, temperature `0.2`, Top-K `64`, and
-Top-P `0.95`:
+Fastest single-run decode results from the verified Ornith 1.5 benchmark set on
+a base M3 MacBook Pro with 24 GB:
 
-| Quantization | Decode | End-to-end output | Mean TTFT |
-| --- | ---: | ---: | ---: |
-| 4-bit | 12.41 tok/s | 7.57 tok/s | 4.59 s |
-| 6-bit (legacy) | 6.99 tok/s | 4.11 tok/s | 7.35 s |
+| Quantization | Best decode | Prompt |
+| --- | ---: | --- |
+| 4-bit | **7.34 tok/s** | Short |
+| 8-bit | **4.38 tok/s** | Medium |
 
-Six-bit is retained here as a historical comparison; support was withdrawn in
-3.9. Current installations use 4-bit or 8-bit. Results depend on hardware,
-prompt, storage, and system load. See the [full benchmark notes](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks).
+[Full benchmark results](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
 
 ## Core Links
 
