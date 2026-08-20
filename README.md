@@ -16,18 +16,6 @@ parameters per token. The chart above is publisher-supplied, not an NVMAI
 measurement. See the [Ornith 1.5 announcement](https://ornith.ai/ornith_1_5.html)
 and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
 
-## Credits
-
-NVMAI is a focused fork of
-[drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare), which
-provides the bounded-memory runtime, installer, CLI, Mac app, and local server.
-The Qwen 3.6 integration was created by
-[NeelM0906](https://github.com/NeelM0906) in
-[upstream PR #29](https://github.com/drumih/turbo-fieldfare/pull/29). Concise
-mode is derived from the
-[Nail-Qwen3.6-35B-A3B](https://huggingface.co/peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-MLX)
-chat template by [peculiar-ragdoll](https://huggingface.co/peculiar-ragdoll).
-
 ## Benchmarks
 
 Base M3 MacBook Pro, 24 GB, 30-request coding workload, 4K context, prompt
@@ -50,3 +38,15 @@ prompt, storage, and system load. See the [full benchmark notes](https://github.
 - [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls)
 - [Benchmarks](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
 - [Changelog](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
+
+## Credits
+
+NVMAI is a focused fork of
+[drumih/turbo-fieldfare](https://github.com/drumih/turbo-fieldfare), which
+provides the bounded-memory runtime, installer, CLI, Mac app, and local server.
+The Qwen 3.6 integration was created by
+[NeelM0906](https://github.com/NeelM0906) in
+[upstream PR #29](https://github.com/drumih/turbo-fieldfare/pull/29). Concise
+mode is derived from the
+[Nail-Qwen3.6-35B-A3B](https://huggingface.co/peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-MLX)
+chat template by [peculiar-ragdoll](https://huggingface.co/peculiar-ragdoll).
