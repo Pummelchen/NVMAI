@@ -15,7 +15,8 @@
 # reasoning off/on. Every choice has a default (codex / full / 4-bit /
 # concise / thinking on), so pressing Enter through the prompts launches
 # that configuration. The server uses native 262,144-token context,
-# multi-prefix cache, 8-bit KV, and MTP off. The server keeps running after
+# a 256 MiB multi-prefix prompt cache, an 8 GiB routed-expert cache, 8-bit KV,
+# and MTP off. The server keeps running after
 # the CLI exits; the next
 # launcher run stops it and starts fresh.
 # Overrides: NVMAI_PORT, CODEX_HOME_NVMAI, QWEN_HOME_NVMAI, CODEX, QWEN,

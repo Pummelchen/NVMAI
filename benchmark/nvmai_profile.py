@@ -17,6 +17,8 @@ DEFAULT_MODEL_PATH = ROOT / "models/ornith-1.5_35B_A3B_4Bit"
 DEFAULT_API_MODEL = "ornith-1.5-35b-a3b"
 DEFAULT_CONTEXT_TOKENS = 262_144
 DEFAULT_PROMPT_CACHE_MODE = "multi-prefix"
+DEFAULT_PROMPT_CACHE_MEMORY_MIB = 256
+DEFAULT_EXPERT_CACHE_BUDGET = "8G"
 DEFAULT_KV_BITS = 8
 DEFAULT_CONCISE = True
 DEFAULT_FAST_ALIAS = False
@@ -37,7 +39,10 @@ def server_command(
     model: str | os.PathLike[str] = DEFAULT_MODEL_PATH,
     cache_mode: str = DEFAULT_PROMPT_CACHE_MODE,
 ) -> list[str]:
-    """Build the standard native-context, non-MTP server command."""
+    """Build the standard native-context, cache-on, non-MTP command."""
+    prompt_cache_memory_mib = (
+        DEFAULT_PROMPT_CACHE_MEMORY_MIB if cache_mode != "off" else 0
+    )
     return [
         str(binary),
         "--port", str(port),
@@ -45,6 +50,8 @@ def server_command(
         "--max-context", str(DEFAULT_CONTEXT_TOKENS),
         "--rope-scaling", "none",
         "--prompt-cache-mode", cache_mode,
+        "--prompt-cache-memory-mib", str(prompt_cache_memory_mib),
+        "--ram-budget", DEFAULT_EXPERT_CACHE_BUDGET,
         "--kv-bits", str(DEFAULT_KV_BITS),
     ]
 

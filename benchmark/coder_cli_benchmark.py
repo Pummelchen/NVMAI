@@ -205,12 +205,13 @@ def wait_http(url: str, timeout: float = 300) -> None:
 
 
 def start_server(*, output: pathlib.Path, family: str, quant: int, port: int,
-                 cache: bool, concise: bool, mtp: bool, label: str) -> RunningProcess:
+                 label: str, cache: bool = True, concise: bool = True,
+                 mtp: bool = False) -> RunningProcess:
     model = MODEL_PATHS[family][quant]
     command = server_command(
         SERVER, port, model=model,
         cache_mode="multi-prefix" if cache else "off",
-    ) + ["--prompt-cache-memory-mib", "256" if cache else "0"]
+    )
     if mtp:
         command += ["--mtp-model", str(MTP_PATHS[family]), "--mtp-memory-mib", "384"]
     env = server_environment(concise=concise)

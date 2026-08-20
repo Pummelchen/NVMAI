@@ -8,8 +8,10 @@ import nvmai_benchmark
 from nvmai_profile import (
     DEFAULT_API_MODEL,
     DEFAULT_CONTEXT_TOKENS,
+    DEFAULT_EXPERT_CACHE_BUDGET,
     DEFAULT_KV_BITS,
     DEFAULT_MODEL_PATH,
+    DEFAULT_PROMPT_CACHE_MEMORY_MIB,
     request_model,
     server_command,
     server_environment,
@@ -24,9 +26,29 @@ class BenchmarkProfileTests(unittest.TestCase):
             command[command.index("--max-context") + 1], str(DEFAULT_CONTEXT_TOKENS)
         )
         self.assertEqual(command[command.index("--prompt-cache-mode") + 1], "multi-prefix")
+        self.assertEqual(
+            command[command.index("--prompt-cache-memory-mib") + 1],
+            str(DEFAULT_PROMPT_CACHE_MEMORY_MIB),
+        )
+        self.assertEqual(
+            command[command.index("--ram-budget") + 1], DEFAULT_EXPERT_CACHE_BUDGET
+        )
         self.assertEqual(command[command.index("--kv-bits") + 1], str(DEFAULT_KV_BITS))
         self.assertEqual(command[command.index("--rope-scaling") + 1], "none")
         self.assertNotIn("--mtp-model", command)
+
+    def test_explicit_cache_off_is_not_a_default(self) -> None:
+        command = server_command("NVMAIServer", 8081, cache_mode="off")
+        self.assertEqual(command[command.index("--prompt-cache-mode") + 1], "off")
+        self.assertEqual(command[command.index("--prompt-cache-memory-mib") + 1], "0")
+
+    def test_shell_launchers_explicitly_enable_both_caches(self) -> None:
+        launcher = (DEFAULT_MODEL_PATH.parents[1] / "tools/server_launcher.sh").read_text()
+        self.assertIn("--prompt-cache-mode multi-prefix", launcher)
+        self.assertIn(
+            f"--prompt-cache-memory-mib {DEFAULT_PROMPT_CACHE_MEMORY_MIB}", launcher
+        )
+        self.assertIn(f"--ram-budget {DEFAULT_EXPERT_CACHE_BUDGET}", launcher)
 
     def test_environment_and_model_select_concise_base_alias(self) -> None:
         environment = server_environment({"PATH": os.environ.get("PATH", "")})
