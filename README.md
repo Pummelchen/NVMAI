@@ -1,4 +1,4 @@
-<img width="1122" height="1402" alt="image" src="https://github.com/user-attachments/assets/ae5aedef-92f2-48bb-9bce-325d188d49e3" />
+<img width="2456" height="930" alt="image" src="https://github.com/user-attachments/assets/737b0ff8-1f55-4456-bc32-89a532cbd716" />
 
 
 # NVMAI
