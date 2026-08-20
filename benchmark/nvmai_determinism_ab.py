@@ -16,9 +16,14 @@ import subprocess
 import sys
 import time
 
+from nvmai_profile import (
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    server_command, server_environment,
+)
+
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit")
+MODEL = str(DEFAULT_MODEL_PATH)
 PORT = 8114
 MAX_TOKENS = int(sys.argv[1]) if len(sys.argv) > 1 else 512
 PROMPTS = [
@@ -60,10 +65,10 @@ def first_diff_index(a, b):
 
 
 def run_server():
-    log = open("/tmp/nvmai_determinism_server.log", "w")
+    log = open(benchmark_log_path("nvmai_determinism_server.log"), "w")
     proc = subprocess.Popen(
-        [BIN, "--port", str(PORT), "--model", MODEL, "--prompt-cache-mode", "off"],
-        stdout=log, stderr=subprocess.STDOUT)
+        server_command(BIN, PORT, model=MODEL),
+        env=server_environment(), stdout=log, stderr=subprocess.STDOUT)
     start = time.time()
     while time.time() - start < 120:
         if proc.poll() is not None:
@@ -82,7 +87,7 @@ def run_server():
     result = {}
     for name, prompt in PROMPTS:
         payload = json.dumps({
-            "model": "ornith-1.5-35b-a3b",
+            "model": DEFAULT_API_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0, "top_p": 0.95, "top_k": 20,
             "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,

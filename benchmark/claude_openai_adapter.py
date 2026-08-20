@@ -19,6 +19,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from nvmai_profile import DEFAULT_API_MODEL
+
 
 def _text_content(content: Any) -> str:
     if isinstance(content, str):
@@ -284,7 +286,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--openai-url", required=True, help="NVMAI base URL ending in /v1")
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default=DEFAULT_API_MODEL)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--max-tokens", type=int, default=2048)
     args = parser.parse_args()

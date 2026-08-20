@@ -9,23 +9,28 @@ import subprocess
 import time
 import sys
 
+from nvmai_profile import (
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    server_command, server_environment,
+)
+
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit")
+MODEL = str(DEFAULT_MODEL_PATH)
 PORT = 8112
 PROMPT = "Write a detailed essay about the history of computing."
 
 
 def run(max_tokens, tag, extra_env=None):
-    env = dict(os.environ)
+    env = server_environment()
     env["NVMAI_RUNNER_STATS"] = "1"
     env["NVMAI_KERNEL_STATS"] = "1"
     if extra_env:
         env.update(extra_env)
-    log_path = f"/tmp/nvmai_gap_{tag}.log"
+    log_path = benchmark_log_path(f"nvmai_gap_{tag}.log")
     log = open(log_path, "w")
     proc = subprocess.Popen(
-        [BIN, "--port", str(PORT), "--model", MODEL, "--prompt-cache-mode", "off"],
+        server_command(BIN, PORT, model=MODEL),
         env=env, stdout=log, stderr=subprocess.STDOUT)
     start = time.time()
     while time.time() - start < 120:
@@ -43,7 +48,7 @@ def run(max_tokens, tag, extra_env=None):
             pass
         time.sleep(0.05)
     payload = json.dumps({
-        "model": "ornith-1.5-35b-a3b",
+        "model": DEFAULT_API_MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": 0, "top_p": 0.95, "top_k": 20,
         "presence_penalty": 0.0, "max_completion_tokens": max_tokens, "stream": True,

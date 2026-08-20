@@ -11,9 +11,14 @@ import subprocess
 import sys
 import time
 
+from nvmai_profile import (
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    server_command, server_environment,
+)
+
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit")
+MODEL = str(DEFAULT_MODEL_PATH)
 PORT = 8117
 PROMPTS = [
     ("code", "Write a Python function that computes the Levenshtein distance between two strings with a detailed docstring, then a second function using it to find the closest match in a list, with a demo main."),
@@ -24,7 +29,7 @@ PROMPTS = [
 
 
 def main():
-    models = sys.argv[1:] or [os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit")]
+    models = sys.argv[1:] or [str(DEFAULT_MODEL_PATH)]
     for model in models:
         label = "4bit" if "6bit" not in model and "8bit" not in model else (
             "6bit" if "6bit" in model else "8bit")
@@ -32,11 +37,11 @@ def main():
 
 
 def run_quant(model, label):
-    log_path = f"/tmp/maxtput_{label}.log"
+    log_path = benchmark_log_path(f"maxtput_{label}.log")
     log = open(log_path, "w")
     proc = subprocess.Popen(
-        [BIN, "--port", str(PORT), "--model", model, "--prompt-cache-mode", "off"],
-        stdout=log, stderr=subprocess.STDOUT)
+        server_command(BIN, PORT, model=model),
+        env=server_environment(), stdout=log, stderr=subprocess.STDOUT)
     start = time.time()
     while time.time() - start < 120:
         if proc.poll() is not None:
@@ -54,7 +59,7 @@ def run_quant(model, label):
 
     def request(prompt):
         payload = json.dumps({
-            "model": "ornith-1.5-35b-a3b",
+            "model": DEFAULT_API_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0, "top_p": 0.95, "top_k": 20,
             "presence_penalty": 0.0, "max_completion_tokens": 512, "stream": True,

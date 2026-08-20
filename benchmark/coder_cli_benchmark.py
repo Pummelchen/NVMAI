@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Reproducible Ornith coding-client and NVMAI feature benchmark rounds.
 
-Round ``coder`` runs Codex, Qwen Code, OpenCode, and (through the adjacent
-loopback adapter) Claude Code against Ornith 4-bit and 8-bit with fixed short,
-medium, and long prompts.  Round ``features`` uses direct OpenAI requests to
+The default ``coder`` round runs Codex, Qwen Code, OpenCode, and (through the
+adjacent loopback adapter) Claude Code against Ornith 4-bit with fixed short,
+medium, and long prompts using the production benchmark profile. The opt-in
+``features`` round uses direct OpenAI requests to
 isolate prompt-cache, fast-alias, and concise-mode behavior on Ornith, then
 checks Ornith's native MTP off/on. Results are resumable and
 kept below .build by default.
@@ -28,6 +29,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterable
+
+from nvmai_profile import DEFAULT_CONTEXT_TOKENS, DEFAULT_KV_BITS, server_command, server_environment
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -204,23 +207,18 @@ def wait_http(url: str, timeout: float = 300) -> None:
 def start_server(*, output: pathlib.Path, family: str, quant: int, port: int,
                  cache: bool, concise: bool, mtp: bool, label: str) -> RunningProcess:
     model = MODEL_PATHS[family][quant]
-    command = [
-        str(SERVER), "--model", str(model), "--port", str(port),
-        "--max-context", "32768", "--prompt-cache-mode", "multi-prefix" if cache else "off",
-        "--prompt-cache-memory-mib", "256" if cache else "0",
-    ]
+    command = server_command(
+        SERVER, port, model=model,
+        cache_mode="multi-prefix" if cache else "off",
+    ) + ["--prompt-cache-memory-mib", "256" if cache else "0"]
     if mtp:
         command += ["--mtp-model", str(MTP_PATHS[family]), "--mtp-memory-mib", "384"]
-    env = os.environ.copy()
+    env = server_environment(concise=concise)
     # Coding-client answers are the measured artifact. Keep reasoning tokens
     # out of the visible response so every client can be judged against the
     # same explicit word limit; MTP qualification also requires direct greedy
     # generation rather than a separately rendered reasoning block.
     env["NVMAI_THINKING_MODE"] = "0"
-    if concise:
-        env["NVMAI_CONCISE_MODE"] = "1"
-    else:
-        env.pop("NVMAI_CONCISE_MODE", None)
     log_path = output / "server" / f"{label}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("a", buffering=1)
@@ -531,7 +529,7 @@ def run_coder_round(args: argparse.Namespace, output: pathlib.Path, prompts: dic
         model = manifest_api_model(model_path)
         server = start_server(
             output=output, family="ornith", quant=quant, port=port,
-            cache=False, concise=False, mtp=False, label=f"coder-ornith-q{quant}",
+            cache=True, concise=True, mtp=False, label=f"coder-ornith-q{quant}",
         )
         adapter: RunningProcess | None = None
         try:
@@ -565,7 +563,9 @@ def run_coder_round(args: argparse.Namespace, output: pathlib.Path, prompts: dic
                     record = {
                         "key": key, "round": "coder", "status": "ok" if result["exit_code"] == 0 else "failed",
                         "phase": phase, "repetition": repetition, "family": "ornith",
-                        "quantization": quant, "client": client, "prompt": prompt_name,
+                        "quantization": quant, "cache": True, "mtp": False,
+                        "fast": False, "concise": True,
+                        "client": client, "prompt": prompt_name,
                         "prompt_sha256": sha256_text(prompts[prompt_name]), "model": model,
                         "server_log": log_delta, "quality": quality, "finished_at": utc_now(),
                         **{name: value for name, value in result.items() if name != "answer"},
@@ -840,9 +840,9 @@ def run_feature_round(args: argparse.Namespace, output: pathlib.Path,
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--round", choices=("coder", "features", "all"), default="all")
+    parser.add_argument("--round", choices=("coder", "features", "all"), default="coder")
     parser.add_argument("--output", type=pathlib.Path)
-    parser.add_argument("--quantizations", nargs="+", type=int, choices=(4, 8), default=[4, 8])
+    parser.add_argument("--quantizations", nargs="+", type=int, choices=(4, 8), default=[4])
     parser.add_argument("--clients", nargs="+", choices=("codex", "qwen", "opencode", "claude"))
     parser.add_argument("--prompts", nargs="+", choices=("short", "medium", "long"),
                         default=["short", "medium", "long"])
@@ -879,6 +879,15 @@ def main() -> int:
     }
     environment["prompt_sha256"] = {name: sha256_text(value) for name, value in prompts.items()}
     environment["arguments"] = vars(args) | {"output": str(output)}
+    environment["default_profile"] = {
+        "model": "ornith-1.5-35b-a3b-4bit",
+        "context_tokens": DEFAULT_CONTEXT_TOKENS,
+        "prompt_cache": "multi-prefix",
+        "kv_bits": DEFAULT_KV_BITS,
+        "mtp": False,
+        "concise": True,
+        "fast_alias": False,
+    }
     write_json(output / f"environment-{args.round}.json", environment)
     if not (output / "environment.json").exists():
         write_json(output / "environment.json", environment)

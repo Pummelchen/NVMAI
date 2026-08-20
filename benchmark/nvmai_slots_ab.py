@@ -12,17 +12,22 @@ import subprocess
 import sys
 import time
 
+from nvmai_profile import (
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    server_command, server_environment,
+)
+
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
 MODEL = os.environ.get("NVMAI_BENCH_MODEL",
-                       os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit"))
+                       str(DEFAULT_MODEL_PATH))
 PORT = 8115
 PROMPT = "Write a detailed essay about the history of computing."
 MAX_TOKENS = int(os.environ.get("NVMAI_AB_TOKENS", "512"))
 
 
 def run(slots, pin=None):
-    env = dict(os.environ)
+    env = server_environment()
     env["NVMAI_RUNNER_STATS"] = "1"
     env["NVMAI_KERNEL_STATS"] = "1"
     env["NVMAI_EXPERT_CACHE_SLOTS"] = str(slots)
@@ -31,11 +36,11 @@ def run(slots, pin=None):
             env.pop("NVMAI_NO_PIN", None)
         else:
             env["NVMAI_NO_PIN"] = "1"
-    log_path = f"/tmp/nvmai_slots_{slots}{'_pin' if pin else ''}.log"
+    log_path = benchmark_log_path(f"nvmai_slots_{slots}{'_pin' if pin else ''}.log")
     log = open(log_path, "w")
     boot = time.time()
     proc = subprocess.Popen(
-        [BIN, "--port", str(PORT), "--model", MODEL, "--prompt-cache-mode", "off"],
+        server_command(BIN, PORT, model=MODEL),
         env=env, stdout=log, stderr=subprocess.STDOUT)
     start = time.time()
     while time.time() - start < 120:
@@ -55,7 +60,7 @@ def run(slots, pin=None):
     boot_s = time.time() - boot
     print(f"--- slots={slots} pin={pin} boot_s={boot_s:.1f} ---")
     payload = json.dumps({
-        "model": "ornith-1.5-35b-a3b",
+        "model": DEFAULT_API_MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": 0, "top_p": 0.95, "top_k": 20,
         "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,

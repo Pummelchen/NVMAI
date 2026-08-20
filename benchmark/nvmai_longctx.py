@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Long-context decode measurement: KV pressure at ~10k tokens + long generation.
 
-A: ~10k-token prompt (built from /tmp/prompt_10k.txt if present, else generated
-   inline), 128 max new -> KV pressure (prefill_s, decode, RSS)
+A: generated ~10k-token prompt, 128 max new -> KV pressure
+   (prefill_s, decode, RSS)
 B: short prompt, 1024 max new     -> long-generation sustained decode
 C: ~10k-token prompt, 1024 max new -> combined
 
@@ -19,29 +19,31 @@ import sys
 import time
 import http.client
 
+from nvmai_profile import (
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    server_command, server_environment,
+)
+
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
-MODEL = os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit")
+MODEL = str(DEFAULT_MODEL_PATH)
 PORT = 8091
 def build_prompt():
-    try:
-        return open("/tmp/prompt_10k.txt").read()
-    except OSError:
-        para = ("The NVMAI inference engine executes Qwen 3.6 35B-A3B on Apple "
-                "Silicon via Metal with a 40-layer mixture-of-experts network "
-                "and routed-expert pread streaming. This paragraph repeats to "
-                "build a long context for decode-pressure measurement. ")
-        return "Continue the technical discussion: " + para * 40
+    para = ("The NVMAI inference engine executes Ornith 1.5 35B-A3B on Apple "
+            "Silicon via Metal with a 40-layer mixture-of-experts network "
+            "and routed-expert pread streaming. This paragraph repeats to "
+            "build a long context for decode-pressure measurement. ")
+    return "Continue the technical discussion: " + para * 40
 
 PROMPT_10K = build_prompt()
 SHORT = "Write a detailed essay about the history of computing."
 
 
 def launch_server():
-    log = open("/tmp/longctx_server.log", "w")
+    log = open(benchmark_log_path("longctx_server.log"), "w")
     proc = subprocess.Popen(
-        [BIN, "--port", str(PORT), "--model", MODEL, "--prompt-cache-mode", "off"],
-        stdout=log, stderr=subprocess.STDOUT)
+        server_command(BIN, PORT, model=MODEL),
+        env=server_environment(), stdout=log, stderr=subprocess.STDOUT)
     for _ in range(240):
         try:
             conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=2)
@@ -69,7 +71,7 @@ def request(messages, max_new, label):
     """Stream one request; returns dict incl. chunk_times (t_since_start,
     cum_chars) per recv."""
     payload = json.dumps({
-        "model": "ornith-1.5-35b-a3b",
+        "model": DEFAULT_API_MODEL,
         "messages": messages,
         "temperature": 0,
         "top_p": 0.95,
@@ -182,7 +184,7 @@ def main():
         proc.kill()
 
     print("\n--- server footers ---", flush=True)
-    for line in open("/tmp/longctx_server.log"):
+    for line in open(benchmark_log_path("longctx_server.log")):
         if "NVMAI generation" in line or "completed in" in line:
             print(line.strip(), flush=True)
 

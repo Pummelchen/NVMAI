@@ -13,7 +13,7 @@ the default sweeps are 6 slots + 5 chunks = 11 runs. Pick one sweep to halve
 that, or trim the lists with --slots / --chunks.
 
 Usage:
-  python3 benchmark/nvmai_m5_sweep.py --model models/ornith-1.5_35B_A3B_4Bit
+  python3 benchmark/nvmai_m5_sweep.py
   python3 benchmark/nvmai_m5_sweep.py --model ... --sweep slots
   python3 benchmark/nvmai_m5_sweep.py --model ... --sweep chunk --prompt-tokens 22800
   python3 benchmark/nvmai_m5_sweep.py --model ... --slots 32,64,128 --chunks 512,4096
@@ -28,6 +28,8 @@ import subprocess
 import sys
 import tempfile
 import time
+
+from nvmai_profile import DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL_PATH
 
 DEFAULT_SLOTS = [16, 24, 32, 64, 96, 128]
 DEFAULT_CHUNKS = [256, 512, 1024, 2048, 4096]
@@ -64,21 +66,15 @@ def make_prompt(target_tokens: int) -> str:
     return (PARAGRAPH * blocks).strip()
 
 
-def pick_context(prompt_tokens: int, max_new: int) -> int:
-    """Smallest supported context that fits the prompt, the generation, and the
-    template headroom.
-
-    The CLI defaults to 4096, so without this every sweep longer than a short
-    prompt fails on context rather than measuring anything.
-    """
+def validate_context(prompt_tokens: int, max_new: int, max_context: int) -> int:
+    """Reject a selected context that cannot hold the estimated request."""
     need = prompt_tokens + max_new + CONTEXT_HEADROOM_TOKENS
-    for size in SUPPORTED_CONTEXTS:
-        if size >= need:
-            return size
-    raise SystemExit(
-        "--prompt-tokens %d + --max-new %d needs ~%d tokens of context, above "
-        "the %d maximum the runtime supports"
-        % (prompt_tokens, max_new, need, SUPPORTED_CONTEXTS[-1]))
+    if max_context < need:
+        raise SystemExit(
+            "--prompt-tokens %d + --max-new %d needs ~%d tokens of context, "
+            "above --max-context %d"
+            % (prompt_tokens, max_new, need, max_context))
+    return max_context
 
 
 def run_once(cli: str, model: str, slots: int, chunk: int, prompt_file: str,
@@ -88,6 +84,9 @@ def run_once(cli: str, model: str, slots: int, chunk: int, prompt_file: str,
            "--prefill-chunk", str(chunk),
            "--messages-file", prompt_file,
            "--max-context", str(max_context),
+           "--rope-scaling", "none",
+           "--kv-bits", "8",
+           "--concise",
            "--max-new", str(max_new)]
     # Every return below carries slots/chunk, so a failed run is still
     # attributable to its configuration in the CSV.
@@ -118,7 +117,7 @@ def run_once(cli: str, model: str, slots: int, chunk: int, prompt_file: str,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True)
+    ap.add_argument("--model", default=str(DEFAULT_MODEL_PATH))
     ap.add_argument("--cli", default=None,
                     help="path to NVMAICLI (default: .build/arm64-apple-macosx/release/NVMAICLI)")
     ap.add_argument("--sweep", choices=["slots", "chunk", "both"], default="both")
@@ -126,6 +125,8 @@ def main():
     ap.add_argument("--chunks", default=",".join(map(str, DEFAULT_CHUNKS)))
     ap.add_argument("--prompt-tokens", type=int, default=8192)
     ap.add_argument("--max-new", type=int, default=256)
+    ap.add_argument("--max-context", type=int, choices=SUPPORTED_CONTEXTS,
+                    default=DEFAULT_CONTEXT_TOKENS)
     args = ap.parse_args()
 
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -135,8 +136,12 @@ def main():
 
     slots = [int(v) for v in args.slots.split(",")]
     chunks = [int(v) for v in args.chunks.split(",")]
-    max_context = pick_context(args.prompt_tokens, args.max_new)
-    prompt_file = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False).name
+    max_context = validate_context(args.prompt_tokens, args.max_new, args.max_context)
+    prompt_directory = os.path.join(base, ".build", "benchmark-prompts")
+    os.makedirs(prompt_directory, exist_ok=True)
+    prompt_file = tempfile.NamedTemporaryFile(
+        "w", suffix=".json", delete=False, dir=prompt_directory
+    ).name
     with open(prompt_file, "w") as f:
         f.write(json.dumps([{"role": "user", "content": make_prompt(args.prompt_tokens)}]))
 

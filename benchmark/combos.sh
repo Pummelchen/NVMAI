@@ -2,6 +2,7 @@
 # Compatibility entry point for the current two-round benchmark harness.
 #
 # Examples:
+#   benchmark/combos.sh
 #   benchmark/combos.sh --round coder
 #   benchmark/combos.sh --round features
 #   benchmark/combos.sh --round all --output .build/benchmark-rounds/my-run

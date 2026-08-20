@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Precise 2x2 benchmark with streaming and TTFT tracking.
+"""Precise production-profile benchmark with optional 2x2 feature matrix.
 
 Methodology notes (production audit fixes):
 - Cache-warm runs: for prompt-cache configs every prompt is sent twice; the
@@ -18,13 +18,14 @@ Methodology notes (production audit fixes):
 - The server buffers SSE content frames until generation completes, so
   client-side TTFT ~= wall and client decode rates are always null. The
   authoritative per-request decode rate comes from the server's own footer
-  (decode_tok_s in /tmp/nvmaiserver_PORT.log), which is parsed per config and
+  (decode_tok_s in .build/benchmark-logs/nvmaiserver_PORT.log), which is parsed per config and
   attached to rows / summarized as footer_decode_rates.
 - MTP engages only for pure-greedy requests (temperature 0, repetition
   penalty 1), so the MTP cell runs at temperature 0. All other cells use the
   production defaults: temperature 0.6, top-p 0.95, top-k 20, and presence
   penalty 0.
 """
+import argparse
 import json
 import time
 import http.client
@@ -33,6 +34,11 @@ import signal
 import subprocess
 import sys
 import re
+
+from nvmai_profile import (
+    DEFAULT_CONTEXT_TOKENS, DEFAULT_KV_BITS, DEFAULT_MODEL_PATH,
+    benchmark_log_path, server_command, server_environment,
+)
 
 DECODE_FOOTER_RE = re.compile(r"decode_tok_s=([0-9.]+)")
 MTP_STATS_RE = re.compile(
@@ -306,9 +312,9 @@ def run_config(cache_mode, mtp_config, config_label, port, verify=True,
     terminate_servers()
 
     # Authoritative decode rates come from the server's own footer lines in
-    # /tmp/nvmaiserver_PORT.log (one per completed request). The first line
+    # .build/benchmark-logs/nvmaiserver_PORT.log (one per completed request). The first line
     # is the warmup request.
-    log_path = f"/tmp/nvmaiserver_{port}.log"
+    log_path = benchmark_log_path(f"nvmaiserver_{port}.log")
     footer_rates = []
     mtp_stats = []
     try:
@@ -402,7 +408,12 @@ def run_config(cache_mode, mtp_config, config_label, port, verify=True,
     os.makedirs(outdir, exist_ok=True)
     with open(os.path.join(outdir, "aggregate.json"), "w") as f:
         json.dump({"config": config_label, "cache_mode": cache_mode,
-            "mtp_config": mtp_config, "results": results,
+            "mtp_config": mtp_config,
+            "runtime_profile": {
+                "context_tokens": DEFAULT_CONTEXT_TOKENS, "kv_bits": DEFAULT_KV_BITS,
+                "concise": True, "fast_alias": False,
+            },
+            "results": results,
             "summary": {"total_requests": len(results),
                 "total_wall_s": round(total_wall, 2),
                 "total_completion_tokens": total_ct,
@@ -425,12 +436,12 @@ def run_config(cache_mode, mtp_config, config_label, port, verify=True,
 def launch_server(base_dir, port, main_model, mtp_model, cache_mode, mtp_config):
     binary = os.path.join(base_dir, ".build", "arm64-apple-macosx",
                           "release", "NVMAIServer")
-    cmd = [binary, "--port", str(port), "--model", main_model,
-           "--prompt-cache-mode", cache_mode]
+    cmd = server_command(binary, port, model=main_model, cache_mode=cache_mode)
     if mtp_config == "on":
         cmd += ["--mtp-model", mtp_model, "--mtp-memory-mib", "384"]
-    log = open(f"/tmp/nvmaiserver_{port}.log", "w")
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+    log = open(benchmark_log_path(f"nvmaiserver_{port}.log"), "w")
+    proc = subprocess.Popen(
+        cmd, env=server_environment(), stdout=log, stderr=subprocess.STDOUT)
     _spawned_servers.append(proc)
     return proc
 
@@ -462,13 +473,32 @@ def wait_ready(port, attempts=10):
     return False
 
 
+def selected_configs(quant_label, matrix=False):
+    production = (
+        "multi-prefix", "off", f"cache_on_mtp_off_{quant_label}", 8081, 0.6
+    )
+    if not matrix:
+        return [production]
+    return [
+        ("off", "off", f"cache_off_mtp_off_{quant_label}", 8080, 0.6),
+        production,
+        ("off", "on", f"cache_off_mtp_on_{quant_label}", 8082, 0.0),
+    ]
+
+
 def main():
     signal.signal(signal.SIGINT, lambda *_: (terminate_servers(), sys.exit(130)))
 
     base_dir = os.path.abspath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)), ".."))
-    main_model = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        base_dir, "models", "ornith-1.5_35B_A3B_4Bit")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model", nargs="?", default=str(DEFAULT_MODEL_PATH))
+    parser.add_argument(
+        "--matrix", action="store_true",
+        help="run the opt-in cache-off and MTP-on comparison cells too",
+    )
+    args = parser.parse_args()
+    main_model = args.model
     mtp_model = os.path.join(base_dir, "models", "ornith-1.5_35B_A3B_MTP_4Bit")
 
     quant_label = "4bit"
@@ -482,11 +512,7 @@ def main():
     # pure-greedy requests (temperature 0, repetition penalty 1), so the MTP
     # cell runs at temperature 0 while the non-MTP cells use the production
     # sampling defaults.
-    configs = [
-        ("off", "off", f"cache_off_mtp_off_{quant_label}", 8080, 0.6),
-        ("multi-prefix", "off", f"cache_on_mtp_off_{quant_label}", 8081, 0.6),
-        ("off", "on", f"cache_off_mtp_on_{quant_label}", 8082, 0.0),
-    ]
+    configs = selected_configs(quant_label, matrix=args.matrix)
 
     print(f"\n{'#'*110}", flush=True)
     print(f"# BENCHMARKING MODEL: {os.path.basename(main_model)}", flush=True)
@@ -511,7 +537,8 @@ def main():
     finally:
         terminate_servers()
 
-    print(f"\n{'='*110}\nALL PRECISE 2x2 COMPLETE\n{'='*110}", flush=True)
+    label = "PRECISE FEATURE MATRIX" if args.matrix else "PRODUCTION PROFILE"
+    print(f"\n{'='*110}\n{label} COMPLETE\n{'='*110}", flush=True)
 
 
 if __name__ == "__main__":

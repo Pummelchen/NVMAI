@@ -10,21 +10,26 @@ import subprocess
 import time
 import sys
 
+from nvmai_profile import (
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    server_command, server_environment,
+)
+
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
 MODEL = os.environ.get("NVMAI_BENCH_MODEL",
-                       os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit"))
+                       str(DEFAULT_MODEL_PATH))
 PORT = 8111
 PROMPT = "Write a detailed essay about the history of computing."
 MAX_TOKENS = int(sys.argv[1]) if len(sys.argv) > 1 else 512
 
-env = dict(os.environ)
+env = server_environment()
 env["NVMAI_RUNNER_STATS"] = "1"
 env["NVMAI_KERNEL_STATS"] = "1"
-log_path = "/tmp/nvmai_overlap.log"
+log_path = benchmark_log_path("nvmai_overlap.log")
 log = open(log_path, "w")
 proc = subprocess.Popen(
-    [BIN, "--port", str(PORT), "--model", MODEL, "--prompt-cache-mode", "off"],
+    server_command(BIN, PORT, model=MODEL),
     env=env, stdout=log, stderr=subprocess.STDOUT)
 start = time.time()
 while time.time() - start < 120:
@@ -43,7 +48,7 @@ while time.time() - start < 120:
     time.sleep(0.05)
 
 payload = json.dumps({
-    "model": "ornith-1.5-35b-a3b",
+    "model": DEFAULT_API_MODEL,
     "messages": [{"role": "user", "content": PROMPT}],
     "temperature": 0, "top_p": 0.95, "top_k": 20,
     "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,

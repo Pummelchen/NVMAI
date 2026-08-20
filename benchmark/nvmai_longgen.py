@@ -10,6 +10,11 @@ import subprocess
 import sys
 import time
 
+from nvmai_profile import (
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    server_command, server_environment,
+)
+
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BIN = os.path.join(BASE, ".build", "arm64-apple-macosx", "release", "NVMAIServer")
 PORT = 8114
@@ -25,12 +30,12 @@ MAX_TOKENS = 512
 
 
 def run_quant(model_path, label):
-    env = dict(os.environ)
+    env = server_environment()
     env["NVMAI_RUNNER_STATS"] = "1"
-    log_path = f"/tmp/longgen_{label}.log"
+    log_path = benchmark_log_path(f"longgen_{label}.log")
     log = open(log_path, "w")
     proc = subprocess.Popen(
-        [BIN, "--port", str(PORT), "--model", model_path, "--prompt-cache-mode", "off"],
+        server_command(BIN, PORT, model=model_path),
         env=env, stdout=log, stderr=subprocess.STDOUT)
     start = time.time()
     while time.time() - start < 120:
@@ -48,7 +53,7 @@ def run_quant(model_path, label):
         time.sleep(0.05)
 
     payload = json.dumps({
-        "model": "ornith-1.5-35b-a3b",
+        "model": DEFAULT_API_MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": 0, "top_p": 0.95, "top_k": 20,
         "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,
@@ -88,7 +93,7 @@ def run_quant(model_path, label):
 
 def main():
     models = sys.argv[1:] or [
-        os.path.join(BASE, "models", "ornith-1.5_35B_A3B_4Bit"),
+        str(DEFAULT_MODEL_PATH),
     ]
     for model in models:
         label = "4bit" if "6bit" not in model and "8bit" not in model else (
