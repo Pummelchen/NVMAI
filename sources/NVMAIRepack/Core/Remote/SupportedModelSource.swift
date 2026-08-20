@@ -59,6 +59,34 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 37_800_000_000,
         reserveBytes: 1_073_741_824)
 
+    /// Text-only Ornith 1.5 uses the same qwen3_5_moe tensor contract as the
+    /// Qwen 3.6 target. The official MLX conversion intentionally contains
+    /// only `language_model.*` tensors; vision and MTP are separate follow-up
+    /// features rather than silently entering the text runtime.
+    public static let ornith15 = SupportedModelSource(
+        name: "ornith15",
+        displayName: "Ornith 1.5 35B-A3B 4-bit (text)",
+        repoID: "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit",
+        revision: "19504d912fa8fc7622bf6b1de3db5d5d890b1f02",
+        sourceIndexSHA256:
+            "c118f13c0dcb729e4ca2e3d653ab193067551eb1a6410badb5192eb426104f36",
+        modelID: "ornith-1.5-35b-a3b-4bit",
+        approximateDownloadBytes: 19_528_995_943,
+        installedBytes: 19_530_000_000,
+        reserveBytes: 1_073_741_824)
+
+    public static let ornith15_8bit = SupportedModelSource(
+        name: "ornith15-8bit",
+        displayName: "Ornith 1.5 35B-A3B 8-bit (text)",
+        repoID: "ornith-ai/Ornith-1.5-35B-A3B-MLX-8bit",
+        revision: "02440c39bdf7365c494a7f55f2a8b104ba87562f",
+        sourceIndexSHA256:
+            "83c641a791aa957df7d280eef1b0c8faf7a2ec9b19dd3355fb13abae8ae0ed15",
+        modelID: "ornith-1.5-35b-a3b-8bit",
+        approximateDownloadBytes: 36_848_194_663,
+        installedBytes: 36_850_000_000,
+        reserveBytes: 1_073_741_824)
+
     /// One-layer native Qwen3.6 MTP draft. It contains no embedding or LM
     /// head; the runtime reuses those tensors from whichever 4/6/8-bit target
     /// is loaded. The routed experts remain SSD-streamed in `.gturbo` form.
@@ -78,7 +106,7 @@ public struct SupportedModelSource: Sendable, Equatable {
     public static let `default` = qwen36
 
     public static let all: [SupportedModelSource] = [
-        qwen36, qwen36_8bit, qwen36MTP,
+        qwen36, qwen36_8bit, ornith15, ornith15_8bit, qwen36MTP,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

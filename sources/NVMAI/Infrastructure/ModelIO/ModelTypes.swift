@@ -3,8 +3,8 @@ import Metal
 
 /// Model family discriminator. Selects the tensor-name contract, the layer
 /// graph shape, and family-specific kernel behavior. Stored in
-/// `manifest.json -> arch.family`; absent means the Qwen 3.6 baseline
-/// (NVMAI is Qwen-only).
+/// `manifest.json -> arch.family`; absent means the compatible Qwen3.5-MoE
+/// 35B-A3B baseline used by Qwen 3.6 and Ornith 1.5.
 public enum ModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
     case qwen36MTP = "qwen36_mtp"
@@ -68,8 +68,8 @@ public struct ArchConfig: Sendable, Equatable {
     public let fullAttentionLayerMask: [UInt8]
     public let hiddenActivation: String
 
-    // Family-dependent extensions. Defaults describe the Qwen 3.6 baseline so
-    // that manifests which omit them validate unchanged.
+    // Family-dependent extensions. Defaults describe the compatible
+    // Qwen3.5-MoE baseline so earlier manifests validate unchanged.
     public let family: ModelFamily
     /// Full-attention q_proj emits `2 * numHeads * fullHeadDim` rows: per-head
     /// [query ; gate] halves. Attention output is multiplied by sigmoid(gate)

@@ -152,6 +152,28 @@ import Foundation
         #expect(try ManifestReader.peekFamily(directoryURL: dir) == .qwen36)
     }
 
+    @Test func peekIdentityPreservesCompatibleModelID() throws {
+        let modelID = "ornith-1.5-35b-a3b-4bit"
+        let (dir, _) = try Self.writeToyManifest(["modelID": modelID])
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let identity = try ManifestReader.peekIdentity(directoryURL: dir)
+        #expect(identity.modelID == modelID)
+        #expect(identity.family == .qwen36)
+    }
+
+    @Test func peekIdentityRejectsEmptyModelID() throws {
+        let (dir, _) = try Self.writeToyManifest(["modelID": ""])
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect {
+            _ = try ManifestReader.peekIdentity(directoryURL: dir)
+        } throws: { error in
+            guard case ModelError.indexCorrupt(let detail) = error else { return false }
+            return detail.contains("modelID is empty")
+        }
+    }
+
     @Test func peekFamilyDetectsMTPByArchitectureShape() throws {
         let arch = ArchConfig.qwen36MTP
         let (dir, _) = try Self.writeToyManifest(

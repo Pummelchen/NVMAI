@@ -1,7 +1,8 @@
 # NVMAI
 
-Swift and Metal inference for Qwen 3.6 35B-A3B in 4-bit, 6-bit, and 8-bit
-quantization on Apple Silicon.
+Swift and Metal inference for compatible Qwen3.5-MoE 35B-A3B text models on
+Apple Silicon. Pinned installers support Qwen 3.6 and Ornith 1.5 in 4-bit and
+8-bit; 6-bit is a withdrawn legacy format.
 
 ## Scope
 
@@ -18,6 +19,7 @@ Mac app.
 
 ```bash
 swift run -c release NVMAIRepack --model qwen36 --output models/qwen3.6_35B_A3B_4Bit
+swift run -c release NVMAIRepack --model ornith15 --output models/ornith-1.5_35B_A3B_4Bit
 swift run -c release NVMAIRepack --model qwen36 --output models/qwen3.6_35B_A3B_4Bit --resume
 swift build -c release
 .build/release/NVMAIMac
@@ -58,7 +60,7 @@ the server is needed, and stop only a server you launched.
 
 ## Test rules
 
-Before a model run, require macOS 26+, Swift 6.3+, enough disk, acceptable `memory_pressure -Q`, a completed selected Qwen `.gturbo` installation, and no process from `pgrep -fl 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
+Before a model run, require macOS 26+, Swift 6.3+, enough disk, acceptable `memory_pressure -Q`, a completed selected `.gturbo` installation, and no process from `pgrep -fl 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm'`. If a check fails, inform the user and stop; do not terminate apps or delete or reinstall the model.
 
 Run package tests serially (`swift test --no-parallel`), passing any extra
 arguments like `--filter` through. Run only one app, CLI, or model-using test

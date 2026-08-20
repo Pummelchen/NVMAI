@@ -92,9 +92,29 @@ import NVMAIRepackCore
     #expect(AppModelInstallDescriptor.qwen36.installDirectoryName == "qwen3.6_35B_A3B_4Bit")
     #expect(AppModelInstallDescriptor.qwen36_6bit.installDirectoryName == "qwen3.6_35B_A3B_6Bit")
     #expect(AppModelInstallDescriptor.qwen36_8bit.installDirectoryName == "qwen3.6_35B_A3B_8Bit")
-    #expect(Set(AppModelInstallDescriptor.all.map(\.sourceIndexSHA256)).count == 3)
+    #expect(Set(AppModelInstallDescriptor.all.map(\.sourceIndexSHA256)).count
+            == AppModelInstallDescriptor.all.count)
     #expect(AppModelInstallDescriptor.qwen36_6bit.repoID.hasSuffix("-6bit"))
     #expect(AppModelInstallDescriptor.qwen36_8bit.repoID.hasSuffix("-8bit"))
+  }
+
+  @Test func ornithTextDescriptorsArePinnedAndSelectable() {
+    let fourBit = AppModelInstallDescriptor.ornith15
+    let eightBit = AppModelInstallDescriptor.ornith15_8bit
+
+    #expect(fourBit.installDirectoryName == "ornith-1.5_35B_A3B_4Bit")
+    #expect(eightBit.installDirectoryName == "ornith-1.5_35B_A3B_8Bit")
+    #expect(fourBit.repoID == "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit")
+    #expect(eightBit.repoID == "ornith-ai/Ornith-1.5-35B-A3B-MLX-8bit")
+    #expect(fourBit.sourceIndexSHA256
+            == "c118f13c0dcb729e4ca2e3d653ab193067551eb1a6410badb5192eb426104f36")
+    #expect(eightBit.sourceIndexSHA256
+            == "83c641a791aa957df7d280eef1b0c8faf7a2ec9b19dd3355fb13abae8ae0ed15")
+    #expect(fourBit.requiredFreeBytes > fourBit.installedBytes)
+    #expect(eightBit.requiredFreeBytes > eightBit.installedBytes)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15") == fourBit)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15-8bit") == eightBit)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36-6bit") == .qwen36)
   }
 
   @MainActor

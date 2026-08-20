@@ -1,18 +1,20 @@
 import Foundation
 import NVMAIRepackCore
 
+private let supportedModelNames = SupportedModelSource.all.map(\.name).joined(separator: "|")
+
 private let usage = """
 Usage:
-  NVMAIRepack [--model <qwen36|qwen36-8bit|qwen36-mtp>] --output <model.gturbo> [--overwrite] [--resume]
+  NVMAIRepack [--model <\(supportedModelNames)>] --output <model.gturbo> [--overwrite] [--resume]
   NVMAIRepack --discard-partial --output <model.gturbo>
   NVMAIRepack --verify-install --input-gturbo <model.gturbo>
   NVMAIRepack --help
 
-The installer streams the selected Qwen 3.6 checkpoint (default: 4-bit) from
-Hugging Face and repackages it without materializing the source checkpoint on
-disk. Set HF_TOKEN only if Hugging Face requests authentication. A cancelled
-or interrupted download can be continued with --resume or removed with
---discard-partial.
+The installer streams the selected Qwen 3.6 or text-only Ornith 1.5 checkpoint
+(default: Qwen 4-bit) from Hugging Face and repackages it without materializing
+the source checkpoint on disk. Set HF_TOKEN only if Hugging Face requests
+authentication. A cancelled or interrupted download can be continued with
+--resume or removed with --discard-partial.
 """
 
 private struct Arguments {

@@ -3,12 +3,13 @@
 
 # NVMAI
 
-## Ornith 1.5 Roadmap
+## Ornith 1.5
 
 > [!IMPORTANT]
-> NVMAI v4.0 plans to adopt **Ornith-1.5-35B-A3B** as its next default model.
-> Qwen 3.6 35B-A3B remains the supported model until the Ornith integration is
-> implemented, validated, and benchmarked.
+> NVMAI now supports text-only **Ornith-1.5-35B-A3B** installation and inference
+> in 4-bit and 8-bit. It reuses the verified Qwen3.5-MoE runtime and keeps routed
+> experts SSD-streamed with the same bounded-memory design. Vision and Ornith
+> MTP are not included in this first integration; Qwen 3.6 remains supported.
 
 [![Published Ornith 1.5 benchmark overview](assets/stats.png)](https://ornith.ai/ornith_1_5.html)
 
@@ -19,8 +20,9 @@ and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
 
 ## Benchmarks
 
-Base M3 MacBook Pro, 24 GB, 30-request coding workload, 4K context, prompt
-cache off, temperature `0.2`, Top-K `64`, and Top-P `0.95`:
+This historical run used a base M3 MacBook Pro with 24 GB, a 30-request coding
+workload, 4K context, prompt cache off, temperature `0.2`, Top-K `64`, and
+Top-P `0.95`:
 
 | Quantization | Decode | End-to-end output | Mean TTFT |
 | --- | ---: | ---: | ---: |

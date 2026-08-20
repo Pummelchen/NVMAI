@@ -64,8 +64,30 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 1_073_741_824)
 
+    public static let ornith15 = AppModelInstallDescriptor(
+        displayName: "Ornith 1.5 35B-A3B 4-bit (text)",
+        repoID: "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit",
+        revision: "19504d912fa8fc7622bf6b1de3db5d5d890b1f02",
+        sourceIndexSHA256: "c118f13c0dcb729e4ca2e3d653ab193067551eb1a6410badb5192eb426104f36",
+        approximateDownloadBytes: 19_528_995_943,
+        installedBytes: 19_530_000_000,
+        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+        reserveBytes: 1_073_741_824)
+
+    public static let ornith15_8bit = AppModelInstallDescriptor(
+        displayName: "Ornith 1.5 35B-A3B 8-bit (text)",
+        repoID: "ornith-ai/Ornith-1.5-35B-A3B-MLX-8bit",
+        revision: "02440c39bdf7365c494a7f55f2a8b104ba87562f",
+        sourceIndexSHA256: "83c641a791aa957df7d280eef1b0c8faf7a2ec9b19dd3355fb13abae8ae0ed15",
+        approximateDownloadBytes: 36_848_194_663,
+        installedBytes: 36_850_000_000,
+        rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
+        reserveBytes: 1_073_741_824)
+
+    /// Known source fingerprints, including withdrawn 6-bit installations so
+    /// an existing receipt can still be identified and reported accurately.
     public static let all: [AppModelInstallDescriptor] = [
-        .qwen36, .qwen36_6bit, .qwen36_8bit,
+        .qwen36, .qwen36_6bit, .qwen36_8bit, .ornith15, .ornith15_8bit,
     ]
 
     /// The shipped descriptor for a model family, if one exists.
@@ -79,6 +101,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     /// Basename of the installed `.gturbo` directory for this descriptor.
     public var installDirectoryName: String {
         switch repoID {
+        case Self.ornith15_8bit.repoID: return "ornith-1.5_35B_A3B_8Bit"
+        case Self.ornith15.repoID: return "ornith-1.5_35B_A3B_4Bit"
         case Self.qwen36_6bit.repoID: return "qwen3.6_35B_A3B_6Bit"
         case Self.qwen36_8bit.repoID: return "qwen3.6_35B_A3B_8Bit"
         case Self.qwen36.repoID: return "qwen3.6_35B_A3B_4Bit"
@@ -87,18 +111,21 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
     }
 
     /// The descriptor the app products select at launch. Defaults to Qwen 3.6
-    /// 4-bit. `TURBO_FIELDFARE_MODEL=qwen36` in the environment wins;
-    /// otherwise the persisted preference (`defaults write NVMAI model
-    /// qwen36`) applies, so GUI launches without an environment also select
-    /// Qwen.
+    /// 4-bit. `TURBO_FIELDFARE_MODEL` in the environment wins; otherwise the
+    /// persisted `defaults write NVMAI model <selector>` preference applies.
     public static var selected: AppModelInstallDescriptor {
         let environmentValue = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_MODEL"]
         let preferenceValue = UserDefaults(suiteName: "NVMAI")?
             .string(forKey: "model")
-        switch environmentValue ?? preferenceValue {
+        return selectedDescriptor(for: environmentValue ?? preferenceValue)
+    }
+
+    static func selectedDescriptor(for selector: String?) -> AppModelInstallDescriptor {
+        switch selector {
         case "qwen36": return .qwen36
-        case "qwen36-6bit": return .qwen36_6bit
         case "qwen36-8bit": return .qwen36_8bit
+        case "ornith15": return .ornith15
+        case "ornith15-8bit": return .ornith15_8bit
         default: return .qwen36
         }
     }

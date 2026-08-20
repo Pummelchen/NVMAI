@@ -19,7 +19,7 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
     }
 }
 
-/// Tokenizer wrapper for the Qwen 3.6 ChatML model family.
+/// Tokenizer wrapper for the compatible Qwen3.5-MoE ChatML model family.
 ///
 /// Loads tokenizer sidecars in a completed `.gturbo/tokenizer/` directory.
 /// Exposes typed accessors for the IDs the generator actually needs (BOS / EOS /

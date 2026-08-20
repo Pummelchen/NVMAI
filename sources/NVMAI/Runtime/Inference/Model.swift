@@ -159,7 +159,7 @@ public struct Model {
     private func sharedExpertName(_ proj: String, layer L: Int) -> String {
         "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
     }
-    /// Qwen-only scalar gate on the shared-expert branch: a `[1, hidden]`
+    /// Qwen3.5-MoE scalar gate on the shared-expert branch: a `[1, hidden]`
     /// 8-bit projection whose sigmoid multiplies the shared FFN output.
     public func sharedExpertScalarGate(layer L: Int) throws -> TensorView {
         try resident(name: "language_model.model.layers.\(L).mlp.shared_expert_gate.weight")
@@ -932,4 +932,3 @@ private struct RuntimeSchemaChecks {
         return (weightBytes, auxBytes, (UInt32(rows), UInt32(columns)))
     }
 }
-

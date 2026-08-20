@@ -82,7 +82,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 
 extension Args {
     public static let usage = """
-    NVMAICLI — Qwen3.6 35B-A3B text generation
+    NVMAICLI — Qwen3.5-MoE 35B-A3B text generation
 
     usage: NVMAICLI --model <dir> (--prompt <string> | --messages-file <path>) [options]
 

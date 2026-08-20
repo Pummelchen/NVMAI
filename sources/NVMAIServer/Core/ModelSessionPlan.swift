@@ -26,6 +26,23 @@ public struct ModelSessionFacts: Sendable, Equatable {
     }
 }
 
+enum ServerModelIdentity {
+    static func apiModelID(manifestModelID: String,
+                           family: ModelFamily) -> String {
+        let quantizationSuffixes = ["-4bit", "-8bit", "-6bit"]
+        for suffix in quantizationSuffixes where manifestModelID.hasSuffix(suffix) {
+            return String(manifestModelID.dropLast(suffix.count))
+        }
+        if manifestModelID != "unknown/snapshot" {
+            return manifestModelID
+        }
+        switch family {
+        case .qwen36: return "qwen3.6-35b-a3b"
+        case .qwen36MTP: return "qwen3.6-35b-a3b-mtp"
+        }
+    }
+}
+
 /// Everything needed to build a `ServerModelSession`, in one place.
 ///
 /// Both the eager path and the deferred path construct sessions through
@@ -97,12 +114,11 @@ public struct ModelSessionPlan: Sendable {
     /// Throwing here also preserves the eager path's behaviour that a bad
     /// `--model` fails at launch rather than on the first request.
     public func previewFacts(modelIDOverride: String? = nil) throws -> ModelSessionFacts {
-        let family = try ManifestReader.peekFamily(directoryURL: modelDirectory)
-        let defaultModelID: String
-        switch family {
-        case .qwen36: defaultModelID = "qwen3.6-35b-a3b"
-        case .qwen36MTP: defaultModelID = "qwen3.6-35b-a3b-mtp"
-        }
+        let identity = try ManifestReader.peekIdentity(directoryURL: modelDirectory)
+        let family = identity.family
+        let defaultModelID = ServerModelIdentity.apiModelID(
+            manifestModelID: identity.modelID,
+            family: family)
         // Mirrors the precedence in ServerModelSession.load: an explicit
         // --prefill-chunk wins, otherwise qwen36 takes the long-prefill chunk
         // and anything else takes the runtime default. Family is the only

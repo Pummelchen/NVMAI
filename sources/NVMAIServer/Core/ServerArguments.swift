@@ -6,8 +6,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let mtpModel: String?
     public let mtpMemoryMiB: Int
     public let port: Int
-    /// Explicit --model-id value; nil defers to the loaded model's family
-    /// default (qwen3.6-35b-a3b).
+    /// Explicit --model-id value; nil derives the API ID from the installed
+    /// manifest (for example qwen3.6-35b-a3b or ornith-1.5-35b-a3b).
     public let modelIDOverride: String?
     public let maxContext: Int
     public let queueLimit: Int
@@ -50,7 +50,7 @@ public struct ServerArguments: Equatable, Sendable {
                              (default 384).
       --port <1...65535>     Loopback port (default 8080).
       --model-id <id>        API model identifier (default derived from the
-                             installed model: qwen3.6-35b-a3b).
+                             installed model manifest).
       --max-context <tokens> 4096, 8192, 16384, 32768, 65536, 131072, or 262144
                              (default 262144).
       --queue-limit <count>  Maximum queued requests (default 4).
@@ -66,7 +66,8 @@ public struct ServerArguments: Equatable, Sendable {
                              SSD snapshot budget, 0...65536 (default 8192).
       --prefill-chunk <tokens>
                              Prefill chunk size: 32, 64, 128, 256, 512,
-                             1024, 2048, or 4096 (default 4096 for Qwen).
+                             1024, 2048, or 4096 (default 4096 for supported
+                             35B-A3B text models).
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment

@@ -36,7 +36,8 @@ struct ArchInfo: Sendable, Equatable {
     let fullAttentionLayerMask: [UInt8]
     let hiddenActivation: String
 
-    // Family-dependent extensions. Defaults describe the Qwen 3.6 baseline.
+    // Family-dependent extensions. Defaults describe the compatible
+    // Qwen3.5-MoE text architecture used by Qwen 3.6 and Ornith 1.5.
     let family: RepackModelFamily
     let attnOutputGate: Bool
     let attentionScale: Double
@@ -63,17 +64,17 @@ struct ArchInfo: Sendable, Equatable {
             return try loadQwen36MTP(configPath: configPath, tc: tc)
         }
         if (root["model_type"] as? String) == "qwen3_5_moe" {
-            return try loadQwen36(configPath: configPath, tc: tc)
+            return try loadQwen35MoE(configPath: configPath, tc: tc)
         }
         throw RepackError.configJsonInvalid(
             path: configPath,
-            detail: "unsupported model_type (NVMAI is Qwen-only)")
+            detail: "unsupported model_type (expected qwen3_5_moe or qwen3_5_mtp)")
     }
 
-    // MARK: - Qwen 3.6 MoE (`model_type == "qwen3_5_moe"`)
+    // MARK: - Qwen3.5-MoE text (`model_type == "qwen3_5_moe"`)
 
-    private static func loadQwen36(configPath: String,
-                                   tc: [String: Any]) throws -> ArchInfo {
+    private static func loadQwen35MoE(configPath: String,
+                                     tc: [String: Any]) throws -> ArchInfo {
         func i(_ k: String) throws -> Int {
             guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
                 throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
@@ -145,7 +146,7 @@ struct ArchInfo: Sendable, Equatable {
             linearKeyHeadDim: try i("linear_key_head_dim"),
             linearValueHeadDim: try i("linear_value_head_dim"),
             linearConvKernelSize: try i("linear_conv_kernel_dim"))
-        try crossCheckProductionQwen36(arch, configPath: configPath)
+        try crossCheckProductionQwen35MoE(arch, configPath: configPath)
         return arch
     }
 
@@ -155,7 +156,7 @@ struct ArchInfo: Sendable, Equatable {
     /// keeps a draft sidecar from ever being accepted as a standalone target.
     private static func loadQwen36MTP(configPath: String,
                                       tc: [String: Any]) throws -> ArchInfo {
-        var base = try loadQwen36(configPath: configPath, tc: tc)
+        var base = try loadQwen35MoE(configPath: configPath, tc: tc)
         guard let count = (tc["mtp_num_hidden_layers"] as? Int)
             ?? (tc["mtp_num_hidden_layers"] as? NSNumber)?.intValue,
               count == 1 else {
@@ -215,13 +216,13 @@ struct ArchInfo: Sendable, Equatable {
         return base
     }
 
-    /// Production Qwen3.6-35B-A3B baseline (mirrors the runtime's
+    /// Production Qwen3.5-MoE 35B-A3B contract (mirrors the runtime's
     /// `ArchConfig.qwen36_35B_A3B`; the repack target has no dependency on the
     /// runtime module). A config that matches the production shape
     /// (hidden 2048, 40 layers) must agree on every field; toy/synthetic
     /// configs are exempt.
-    private static func crossCheckProductionQwen36(_ a: ArchInfo,
-                                                   configPath: String) throws {
+    private static func crossCheckProductionQwen35MoE(_ a: ArchInfo,
+                                                      configPath: String) throws {
         guard a.hiddenSize == 2048, a.numLayers == 40 else { return }
         var expectedMask = [UInt8](repeating: 2, count: 40)
         for i in stride(from: 3, to: 40, by: 4) { expectedMask[i] = 1 }
@@ -263,8 +264,8 @@ struct ArchInfo: Sendable, Equatable {
         guard a == expected else {
             throw RepackError.configJsonInvalid(
                 path: configPath,
-                detail: "qwen3_5_moe config does not match the pinned "
-                    + "Qwen3.6-35B-A3B architecture baseline")
+                detail: "qwen3_5_moe config does not match the supported "
+                    + "35B-A3B architecture contract")
         }
     }
 }

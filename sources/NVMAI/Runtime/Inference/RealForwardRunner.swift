@@ -73,7 +73,7 @@ struct RDAdviceAdaptivePolicyState: Sendable, Equatable {
     }
 }
 
-/// Qwen 3.6 real-forward decode pass.
+/// Compatible Qwen3.5-MoE real-forward decode pass.
 ///
 /// Composes the production kernels against the `.gturbo` model:
 ///
@@ -137,7 +137,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let gate: SharedExpertInt8Proj
         let up: SharedExpertInt8Proj
         let down: SharedExpertInt8Proj
-        /// Qwen-only [1, hidden] scalar gate on the shared expert branch.
+        /// Qwen3.5-MoE [1, hidden] scalar gate on the shared expert branch.
         let scalarGate: TensorView?
     }
 

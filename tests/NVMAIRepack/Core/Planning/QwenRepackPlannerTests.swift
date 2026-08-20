@@ -69,6 +69,30 @@ struct QwenRepackPlannerTests {
         }
     }
 
+    @Test func productionOrnithConfigParsesThroughSharedArchitecture() throws {
+        let root = temporaryRoot("ornith-prod")
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let configPath = (root as NSString).appendingPathComponent("config.json")
+        try writeProductionConfig(to: configPath, mutate: { tc in
+            tc["pad_token_id"] = 248_044
+            tc["router_aux_loss_coef"] = 0.0
+            tc["use_cache"] = false
+            tc["rope_parameters"] = [
+                "rope_theta": 10_000_000.0,
+                "type": "default",
+                "partial_rotary_factor": 0.25,
+            ]
+        })
+
+        let arch = try ArchInfo.load(configPath: configPath)
+        #expect(arch.family == .qwen36)
+        #expect(arch.hiddenSize == 2_048)
+        #expect(arch.numLayers == 40)
+        #expect(arch.numExperts == 256)
+        #expect(arch.topKExperts == 8)
+        #expect(arch.fullAttentionLayerMask.filter { $0 == 1 }.count == 10)
+    }
+
     @Test func productionQwenConfigMismatchIsRejected() throws {
         let root = temporaryRoot("qwen-prod-bad")
         defer { try? FileManager.default.removeItem(atPath: root) }
@@ -98,6 +122,26 @@ struct QwenRepackPlannerTests {
         #expect(SourceFingerprint.modelID(forIndexSha256:
             "00e220ddb21ceeb6290a3a1161f97339c553f3d27fc4319900a96edb5cfae74c")
             == "qwen3.6-35b-a3b-mtp-4bit")
+        #expect(SourceFingerprint.modelID(forIndexSha256:
+            "c118f13c0dcb729e4ca2e3d653ab193067551eb1a6410badb5192eb426104f36")
+            == "ornith-1.5-35b-a3b-4bit")
+        #expect(SourceFingerprint.modelID(forIndexSha256:
+            "83c641a791aa957df7d280eef1b0c8faf7a2ec9b19dd3355fb13abae8ae0ed15")
+            == "ornith-1.5-35b-a3b-8bit")
+    }
+
+    @Test func ornithSourcesArePinnedAndSixBitRemainsUnsupported() {
+        #expect(SupportedModelSource.named("ornith15") == .ornith15)
+        #expect(SupportedModelSource.named("ornith15-8bit") == .ornith15_8bit)
+        #expect(SupportedModelSource.named("ornith15-6bit") == nil)
+        #expect(SupportedModelSource.ornith15.repoID
+            == "ornith-ai/Ornith-1.5-35B-A3B-MLX-4bit")
+        #expect(SupportedModelSource.ornith15_8bit.repoID
+            == "ornith-ai/Ornith-1.5-35B-A3B-MLX-8bit")
+        #expect(Set(SupportedModelSource.all.map(\.name)).count
+            == SupportedModelSource.all.count)
+        #expect(Set(SupportedModelSource.all.map(\.sourceIndexSHA256)).count
+            == SupportedModelSource.all.count)
     }
 
     @Test func mtpClassificationKeepsOnlyAdapterAndOneDecoderLayer() {

@@ -61,6 +61,11 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let expertStride: UInt64
 }
 
+public struct ManifestIdentity: Equatable, Sendable {
+    public let modelID: String
+    public let family: ModelFamily
+}
+
 public enum ManifestReader {
     /// Weight widths this build accepts. 6-bit was withdrawn: non-power-of-two
     /// packing measured 46.8 GB/s against 60 for 4-bit and 8-bit, and a 26 GB
@@ -129,9 +134,18 @@ public enum ManifestReader {
     /// cross-validation so it can be used to auto-select the expected
     /// configuration (e.g. by the installation probe).
     public static func peekFamily(directoryURL: URL) throws -> ModelFamily {
+        try peekIdentity(directoryURL: directoryURL).family
+    }
+
+    /// Read the manifest's model identity and compatible runtime family without
+    /// mapping weights or creating a Metal device.
+    public static func peekIdentity(directoryURL: URL) throws -> ManifestIdentity {
         let directory = try GTurboModelDirectory(rootURL: directoryURL)
         let data = try directory.readMetadata("manifest.json", maxBytes: 4 * 1024 * 1024)
         let wire = try JSONDecoder().decode(GTurboManifestV1.self, from: data)
+        guard !wire.modelID.isEmpty else {
+            throw ModelError.indexCorrupt(detail: "manifest modelID is empty")
+        }
         switch wire.arch.hiddenActivation {
         case "silu":
             break
@@ -143,9 +157,9 @@ public enum ManifestReader {
         if wire.arch.numLayers == mtp.numLayers,
            wire.arch.slidingWindow == mtp.slidingWindow,
            wire.arch.fullAttentionLayerMask == mtp.fullAttentionLayerMask.map(Int.init) {
-            return .qwen36MTP
+            return ManifestIdentity(modelID: wire.modelID, family: .qwen36MTP)
         }
-        return .qwen36
+        return ManifestIdentity(modelID: wire.modelID, family: .qwen36)
     }
 
     static func validate(_ m: Manifest,

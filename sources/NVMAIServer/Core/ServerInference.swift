@@ -401,13 +401,8 @@ private struct RunnerCounterSnapshot {
 }
 
 public actor ServerModelSession: ServerInferenceBackend {
-    /// Family-derived API model identifier used when --model-id is absent.
-    public nonisolated var defaultModelID: String {
-        switch modelFamily {
-        case .qwen36: return "qwen3.6-35b-a3b"
-        case .qwen36MTP: return "qwen3.6-35b-a3b-mtp"
-        }
-    }
+    /// Manifest-derived API model identifier used when --model-id is absent.
+    public nonisolated let defaultModelID: String
     /// The session's configured context window; the HTTP layer validates
     /// max_tokens against it (S11).
     public nonisolated var maximumContext: Int { maxContext }
@@ -633,6 +628,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.model = model
         self.tokenizer = tokenizer
         self.modelFamily = model.config.family
+        self.defaultModelID = ServerModelIdentity.apiModelID(
+            manifestModelID: model.modelID,
+            family: model.config.family)
         self.runner = runner
         self.mtpDecoder = mtpDecoder
         self.scratch = scratch
