@@ -47,14 +47,17 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 failed = true
                 throw ToolCallParserError.malformed
             }
+            let prefix = try boundaryPrefix(delta, marker: "<tool_call>")
+            let events = visibleEvents(prefix)
             toolTokens = []
-            return []
+            return events
         }
         if tokenID == tokenizer.toolCallEndID {
             guard let tokens = toolTokens else {
                 failed = true
                 throw ToolCallParserError.malformed
             }
+            _ = try boundaryPrefix(delta, marker: "</tool_call>")
             toolTokens = nil
             let text = tokenizer.decode(tokens, skipSpecialTokens: false)
             do {
@@ -77,15 +80,39 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             return []
         }
         if tokenID == tokenizer.thinkStartID {
+            let prefix = try boundaryPrefix(delta, marker: "<think>")
+            let events = visibleEvents(prefix)
             channel = .thought
-            return []
+            return events
         }
         if tokenID == tokenizer.thinkEndID {
+            _ = try boundaryPrefix(delta, marker: "</think>")
             channel = .visible
             return []
         }
         guard channel != .thought else { return [] }
         return delta.isEmpty ? [] : [.content(delta)]
+    }
+
+    /// Routes the detokenizer's final buffered bytes through the current
+    /// channel instead of allowing thought/tool tails to become visible.
+    public func consumeTail(_ text: String) throws -> [StructuredAssistantEvent] {
+        guard !failed else { throw ToolCallParserError.malformed }
+        guard toolTokens == nil, channel != .thought else { return [] }
+        return visibleEvents(text)
+    }
+
+    private func boundaryPrefix(_ delta: String, marker: String) throws -> String {
+        guard delta.hasSuffix(marker) else {
+            failed = true
+            throw ToolCallParserError.malformed
+        }
+        return String(delta.dropLast(marker.count))
+    }
+
+    private func visibleEvents(_ text: String) -> [StructuredAssistantEvent] {
+        guard channel != .thought, !text.isEmpty else { return [] }
+        return [.content(text)]
     }
 
     public func finish() throws {

@@ -3,7 +3,7 @@ import Testing
 @testable import NVMAI
 
 /// StructuredAssistantDecoder in ChatML mode: `<think>` suppression and
-/// `<tool_call>` buffering driven by the fixture tokenizer's special-token IDs.
+/// `<tool_call>` buffering driven by the fixture tokenizer's added-token IDs.
 @Suite("ChatML decoder")
 struct ChatMLDecoderTests {
     let tok: GFTokenizer
@@ -94,9 +94,9 @@ struct ChatMLDecoderTests {
     @Test("Nested tool-call start is malformed")
     func nestedToolCallStart() throws {
         let d = decoder()
-        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "")
+        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
         #expect(throws: ToolCallParserError.malformed) {
-            _ = try d.consume(tokenID: tok.toolCallStartID, delta: "")
+            _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
         }
     }
 
@@ -111,9 +111,46 @@ struct ChatMLDecoderTests {
     @Test("Finish with an unterminated tool call is malformed")
     func unterminatedToolCall() throws {
         let d = decoder()
-        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "")
+        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
         #expect(throws: ToolCallParserError.malformed) {
             try d.finish()
+        }
+    }
+
+    @Test("Byte barrier prefix is emitted before entering thought")
+    func byteBarrierBeforeThought() throws {
+        let d = decoder()
+        let events = try d.consume(
+            tokenID: tok.thinkStartID!, delta: "\u{FFFD}<think>")
+        #expect(events == [.content("\u{FFFD}")])
+        _ = try d.consume(tokenID: tok.thinkEndID!, delta: "</think>")
+        try d.finish()
+    }
+
+    @Test("Detokenizer tail follows visible and thought channel state")
+    func tailRespectsChannel() throws {
+        let d = decoder()
+        #expect(try d.consumeTail("visible") == [.content("visible")])
+        _ = try d.consume(tokenID: tok.thinkStartID!, delta: "<think>")
+        #expect(try d.consumeTail("hidden") == [])
+        try d.finish()
+    }
+
+    @Test("Detokenizer tail inside an unfinished tool call is never visible")
+    func toolTailIsSuppressed() throws {
+        let d = decoder()
+        _ = try d.consume(tokenID: tok.toolCallStartID, delta: "<tool_call>")
+        #expect(try d.consumeTail("hidden") == [])
+        #expect(throws: ToolCallParserError.malformed) {
+            try d.finish()
+        }
+    }
+
+    @Test("Control token without its literal marker fails closed")
+    func malformedBoundaryFails() {
+        let d = decoder()
+        #expect(throws: ToolCallParserError.malformed) {
+            _ = try d.consume(tokenID: tok.thinkStartID!, delta: "missing marker")
         }
     }
 }

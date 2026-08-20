@@ -251,7 +251,7 @@ public func runRawCompletion(producer: any LogitProducer,
             break
         }
 
-        let delta = detok.push(tokenID)
+        let delta = try detok.push(tokenID)
         let visible = stopMatcher.push(delta)
         onProgress(.token(index: generated - 1, id: tokenID, delta: visible))
 
@@ -347,7 +347,7 @@ private func runStreamingMTPCompletion(
                 if !tail.isEmpty { onProgress(.tail(tail)) }
                 break decodeLoop
             }
-            let visible = stopMatcher.push(detok.push(item.token))
+            let visible = stopMatcher.push(try detok.push(item.token))
             onProgress(.token(index: generated - 1, id: item.token, delta: visible))
             let hitStop = stopMatcher.isStopped || shouldStop()
             let hitMax = generated >= config.maxNewTokens

@@ -37,7 +37,7 @@
    "lstrip": false,
    "rstrip": false,
    "normalized": false,
-   "special": true
+   "special": false
   },
   {
    "id": 248059,
@@ -46,7 +46,7 @@
    "lstrip": false,
    "rstrip": false,
    "normalized": false,
-   "special": true
+   "special": false
   },
   {
    "id": 248066,
@@ -55,7 +55,7 @@
    "lstrip": false,
    "rstrip": false,
    "normalized": false,
-   "special": true
+   "special": false
   },
   {
    "id": 248067,
@@ -64,7 +64,7 @@
    "lstrip": false,
    "rstrip": false,
    "normalized": false,
-   "special": true
+   "special": false
   },
   {
    "id": 248068,
@@ -73,7 +73,7 @@
    "lstrip": false,
    "rstrip": false,
    "normalized": false,
-   "special": true
+   "special": false
   },
   {
    "id": 248069,
@@ -82,7 +82,7 @@
    "lstrip": false,
    "rstrip": false,
    "normalized": false,
-   "special": true
+   "special": false
   }
  ],
  "normalizer": null,

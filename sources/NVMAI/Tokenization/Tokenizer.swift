@@ -60,6 +60,7 @@ public struct GFTokenizer: @unchecked Sendable {
 
     @usableFromInline
     let tokenizer: any Tokenizer
+    let byteLevelDecoderConfiguration: GFByteLevelDecoderConfiguration
 
     public static func load(from folder: URL) async throws -> GFTokenizer {
         try await GFTokenizerLoadCoordinator.shared.load(.local(folder.standardizedFileURL.path))
@@ -92,7 +93,11 @@ public struct GFTokenizer: @unchecked Sendable {
 
     static func loadUncached(from folder: URL) async throws -> GFTokenizer {
         let underlying = try await AutoTokenizer.from(modelFolder: folder)
-        return try GFTokenizer(tokenizer: underlying)
+        let decoder = try GFByteLevelDecoderConfiguration.load(
+            from: folder.appendingPathComponent("tokenizer.json"),
+            tokenizer: underlying)
+        return try GFTokenizer(tokenizer: underlying,
+                               byteLevelDecoderConfiguration: decoder)
     }
 
     private static func hasTokenizerJSON(in folder: URL, fileManager: FileManager) -> Bool {
@@ -100,9 +105,20 @@ public struct GFTokenizer: @unchecked Sendable {
     }
 
     public init(tokenizer: any Tokenizer) throws {
+        try self.init(
+            tokenizer: tokenizer,
+            byteLevelDecoderConfiguration: .knownChatMLTokens(tokenizer: tokenizer))
+    }
+
+    init(tokenizer: any Tokenizer,
+         byteLevelDecoderConfiguration: GFByteLevelDecoderConfiguration) throws {
         self.tokenizer = tokenizer
+        self.byteLevelDecoderConfiguration = byteLevelDecoderConfiguration
 
         let resolved = try Self.resolveChatMLTokens(tokenizer)
+        try Self.validateStreamingDecoder(byteLevelDecoderConfiguration,
+                                          tokenizer: tokenizer,
+                                          resolved: resolved)
         self.bosID = resolved.bosID
         self.eosID = resolved.eosID
         self.padID = resolved.padID
@@ -147,6 +163,37 @@ public struct GFTokenizer: @unchecked Sendable {
         let thinkEndID: Int32?
         let stopTokenIDs: Set<Int32>
         let vocabSize: Int
+    }
+
+    private static func validateStreamingDecoder(
+        _ decoder: GFByteLevelDecoderConfiguration,
+        tokenizer: any Tokenizer,
+        resolved: ResolvedSpecialTokens
+    ) throws {
+        let literalMarkers: [(Int32, String)] = [
+            (resolved.toolCallStartID, "<tool_call>"),
+            (resolved.toolCallEndID, "</tool_call>"),
+            (resolved.toolResponseID, "<tool_response>"),
+            (resolved.toolResponseEndID, "</tool_response>"),
+            (resolved.channelStartID, "<think>"),
+            (resolved.channelEndID, "</think>"),
+        ]
+        for (id, content) in literalMarkers {
+            guard let added = decoder.addedTokens[id],
+                  added.content == content, !added.special else {
+                throw GFTokenizerError.unsupportedForDialect(
+                    "ChatML control token \(content) must be a literal ByteLevel barrier")
+            }
+        }
+
+        let filteredMarkers = [resolved.eosID, resolved.endOfTurnID]
+        for id in filteredMarkers {
+            guard decoder.addedTokens[id]?.special == true else {
+                let token = tokenizer.convertIdToToken(Int(id)) ?? "id \(id)"
+                throw GFTokenizerError.unsupportedForDialect(
+                    "ChatML stop token \(token) must be marked special")
+            }
+        }
     }
 
     /// Resolves a token string to its ID, rejecting the unk-token fallback

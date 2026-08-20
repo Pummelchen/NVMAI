@@ -907,6 +907,22 @@ public actor ServerModelSession: ServerInferenceBackend {
             ? .reset : completionStart
         let activePromptIDs = activeProducer is StreamingMTPDecoder
             ? promptIDs : effectivePromptIDs
+        func publish(_ events: [StructuredAssistantEvent]) {
+            for event in events {
+                switch event {
+                case .content(let text):
+                    let visible = stopMatcher.push(text)
+                    if !visible.isEmpty {
+                        content += visible
+                        onEvent(.content(visible))
+                    }
+                    if stopMatcher.isStopped { shouldStop = true }
+                case .toolCall(let call):
+                    calls.append(call)
+                    onEvent(.toolCall(call))
+                }
+            }
+        }
         let result = try await runRawCompletion(
             producer: activeProducer,
             tokenizer: tokenizer,
@@ -928,26 +944,14 @@ public actor ServerModelSession: ServerInferenceBackend {
                         } else {
                             delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
                         }
-                        for event in events {
-                            switch event {
-                            case .content(let text):
-                                let visible = stopMatcher.push(text)
-                                if !visible.isEmpty {
-                                    content += visible
-                                    onEvent(.content(visible))
-                                }
-                                if stopMatcher.isStopped { shouldStop = true }
-                            case .toolCall(let call):
-                                calls.append(call)
-                                onEvent(.toolCall(call))
-                            }
-                        }
+                        publish(events)
                     case .tail(let text):
-                        let visible = stopMatcher.push(text)
-                        if !visible.isEmpty {
-                            content += visible
-                            onEvent(.content(visible))
+                        let events = if let decoder {
+                            try decoder.consumeTail(text)
+                        } else {
+                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
                         }
+                        publish(events)
                     }
                 } catch {
                     decodingError = error

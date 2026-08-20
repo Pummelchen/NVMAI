@@ -1,172 +1,217 @@
 import Foundation
 import Tokenizers
 
-/// Streaming detokenizer for generation loops.
+enum GFDetokenizerError: Error, Equatable, CustomStringConvertible {
+    case invalidTokenID(Int32)
+    case invalidByteLevelToken(id: Int32, token: String)
+
+    var description: String {
+        switch self {
+        case .invalidTokenID(let id):
+            return "tokenizer cannot decode generated token id \(id)"
+        case .invalidByteLevelToken(let id, let token):
+            return "token \(id) is not valid ByteLevel text: \(token.debugDescription)"
+        }
+    }
+}
+
+/// The small portion of `tokenizer.json` needed by the streaming decoder.
+/// Model vocabulary entries are deliberately not decoded here: there are
+/// 248K of them, while only the added-token barriers and decoder kind matter.
+struct GFByteLevelDecoderConfiguration: Sendable {
+    struct AddedToken: Sendable {
+        let content: String
+        let special: Bool
+    }
+
+    private struct FileMetadata: Decodable {
+        struct DecoderMetadata: Decodable { let type: String }
+        struct AddedTokenMetadata: Decodable {
+            let id: Int
+            let content: String
+            let special: Bool
+        }
+
+        let decoder: DecoderMetadata
+        let addedTokens: [AddedTokenMetadata]
+
+        enum CodingKeys: String, CodingKey {
+            case decoder
+            case addedTokens = "added_tokens"
+        }
+    }
+
+    let addedTokens: [Int32: AddedToken]
+
+    static func load(from tokenizerJSON: URL,
+                     tokenizer: any Tokenizer) throws -> Self {
+        let data = try Data(contentsOf: tokenizerJSON)
+        let metadata = try JSONDecoder().decode(FileMetadata.self, from: data)
+        guard metadata.decoder.type == "ByteLevel" else {
+            throw GFTokenizerError.unsupportedForDialect(
+                "streaming decoder requires tokenizer.json decoder.type=ByteLevel")
+        }
+
+        var result: [Int32: AddedToken] = [:]
+        result.reserveCapacity(metadata.addedTokens.count)
+        for entry in metadata.addedTokens {
+            guard let id = Int32(exactly: entry.id),
+                  tokenizer.convertIdToToken(entry.id) == entry.content,
+                  result[id] == nil else {
+                throw GFTokenizerError.unsupportedForDialect(
+                    "tokenizer.json contains inconsistent added-token metadata")
+            }
+            result[id] = AddedToken(content: entry.content, special: entry.special)
+        }
+        return Self(addedTokens: result)
+    }
+
+    /// Compatibility initializer for callers that construct `GFTokenizer`
+    /// directly instead of loading its sidecar. Production loads always use
+    /// `load(from:tokenizer:)`, which validates every added token.
+    static func knownChatMLTokens(tokenizer: any Tokenizer) -> Self {
+        let special = [
+            "<|endoftext|>", "<|im_start|>", "<|im_end|>",
+            "<|object_ref_start|>", "<|object_ref_end|>",
+            "<|box_start|>", "<|box_end|>",
+            "<|quad_start|>", "<|quad_end|>",
+            "<|vision_start|>", "<|vision_end|>", "<|vision_pad|>",
+            "<|image_pad|>", "<|video_pad|>",
+            "<|audio_start|>", "<|audio_end|>", "<|audio_pad|>",
+            "<tts_pad>", "<tts_text_bos>", "<tts_text_eod>",
+            "<tts_text_bos_single>",
+        ]
+        let literal = [
+            "<tool_call>", "</tool_call>",
+            "<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>",
+            "<|fim_pad|>", "<|repo_name|>", "<|file_sep|>",
+            "<tool_response>", "</tool_response>", "<think>", "</think>",
+        ]
+        var result: [Int32: AddedToken] = [:]
+        for token in special {
+            if let id = tokenizer.convertTokenToId(token),
+               tokenizer.convertIdToToken(id) == token,
+               let id32 = Int32(exactly: id) {
+                result[id32] = AddedToken(content: token, special: true)
+            }
+        }
+        for token in literal {
+            if let id = tokenizer.convertTokenToId(token),
+               tokenizer.convertIdToToken(id) == token,
+               let id32 = Int32(exactly: id) {
+                result[id32] = AddedToken(content: token, special: false)
+            }
+        }
+        return Self(addedTokens: result)
+    }
+}
+
+/// Incremental Hugging Face ByteLevel decoder used by generation loops.
 ///
-/// Two challenges drive the design:
+/// Ordinary vocabulary pieces are inverse-mapped directly to bytes. Complete
+/// UTF-8 is emitted immediately and at most three bytes of an unfinished scalar
+/// remain buffered. Added tokens are decoder barriers; special added tokens are
+/// filtered before decoding, matching `skipSpecialTokens: true`.
 ///
-/// 1. BPE byte-fallback splits multi-byte codepoints (e.g. emoji) across several
-///    tokens. Naively decoding each token in isolation yields broken UTF-8.
-/// 2. swift-transformers' decoder silently drops byte-fallback tokens that sit
-///    at the **end** of the decoded sequence (the bytes are committed only once
-///    a non-byte-fallback token follows). For us this matters at `flush()`.
-///
-/// Strategy:
-///   - During `push(_:)` we decode the newly appended stable IDs (a rolling
-///     prefix — never the whole history, R7) and emit the delta vs. the
-///     previously emitted text. Any trailing byte-fallback IDs are held back.
-///   - During `flush()` we append the stable prefix text AND manually assemble
-///     the trailing byte-fallback bytes into a UTF-8 string, replacing invalid
-///     sequences losslessly. This recovers text the library would otherwise
-///     drop on a sequence-ending codepoint.
-///
-/// The decoder is prefix-stable for the Qwen ChatML fixture: byte-level BPE
-/// maps every token id to a fixed string and the configured decoder
-/// (`clean_up_tokenization_spaces = false`) concatenates without rewriting, so
-/// `decode(prefix + new) == decode(prefix) + decode(new)`. The rolling
-/// accumulation therefore reproduces the full-history decode exactly.
+/// Work and retained state are bounded by the newly pushed token rather than
+/// the complete generated history. Batch decoding remains on swift-transformers
+/// so tests can compare the two independent implementations.
 struct GFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
-    @usableFromInline var stableIDs: [Int] = []
-    @usableFromInline var trailingByteIDs: [Int] = []
-    @usableFromInline var emitted: String = ""
+    @usableFromInline let configuration: GFByteLevelDecoderConfiguration
+    @usableFromInline var pendingBytes: [UInt8] = []
 
     init(tokenizer: GFTokenizer) {
         self.tokenizer = tokenizer.tokenizer
+        self.configuration = tokenizer.byteLevelDecoderConfiguration
+        pendingBytes.reserveCapacity(8)
     }
 
-    mutating func push(_ id: Int32) -> String {
-        let tokenID = Int(id)
-        let token = tokenizer.convertIdToToken(tokenID) ?? ""
-        if Self.isByteFallback(token) {
-            trailingByteIDs.append(tokenID)
-            return ""
+    mutating func push(_ id: Int32) throws -> String {
+        guard id >= 0, let token = tokenizer.convertIdToToken(Int(id)) else {
+            throw GFDetokenizerError.invalidTokenID(id)
         }
 
-        if !trailingByteIDs.isEmpty {
-            stableIDs.append(contentsOf: trailingByteIDs)
-            trailingByteIDs.removeAll(keepingCapacity: true)
+        if let added = configuration.addedTokens[id] {
+            if added.special {
+                // Hugging Face removes special IDs before ByteLevel decoding,
+                // so they do not split a UTF-8 byte sequence.
+                return ""
+            }
+            return drain(final: true) + added.content
         }
-        stableIDs.append(tokenID)
 
-        // Decode the full stable prefix (not just the newly appended ids) so
-        // multi-byte codepoints split across tokens reassemble with their full
-        // context. A byte-level tokenizer can still leave a trailing
-        // incomplete UTF-8 sequence; hold those bytes back so they don't
-        // surface as a replacement character — the next push completes them.
-        let current = tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        return commitDelta(Self.completeUTF8Prefix(current))
-    }
-
-    /// Longest prefix of `s` that ends on a complete UTF-8 codepoint. A
-    /// trailing split codepoint (fewer continuation bytes than its leading
-    /// byte expects) is held back rather than emitted as U+FFFD.
-    static func completeUTF8Prefix(_ s: String) -> String {
-        let bytes = Array(s.utf8)
-        guard let last = bytes.last, last & 0x80 != 0 else { return s }
-        var lead = bytes.count - 1
-        while lead > 0, bytes[lead] & 0xC0 == 0x80 { lead -= 1 }
-        let b = bytes[lead]
-        let expected: Int
-        if b & 0xE0 == 0xC0 { expected = 2 }
-        else if b & 0xF0 == 0xE0 { expected = 3 }
-        else if b & 0xF8 == 0xF0 { expected = 4 }
-        else { return s }
-        guard bytes.count - lead < expected else { return s }
-        return String(decoding: bytes[..<lead], as: UTF8.self)
+        for scalar in token.unicodeScalars {
+            guard let byte = Self.byteLevelScalarToByte[scalar.value] else {
+                throw GFDetokenizerError.invalidByteLevelToken(id: id, token: token)
+            }
+            pendingBytes.append(byte)
+        }
+        return drain(final: false)
     }
 
     mutating func flush() -> String {
-        let stableText = stableIDs.isEmpty
-            ? ""
-            : tokenizer.decode(tokens: stableIDs, skipSpecialTokens: true)
-        let trailingText = assembleByteFallback(trailingByteIDs)
-        let fullText = stableText + trailingText
-        return commitDelta(fullText)
+        drain(final: true)
     }
 
+    /// Emits all bytes except a valid but incomplete UTF-8 scalar at the end.
+    /// `String(decoding:as:)` supplies the reference decoder's replacement
+    /// behavior for malformed byte sequences and a truncated final scalar.
     @usableFromInline
-    mutating func commitDelta(_ current: String) -> String {
-        // A combining mark can extend the last emitted grapheme, so compare
-        // the append-only prefix byte-for-byte rather than by Character.
-        let currentUTF8 = current.utf8
-        var boundary = currentUTF8.startIndex
-        for byte in emitted.utf8 {
-            guard boundary != currentUTF8.endIndex,
-                  currentUTF8[boundary] == byte else {
-                // Decoder altered the prefix — resync rather than emit garbage.
-                emitted = current
-                return ""
-            }
-            currentUTF8.formIndex(after: &boundary)
+    mutating func drain(final: Bool) -> String {
+        let boundary = final ? pendingBytes.count : Self.incompleteSuffixStart(pendingBytes)
+        guard boundary > 0 else { return "" }
+        let result = String(decoding: pendingBytes[..<boundary], as: UTF8.self)
+        pendingBytes.removeFirst(boundary)
+        return result
+    }
+
+    /// Returns the start of the trailing, structurally valid prefix of a UTF-8
+    /// scalar. When there is no incomplete suffix the returned index is `count`.
+    @usableFromInline
+    static func incompleteSuffixStart(_ bytes: [UInt8]) -> Int {
+        guard let last = bytes.last, last >= 0x80 else { return bytes.count }
+        var lead = bytes.count - 1
+        while lead > 0, bytes[lead] & 0xC0 == 0x80,
+              bytes.count - lead <= 3 {
+            lead -= 1
         }
-        let delta = String(current[boundary...])
-        emitted = current
-        return delta
-    }
-
-    @usableFromInline
-    func assembleByteFallback(_ ids: [Int]) -> String {
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(ids.count)
-        for id in ids {
-            guard let tok = tokenizer.convertIdToToken(id),
-                  let byte = Self.byteFallbackByte(tok) else {
-                // A nil token or non-byte token here means a token ID has no
-                // corresponding byte — output may be silently truncated.
-                continue
-            }
-            bytes.append(byte)
+        let first = bytes[lead]
+        let expected: Int
+        switch first {
+        case 0xC2...0xDF: expected = 2
+        case 0xE0...0xEF: expected = 3
+        case 0xF0...0xF4: expected = 4
+        default: return bytes.count
         }
-        // Invalid/split trailing byte sequences are replaced with U+FFFD
-        // instead of silently dropped; this only affects a genuinely
-        // truncated final codepoint.
-        return String(decoding: bytes, as: UTF8.self)
-    }
-
-    /// The byte represented by a byte-fallback token, in either of the two
-    /// forms this project uses: the `<0xXX>` spelling and the ByteLevel
-    /// byte-to-unicode single-character spelling. Returns nil for tokens that
-    /// are not single bytes, and for ASCII (which never splits a codepoint).
-    @usableFromInline
-    static func byteFallbackByte(_ token: String) -> UInt8? {
-        if token.count == 6,
-           token.hasPrefix("<0x"),
-           token.hasSuffix(">"),
-           token.dropFirst(3).dropLast().allSatisfy({ $0.isHexDigit }),
-           let byte = UInt8(token.dropFirst(3).dropLast(), radix: 16) {
-            return byte
+        let available = bytes.count - lead
+        guard available < expected,
+              bytes[(lead + 1)...].allSatisfy({ $0 & 0xC0 == 0x80 }) else {
+            return bytes.count
         }
-        guard token.unicodeScalars.count == 1,
-              let scalar = token.unicodeScalars.first,
-              let byte = Self.byteLevelCharToByte[scalar.value],
-              byte >= 0x80 else {
-            return nil
+        if available >= 2 {
+            let second = bytes[lead + 1]
+            if first == 0xE0, second < 0xA0 { return bytes.count }
+            if first == 0xED, second > 0x9F { return bytes.count }
+            if first == 0xF0, second < 0x90 { return bytes.count }
+            if first == 0xF4, second > 0x8F { return bytes.count }
         }
-        return byte
+        return lead
     }
 
+    /// Inverse GPT-2 / Hugging Face ByteLevel byte-to-Unicode mapping.
     @usableFromInline
-    static func isByteFallback(_ token: String) -> Bool {
-        byteFallbackByte(token) != nil
-    }
-
-    /// Inverse GPT-2 / HuggingFace ByteLevel byte-to-unicode mapping, used to
-    /// recover the raw byte from a single-character ByteLevel token.
-    @usableFromInline
-    static let byteLevelCharToByte: [UInt32: UInt8] = {
+    static let byteLevelScalarToByte: [UInt32: UInt8] = {
         var bytes: [Int] = Array(0x21...0x7E) + Array(0xA1...0xAC) + Array(0xAE...0xFF)
-        var chars: [Int] = bytes
-        var n = 0
-        for b in 0...255 where !bytes.contains(b) {
-            bytes.append(b)
-            chars.append(0x100 + n)
-            n += 1
+        var scalars: [Int] = bytes
+        var next = 0
+        for byte in 0...255 where !bytes.contains(byte) {
+            bytes.append(byte)
+            scalars.append(0x100 + next)
+            next += 1
         }
-        var table: [UInt32: UInt8] = [:]
-        for (b, c) in zip(bytes, chars) {
-            table[UInt32(c)] = UInt8(b)
-        }
-        return table
+        return Dictionary(uniqueKeysWithValues: zip(scalars, bytes).map {
+            (UInt32($0.0), UInt8($0.1))
+        })
     }()
 }
