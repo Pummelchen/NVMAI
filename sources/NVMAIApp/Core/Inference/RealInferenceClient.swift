@@ -177,9 +177,13 @@ actor RealInferenceSession {
             }
 
             onState(.loading(.tokenizer))
-            if tokenizer == nil || tokenizerDirectoryCache.shouldReload(for: key.directory) {
+            if tokenizer == nil
+                || tokenizer?.thinkingMode != key.options.thinkingMode
+                || tokenizerDirectoryCache.shouldReload(for: key.directory) {
                 do {
-                    tokenizer = try await Self.loadTokenizer(for: key.directory)
+                    tokenizer = try await Self.loadTokenizer(
+                        for: key.directory,
+                        thinkingMode: key.options.thinkingMode)
                     tokenizerDirectoryCache.markLoaded(for: key.directory)
                 } catch {
                     throw AppInferenceError.tokenizerUnavailable("\(error)")
@@ -234,8 +238,13 @@ actor RealInferenceSession {
         }
     }
 
-    private static func loadTokenizer(for modelDirectory: URL) async throws -> GFTokenizer {
-        try await GFTokenizer.load(forModelDirectory: modelDirectory)
+    private static func loadTokenizer(
+        for modelDirectory: URL,
+        thinkingMode: ModelThinkingMode
+    ) async throws -> GFTokenizer {
+        try await GFTokenizer.load(
+            forModelDirectory: modelDirectory,
+            thinkingMode: thinkingMode)
     }
 
     static func forceLogitsHead(for request: AppGenerationRequest) -> Bool {

@@ -59,6 +59,27 @@ struct ChatMLTemplateTests {
             + "<|im_start|>assistant\n<think>\n\n</think>\n\n")
     }
 
+    @Test("Thinking mode leaves the generation think block open")
+    func thinkingModeGenerationPrompt() async throws {
+        let thinking = try await GFTokenizer.load(
+            from: Self.fixtureFolder(), thinkingMode: .on)
+        let prompt = try thinking.applyChatTemplate([
+            Message(role: .user, content: "Hi"),
+        ])
+        #expect(thinking.thinkingMode == .on)
+        #expect(prompt.hasSuffix("<|im_start|>assistant\n<think>\n"))
+        #expect(!prompt.hasSuffix("<think>\n\n</think>\n\n"))
+    }
+
+    @Test("Environment compatibility resolves only the documented binary modes")
+    func thinkingModeEnvironmentCompatibility() {
+        #expect(ModelThinkingMode.resolved(environment: [:]) == .off)
+        #expect(ModelThinkingMode.resolved(
+            environment: ["NVMAI_THINKING_MODE": "on"]) == .on)
+        #expect(ModelThinkingMode.resolved(
+            environment: ["NVMAI_THINKING_MODE": "medium"]) == .off)
+    }
+
     @Test("Multi-turn renders roles verbatim with assistant unrenamed")
     func multiTurn() throws {
         let p = try tok.applyChatTemplate([
@@ -148,5 +169,19 @@ struct ChatMLTemplateTests {
         let suffix = String(text.suffix(80))
         #expect(text.hasSuffix("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
                 "expected enable_thinking=false generation prompt, got suffix: \(suffix)")
+    }
+
+    @Test("Tool chat uses the same explicit thinking mode as text chat")
+    func thinkingToolChatRendersJinja() async throws {
+        let thinking = try await GFTokenizer.load(
+            from: Self.fixtureFolder(), thinkingMode: .on)
+        let ids = try thinking.encodeToolChat(
+            messages: [Message(role: .user, content: "Weather?")],
+            tools: [
+                .init(name: "weather", description: "Look up weather",
+                      parameters: .object(["type": .string("object")])),
+            ])
+        let text = thinking.decode(ids, skipSpecialTokens: false)
+        #expect(text.hasSuffix("<|im_start|>assistant\n<think>\n"))
     }
 }

@@ -52,7 +52,9 @@ public func run(args: Args,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
-        let tokenizer = try await GFTokenizer.load(forModelDirectory: modelURL)
+        let tokenizer = try await GFTokenizer.load(
+            forModelDirectory: modelURL,
+            thinkingMode: args.thinkingMode)
         // Concise mode injects a per-quantization system prompt. The routed
         // expert bit width comes from the manifest so the right prompt
         // variant is selected before the full model load.

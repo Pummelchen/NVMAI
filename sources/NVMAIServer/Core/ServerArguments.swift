@@ -19,6 +19,7 @@ public struct ServerArguments: Equatable, Sendable {
     public let prefillChunkTokens: Int?
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
+    public let thinkingMode: ModelThinkingMode
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use. Slots are derived from it and the
     /// model's own expert stride, so this is the knob and the slot count is the
@@ -72,6 +73,9 @@ public struct ServerArguments: Equatable, Sendable {
                              1024, 2048, or 4096 (default 4096 for supported
                              35B-A3B text models).
       --kv-bits <4|8|16>     KV-cache storage precision (default 8).
+      --thinking <off|on>    Ornith/Qwen reasoning mode (default off, or
+                             NVMAI_THINKING_MODE). The model does not expose
+                             low/medium/high effort levels.
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
@@ -98,7 +102,10 @@ public struct ServerArguments: Equatable, Sendable {
     /// lint:allow-long a flag table: one `case` per option plus its
     /// validation. Splitting it into per-group parsers would hide the
     /// exhaustive switch that makes an unhandled flag a compile-visible gap.
-    public static func parse(_ input: [String]) throws -> ServerArguments {
+    public static func parse(
+        _ input: [String],
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> ServerArguments {
         var model: String?
         var mtpModel: String?
         var mtpMemoryMiB = StreamingMTPMemoryPlan.defaultBudgetMiB
@@ -115,6 +122,7 @@ public struct ServerArguments: Equatable, Sendable {
         var prefillChunkTokens: Int?
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
+        var thinkingMode = ModelThinkingMode.resolved(environment: environment)
         var expertCacheSlots: Int?
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
@@ -220,6 +228,11 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--kv-bits must be 4, 8, or 16")
                 }
                 kvCachePrecision = parsed
+            case "--thinking":
+                guard let parsed = ModelThinkingMode(rawValue: value) else {
+                    throw ServerArgumentError.invalid("--thinking must be off or on")
+                }
+                thinkingMode = parsed
             case "--expert-cache-slots":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
@@ -276,6 +289,7 @@ public struct ServerArguments: Equatable, Sendable {
                                prefillChunkTokens: prefillChunkTokens,
                                kvCachePrecision: kvCachePrecision,
                                ropeScalingMode: ropeScalingMode,
+                               thinkingMode: thinkingMode,
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,

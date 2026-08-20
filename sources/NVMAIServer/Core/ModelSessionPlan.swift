@@ -59,6 +59,7 @@ public struct ModelSessionPlan: Sendable {
     public let prefillChunkTokens: Int?
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
+    public let thinkingMode: ModelThinkingMode
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use; slots are derived from it.
     public let expertCacheBudgetBytes: Int?
@@ -75,6 +76,7 @@ public struct ModelSessionPlan: Sendable {
                 prefillChunkTokens: Int?,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
+                thinkingMode: ModelThinkingMode = .off,
                 expertCacheSlots: Int?,
                 expertCacheBudgetBytes: Int? = nil,
                 mtpModelDirectory: URL?,
@@ -89,6 +91,7 @@ public struct ModelSessionPlan: Sendable {
         self.prefillChunkTokens = prefillChunkTokens
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
+        self.thinkingMode = thinkingMode
         self.expertCacheSlots = expertCacheSlots
         self.expertCacheBudgetBytes = expertCacheBudgetBytes
         self.mtpModelDirectory = mtpModelDirectory
@@ -109,6 +112,7 @@ public struct ModelSessionPlan: Sendable {
             prefillChunkTokens: prefillChunkTokens,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
+            thinkingMode: thinkingMode,
             expertCacheSlots: expertCacheSlots,
             expertCacheBudgetBytes: expertCacheBudgetBytes,
             mtpModelDirectory: mtpModelDirectory,

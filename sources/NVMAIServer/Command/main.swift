@@ -29,6 +29,7 @@ do {
         prefillChunkTokens: arguments.prefillChunkTokens,
         kvCachePrecision: arguments.kvCachePrecision,
         ropeScalingMode: arguments.ropeScalingMode,
+        thinkingMode: arguments.thinkingMode,
         expertCacheSlots: arguments.expertCacheSlots,
         expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
         mtpModelDirectory: arguments.mtpModel.map {
@@ -74,7 +75,7 @@ do {
     let residencyBanner = arguments.managesResidency
         ? " lazy_load=on idle_unload=\(arguments.idleUnloadSeconds > 0 ? "\(arguments.idleUnloadSeconds)s" : "off")"
         : ""
-    print("NVMAIServer ready at http://127.0.0.1:\(arguments.port) model=\(facts.modelID) context=\(arguments.maxContext) prefill_chunk=\(facts.prefillChunkTokens)\(facts.expertCacheSlots > 0 ? " expert_slots=\(facts.expertCacheSlots)" : "") prompt_cache=\(facts.promptCacheMode.rawValue) prompt_cache_memory_mib=\(cacheMemoryMiB) prompt_cache_disk=\(diskCache) mtp=\(mtp)\(residencyBanner)")
+    print("NVMAIServer ready at http://127.0.0.1:\(arguments.port) model=\(facts.modelID) context=\(arguments.maxContext) prefill_chunk=\(facts.prefillChunkTokens)\(facts.expertCacheSlots > 0 ? " expert_slots=\(facts.expertCacheSlots)" : "") prompt_cache=\(facts.promptCacheMode.rawValue) prompt_cache_memory_mib=\(cacheMemoryMiB) prompt_cache_disk=\(diskCache) thinking=\(arguments.thinkingMode.rawValue) mtp=\(mtp)\(residencyBanner)")
     if arguments.unloadDiscardsWarmCache {
         FileHandle.standardError.write(Data(
             ("warning: --idle-unload-seconds drops the in-memory prompt cache with "

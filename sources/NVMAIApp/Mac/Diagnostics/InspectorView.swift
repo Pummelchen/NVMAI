@@ -134,6 +134,18 @@ struct InspectorView: View {
 
     private var generationSection: some View {
         Section("Generation") {
+            LabeledContent("Thinking") {
+                Picker("Thinking", selection: $model.runtimeOptions.thinkingMode) {
+                    Text("Off").tag(ModelThinkingMode.off)
+                    Text("On").tag(ModelThinkingMode.on)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
+            Text("Ornith and Qwen expose a binary thinking switch; they do not define Low, Medium, or High effort levels. This setting applies after reloading the model.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             LabeledContent("Temperature") {
                 HStack(spacing: 8) {
                     Slider(value: $model.temperature, in: 0...2, step: 0.05)

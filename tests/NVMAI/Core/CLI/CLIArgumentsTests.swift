@@ -19,6 +19,7 @@ import Testing
         #expect(arguments.prefillChunk == nil)
         #expect(arguments.kvCachePrecision == .int8)
         #expect(arguments.ropeScalingMode == .none)
+        #expect(arguments.thinkingMode == .off)
     }
 
     @Test func kvPrecisionAndYaRNOptionsParse() throws {
@@ -125,13 +126,25 @@ import Testing
         #expect(!off.concise)
     }
 
+    @Test func thinkingModeParsesOnlyTheOfficialBinaryValues() throws {
+        let on = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi", "--thinking", "on",
+        ])
+        #expect(on.thinkingMode == .on)
+        #expect(throws: ArgsError.invalidValue(flag: "--thinking", value: "medium")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi", "--thinking", "medium",
+            ])
+        }
+    }
+
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--prefill-chunk", "--concise",
-            "--kv-bits", "--rope-scaling",
+            "--kv-bits", "--rope-scaling", "--thinking",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

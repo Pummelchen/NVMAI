@@ -10,7 +10,8 @@ import NVMAIDecodeProtocol
             prefillEnabled: false,
             prefillChunkTokens: 64,
             rdadvisePolicy: "adaptive",
-            modelVerification: "trusted-install")
+            modelVerification: "trusted-install",
+            thinkingMode: "on")
         let request = DecodeLoadRequest(
             modelPath: "/tmp/model.gturbo",
             maxContextTokens: 8192,
@@ -28,6 +29,7 @@ import NVMAIDecodeProtocol
         #expect(decoded.modelPath == request.modelPath)
         #expect(decoded.maxContextTokens == 8192)
         #expect(decoded.runtimeOptions == options)
+        #expect(decoded.runtimeOptions.thinkingMode == "on")
         #expect(decoded.forceLogitsHead)
     }
 

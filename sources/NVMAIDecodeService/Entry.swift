@@ -314,6 +314,10 @@ import NVMAIDecodeProtocol
             throw AppInferenceError.invalidRequest(
                 "unknown RoPE scaling mode \(options.ropeScalingMode)")
         }
+        guard let thinkingMode = ModelThinkingMode(rawValue: options.thinkingMode) else {
+            throw AppInferenceError.invalidRequest(
+                "unknown thinking mode \(options.thinkingMode)")
+        }
         let resolved = AppRuntimeOptions(
             expertCacheSlots: options.expertCacheSlots,
             expertCachePolicy: cachePolicy,
@@ -322,6 +326,7 @@ import NVMAIDecodeProtocol
             rdadvisePolicy: rdadvisePolicy,
             modelVerification: modelVerification,
             conciseMode: options.conciseMode,
+            thinkingMode: thinkingMode,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode)
         try resolved.validate()

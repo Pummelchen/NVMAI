@@ -61,6 +61,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var conciseMode: Bool
+    public var thinkingMode: ModelThinkingMode
     public var kvCachePrecision: KVCachePrecision
     public var ropeScalingMode: RuntimeRoPEScalingMode
 
@@ -71,6 +72,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 rdadvisePolicy: AppRDAdvicePolicy = .default,
                 modelVerification: AppModelVerification = .fullSha256,
                 conciseMode: Bool = false,
+                thinkingMode: ModelThinkingMode = .off,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none) {
         self.expertCacheSlots = expertCacheSlots
@@ -80,6 +82,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.conciseMode = conciseMode
+        self.thinkingMode = thinkingMode
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
     }
@@ -103,7 +106,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
         let scaling = ropeScalingMode == .yarn ? "YaRN" : "native RoPE"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), thinking \(thinkingMode.rawValue), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
@@ -142,6 +145,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var forceLogitsHead: Bool
     public var kvCachePrecision: KVCachePrecision
     public var ropeScalingMode: RuntimeRoPEScalingMode
+    public var thinkingMode: ModelThinkingMode
 
     public init(modelDirectory: URL,
                 maxContextTokens: Int,
@@ -156,5 +160,6 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.forceLogitsHead = forceLogitsHead
         self.kvCachePrecision = options.kvCachePrecision
         self.ropeScalingMode = options.ropeScalingMode
+        self.thinkingMode = options.thinkingMode
     }
 }

@@ -19,6 +19,28 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
     }
 }
 
+/// The binary reasoning switch exposed by compatible Qwen/Ornith chat
+/// templates. Ornith 1.5 accepts `enable_thinking=true|false`; it does not
+/// define low/medium/high effort levels or a thinking-token budget.
+public enum ModelThinkingMode: String, Codable, CaseIterable, Sendable {
+    case off
+    case on
+
+    public var isEnabled: Bool { self == .on }
+
+    /// Backwards-compatible resolution for processes that still configure the
+    /// runtime through `NVMAI_THINKING_MODE`. Unknown values retain the
+    /// historical safe default of off.
+    public static func resolved(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ModelThinkingMode {
+        switch environment["NVMAI_THINKING_MODE"]?.lowercased() {
+        case "1", "on", "true", "yes": return .on
+        default: return .off
+        }
+    }
+}
+
 /// Tokenizer wrapper for the compatible Qwen3.5-MoE ChatML model family.
 ///
 /// Loads tokenizer sidecars in a completed `.gturbo/tokenizer/` directory.
@@ -51,6 +73,7 @@ public struct GFTokenizer: @unchecked Sendable {
     public let thinkEndID: Int32?
     public let stopTokenIDs: Set<Int32>
     public let vocabSize: Int
+    public let thinkingMode: ModelThinkingMode
 
     /// Generation-prompt suffix appended after the last message: derived from
     /// the tokenizer's bundled `chat_template.jinja`
@@ -62,16 +85,21 @@ public struct GFTokenizer: @unchecked Sendable {
     let tokenizer: any Tokenizer
     let byteLevelDecoderConfiguration: GFByteLevelDecoderConfiguration
 
-    public static func load(from folder: URL) async throws -> GFTokenizer {
-        try await GFTokenizerLoadCoordinator.shared.load(.local(folder.standardizedFileURL.path))
+    public static func load(
+        from folder: URL,
+        thinkingMode: ModelThinkingMode = .off
+    ) async throws -> GFTokenizer {
+        try await GFTokenizerLoadCoordinator.shared.load(
+            .local(folder.standardizedFileURL.path, thinkingMode))
     }
 
     public static func load(forModelDirectory modelDirectory: URL,
+                            thinkingMode: ModelThinkingMode = .off,
                             environment: [String: String] = ProcessInfo.processInfo.environment) async throws -> GFTokenizer {
         guard let folder = tokenizerFolder(forModelDirectory: modelDirectory, environment: environment) else {
             throw GFTokenizerError.missingToolTemplate
         }
-        return try await load(from: folder)
+        return try await load(from: folder, thinkingMode: thinkingMode)
     }
 
     public static func tokenizerFolder(forModelDirectory modelDirectory: URL,
@@ -91,27 +119,36 @@ public struct GFTokenizer: @unchecked Sendable {
         return hasTokenizerJSON(in: overrideURL, fileManager: fileManager) ? overrideURL : nil
     }
 
-    static func loadUncached(from folder: URL) async throws -> GFTokenizer {
+    static func loadUncached(
+        from folder: URL,
+        thinkingMode: ModelThinkingMode
+    ) async throws -> GFTokenizer {
         let underlying = try await AutoTokenizer.from(modelFolder: folder)
         let decoder = try GFByteLevelDecoderConfiguration.load(
             from: folder.appendingPathComponent("tokenizer.json"),
             tokenizer: underlying)
         return try GFTokenizer(tokenizer: underlying,
-                               byteLevelDecoderConfiguration: decoder)
+                               byteLevelDecoderConfiguration: decoder,
+                               thinkingMode: thinkingMode)
     }
 
     private static func hasTokenizerJSON(in folder: URL, fileManager: FileManager) -> Bool {
         fileManager.fileExists(atPath: folder.appendingPathComponent("tokenizer.json").path)
     }
 
-    public init(tokenizer: any Tokenizer) throws {
+    public init(
+        tokenizer: any Tokenizer,
+        thinkingMode: ModelThinkingMode = .off
+    ) throws {
         try self.init(
             tokenizer: tokenizer,
-            byteLevelDecoderConfiguration: .knownChatMLTokens(tokenizer: tokenizer))
+            byteLevelDecoderConfiguration: .knownChatMLTokens(tokenizer: tokenizer),
+            thinkingMode: thinkingMode)
     }
 
     init(tokenizer: any Tokenizer,
-         byteLevelDecoderConfiguration: GFByteLevelDecoderConfiguration) throws {
+         byteLevelDecoderConfiguration: GFByteLevelDecoderConfiguration,
+         thinkingMode: ModelThinkingMode = .off) throws {
         self.tokenizer = tokenizer
         self.byteLevelDecoderConfiguration = byteLevelDecoderConfiguration
 
@@ -133,19 +170,9 @@ public struct GFTokenizer: @unchecked Sendable {
         self.thinkEndID = resolved.thinkEndID
         self.stopTokenIDs = resolved.stopTokenIDs
         self.vocabSize = resolved.vocabSize
+        self.thinkingMode = thinkingMode
         self.generationSuffix = Self.deriveGenerationSuffix(
-            tokenizer, thinkingEnabled: Self.thinkingModeEnabled())
-    }
-
-    /// NVMAI_THINKING_MODE=1 (or "on", "true", "yes") enables the model's
-    /// reasoning mode (chat template opens a `<think>` block the model must
-    /// fill). Off by default. Read at load; the tokenizer keeps no state, so
-    /// the struct layout is unchanged.
-    private static func thinkingModeEnabled() -> Bool {
-        switch ProcessInfo.processInfo.environment["NVMAI_THINKING_MODE"]?.lowercased() {
-        case "1", "on", "true", "yes": return true
-        default: return false
-        }
+            tokenizer, thinkingEnabled: thinkingMode.isEnabled)
     }
 
     private struct ResolvedSpecialTokens {
@@ -463,7 +490,7 @@ public struct GFTokenizer: @unchecked Sendable {
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: ["enable_thinking": Self.thinkingModeEnabled()]
+            additionalContext: ["enable_thinking": thinkingMode.isEnabled]
         ).map(Int32.init)
     }
 
@@ -493,7 +520,7 @@ public struct GFTokenizer: @unchecked Sendable {
 }
 
 private enum GFTokenizerLoadSource: Hashable {
-    case local(String)
+    case local(String, ModelThinkingMode)
 }
 
 private actor GFTokenizerLoadCoordinator {
@@ -510,8 +537,10 @@ private actor GFTokenizerLoadCoordinator {
         // share the task result instead of owning its cancellation.
         let task = Task.detached(priority: .userInitiated) { () throws -> GFTokenizer in
             switch source {
-            case .local(let path):
-                return try await GFTokenizer.loadUncached(from: URL(fileURLWithPath: path))
+            case .local(let path, let thinkingMode):
+                return try await GFTokenizer.loadUncached(
+                    from: URL(fileURLWithPath: path),
+                    thinkingMode: thinkingMode)
             }
         }
         tasks[source] = task

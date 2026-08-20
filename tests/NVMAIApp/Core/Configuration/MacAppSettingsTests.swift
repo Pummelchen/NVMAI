@@ -84,6 +84,7 @@ import Testing
         #expect(settings.newlineShortcut == .return)
         #expect(settings.showPromptExamples)
         #expect(!settings.conciseMode)
+        #expect(settings.thinkingMode == "off")
     }
 
     @Test func conciseModeDecodesAndRoundTrips() throws {
@@ -110,6 +111,16 @@ import Testing
             from: JSONEncoder().encode(settings))
         #expect(roundTripped.conciseMode)
         #expect(roundTripped == settings)
+    }
+
+    @Test func thinkingModeDecodesAndRoundTrips() throws {
+        let initial = MacAppSettings(thinkingMode: "on")
+        let decoded = try JSONDecoder().decode(
+            MacAppSettings.self,
+            from: JSONEncoder().encode(initial))
+        #expect(decoded.thinkingMode == "on")
+        #expect(decoded == initial)
+        #expect(!MacAppSettings(thinkingMode: "medium").isValid())
     }
 
     @Test(arguments: AppNewlineShortcut.allCases)
@@ -182,7 +193,8 @@ import Testing
             topP: 0.8,
             prefillEnabled: false,
             newlineShortcut: .shiftReturn,
-            showPromptExamples: false)
+            showPromptExamples: false,
+            thinkingMode: "on")
         try MacAppSettingsFileStore.save(initial, forModelDirectory: modelDirectory)
 
         let model = AppModel(
@@ -198,6 +210,7 @@ import Testing
         #expect(!model.runtimeOptions.prefillEnabled)
         #expect(model.newlineShortcut == .shiftReturn)
         #expect(!model.showPromptExamples)
+        #expect(model.runtimeOptions.thinkingMode == .on)
 
         model.temperature = 0.6
         model.runtimeOptions.expertCacheSlots = 32
@@ -216,6 +229,7 @@ import Testing
         #expect(saved.prefillEnabled)
         #expect(saved.newlineShortcut == .shiftReturn)
         #expect(!saved.showPromptExamples)
+        #expect(saved.thinkingMode == "on")
         model.cancel()
     }
 

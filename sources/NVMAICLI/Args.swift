@@ -19,6 +19,7 @@ public struct Args: Equatable, Sendable {
     public var stops: [String]
     public var quiet: Bool
     public var concise: Bool
+    public var thinkingMode: ModelThinkingMode
     public var expertCacheSlots: Int
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice?
@@ -38,6 +39,7 @@ public struct Args: Equatable, Sendable {
                 stops: [String] = [],
                 quiet: Bool = false,
                 concise: Bool = false,
+                thinkingMode: ModelThinkingMode = .off,
                 expertCacheSlots: Int = 64,
                 rdadvise: String = "default",
                 prefillChunk: PrefillChunkChoice? = nil,
@@ -61,6 +63,7 @@ public struct Args: Equatable, Sendable {
         self.stops = stops
         self.quiet = quiet
         self.concise = concise
+        self.thinkingMode = thinkingMode
     }
 }
 
@@ -122,6 +125,8 @@ extension Args {
       --concise                 Inject the per-quantization concise-mode
                                 system prompt (answers without preamble,
                                 filler, or closing codas).
+      --thinking <off|on>       Ornith/Qwen reasoning mode (default off).
+                                These models do not define effort levels.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -143,6 +148,7 @@ extension Args {
         var stops: [String] = []
         var quiet = false
         var concise = false
+        var thinkingMode: ModelThinkingMode = .off
         var expertCacheSlots = 64
         var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
@@ -161,6 +167,12 @@ extension Args {
             case "--concise":
                 concise = true
                 index += 1
+            case "--thinking":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = ModelThinkingMode(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                thinkingMode = parsed
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -288,6 +300,7 @@ extension Args {
                     stops: stops,
                     quiet: quiet,
                     concise: concise,
+                    thinkingMode: thinkingMode,
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
                     prefillChunk: prefillChunk,

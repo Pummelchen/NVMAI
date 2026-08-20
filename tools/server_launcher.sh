@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Start the NVMAIServer for the chosen quantization and mode (interactive
 # TUI or positional). Asks the same five question blocks as
-# tools/cli_launcher.sh — CLI, model, quantization, mode, reasoning — so the
-# two launchers behave identically. Quantization/mode/reasoning drive the
+# tools/cli_launcher.sh — CLI, model, quantization, mode, thinking — so the
+# two launchers behave identically. Quantization/mode/thinking drive the
 # server; the CLI/model answers pick the cli_launcher.sh command to connect
 # a coding CLI afterwards.
 #
-#   tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [nothink|think]
+#   tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [off|on]
 #
 # With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
 # (fast/full), then the quantization, then default/concise mode, then
-# reasoning off/on. Every choice has a default (codex / full / 4-bit /
-# concise / thinking on), so pressing Enter through the prompts launches
+# thinking off/on. Every choice has a default (codex / full / 4-bit /
+# concise / thinking off), so pressing Enter through the prompts launches
 # that configuration. The server runtime is pinned to native 262,144-token
 # context, a 256 MiB multi-prefix prompt cache, an 8 GiB routed-expert
 # cache, 8-bit KV, and MTP off. Stops any stale
@@ -116,23 +116,29 @@ else
   esac
 fi
 
-# --- 5) reasoning: on (default) or off (direct answers) ---
+# --- 5) thinking: off (default) or on ---
+thinking_default="${NVMAI_THINKING_MODE:-off}"
+case "$thinking_default" in
+  0|off|false|no) thinking_default=off ; default_think_choice=1 ;;
+  1|on|true|yes) thinking_default=on ; default_think_choice=2 ;;
+  *) echo "invalid NVMAI_THINKING_MODE: $thinking_default (off|on)" >&2; exit 2 ;;
+esac
 if [[ -n "${5:-}" ]]; then
   case "$5" in
-    nothink|0|off) thinking="0" ; think_word=nothink ;;
-    think|1|on) thinking="1" ; think_word=think ;;
-    *) echo "unknown reasoning: $5 (nothink|think)" >&2; exit 2 ;;
+    nothink|0|off) thinking_mode=off ; think_word=off ;;
+    think|1|on) thinking_mode=on ; think_word=on ;;
+    *) echo "unknown thinking mode: $5 (off|on)" >&2; exit 2 ;;
   esac
 else
   echo ""
   echo "Reasoning (thinking)?"
-  echo "  1) On (model reasons before answering, default)"
-  echo "  2) Off (direct answers)"
-  printf "Choice [1-2] (default 1): "
+  echo "  1) Off (direct answers, default)"
+  echo "  2) On (model reasons before answering)"
+  printf "Choice [1-2] (default %s): " "$default_think_choice"
   read -r think_choice || exit 1
-  case "${think_choice:-1}" in
-    1) thinking="1" ; think_word=think ;;
-    2) thinking="0" ; think_word=nothink ;;
+  case "${think_choice:-$default_think_choice}" in
+    1) thinking_mode=off ; think_word=off ;;
+    2) thinking_mode=on ; think_word=on ;;
     *) echo "invalid choice: $think_choice" >&2; exit 2 ;;
   esac
 fi
@@ -150,10 +156,10 @@ else
   unset NVMAI_CONCISE_MODE
   concise_label=""
 fi
-# Reasoning mode: on (default) or off. The server reads this once at load;
+# Thinking mode: off (default) or on. The server reads this once at load;
 # on opens a <think> block in the generation prompt so the model reasons
 # before answering (costs wall time and tokens); off gives direct answers.
-export NVMAI_THINKING_MODE="${thinking:-1}"
+export NVMAI_THINKING_MODE="$thinking_mode"
 
 if [[ ! -f "$BINARY" ]]; then
   echo "ERROR: NVMAIServer binary not found at $BINARY" >&2
@@ -198,7 +204,8 @@ echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
   --prompt-cache-mode multi-prefix \
   --prompt-cache-memory-mib 256 \
   --ram-budget 8G \
-  --kv-bits 8 &
+  --kv-bits 8 \
+  --thinking "$thinking_mode" &
 server_pid=$!
 
 for _ in $(seq 1 120); do
@@ -236,7 +243,7 @@ echo ""
 echo "Or let the CLI launcher wire Codex / Qwen Code / OpenCode for you:"
 echo "  tools/cli_launcher.sh $cli $model_word $quant $mode_word $think_word"
 echo ""
-echo "Model: $MODEL_DIR | Reasoning: $think_word | Ctrl-C to stop"
+echo "Model: $MODEL_DIR | Thinking: $think_word | Ctrl-C to stop"
 echo "============================================================"
 echo ""
 

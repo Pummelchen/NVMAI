@@ -271,7 +271,8 @@ struct StreamingStopMatcherTests {
 @Suite("Server arguments")
 struct ServerArgumentTests {
     @Test func defaults() throws {
-        let arguments = try ServerArguments.parse(["--model", "model.gturbo"])
+        let arguments = try ServerArguments.parse(
+            ["--model", "model.gturbo"], environment: [:])
         #expect(arguments.mtpModel == nil)
         #expect(arguments.mtpMemoryMiB == 384)
         #expect(arguments.port == 8080)
@@ -285,6 +286,23 @@ struct ServerArgumentTests {
         #expect(arguments.prefillChunkTokens == nil)
         #expect(arguments.kvCachePrecision == .int8)
         #expect(arguments.ropeScalingMode == .none)
+        #expect(arguments.thinkingMode == .off)
+    }
+
+    @Test func parsesOnlyBinaryThinkingModes() throws {
+        let on = try ServerArguments.parse([
+            "--model", "model.gturbo", "--thinking", "on",
+        ])
+        #expect(on.thinkingMode == .on)
+        let environmentOn = try ServerArguments.parse(
+            ["--model", "model.gturbo"],
+            environment: ["NVMAI_THINKING_MODE": "true"])
+        #expect(environmentOn.thinkingMode == .on)
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo", "--thinking", "high",
+            ])
+        }
     }
 
     @Test func parsesKVPrecisionAndYaRNContexts() throws {

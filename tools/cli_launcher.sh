@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
 # Launch a coding CLI against NVMAI in the macOS terminal (interactive TUI).
 # Asks the same five question blocks as tools/server_launcher.sh — CLI,
-# model, quantization, mode, reasoning — and uses all of them: it stops any
+# model, quantization, mode, thinking — and uses all of them: it stops any
 # stale NVMAIServer, starts a fresh one via tools/server_launcher.sh for the
-# chosen quantization/mode/reasoning, wires the CLI's provider config to the
+# chosen quantization/mode/thinking, wires the CLI's provider config to the
 # chosen model (the "<model>-fast" alias strips CLI boilerplate before
 # prefill for seconds-per-answer chat speed; the base model keeps the CLI's
 # agentic tool loop), then hands the terminal over to the CLI.
 #
-#   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [nothink|think]
+#   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [off|on]
 #
 # With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
 # (fast/full), then the quantization, then default/concise mode, then
-# reasoning off/on. Every choice has a default (codex / full / 4-bit /
-# concise / thinking on), so pressing Enter through the prompts launches
+# thinking off/on. Every choice has a default (codex / full / 4-bit /
+# concise / thinking off), so pressing Enter through the prompts launches
 # that configuration. The server uses native 262,144-token context,
 # a 256 MiB multi-prefix prompt cache, an 8 GiB routed-expert cache, 8-bit KV,
 # and MTP off. The server keeps running after
 # the CLI exits; the next
 # launcher run stops it and starts fresh.
 # Overrides: NVMAI_PORT, CODEX_HOME_NVMAI, QWEN_HOME_NVMAI, CODEX, QWEN,
-# OPENCODE, NVMAI_STRIP_TAGS (comma-separated scaffolding tag list).
+# OPENCODE, NVMAI_STRIP_TAGS (comma-separated scaffolding tag list),
+# NVMAI_THINKING_MODE (off|on).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -115,23 +116,29 @@ else
   esac
 fi
 
-# --- 5) reasoning: on (default) or off (direct answers) ---
+# --- 5) thinking: off (default) or on ---
+thinking_default="${NVMAI_THINKING_MODE:-off}"
+case "$thinking_default" in
+  0|off|false|no) thinking_default=off ; default_think_choice=1 ;;
+  1|on|true|yes) thinking_default=on ; default_think_choice=2 ;;
+  *) echo "invalid NVMAI_THINKING_MODE: $thinking_default (off|on)" >&2; exit 2 ;;
+esac
 if [[ -n "${5:-}" ]]; then
   case "$5" in
-    nothink|0|off) thinking="" ; think_word=nothink ;;
-    think|1|on) thinking="1" ; think_word=think ;;
-    *) echo "unknown reasoning: $5 (nothink|think)" >&2; exit 2 ;;
+    nothink|0|off) thinking_mode=off ; think_word=off ;;
+    think|1|on) thinking_mode=on ; think_word=on ;;
+    *) echo "unknown thinking mode: $5 (off|on)" >&2; exit 2 ;;
   esac
 else
   echo ""
   echo "Reasoning (thinking)?"
-  echo "  1) On (model reasons before answering, default)"
-  echo "  2) Off (direct answers)"
-  printf "Choice [1-2] (default 1): "
+  echo "  1) Off (direct answers, default)"
+  echo "  2) On (model reasons before answering)"
+  printf "Choice [1-2] (default %s): " "$default_think_choice"
   read -r think_choice || exit 1
-  case "${think_choice:-1}" in
-    1) thinking="1" ; think_word=think ;;
-    2) thinking="" ; think_word=nothink ;;
+  case "${think_choice:-$default_think_choice}" in
+    1) thinking_mode=off ; think_word=off ;;
+    2) thinking_mode=on ; think_word=on ;;
     *) echo "invalid choice: $think_choice" >&2; exit 2 ;;
   esac
 fi
@@ -157,14 +164,17 @@ if pgrep -x NVMAIServer >/dev/null 2>&1; then
   fi
 fi
 echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
-nohup "$BASE_DIR/tools/server_launcher.sh" "$cli" "$model_word" "$quant" "$mode_word" "$think_word" >/tmp/nvmai-server.log 2>&1 &
+LAUNCH_LOG_DIR="$BASE_DIR/.build/launcher-logs"
+mkdir -p "$LAUNCH_LOG_DIR"
+LAUNCH_LOG="$LAUNCH_LOG_DIR/nvmai-server.log"
+nohup "$BASE_DIR/tools/server_launcher.sh" "$cli" "$model_word" "$quant" "$mode_word" "$thinking_mode" >"$LAUNCH_LOG" 2>&1 &
 for _ in $(seq 1 120); do
   curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 && break
   sleep 5
 done
 curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 || {
   echo "ERROR: NVMAIServer did not come up on port $PORT" >&2
-  echo "Check /tmp/nvmai-server.log" >&2
+  echo "Check $LAUNCH_LOG" >&2
   exit 1
 }
 echo "NVMAIServer ready at $BASE_URL (model $launch_model; base $MODEL)"

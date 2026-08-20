@@ -14,6 +14,7 @@ import NVMAI
         #expect(options.modelVerification == .fullSha256)
         #expect(options.kvCachePrecision == .int8)
         #expect(options.ropeScalingMode == .none)
+        #expect(options.thinkingMode == .off)
 
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
         #expect(runtime.expertCacheSlots == RuntimeConfiguration.production.expertCacheSlots)
@@ -22,7 +23,7 @@ import NVMAI
         #expect(runtime.rdadvisePolicy == RuntimeConfiguration.production.rdadvisePolicy)
         #expect(runtime.headPath == RuntimeConfiguration.production.headPath)
         #expect(options.resultSummary ==
-            "Cache 64 LFU, prefill 4096, 8-bit KV, native RoPE, RDADVISE default, full SHA-256")
+            "Cache 64 LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, RDADVISE default, full SHA-256")
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {
@@ -87,6 +88,7 @@ import NVMAI
         value = base; value.modelVerification = .trustedInstall; variants.append(value)
         value = base; value.kvCachePrecision = .int4; variants.append(value)
         value = base; value.ropeScalingMode = .yarn; variants.append(value)
+        value = base; value.thinkingMode = .on; variants.append(value)
 
         for variant in variants {
             #expect(AppLoadedRuntimeKey(

@@ -604,6 +604,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             rdadvisePolicy: options.rdadvisePolicy.rawValue,
             modelVerification: options.modelVerification.rawValue,
             conciseMode: options.conciseMode,
+            thinkingMode: options.thinkingMode.rawValue,
             kvCacheBits: options.kvCachePrecision.rawValue,
             ropeScalingMode: options.ropeScalingMode.rawValue)
     }

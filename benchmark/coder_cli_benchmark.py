@@ -30,7 +30,13 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from nvmai_profile import DEFAULT_CONTEXT_TOKENS, DEFAULT_KV_BITS, server_command, server_environment
+from nvmai_profile import (
+    DEFAULT_CONTEXT_TOKENS,
+    DEFAULT_KV_BITS,
+    DEFAULT_THINKING_MODE,
+    server_command,
+    server_environment,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -215,11 +221,6 @@ def start_server(*, output: pathlib.Path, family: str, quant: int, port: int,
     if mtp:
         command += ["--mtp-model", str(MTP_PATHS[family]), "--mtp-memory-mib", "384"]
     env = server_environment(concise=concise)
-    # Coding-client answers are the measured artifact. Keep reasoning tokens
-    # out of the visible response so every client can be judged against the
-    # same explicit word limit; MTP qualification also requires direct greedy
-    # generation rather than a separately rendered reasoning block.
-    env["NVMAI_THINKING_MODE"] = "0"
     log_path = output / "server" / f"{label}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("a", buffering=1)
@@ -888,6 +889,7 @@ def main() -> int:
         "mtp": False,
         "concise": True,
         "fast_alias": False,
+        "thinking": DEFAULT_THINKING_MODE,
     }
     write_json(output / f"environment-{args.round}.json", environment)
     if not (output / "environment.json").exists():

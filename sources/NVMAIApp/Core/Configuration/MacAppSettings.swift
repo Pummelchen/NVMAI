@@ -17,6 +17,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var newlineShortcut: AppNewlineShortcut = .return
     var showPromptExamples: Bool = true
     var conciseMode: Bool = false
+    var thinkingMode: String = "off"
     var kvCacheBits: Int = 8
     var ropeScalingMode: String = "none"
 
@@ -33,6 +34,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case newlineShortcut
         case showPromptExamples
         case conciseMode
+        case thinkingMode
         case kvCacheBits
         case ropeScalingMode
     }
@@ -49,6 +51,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          newlineShortcut: AppNewlineShortcut = .return,
          showPromptExamples: Bool = true,
          conciseMode: Bool = false,
+         thinkingMode: String = "off",
          kvCacheBits: Int = 8,
          ropeScalingMode: String = "none") {
         self.version = version
@@ -63,6 +66,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.newlineShortcut = newlineShortcut
         self.showPromptExamples = showPromptExamples
         self.conciseMode = conciseMode
+        self.thinkingMode = thinkingMode
         self.kvCacheBits = kvCacheBits
         self.ropeScalingMode = ropeScalingMode
     }
@@ -87,6 +91,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         conciseMode = try container.decodeIfPresent(
             Bool.self,
             forKey: .conciseMode) ?? false
+        thinkingMode = try container.decodeIfPresent(
+            String.self,
+            forKey: .thinkingMode) ?? "off"
         kvCacheBits = try container.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? 8
         ropeScalingMode = try container.decodeIfPresent(
             String.self, forKey: .ropeScalingMode) ?? "none"
@@ -97,6 +104,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
             && KVCachePrecision(rawValue: kvCacheBits) != nil
             && RuntimeRoPEScalingMode(rawValue: ropeScalingMode) != nil
+            && ModelThinkingMode(rawValue: thinkingMode) != nil
             && (ropeScalingMode == "yarn"
                 ? RuntimeConfiguration.supportedYaRNContextTokens.contains(contextTokens)
                 : contextTokens <= RuntimeConfiguration.nativeMaximumContextTokens)

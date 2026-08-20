@@ -37,6 +37,7 @@ import re
 
 from nvmai_profile import (
     DEFAULT_CONTEXT_TOKENS, DEFAULT_KV_BITS, DEFAULT_MODEL_PATH,
+    DEFAULT_THINKING_MODE,
     benchmark_log_path, server_command, server_environment,
 )
 
@@ -412,6 +413,7 @@ def run_config(cache_mode, mtp_config, config_label, port, verify=True,
             "runtime_profile": {
                 "context_tokens": DEFAULT_CONTEXT_TOKENS, "kv_bits": DEFAULT_KV_BITS,
                 "concise": True, "fast_alias": False,
+                "thinking": DEFAULT_THINKING_MODE,
             },
             "results": results,
             "summary": {"total_requests": len(results),

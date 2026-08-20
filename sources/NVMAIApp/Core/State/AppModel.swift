@@ -79,6 +79,7 @@ public final class AppModel {
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
             conciseMode: settings.conciseMode,
+            thinkingMode: ModelThinkingMode(rawValue: settings.thinkingMode) ?? .off,
             kvCachePrecision: KVCachePrecision(rawValue: settings.kvCacheBits) ?? .int8,
             ropeScalingMode: RuntimeRoPEScalingMode(
                 rawValue: settings.ropeScalingMode) ?? .none)
@@ -700,6 +701,8 @@ public final class AppModel {
         runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
+            conciseMode: settings.conciseMode,
+            thinkingMode: ModelThinkingMode(rawValue: settings.thinkingMode) ?? .off,
             kvCachePrecision: KVCachePrecision(rawValue: settings.kvCacheBits) ?? .int8,
             ropeScalingMode: RuntimeRoPEScalingMode(
                 rawValue: settings.ropeScalingMode) ?? .none)
@@ -727,6 +730,7 @@ public final class AppModel {
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples,
             conciseMode: runtimeOptions.conciseMode,
+            thinkingMode: runtimeOptions.thinkingMode.rawValue,
             kvCacheBits: runtimeOptions.kvCachePrecision.rawValue,
             ropeScalingMode: runtimeOptions.ropeScalingMode.rawValue)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)

@@ -29,6 +29,8 @@
 - **Compressed KV cache:** Live attention state can use 16-bit, 8-bit, or 4-bit
   storage independently of the installed model quantization, with 8-bit as the
   default.
+- **Thinking mode:** Ornith and Qwen support truthful Off/On reasoning control;
+  their chat templates do not define Low, Medium, or High effort levels.
 - **MTP off by default:** Native speculative decoding remains experimental and
   disabled because measured Ornith runs showed no speed benefit and it
   currently requires greedy decoding, native RoPE, and prompt-cache reuse off.

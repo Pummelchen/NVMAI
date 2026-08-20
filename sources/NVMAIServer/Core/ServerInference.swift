@@ -457,6 +457,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                             prefillChunkTokens requestedPrefillChunkTokens: Int? = nil,
                             kvCachePrecision: KVCachePrecision = .int8,
                             ropeScalingMode: RuntimeRoPEScalingMode = .none,
+                            thinkingMode: ModelThinkingMode = .off,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
                             mtpModelDirectory: URL? = nil,
@@ -470,7 +471,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         guard FileManager.default.fileExists(atPath: templateURL.path) else {
             throw GFTokenizerError.missingToolTemplate
         }
-        let tokenizer = try await GFTokenizer.load(from: tokenizerFolder)
+        let tokenizer = try await GFTokenizer.load(
+            from: tokenizerFolder,
+            thinkingMode: thinkingMode)
         // A caller managing model residency supplies its own context so one
         // MTLCommandQueue and one compiled shader library survive across
         // unload/reload cycles (MetalContext.deinit documents that queue

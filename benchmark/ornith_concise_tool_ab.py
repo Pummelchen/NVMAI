@@ -272,11 +272,11 @@ def wait_ready(port: int, timeout: int = 300) -> None:
 
 def start_server(output: pathlib.Path, concise: bool, port: int) -> ServerProcess:
     label = "concise-on" if concise else "concise-off"
-    command = server_command(SERVER, port, model=DEFAULT_MODEL_PATH)
-    environment = server_environment(concise=concise)
+    command = server_command(
+        SERVER, port, model=DEFAULT_MODEL_PATH, thinking_mode="off")
+    environment = server_environment(concise=concise, thinking_mode="off")
     # Match the coding-client benchmark: rendered reasoning is disabled so
     # Concise Mode is the sole behavioral variable in this A/B.
-    environment["NVMAI_THINKING_MODE"] = "0"
     log_path = output / "server" / f"{label}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("w", buffering=1)
@@ -678,7 +678,7 @@ def main() -> int:
             "kv_bits": 8,
             "mtp": False,
             "fast_alias": False,
-            "thinking": False,
+            "thinking": "off",
             "warmup": "one discarded request per profile",
         },
         "purpose_note": (

@@ -8,6 +8,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var rdadvisePolicy: String
     public var modelVerification: String
     public var conciseMode: Bool
+    public var thinkingMode: String
     public var kvCacheBits: Int
     public var ropeScalingMode: String
 
@@ -18,6 +19,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
                 rdadvisePolicy: String = "default",
                 modelVerification: String = "full-sha256",
                 conciseMode: Bool = false,
+                thinkingMode: String = "off",
                 kvCacheBits: Int = 8,
                 ropeScalingMode: String = "none") {
         self.expertCacheSlots = expertCacheSlots
@@ -27,6 +29,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.conciseMode = conciseMode
+        self.thinkingMode = thinkingMode
         self.kvCacheBits = kvCacheBits
         self.ropeScalingMode = ropeScalingMode
     }

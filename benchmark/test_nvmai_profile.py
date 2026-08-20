@@ -15,6 +15,7 @@ from nvmai_profile import (
     request_model,
     server_command,
     server_environment,
+    configured_thinking_mode,
 )
 
 
@@ -35,6 +36,7 @@ class BenchmarkProfileTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--kv-bits") + 1], str(DEFAULT_KV_BITS))
         self.assertEqual(command[command.index("--rope-scaling") + 1], "none")
+        self.assertEqual(command[command.index("--thinking") + 1], "off")
         self.assertNotIn("--mtp-model", command)
 
     def test_explicit_cache_off_is_not_a_default(self) -> None:
@@ -49,11 +51,23 @@ class BenchmarkProfileTests(unittest.TestCase):
             f"--prompt-cache-memory-mib {DEFAULT_PROMPT_CACHE_MEMORY_MIB}", launcher
         )
         self.assertIn(f"--ram-budget {DEFAULT_EXPERT_CACHE_BUDGET}", launcher)
+        self.assertIn('${NVMAI_THINKING_MODE:-off}', launcher)
+        self.assertIn('--thinking "$thinking_mode"', launcher)
 
     def test_environment_and_model_select_concise_base_alias(self) -> None:
         environment = server_environment({"PATH": os.environ.get("PATH", "")})
         self.assertEqual(environment["NVMAI_CONCISE_MODE"], "1")
+        self.assertEqual(environment["NVMAI_THINKING_MODE"], "off")
         self.assertEqual(request_model(), DEFAULT_API_MODEL)
+
+    def test_thinking_mode_is_binary_and_configurable(self) -> None:
+        self.assertEqual(configured_thinking_mode({}), "off")
+        self.assertEqual(
+            configured_thinking_mode({"NVMAI_THINKING_MODE": "yes"}), "on")
+        with self.assertRaises(ValueError):
+            configured_thinking_mode({"NVMAI_THINKING_MODE": "medium"})
+        command = server_command("server", 8080, thinking_mode="on")
+        self.assertEqual(command[command.index("--thinking") + 1], "on")
         self.assertFalse(request_model().endswith("-fast"))
 
     def test_coder_harness_plain_invocation_uses_ornith_four_bit(self) -> None:
