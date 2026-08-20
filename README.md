@@ -3,6 +3,56 @@
 
 # NVMAI
 
+## Core Benefits
+
+### Project Purpose
+
+- **SSD-streamed inference:** NVMAI runs large mixture-of-experts models on
+  low-RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
+  loading only the experts selected for each token.
+
+### Supported LLMs
+
+- **Verified models:** NVMAI supports text-only Ornith 1.5 35B-A3B and Qwen
+  3.6 35B-A3B in 4-bit and 8-bit quantization.
+- **Adaptable runtime:** The shared Qwen3.5-MoE parser, repacker, and inference
+  path make other tensor-compatible Qwen-based MoE models straightforward to
+  add after validation.
+
+### Special Features
+
+- **Bounded expert RAM:** The server accepts common 1, 2, 4, 8, or 16 GiB RAM
+  budgets to limit the resident expert cache, while model state, KV cache, and
+  runtime scratch use additional memory.
+- **Long context:** Native RoPE supports up to 262K tokens, while optional YaRN
+  extends the context to 512K or 1M tokens.
+- **Compressed KV cache:** Live attention state can use 16-bit, 8-bit, or 4-bit
+  storage independently of the installed model quantization, with 8-bit as the
+  default.
+- **MTP off by default:** Native speculative decoding remains experimental and
+  disabled because measured Ornith runs showed no speed benefit and it
+  currently requires greedy decoding, native RoPE, and prompt-cache reuse off.
+
+### Performance Improvements
+
+- **Follow-up cache:** Exact live and multi-prefix prompt-state reuse avoids
+  repeating compatible prefill work across conversation turns.
+- **Concise mode:** An optional terse system prompt reduces unnecessary
+  generated tokens and response time without changing model weights.
+- **Fast alias:** The chat-only `-fast` model alias strips coding-agent
+  boilerplate before prefill for quicker direct answers, while the base alias
+  preserves tools and agent loops.
+
+### Usage
+
+- **OpenAI-compatible server:** A loopback Chat Completions and Responses API
+  includes launch scripts for starting NVMAI and connecting supported coding
+  clients.
+- **Tested coding CLIs:** The launch workflow supports Codex, Qwen Code, and
+  OpenCode against the local server.
+- **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
+  generation, streaming responses, and client-authorized function-tool calls.
+
 ## Ornith 1.5
 
 > [!IMPORTANT]
