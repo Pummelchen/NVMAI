@@ -56,7 +56,8 @@ def run_quant(model, label):
         payload = json.dumps({
             "model": "qwen3.6-35b-a3b",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0, "max_completion_tokens": 512, "stream": True,
+            "temperature": 0, "top_p": 0.95, "top_k": 20,
+            "presence_penalty": 0.0, "max_completion_tokens": 512, "stream": True,
         }).encode()
         conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=1800)
         conn.request("POST", "/v1/chat/completions", body=payload,

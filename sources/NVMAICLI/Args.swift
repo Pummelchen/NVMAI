@@ -30,9 +30,9 @@ public struct Args: Equatable, Sendable {
                 messagesFile: String? = nil,
                 maxNew: Int = 1_024,
                 maxContext: Int = 4096,
-                temperature: Float = 0.6,
-                topK: Int? = 20,
-                topP: Float? = 0.95,
+                temperature: Float = GenerationDefaults.temperature,
+                topK: Int? = GenerationDefaults.topK,
+                topP: Float? = GenerationDefaults.topP,
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stops: [String] = [],
@@ -135,9 +135,9 @@ extension Args {
         var maxNew = 1_024
         var maxContext = 4096
         var maxContextWasSet = false
-        var temperature: Float = 0.6
-        var topK: Int? = 20
-        var topP: Float? = 0.95
+        var temperature: Float = GenerationDefaults.temperature
+        var topK: Int? = GenerationDefaults.topK
+        var topP: Float? = GenerationDefaults.topP
         var repetitionPenalty: Float = 1.0
         var seed: UInt64?
         var stops: [String] = []

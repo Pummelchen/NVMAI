@@ -11,6 +11,7 @@ import Testing
         #expect(request.temperature == 0.6)
         #expect(request.topK == 20)
         #expect(request.topP == 0.95)
+        #expect(request.presencePenalty == 0)
         #expect(request.repetitionPenalty == 1)
         #expect(!request.isPureGreedy)
     }
@@ -87,6 +88,14 @@ import Testing
     @Test func repetitionPenaltyBelowOneRejected() {
         let request = AppGenerationRequest(modelDirectory: existingDirectory,
                                            prompt: "hello", repetitionPenalty: 0.9)
+        #expect(throws: AppInferenceError.self) {
+            try request.validate()
+        }
+    }
+
+    @Test func nonzeroPresencePenaltyRejected() {
+        let request = AppGenerationRequest(modelDirectory: existingDirectory,
+                                           prompt: "hello", presencePenalty: 0.1)
         #expect(throws: AppInferenceError.self) {
             try request.validate()
         }

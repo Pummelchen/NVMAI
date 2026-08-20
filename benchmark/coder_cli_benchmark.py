@@ -51,6 +51,10 @@ PROCESS_PATTERN = (
     "NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|"
     "swiftpm-testing-helper|mlx_lm|mlx-lm"
 )
+DEFAULT_TEMPERATURE = 0.6
+DEFAULT_TOP_P = 0.95
+DEFAULT_TOP_K = 20
+DEFAULT_PRESENCE_PENALTY = 0.0
 
 
 @dataclass
@@ -585,13 +589,16 @@ def run_coder_round(args: argparse.Namespace, output: pathlib.Path, prompts: dic
 
 
 def post_chat(base_url: str, model: str, messages: list[dict[str, Any]],
-              tools: list[dict[str, Any]], timeout: int) -> tuple[dict[str, Any], float]:
+              tools: list[dict[str, Any]], timeout: int,
+              temperature: float = DEFAULT_TEMPERATURE) -> tuple[dict[str, Any], float]:
     payload = {
         "model": model,
         "messages": messages,
         "tools": tools,
-        "temperature": 0,
-        "top_p": 1,
+        "temperature": temperature,
+        "top_p": DEFAULT_TOP_P,
+        "top_k": DEFAULT_TOP_K,
+        "presence_penalty": DEFAULT_PRESENCE_PENALTY,
         "seed": 1234,
         "max_tokens": 512,
         "stream": False,
@@ -655,9 +662,10 @@ def response_answer(response: dict[str, Any]) -> str:
 
 
 def feature_key(*, family: str, quant: int, cache: bool, mtp: bool,
-                fast: bool, concise: bool, prompt_name: str) -> str:
+                fast: bool, concise: bool, prompt_name: str,
+                track: str = "feature") -> str:
     return (
-        f"feature-{family}-q{quant}-cache{int(cache)}-mtp{int(mtp)}-"
+        f"{track}-{family}-q{quant}-cache{int(cache)}-mtp{int(mtp)}-"
         f"fast{int(fast)}-concise{int(concise)}-{prompt_name}"
     )
 
@@ -666,10 +674,12 @@ def run_feature_case(*, args: argparse.Namespace, output: pathlib.Path,
                      results: pathlib.Path, prompts: dict[str, str], family: str,
                      quant: int, cache: bool, fast: bool, concise: bool, mtp: bool,
                      prompt_name: str, base_url: str, model: str,
-                     server: RunningProcess, log_offset: int) -> int:
+                     server: RunningProcess, log_offset: int,
+                     temperature: float = DEFAULT_TEMPERATURE,
+                     track: str = "feature") -> int:
     key = feature_key(
         family=family, quant=quant, cache=cache, mtp=mtp, fast=fast,
-        concise=concise, prompt_name=prompt_name,
+        concise=concise, prompt_name=prompt_name, track=track,
     )
     if key in completed_keys(results):
         print(f"SKIP {key}", flush=True)
@@ -682,7 +692,7 @@ def run_feature_case(*, args: argparse.Namespace, output: pathlib.Path,
     tools = synthetic_tools()
     try:
         first, first_wall = post_chat(
-            base_url, requested_model, first_messages, tools, args.timeout
+            base_url, requested_model, first_messages, tools, args.timeout, temperature
         )
         first_answer = response_answer(first)
         followup_prompt = (
@@ -696,7 +706,7 @@ def run_feature_case(*, args: argparse.Namespace, output: pathlib.Path,
             {"role": "user", "content": followup_prompt},
         ]
         second, second_wall = post_chat(
-            base_url, requested_model, second_messages, tools, args.timeout
+            base_url, requested_model, second_messages, tools, args.timeout, temperature
         )
         second_answer = response_answer(second)
         exit_code = 0
@@ -727,12 +737,16 @@ def run_feature_case(*, args: argparse.Namespace, output: pathlib.Path,
     usage_first = first.get("usage", {})
     usage_second = second.get("usage", {})
     record = {
-        "key": key, "round": "features", "status": "ok" if exit_code == 0 else "failed",
+        "key": key, "round": "features", "track": track,
+        "status": "ok" if exit_code == 0 else "failed",
         "family": family, "quantization": quant, "cache": cache, "mtp": mtp,
         "fast": fast, "concise": concise, "prompt": prompt_name, "model": requested_model,
         "prompt_sha256": sha256_text(prompts[prompt_name]),
         "first_wall_seconds": round(first_wall, 3),
         "followup_wall_seconds": round(second_wall, 3),
+        "sampling": {"temperature": temperature, "top_p": DEFAULT_TOP_P,
+                     "top_k": DEFAULT_TOP_K,
+                     "presence_penalty": DEFAULT_PRESENCE_PENALTY},
         "first_usage": usage_first, "followup_usage": usage_second,
         "first_quality": first_quality, "followup_quality": follow_quality,
         "answer_file": str(answer_path.relative_to(output)),
@@ -800,7 +814,7 @@ def run_feature_round(args: argparse.Namespace, output: pathlib.Path,
             return
         key = feature_key(
             family="ornith", quant=quant, cache=False, mtp=mtp, fast=False,
-            concise=False, prompt_name=prompt_name,
+            concise=False, prompt_name=prompt_name, track="mtp-comparison",
         )
         if key in done:
             print(f"SKIP {key}", flush=True)
@@ -820,6 +834,10 @@ def run_feature_round(args: argparse.Namespace, output: pathlib.Path,
                 family="ornith", quant=quant, cache=False, fast=False,
                 concise=False, mtp=mtp, prompt_name=prompt_name,
                 base_url=base_url, model=model, server=server, log_offset=offset,
+                # Both sides of the MTP comparison must be pure-greedy or the
+                # draft path cannot engage.
+                temperature=0.0,
+                track="mtp-comparison",
             )
         finally:
             server.stop()

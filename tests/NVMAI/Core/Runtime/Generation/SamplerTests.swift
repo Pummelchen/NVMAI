@@ -209,7 +209,8 @@ import NVMAIValidationSupport
         var counts = [Int](repeating: 0, count: v)
         let trials = 1600
         for t in 0..<trials {
-            let cfg = GenerationConfig(temperature: 2.0, topK: v, seed: UInt64(t) &+ 1)
+            let cfg = GenerationConfig(temperature: 2.0, topK: v, topP: 1,
+                                       seed: UInt64(t) &+ 1)
             let raw = try rig.draw(logits, config: cfg, position: t).id
             let id = Int(raw)
             guard id >= 0 && id < v else { Issue.record("id \(raw) (0x\(String(raw, radix: 16))) out of range v=\(v)"); continue }

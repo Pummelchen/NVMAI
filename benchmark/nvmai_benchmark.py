@@ -21,8 +21,9 @@ Methodology notes (production audit fixes):
   (decode_tok_s in /tmp/nvmaiserver_PORT.log), which is parsed per config and
   attached to rows / summarized as footer_decode_rates.
 - MTP engages only for pure-greedy requests (temperature 0, repetition
-  penalty 1), so the MTP cell runs at temperature 0 and the other cells at
-  the original 0.2.
+  penalty 1), so the MTP cell runs at temperature 0. All other cells use the
+  production defaults: temperature 0.6, top-p 0.95, top-k 20, and presence
+  penalty 0.
 """
 import json
 import time
@@ -87,7 +88,7 @@ def verify_response(prompt_capability, response):
     return _normalize(expected) in _normalize(response)
 
 
-def probe_continuation(port, temperature=0.2):
+def probe_continuation(port, temperature=0.6):
     """Exercise the multi-prefix cache's real use case: a second turn that
     continues the first, with the client echoing the assistant reply verbatim.
     Returns a dict with per-turn cached tokens and wall times, or None on a
@@ -122,7 +123,7 @@ def probe_continuation(port, temperature=0.2):
     }
 
 
-def send_request_stream(messages, port=8080, temperature=0.2):
+def send_request_stream(messages, port=8080, temperature=0.6):
     """Stream request tracking TTFT using incremental read.
 
     Returns (wall, ttft, pt, ct, cached, content) or None on protocol error.
@@ -133,6 +134,7 @@ def send_request_stream(messages, port=8080, temperature=0.2):
         "temperature": temperature,
         "top_p": 0.95,
         "top_k": 20,
+        "presence_penalty": 0.0,
         "seed": 42,
         "max_completion_tokens": MAX_TOKENS,
         "stream": True,
@@ -210,7 +212,7 @@ def send_request_stream(messages, port=8080, temperature=0.2):
 
 
 def run_config(cache_mode, mtp_config, config_label, port, verify=True,
-               temperature=0.2):
+               temperature=0.6):
     print(f"\n{'#'*110}", flush=True)
     print(f"# BENCHMARK: {config_label}", flush=True)
     print(f"# Cache: {cache_mode}, MTP: {mtp_config}, Port: {port}, "
@@ -478,11 +480,11 @@ def main():
     # MTP forces prompt cache OFF server-side, so the cache-ON x MTP-ON cell
     # is impossible; the matrix is 3 real cells. MTP engages only for
     # pure-greedy requests (temperature 0, repetition penalty 1), so the MTP
-    # cell runs at temperature 0 while the non-MTP cells keep the original
+    # cell runs at temperature 0 while the non-MTP cells use the production
     # sampling defaults.
     configs = [
-        ("off", "off", f"cache_off_mtp_off_{quant_label}", 8080, 0.2),
-        ("multi-prefix", "off", f"cache_on_mtp_off_{quant_label}", 8081, 0.2),
+        ("off", "off", f"cache_off_mtp_off_{quant_label}", 8080, 0.6),
+        ("multi-prefix", "off", f"cache_on_mtp_off_{quant_label}", 8081, 0.6),
         ("off", "on", f"cache_off_mtp_on_{quant_label}", 8082, 0.0),
     ]
 

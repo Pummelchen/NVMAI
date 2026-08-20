@@ -50,7 +50,8 @@ def run_quant(model_path, label):
     payload = json.dumps({
         "model": "qwen3.6-35b-a3b",
         "messages": [{"role": "user", "content": PROMPT}],
-        "temperature": 0, "max_completion_tokens": MAX_TOKENS, "stream": True,
+        "temperature": 0, "top_p": 0.95, "top_k": 20,
+        "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,
     }).encode()
 
     def request():

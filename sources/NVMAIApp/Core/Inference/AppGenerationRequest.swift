@@ -9,6 +9,7 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
+    public var presencePenalty: Float
     public var repetitionPenalty: Float
     public var runtimeOptions: AppRuntimeOptions
 
@@ -16,9 +17,10 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 prompt: String,
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
-                temperature: Float = 0.6,
-                topK: Int? = 20,
-                topP: Float? = 0.95,
+                temperature: Float = GenerationDefaults.temperature,
+                topK: Int? = GenerationDefaults.topK,
+                topP: Float? = GenerationDefaults.topP,
+                presencePenalty: Float = GenerationDefaults.presencePenalty,
                 repetitionPenalty: Float = 1.0,
                 runtimeOptions: AppRuntimeOptions = AppRuntimeOptions()) {
         self.modelDirectory = modelDirectory
@@ -28,12 +30,13 @@ public struct AppGenerationRequest: Equatable, Sendable {
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
+        self.presencePenalty = presencePenalty
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
     }
 
     public var isPureGreedy: Bool {
-        temperature == 0 && repetitionPenalty == 1
+        temperature == 0 && presencePenalty == 0 && repetitionPenalty == 1
     }
 
     public func validate(fileManager: FileManager = .default,
@@ -72,6 +75,10 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 throw AppInferenceError.invalidRequest(
                     "Top-P below 1 requires Top-K to be enabled.")
             }
+        }
+        guard presencePenalty.isFinite, presencePenalty == 0 else {
+            throw AppInferenceError.invalidRequest(
+                "Presence penalty must be zero; nonzero values are not supported.")
         }
         guard repetitionPenalty >= 1 else {
             throw AppInferenceError.invalidRequest("Repetition penalty must be at least 1.")

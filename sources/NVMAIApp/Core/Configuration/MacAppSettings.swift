@@ -10,7 +10,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var expertCacheSlots: Int = 64
     var temperature: Double = 0.6
     var topKEnabled: Bool = true
-    var topK: Int = 20
+    var topK: Int = GenerationDefaults.topK
     var topPEnabled: Bool = true
     var topP: Double = 0.95
     var prefillEnabled: Bool = true
@@ -42,7 +42,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          expertCacheSlots: Int = 64,
          temperature: Double = 0.6,
          topKEnabled: Bool = true,
-         topK: Int = 20,
+         topK: Int = GenerationDefaults.topK,
          topPEnabled: Bool = true,
          topP: Double = 0.95,
          prefillEnabled: Bool = true,

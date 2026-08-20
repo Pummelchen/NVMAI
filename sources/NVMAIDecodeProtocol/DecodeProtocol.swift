@@ -56,18 +56,28 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var maxNewTokens: Int
     public var maxContextTokens: Int
     public var temperature: Float
+    public var topK: Int?
+    public var topP: Float?
+    public var presencePenalty: Float
     public var repetitionPenalty: Float
     public var runtimeOptions: DecodeRuntimeOptions
     public var generationID: UUID
 
     public init(prompt: String, maxNewTokens: Int, maxContextTokens: Int,
-                temperature: Float, repetitionPenalty: Float = 1,
+                temperature: Float = 0.6,
+                topK: Int? = 20,
+                topP: Float? = 0.95,
+                presencePenalty: Float = 0,
+                repetitionPenalty: Float = 1,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 generationID: UUID = UUID()) {
         self.prompt = prompt
         self.maxNewTokens = maxNewTokens
         self.maxContextTokens = maxContextTokens
         self.temperature = temperature
+        self.topK = topK
+        self.topP = topP
+        self.presencePenalty = presencePenalty
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID

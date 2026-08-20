@@ -92,7 +92,8 @@ Report the commit, hardware and RAM, macOS, Swift version, exact command, exit c
 
 The Mac app sends prompts through Qwen's ChatML format. It
 exposes context length, temperature, Top-K, Top-P, expert-cache slots, prefill,
-and RDADVISE. The defaults are temperature `0.6`, Top-K `20`, and Top-P `0.95`.
+and RDADVISE. The defaults are temperature `0.6`, Top-K `20`, Top-P `0.95`,
+and presence penalty `0.0` (the only currently supported presence-penalty value).
 Responses can use the context space left after formatting the prompt, and FP16
 is the runtime KV format. The HUD shows generation rate, token count, and
 decode-service memory; Last run also shows time to first token and I/O. Build

@@ -2,6 +2,14 @@ import Foundation
 import Metal
 import Synchronization
 
+/// Canonical sampling defaults shared by every NVMAI model and quantization.
+public enum GenerationDefaults {
+    public static let temperature: Float = 0.6
+    public static let topK = 20
+    public static let topP: Float = 0.95
+    public static let presencePenalty: Float = 0
+}
+
 /// Generation knobs threaded from the caller through the `Generator` into the
 /// sampler. Pure value type; one per `generate(...)` call.
 ///
@@ -9,18 +17,23 @@ import Synchronization
 /// reuses the same type rather than redeclaring it.
 public struct GenerationConfig: Sendable {
     public var maxNewTokens: Int = 256
-    public var temperature: Float = 1.0
-    public var topK: Int? = nil            // nil = no truncation
-    public var topP: Float? = nil          // nil = no nucleus truncation
+    public var temperature: Float = GenerationDefaults.temperature
+    public var topK: Int? = GenerationDefaults.topK
+    public var topP: Float? = GenerationDefaults.topP
+    /// OpenAI-compatible presence penalty. NVMAI currently supports the
+    /// neutral value only; keeping it explicit prevents front ends from
+    /// silently drifting to a different policy.
+    public var presencePenalty: Float = GenerationDefaults.presencePenalty
     public var repetitionPenalty: Float = 1.0
     public var seed: UInt64? = nil         // nil = nondeterministic
     public var stopStrings: [String] = []
     public var extraStopTokens: Set<Int32> = []
 
     public init(maxNewTokens: Int = 256,
-                temperature: Float = 1.0,
-                topK: Int? = nil,
-                topP: Float? = nil,
+                temperature: Float = GenerationDefaults.temperature,
+                topK: Int? = GenerationDefaults.topK,
+                topP: Float? = GenerationDefaults.topP,
+                presencePenalty: Float = GenerationDefaults.presencePenalty,
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stopStrings: [String] = [],
@@ -29,6 +42,7 @@ public struct GenerationConfig: Sendable {
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
+        self.presencePenalty = presencePenalty
         self.repetitionPenalty = repetitionPenalty
         self.seed = seed
         self.stopStrings = stopStrings
@@ -51,6 +65,10 @@ public struct GenerationConfig: Sendable {
         if let topP, (!topP.isFinite || topP <= 0 || topP > 1) {
             throw GeneratorError.invalidGenerationConfig(
                 "topP must be greater than zero and at most one")
+        }
+        guard presencePenalty.isFinite, presencePenalty == 0 else {
+            throw GeneratorError.invalidGenerationConfig(
+                "presencePenalty must be zero; nonzero presence penalties are not implemented")
         }
         if temperature > 0, topK == nil, let topP, topP < 1 {
             throw GeneratorError.invalidGenerationConfig(

@@ -248,6 +248,7 @@ actor RealInferenceSession {
                          temperature: request.temperature,
                          topK: request.topK,
                          topP: request.topP,
+                         presencePenalty: request.presencePenalty,
                          repetitionPenalty: request.repetitionPenalty)
     }
 

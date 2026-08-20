@@ -18,6 +18,22 @@ import Testing
         #expect(validated.generationConfig.temperature == 0.6)
         #expect(validated.generationConfig.topK == 20)
         #expect(validated.generationConfig.topP == 0.95)
+        #expect(validated.generationConfig.presencePenalty == 0)
+    }
+
+    @Test func samplingControlsMapExplicitly() throws {
+        let request = try decode("""
+        {"model":"m","input":[{"role":"user","content":"hi"}],
+         "temperature":0.7,"top_p":0.9,"top_k":12,"presence_penalty":0.0}
+        """)
+
+        let chat = try ResponsesAPIMapper.chatRequest(request)
+        let validated = try OpenAIRequestValidator.validate(chat, modelID: "m")
+
+        #expect(validated.generationConfig.temperature == 0.7)
+        #expect(validated.generationConfig.topK == 12)
+        #expect(validated.generationConfig.topP == 0.9)
+        #expect(validated.generationConfig.presencePenalty == 0)
     }
 
     @Test func instructionsAndDeveloperMergeIntoOneLeadingSystemMessage() throws {

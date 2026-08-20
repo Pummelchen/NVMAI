@@ -146,6 +146,10 @@ class AdapterHandler(BaseHTTPRequestHandler):
             "model": model,
             "messages": _openai_messages(body),
             "max_tokens": min(int(body.get("max_tokens", 2048)), server.max_tokens),
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "presence_penalty": 0.0,
             "stream": True,
         }
         tools = _openai_tools(body)

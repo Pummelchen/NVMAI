@@ -14,6 +14,7 @@ struct OpenAIValidationTests {
         #expect(validated.generationConfig.temperature == 0.6)
         #expect(validated.generationConfig.topK == 20)
         #expect(validated.generationConfig.topP == 0.95)
+        #expect(validated.generationConfig.presencePenalty == 0)
     }
 
     @Test func requiredToolChoiceIsRejected() throws {

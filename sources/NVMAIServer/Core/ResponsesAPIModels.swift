@@ -51,6 +51,8 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
     public let maxOutputTokens: Int?
     public let temperature: Float?
     public let topP: Float?
+    public let topK: Int?
+    public let presencePenalty: Float?
     public let stream: Bool?
     public let store: Bool?
 
@@ -60,6 +62,8 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
         case parallelToolCalls = "parallel_tool_calls"
         case maxOutputTokens = "max_output_tokens"
         case topP = "top_p"
+        case topK = "top_k"
+        case presencePenalty = "presence_penalty"
     }
 }
 
@@ -163,8 +167,8 @@ public enum ResponsesAPIMapper {
             messages: chatMessages,
             stream: request.stream ?? true,
             streamOptions: nil,
-            temperature: request.temperature ?? 0.6,
-            topP: request.topP,
+            temperature: request.temperature ?? GenerationDefaults.temperature,
+            topP: request.topP ?? GenerationDefaults.topP,
             // Codex and OpenCode omit max_output_tokens; forward nil so the
             // chat validator applies its context-bounded default (no
             // artificial output cap) instead of a fixed token budget.
@@ -177,11 +181,12 @@ public enum ResponsesAPIMapper {
             // parallel_tool_calls=false is not supported by the chat path;
             // forward nothing so the validator's default applies.
             parallelToolCalls: nil,
-            topK: nil,
+            topK: request.topK ?? GenerationDefaults.topK,
             repetitionPenalty: nil,
             n: 1,
             logprobs: nil,
-            presencePenalty: nil,
+            presencePenalty: request.presencePenalty
+                ?? GenerationDefaults.presencePenalty,
             frequencyPenalty: nil)
     }
 }

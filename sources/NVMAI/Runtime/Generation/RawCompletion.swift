@@ -65,7 +65,7 @@ extension GenerationConfig {
     /// (`RealForwardRunner.lastGreedyToken`) instead of sampling from the
     /// logits buffer. Anything else needs real logits.
     public var isPureGreedy: Bool {
-        temperature == 0 && repetitionPenalty == 1
+        temperature == 0 && presencePenalty == 0 && repetitionPenalty == 1
     }
 
 }

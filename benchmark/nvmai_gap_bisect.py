@@ -45,7 +45,8 @@ def run(max_tokens, tag, extra_env=None):
     payload = json.dumps({
         "model": "qwen3.6-35b-a3b",
         "messages": [{"role": "user", "content": PROMPT}],
-        "temperature": 0, "max_completion_tokens": max_tokens, "stream": True,
+        "temperature": 0, "top_p": 0.95, "top_k": 20,
+        "presence_penalty": 0.0, "max_completion_tokens": max_tokens, "stream": True,
     }).encode()
     # one warm request then the measured one
     for i in range(2):

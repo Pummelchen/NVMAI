@@ -3,6 +3,21 @@ import Testing
 @testable import NVMAI
 
 @Suite struct SampleTopK64Tests {
+    @Test func generationConfigUsesCanonicalSamplingDefaults() throws {
+        let config = GenerationConfig()
+        #expect(config.temperature == 0.6)
+        #expect(config.topK == 20)
+        #expect(config.topP == 0.95)
+        #expect(config.presencePenalty == 0)
+        try config.validate()
+    }
+
+    @Test func nonzeroPresencePenaltyIsRejected() {
+        #expect(throws: GeneratorError.self) {
+            try GenerationConfig(presencePenalty: 0.1).validate()
+        }
+    }
+
     @Test func truncationDefaultsDoNotDisableGreedyEligibility() {
         let config = GenerationConfig(temperature: 0, topK: 64, topP: 0.95)
         #expect(config.isPureGreedy)
