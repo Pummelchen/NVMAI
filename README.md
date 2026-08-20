@@ -1,4 +1,17 @@
 <img width="1122" height="1402" alt="image" src="https://github.com/user-attachments/assets/b807e4e2-f26f-4cae-9998-3a7fdbe03290" />
+## Announcement — Ornith-1.5-35B-A3B will be NVMAI's new default model
+
+NVMAI will work on support for **Ornith-1.5-35B-A3B** as its new default AI model,
+replacing Qwen 3.6 35B-A3B. It is a 35B mixture-of-experts model that activates
+only ~3B parameters per token, so it fits the same bounded-memory architecture and
+Apple M1–M5 hardware NVMAI already targets — while outperforming Qwen 3.6 35B-A3B
+on the coding and agentic benchmarks that drive this project.
+
+![LLM Performance Evaluation](assets/stats.png)
+
+Source: [Ornith-1.5 announcement](https://ornith.ai/ornith_1_5.html) and
+[ornith-ai/Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
+
 
 # NVMAI
 
