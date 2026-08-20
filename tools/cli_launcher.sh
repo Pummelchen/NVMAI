@@ -8,7 +8,7 @@
 # prefill for seconds-per-answer chat speed; the base model keeps the CLI's
 # agentic tool loop), then hands the terminal over to the CLI.
 #
-#   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
+#   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [nothink|think]
 #
 # With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
 # (fast/full), then the quantization, then default/concise mode, then

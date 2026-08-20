@@ -6,7 +6,7 @@
 # server; the CLI/model answers pick the cli_launcher.sh command to connect
 # a coding CLI afterwards.
 #
-#   tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [4|6|8] [default|concise] [nothink|think]
+#   tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [nothink|think]
 #
 # With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
 # (fast/full), then the quantization, then default/concise mode, then
