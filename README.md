@@ -7,7 +7,7 @@
 
 ### Project Purpose
 
-- **SSD-streamed inference:** NVMAI runs large mixture-of-experts models on
+- **SSD-streamed inference:** NVMAI runs large mixture-of-experts (MOE) models on
   low-RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
   loading only the experts selected for each token.
 
@@ -53,7 +53,7 @@
 - **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
   generation, streaming responses, and client-authorized function-tool calls.
 
-## Ornith 1.5
+## Ornith 1.5 35B A3B
 
 > [!IMPORTANT]
 > NVMAI now supports text-only **Ornith-1.5-35B-A3B** installation and inference
