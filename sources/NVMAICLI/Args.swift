@@ -28,8 +28,8 @@ public struct Args: Equatable, Sendable {
                 messagesFile: String? = nil,
                 maxNew: Int = 1_024,
                 maxContext: Int = 4096,
-                temperature: Float = 0.2,
-                topK: Int? = 64,
+                temperature: Float = 0.6,
+                topK: Int? = 20,
                 topP: Float? = 0.95,
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
@@ -94,8 +94,8 @@ extension Args {
     options:
       --max-new <int>           Generated-token limit (default 1024).
       --max-context <int>       Context limit, 1...262144 tokens (default 4096).
-      --temperature <float>     Sampling temperature (default 0.2; 0 = greedy).
-      --top-k <int>             Top-k truncation, 1...256 (default 64; 0 = off).
+      --temperature <float>     Sampling temperature (default 0.6; 0 = greedy).
+      --top-k <int>             Top-k truncation, 1...256 (default 20; 0 = off).
       --top-p <float>           Nucleus truncation (default 0.95).
       --repetition-penalty <f>  Repetition penalty (default 1.0).
       --seed <uint64>           Deterministic sampling seed (default off).
@@ -125,8 +125,8 @@ extension Args {
         var messagesFile: String?
         var maxNew = 1_024
         var maxContext = 4096
-        var temperature: Float = 0.2
-        var topK: Int? = 64
+        var temperature: Float = 0.6
+        var topK: Int? = 20
         var topP: Float? = 0.95
         var repetitionPenalty: Float = 1.0
         var seed: UInt64?

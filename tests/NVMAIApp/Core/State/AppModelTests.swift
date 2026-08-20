@@ -10,8 +10,8 @@ import Testing
         model.promptText = "go"
 
         let request = try model.makeRequest()
-        #expect(request.temperature == 0.2)
-        #expect(request.topK == 64)
+        #expect(request.temperature == 0.6)
+        #expect(request.topK == 20)
         #expect(request.topP == 0.95)
         #expect(request.maxNewTokens == 4_096)
         #expect(request.repetitionPenalty == 1)

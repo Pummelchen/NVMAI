@@ -5,6 +5,17 @@ import Testing
 
 @Suite("OpenAI request validation")
 struct OpenAIValidationTests {
+    @Test func omittedSamplingControlsUseProductionDefaults() throws {
+        let data = Data(#"{"model":"m","messages":[{"role":"user","content":"x"}]}"#.utf8)
+        let request = try JSONDecoder().decode(OpenAIChatRequest.self, from: data)
+
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+
+        #expect(validated.generationConfig.temperature == 0.6)
+        #expect(validated.generationConfig.topK == 20)
+        #expect(validated.generationConfig.topP == 0.95)
+    }
+
     @Test func requiredToolChoiceIsRejected() throws {
         let data = Data(#"""
         {"model":"m","messages":[{"role":"user","content":"x"}],"tool_choice":"required"}

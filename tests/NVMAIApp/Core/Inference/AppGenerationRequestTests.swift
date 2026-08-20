@@ -8,8 +8,8 @@ import Testing
     @Test func defaultRequestUsesDocumentedSamplingPolicy() {
         let request = AppGenerationRequest(modelDirectory: existingDirectory, prompt: "hello")
         #expect(request.maxNewTokens == 4_096)
-        #expect(request.temperature == 0.2)
-        #expect(request.topK == 64)
+        #expect(request.temperature == 0.6)
+        #expect(request.topK == 20)
         #expect(request.topP == 0.95)
         #expect(request.repetitionPenalty == 1)
         #expect(!request.isPureGreedy)
@@ -19,7 +19,7 @@ import Testing
         let request = AppGenerationRequest(modelDirectory: existingDirectory,
                                            prompt: "hello",
                                            temperature: 0)
-        #expect(request.topK == 64)
+        #expect(request.topK == 20)
         #expect(request.topP == 0.95)
         #expect(request.isPureGreedy)
     }

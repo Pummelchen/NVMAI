@@ -19,9 +19,9 @@ public final class AppModel {
     public var runtimeOptions = AppRuntimeOptions()
     public var maxNewTokensOverride: Int?
     public var maxContextTokens: Int = 4096
-    public var temperature: Double = 0.2
+    public var temperature: Double = 0.6
     public var topKEnabled: Bool = true
-    public var topK: Int = 64
+    public var topK: Int = 20
     public var topPEnabled: Bool = true
     public var topP: Double = 0.95
     public private(set) var newlineShortcut: AppNewlineShortcut = .return

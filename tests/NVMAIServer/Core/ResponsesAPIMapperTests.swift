@@ -7,6 +7,19 @@ import Testing
         try JSONDecoder().decode(ResponsesAPIRequest.self, from: Data(json.utf8))
     }
 
+    @Test func omittedSamplingControlsUseProductionDefaults() throws {
+        let request = try decode("""
+        {"model": "m", "input": [{"role": "user", "content": "hi"}]}
+        """)
+
+        let chat = try ResponsesAPIMapper.chatRequest(request)
+        let validated = try OpenAIRequestValidator.validate(chat, modelID: "m")
+
+        #expect(validated.generationConfig.temperature == 0.6)
+        #expect(validated.generationConfig.topK == 20)
+        #expect(validated.generationConfig.topP == 0.95)
+    }
+
     @Test func instructionsAndDeveloperMergeIntoOneLeadingSystemMessage() throws {
         let request = try decode("""
         {

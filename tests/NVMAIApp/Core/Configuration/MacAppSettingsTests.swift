@@ -19,6 +19,8 @@ import Testing
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: model)
 
         #expect(settings == MacAppSettings())
+        #expect(settings.temperature == 0.6)
+        #expect(settings.topK == 20)
         #expect(FileManager.default.fileExists(atPath: fileURL.path))
         let decoded = try JSONDecoder().decode(
             MacAppSettings.self,

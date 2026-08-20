@@ -16,8 +16,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 prompt: String,
                 maxNewTokens: Int = 4_096,
                 maxContextTokens: Int = 4096,
-                temperature: Float = 0.2,
-                topK: Int? = 64,
+                temperature: Float = 0.6,
+                topK: Int? = 20,
                 topP: Float? = 0.95,
                 repetitionPenalty: Float = 1.0,
                 runtimeOptions: AppRuntimeOptions = AppRuntimeOptions()) {

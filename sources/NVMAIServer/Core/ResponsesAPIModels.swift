@@ -163,7 +163,7 @@ public enum ResponsesAPIMapper {
             messages: chatMessages,
             stream: request.stream ?? true,
             streamOptions: nil,
-            temperature: request.temperature ?? 0.2,
+            temperature: request.temperature ?? 0.6,
             topP: request.topP,
             // Codex and OpenCode omit max_output_tokens; forward nil so the
             // chat validator applies its context-bounded default (no

@@ -79,8 +79,8 @@ import NVMAI
             prompt: "hello")
 
         let config = RealInferenceSession.generationConfig(for: request)
-        #expect(config.temperature == 0.2)
-        #expect(config.topK == 64)
+        #expect(config.temperature == 0.6)
+        #expect(config.topK == 20)
         #expect(config.topP == 0.95)
         #expect(config.repetitionPenalty == 1)
     }
