@@ -117,7 +117,17 @@ enum PrefillChunkPlanner {
 }
 
 public enum PrefillKVStorageMode: String, Sendable, Equatable {
+    case int4
+    case int8
     case fp16
+
+    public init(precision: KVCachePrecision) {
+        switch precision {
+        case .int4: self = .int4
+        case .int8: self = .int8
+        case .fp16: self = .fp16
+        }
+    }
 }
 
 public enum PrefillExecutedMode: String, Sendable, Equatable {

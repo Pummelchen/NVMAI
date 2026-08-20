@@ -29,6 +29,21 @@ import Foundation
             || ProcessInfo.processInfo.environment["NVMAI_MTP_EXPERT_SLOTS"] != nil)
     }
 
+    @Test func draftKVAccountingUsesSelectedPrecision() throws {
+        func bytes(_ precision: KVCachePrecision) throws -> Int {
+            try StreamingMTPMemoryPlan(
+                residentTensorBytes: 0,
+                expertStrideBytes: 0,
+                draftKVTokens: 65_536,
+                kvCachePrecision: precision,
+                targetRollbackBytes: 0,
+                scratchBytes: 0).draftKVBytes
+        }
+        #expect(try bytes(.fp16) == 128 * 1_048_576)
+        #expect(try bytes(.int8) == 68 * 1_048_576)
+        #expect(try bytes(.int4) == 36 * 1_048_576)
+    }
+
     @Test func oversizedResidentDesignIsRejected() {
         #expect(throws: StreamingMTPError.self) {
             _ = try StreamingMTPMemoryPlan(

@@ -50,6 +50,7 @@ public struct StreamingMTPMemoryPlan: Sendable, Equatable {
                 residentTensorBytes: Int,
                 expertStrideBytes: Int,
                 draftKVTokens: Int = defaultDraftKVTokens,
+                kvCachePrecision: KVCachePrecision = .fp16,
                 targetRollbackBytes: Int,
                 scratchBytes: Int) throws {
         guard Self.allowedBudgetMiB.contains(budgetMiB) else {
@@ -62,8 +63,16 @@ public struct StreamingMTPMemoryPlan: Sendable, Equatable {
         }
         let budgetBytes = budgetMiB * 1_048_576
         let streamedExpertCacheBytes = expertStrideBytes * Self.expertSlots
-        // One MTP attention layer, two FP16 KV tensors, 2 heads x 256 dims.
-        let draftKVBytes = draftKVTokens * 2 * 2 * 256 * 2
+        // One MTP attention layer, two KV tensors, 2 heads x 256 dimensions.
+        let elementsPerRow = 2 * 256
+        let valueBytes = (elementsPerRow * kvCachePrecision.rawValue + 7) / 8
+        let alignedValueBytes = (valueBytes + 1) & ~1
+        let groupCount = (elementsPerRow + KVCacheManager.quantizationGroupSize - 1)
+            / KVCacheManager.quantizationGroupSize
+        let rowBytes = kvCachePrecision == .fp16
+            ? elementsPerRow * MemoryLayout<Float16>.stride
+            : alignedValueBytes + groupCount * 2 * MemoryLayout<Float16>.stride
+        let draftKVBytes = draftKVTokens * 2 * rowBytes
         let required = residentTensorBytes + streamedExpertCacheBytes
             + draftKVBytes + targetRollbackBytes + scratchBytes
         guard required <= budgetBytes else {
@@ -87,6 +96,7 @@ public enum StreamingMTPError: Error, Equatable, CustomStringConvertible {
     case sidecarMustBeQwen36MTP
     case greedyOnly
     case draftNotReady
+    case yaRNUnsupported
     /// A logic invariant the decoder believes is impossible was violated.
     /// Distinct from `.draftNotReady` so a genuine internal bug is debuggable
     /// instead of masquerading as "call advance before prepare" (R24).
@@ -108,6 +118,8 @@ public enum StreamingMTPError: Error, Equatable, CustomStringConvertible {
             "native MTP currently preserves exact output only for greedy decoding"
         case .draftNotReady:
             "MTP draft state has not been aligned with the target prompt"
+        case .yaRNUnsupported:
+            "MTP cannot use YaRN until its 65536-token draft cache supports extended logical positions"
         case .internalInconsistency(let detail):
             "MTP internal inconsistency: \(detail)"
         }
@@ -190,6 +202,9 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
         guard mtpSidecar.config.family == .qwen36MTP else {
             throw StreamingMTPError.sidecarMustBeQwen36MTP
         }
+        guard runtimeConfiguration.ropeScalingMode == .none else {
+            throw StreamingMTPError.yaRNUnsupported
+        }
         // Validate MTP tensors exist before attempting weight sharing. The
         // errors (missing tensor, wrong layout) propagate as-is (R19) — a
         // broken sidecar must fail loudly at session construction.
@@ -211,7 +226,8 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
             prefillEnabled: true,
             prefillChunkTokens: 32,
             prefillAttentionPath: runtimeConfiguration.prefillAttentionPath,
-            forceLogitsHead: boundDraft.lmHeadWeightBits != 4)
+            forceLogitsHead: boundDraft.lmHeadWeightBits != 4,
+            kvCachePrecision: runtimeConfiguration.kvCachePrecision)
         let draftRunner = try RealForwardRunner(model: boundDraft,
                                                 context: context,
                                                 maxContext: draftContext,
@@ -226,6 +242,7 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
             residentTensorBytes: mtpSidecar.mtpResidentTensorBytes,
             expertStrideBytes: mtpSidecar.mtpExpertStrideBytes,
             draftKVTokens: draftContext,
+            kvCachePrecision: runtimeConfiguration.kvCachePrecision,
             targetRollbackBytes: targetRunner.speculativeRollbackBytes,
             scratchBytes: scratch)
         self.target = targetRunner

@@ -1,4 +1,5 @@
 import Foundation
+import NVMAI
 import NVMAIRepackCore
 import Observation
 import os
@@ -77,7 +78,10 @@ public final class AppModel {
         self.runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
-            conciseMode: settings.conciseMode)
+            conciseMode: settings.conciseMode,
+            kvCachePrecision: KVCachePrecision(rawValue: settings.kvCacheBits) ?? .int8,
+            ropeScalingMode: RuntimeRoPEScalingMode(
+                rawValue: settings.ropeScalingMode) ?? .none)
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
@@ -695,7 +699,10 @@ public final class AppModel {
             forModelDirectory: modelDirectory)
         runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
-            prefillEnabled: settings.prefillEnabled)
+            prefillEnabled: settings.prefillEnabled,
+            kvCachePrecision: KVCachePrecision(rawValue: settings.kvCacheBits) ?? .int8,
+            ropeScalingMode: RuntimeRoPEScalingMode(
+                rawValue: settings.ropeScalingMode) ?? .none)
         maxContextTokens = settings.contextTokens
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
@@ -718,7 +725,10 @@ public final class AppModel {
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
             newlineShortcut: newlineShortcut,
-            showPromptExamples: showPromptExamples)
+            showPromptExamples: showPromptExamples,
+            conciseMode: runtimeOptions.conciseMode,
+            kvCacheBits: runtimeOptions.kvCachePrecision.rawValue,
+            ropeScalingMode: runtimeOptions.ropeScalingMode.rawValue)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
         do {
             try MacAppSettingsFileStore.save(

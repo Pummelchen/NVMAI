@@ -203,9 +203,10 @@ public struct ArchConfig: Sendable, Equatable {
             convKernelSize: 4)
     )
 
-    /// Native one-layer Qwen3.6 MTP draft. The 65,536-token FP16 ring keeps
-    /// its KV at 128 MiB; truncating draft context can only lower acceptance
-    /// because every emitted token is still verified by the full target.
+    /// Native one-layer Qwen3.6 MTP draft. Its 65,536-token KV cache is at most
+    /// 128 MiB in FP16 and smaller with compressed storage; truncating draft
+    /// context can only lower acceptance because every emitted token is still
+    /// verified by the full target.
     public static let qwen36MTP = ArchConfig(
         hiddenSize: 2048,
         intermediateSize: 512,

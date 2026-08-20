@@ -101,6 +101,35 @@ kernel void rope_neox_subdim(
                     float(position), theta);
 }
 
+kernel void rope_yarn_neox_subdim(
+    device half* data [[buffer(0)]],
+    device const float* inverse_frequencies [[buffer(1)]],
+    constant uint& position [[buffer(2)]],
+    constant uint& head_dim [[buffer(3)]],
+    constant uint& num_heads [[buffer(4)]],
+    constant uint& rotary_dim [[buffer(5)]],
+    constant float& attention_factor [[buffer(6)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    const uint pair = gid.x;
+    const uint head_index = gid.y;
+    const uint token_index = gid.z;
+    const uint half_rotary = rotary_dim / 2u;
+    if (pair >= half_rotary || head_index >= num_heads) return;
+    device half* head = data
+        + token_index * num_heads * head_dim
+        + head_index * head_dim;
+    const float angle = float(position + token_index) * inverse_frequencies[pair];
+    const float cosine = cos(angle) * attention_factor;
+    const float sine = sin(angle) * attention_factor;
+    const uint lower = pair;
+    const uint upper = half_rotary + pair;
+    const float x0 = float(head[lower]);
+    const float x1 = float(head[upper]);
+    head[lower] = half(x0 * cosine - x1 * sine);
+    head[upper] = half(x0 * sine + x1 * cosine);
+}
+
 kernel void rope_proportional_neox(
     device half* data [[buffer(0)]],
     constant uint& position [[buffer(1)]],

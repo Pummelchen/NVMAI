@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import NVMAI
 import NVMAIAppCore
 import NVMAIDecodeProtocol
 
@@ -301,6 +302,15 @@ import NVMAIDecodeProtocol
             throw AppInferenceError.invalidRequest(
                 "unknown model verification \(options.modelVerification)")
         }
+        guard let kvCachePrecision = KVCachePrecision(rawValue: options.kvCacheBits) else {
+            throw AppInferenceError.invalidRequest(
+                "unknown KV-cache precision \(options.kvCacheBits)")
+        }
+        guard let ropeScalingMode = RuntimeRoPEScalingMode(
+            rawValue: options.ropeScalingMode) else {
+            throw AppInferenceError.invalidRequest(
+                "unknown RoPE scaling mode \(options.ropeScalingMode)")
+        }
         let resolved = AppRuntimeOptions(
             expertCacheSlots: options.expertCacheSlots,
             expertCachePolicy: cachePolicy,
@@ -308,7 +318,9 @@ import NVMAIDecodeProtocol
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: rdadvisePolicy,
             modelVerification: modelVerification,
-            conciseMode: options.conciseMode)
+            conciseMode: options.conciseMode,
+            kvCachePrecision: kvCachePrecision,
+            ropeScalingMode: ropeScalingMode)
         try resolved.validate()
         return resolved
     }

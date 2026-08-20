@@ -5,9 +5,9 @@ final class PrefillQKVEpilogue {
     private let perHeadNorm: PrefillPerHeadNorm
     private let rope: PrefillRoPE
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, yarn: YaRNRoPEParameters? = nil) throws {
         self.perHeadNorm = try PrefillPerHeadNorm(context: context)
-        self.rope = try PrefillRoPE(context: context)
+        self.rope = try PrefillRoPE(context: context, yarn: yarn)
     }
 
     /// Qwen 3.6 full-attention epilogue: per-head weighted RMS norm on Q and K

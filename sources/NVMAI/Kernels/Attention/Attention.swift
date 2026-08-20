@@ -183,7 +183,8 @@ final class Attention {
                           seqLen: UInt32,
                           window: UInt32,
                           scale: Float? = nil,
-                          ringCapacity: UInt32 = 0) throws {
+                          ringCapacity: UInt32 = 0,
+                          kvFormat: KVView? = nil) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -197,7 +198,8 @@ final class Attention {
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: kvStart, scale: sc,
                     preferGQASWA: true,
-                    ringCapacity: ringCapacity)
+                    ringCapacity: ringCapacity,
+                    kvFormat: kvFormat)
     }
 
     /// Full attention. Separate normalization and RoPE make the cache streams
@@ -211,7 +213,8 @@ final class Attention {
                            numQHeads: UInt32,
                            numKVHeads: UInt32,
                            seqLen: UInt32,
-                           scale: Float? = nil) throws {
+                           scale: Float? = nil,
+                           kvFormat: KVView? = nil) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -225,7 +228,8 @@ final class Attention {
                     v: v, vOffset: vOffset, out: out, outOffset: outOffset,
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
-                    preferGQASWA: false)
+                    preferGQASWA: false,
+                    kvFormat: kvFormat)
     }
 
 
@@ -242,13 +246,14 @@ final class Attention {
                              headDim: UInt32, numQHeads: UInt32, numKVHeads: UInt32,
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
-                             ringCapacity: UInt32 = 0) throws {
+                             ringCapacity: UInt32 = 0,
+                             kvFormat: KVView? = nil) throws {
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
         precondition(Int(headDim) <= Self.maxHeadDim,
                      "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
         precondition(ringCapacity == 0 || preferGQASWA,
-                     "FP16 KV ring is only valid for SWA attention")
+                     "KV ring is only valid for SWA attention")
         splitStateLock.lock()
         let reentered = splitInFlight
         splitInFlight = true
@@ -298,6 +303,14 @@ final class Attention {
         p1.setBytes(&cl,  length: MemoryLayout<UInt32>.size, index: 11)
         p1.setBytes(&nc,  length: MemoryLayout<UInt32>.size, index: 12)
         p1.setBytes(&sc,  length: MemoryLayout<Float>.size,  index: 13)
+        var kvBits = UInt32(kvFormat?.precision.rawValue ?? 16)
+        var kvStride = UInt32(kvFormat?.stride ?? 0)
+        var kvValueBytes = UInt32(kvFormat?.valueBytes ?? 0)
+        var kvGroupSize = UInt32(kvFormat?.groupSize ?? KVCacheManager.quantizationGroupSize)
+        p1.setBytes(&kvBits, length: MemoryLayout<UInt32>.size, index: 14)
+        p1.setBytes(&kvStride, length: MemoryLayout<UInt32>.size, index: 15)
+        p1.setBytes(&kvValueBytes, length: MemoryLayout<UInt32>.size, index: 16)
+        p1.setBytes(&kvGroupSize, length: MemoryLayout<UInt32>.size, index: 17)
         let partialGroups = geometry.partialThreadgroups
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
@@ -372,7 +385,7 @@ final class Attention {
                                                     numChunks: specializedChunks,
                                                     ringCapacity: ringCapacity)
             } catch {
-                preconditionFailure("failed to build FP16 KV ring attention pipeline: \(error)")
+                preconditionFailure("failed to build KV ring attention pipeline: \(error)")
             }
         }
         if useGQAPartial && headDim == 256 && numQHeads == 16 && numKVHeads == 8 {

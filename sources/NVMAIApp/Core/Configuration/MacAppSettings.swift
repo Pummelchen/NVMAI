@@ -1,4 +1,5 @@
 import Foundation
+import NVMAI
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
@@ -16,6 +17,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var newlineShortcut: AppNewlineShortcut = .return
     var showPromptExamples: Bool = true
     var conciseMode: Bool = false
+    var kvCacheBits: Int = 8
+    var ropeScalingMode: String = "none"
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -30,6 +33,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case newlineShortcut
         case showPromptExamples
         case conciseMode
+        case kvCacheBits
+        case ropeScalingMode
     }
 
     init(version: Int = currentVersion,
@@ -43,7 +48,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          prefillEnabled: Bool = true,
          newlineShortcut: AppNewlineShortcut = .return,
          showPromptExamples: Bool = true,
-         conciseMode: Bool = false) {
+         conciseMode: Bool = false,
+         kvCacheBits: Int = 8,
+         ropeScalingMode: String = "none") {
         self.version = version
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
@@ -56,6 +63,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.newlineShortcut = newlineShortcut
         self.showPromptExamples = showPromptExamples
         self.conciseMode = conciseMode
+        self.kvCacheBits = kvCacheBits
+        self.ropeScalingMode = ropeScalingMode
     }
 
     init(from decoder: Decoder) throws {
@@ -78,11 +87,19 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         conciseMode = try container.decodeIfPresent(
             Bool.self,
             forKey: .conciseMode) ?? false
+        kvCacheBits = try container.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? 8
+        ropeScalingMode = try container.decodeIfPresent(
+            String.self, forKey: .ropeScalingMode) ?? "none"
     }
 
     func isValid() -> Bool {
         version == Self.currentVersion
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
+            && KVCachePrecision(rawValue: kvCacheBits) != nil
+            && RuntimeRoPEScalingMode(rawValue: ropeScalingMode) != nil
+            && (ropeScalingMode == "yarn"
+                ? RuntimeConfiguration.supportedYaRNContextTokens.contains(contextTokens)
+                : contextTokens <= RuntimeConfiguration.nativeMaximumContextTokens)
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)

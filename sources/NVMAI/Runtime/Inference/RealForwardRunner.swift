@@ -153,6 +153,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let int4: DequantInt4GEMV
     private let affine: AffineQuantGEMV?
     private let attention: Attention
+    private let kvQuantizer: KVCacheQuantizer?
     private let shared: SharedExpertRuntime
     private let moe: MoE
     private let fusionHead: LMHeadChainInt4
@@ -282,6 +283,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.ctx = context
         self.cfg = model.config
         self.maxContext = maxContext
+        try runtimeConfiguration.validate(maxContext: maxContext)
+        let yarnParameters: YaRNRoPEParameters?
+        if runtimeConfiguration.ropeScalingMode == .yarn {
+            guard model.config.ropeNeoxSubdim else {
+                throw RuntimeConfigurationError.yaRNUnsupportedArchitecture
+            }
+            yarnParameters = YaRNRoPEParameters(
+                headDim: model.config.fullHeadDim,
+                partialRotaryFactor: model.config.partialRotaryFactor,
+                theta: model.config.fullRopeTheta,
+                targetContextTokens: runtimeConfiguration.yarnContextTokens)
+        } else {
+            yarnParameters = nil
+        }
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
             && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
@@ -298,6 +313,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      config: cfg,
                                      maxContext: maxContext,
                                      fp16RingEnabled: useFP16Ring,
+                                     precision: runtimeConfiguration.kvCachePrecision,
                                      slidingWindow: cfg.slidingWindow,
                                      maxPrefillChunkTokens: runtimeConfiguration.prefillChunkTokens)
 
@@ -314,6 +330,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             : try AffineQuantGEMV(context: context,
                                   weightBits: model.attentionWeightBits)
         self.attention = try Attention(context: context)
+        self.kvQuantizer = runtimeConfiguration.kvCachePrecision.isQuantized
+            ? try KVCacheQuantizer(context: context) : nil
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
                                                   siluActivation: silu)
@@ -339,7 +357,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.prefillMPPAffineInt4 = MPPPrefillInt4QMM(
             context: context,
             weightBits: model.attentionWeightBits)
-        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context)
+        self.prefillQKVEpilogue = try PrefillQKVEpilogue(context: context,
+                                                         yarn: yarnParameters)
         self.prefillAttention = try PrefillAttention(context: context)
         self.prefillRouter = try PrefillRouter(context: context,
                                                weightBits: model.routerWeightBits)
@@ -374,7 +393,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gdn = nil
             self.gdnState = nil
         }
-        self.rope = cfg.ropeNeoxSubdim ? try RoPE(context: context) : nil
+        self.rope = cfg.ropeNeoxSubdim
+            ? try RoPE(context: context, yarn: yarnParameters) : nil
         self.int8ScalarGate = cfg.sharedExpertGated
             ? try DequantInt8GEMV(context: context,
                                   additionalShapes: cfg.decodeInt8GEMVShapes)
@@ -1336,7 +1356,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      useTwoRowProjection: Bool = false) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
-            throw PrefillError.chunkedUnsupported("chunked prefill attention requires FP16 KV")
+            throw PrefillError.chunkedUnsupported("chunked prefill attention requires a KV cache")
         }
         let kvPosition = kv?.position ?? 0
         guard kvPosition == startPosition else {
@@ -1365,7 +1385,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let ringCapacity = kv.ringCapacity(layer: ringLayer)
             guard requiredCapacity <= ringCapacity else {
                 throw PrefillError.chunkedUnsupported(
-                    "FP16 KV ring capacity \(ringCapacity) cannot hold required capacity \(requiredCapacity) for maxContext \(maxContext), slidingWindow \(cfg.slidingWindow), and prefillChunkTokens \(config.chunkTokens)")
+                    "KV ring capacity \(ringCapacity) cannot hold required capacity \(requiredCapacity) for maxContext \(maxContext), slidingWindow \(cfg.slidingWindow), and prefillChunkTokens \(config.chunkTokens)")
             }
         }
 
@@ -1807,34 +1827,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// [query ; gate] q_proj split per head, weighted per-head q/k norms
     /// (no V norm), NeoX sub-dim RoPE, full attention with the configured
     /// scale, sigmoid output gate, then o_proj into `oOut`.
-    private func encodeGatedFullAttentionDecode(_ cb: MTLCommandBuffer,
-                                                layer L: Int,
-                                                position: Int,
-                                                seqLen: UInt32) throws {
-        guard let elementwise, let rope, let qPackedScratch, let attnGateScratch else {
-            throw ModelError.internalInconsistency(
-                detail: "attn_output_gate layer \(L) without gate kernels (arch mask misconfiguration)")
-        }
-        guard let kv else {
-            throw ModelError.internalInconsistency(
-                detail: "FP16 attention requires an FP16 KV cache")
-        }
-        let D = UInt32(cfg.hiddenSize)
-        let eps: Float = 1e-6
-        let headDim = cfg.fullHeadDim
-        let numKV = cfg.numFullKVHeads
-        let qDim = UInt32(cfg.numHeads * headDim)
-        let kvDim = UInt32(numKV * headDim)
-        let kSlot = kv.kSlot(layer: L, position: position)
-        let vSlot = kv.vSlot(layer: L, position: position)
-        let q = try model.qProj(layer: L)
-        let k = try model.kProj(layer: L)
-        let v = try model.vProj(layer: L)
-        let o = try model.oProj(layer: L)
-        let qNormW = try model.qNorm(layer: L)
-        let kNormW = try model.kNorm(layer: L)
-        let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
-
+    private func encodeGatedFullQKVProjection(
+        _ cb: MTLCommandBuffer,
+        layer: Int,
+        qOutput: MTLBuffer,
+        kOutput: (buffer: MTLBuffer, offset: Int),
+        vOutput: (buffer: MTLBuffer, offset: Int),
+        qDimension: UInt32,
+        kvDimension: UInt32
+    ) throws {
+        let q = try model.qProj(layer: layer)
+        let k = try model.kProj(layer: layer)
+        let v = try model.vProj(layer: layer)
+        let hiddenDimension = UInt32(cfg.hiddenSize)
         if model.attentionWeightBits == 4 {
             try fusedQKVGEMV.encode(commandBuffer: cb,
                             qWeights: q.buffer, qWeightsOffset: Int(q.offset),
@@ -1847,23 +1852,59 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                             vScales: v.buffer, vScalesOffset: Int(v.scaleOffset),
                             vBiases: v.buffer, vBiasesOffset: Int(v.biasOffset),
                             x: normed,
-                            qOut: qPackedScratch,
-                            kOut: kSlot.buffer, kOutOffset: kSlot.offset,
-                            vOut: vSlot.buffer, vOutOffset: vSlot.offset,
-                            qRows: 2 * qDim,
-                            kvRows: kvDim,
-                            n: D)
+                            qOut: qOutput,
+                            kOut: kOutput.buffer, kOutOffset: kOutput.offset,
+                            vOut: vOutput.buffer, vOutOffset: vOutput.offset,
+                            qRows: 2 * qDimension,
+                            kvRows: kvDimension,
+                            n: hiddenDimension)
         } else {
             try encodePrimaryGEMV(commandBuffer: cb, projection: q,
-                              x: normed, y: qPackedScratch,
-                              m: 2 * qDim, n: D)
+                              x: normed, y: qOutput,
+                              m: 2 * qDimension, n: hiddenDimension)
             try encodePrimaryGEMV(commandBuffer: cb, projection: k,
-                              x: normed, y: kSlot.buffer,
-                              yOffset: kSlot.offset, m: kvDim, n: D)
+                              x: normed, y: kOutput.buffer,
+                              yOffset: kOutput.offset,
+                              m: kvDimension, n: hiddenDimension)
             try encodePrimaryGEMV(commandBuffer: cb, projection: v,
-                              x: normed, y: vSlot.buffer,
-                              yOffset: vSlot.offset, m: kvDim, n: D)
+                              x: normed, y: vOutput.buffer,
+                              yOffset: vOutput.offset,
+                              m: kvDimension, n: hiddenDimension)
         }
+    }
+
+    private func encodeGatedFullAttentionDecode(_ cb: MTLCommandBuffer,
+                                                layer L: Int,
+                                                position: Int,
+                                                seqLen: UInt32) throws {
+        guard let elementwise, let rope, let qPackedScratch, let attnGateScratch else {
+            throw ModelError.internalInconsistency(
+                detail: "attn_output_gate layer \(L) without gate kernels (arch mask misconfiguration)")
+        }
+        guard let kv else {
+            throw ModelError.internalInconsistency(
+                detail: "full attention requires a KV cache")
+        }
+        let D = UInt32(cfg.hiddenSize)
+        let eps: Float = 1e-6
+        let headDim = cfg.fullHeadDim
+        let numKV = cfg.numFullKVHeads
+        let qDim = UInt32(cfg.numHeads * headDim)
+        let kvDim = UInt32(numKV * headDim)
+        let kSlot = kv.kSlot(layer: L, position: position)
+        let vSlot = kv.vSlot(layer: L, position: position)
+        let quantizedKV = kv.precision.isQuantized
+        let kWrite = quantizedKV ? (buffer: kStage, offset: 0) : kSlot
+        let vWrite = quantizedKV ? (buffer: vStage, offset: 0) : vSlot
+        let o = try model.oProj(layer: L)
+        let qNormW = try model.qNorm(layer: L)
+        let kNormW = try model.kNorm(layer: L)
+        let rotaryDim = UInt32(Double(headDim) * cfg.partialRotaryFactor)
+
+        try encodeGatedFullQKVProjection(
+            cb, layer: L, qOutput: qPackedScratch,
+            kOutput: kWrite, vOutput: vWrite,
+            qDimension: qDim, kvDimension: kvDim)
         try elementwise.encodeSplitQGate(commandBuffer: cb,
                                      packed: qPackedScratch,
                                      q: qScratch,
@@ -1879,10 +1920,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                numHeads: cfg.numHeads,
                                eps: eps)
         try rms.encodeBF16WPerHead(commandBuffer: cb,
-                               x: kSlot.buffer, xOffset: kSlot.offset,
+                               x: kWrite.buffer, xOffset: kWrite.offset,
                                weight: kNormW.buffer,
                                weightOffset: Int(kNormW.offset),
-                               out: kSlot.buffer, outOffset: kSlot.offset,
+                               out: kWrite.buffer, outOffset: kWrite.offset,
                                headDim: UInt32(headDim),
                                numHeads: numKV,
                                eps: eps)
@@ -1894,23 +1935,31 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               rotaryDim: rotaryDim,
                               theta: Float(cfg.fullRopeTheta))
         try rope.encodeNeoxSubdim(commandBuffer: cb,
-                              data: kSlot.buffer,
-                              dataOffset: kSlot.offset,
+                              data: kWrite.buffer,
+                              dataOffset: kWrite.offset,
                               position: UInt32(position),
                               headDim: UInt32(headDim),
                               numHeads: UInt32(numKV),
                               rotaryDim: rotaryDim,
                               theta: Float(cfg.fullRopeTheta))
+        if quantizedKV {
+            try encodeQuantizedKV(commandBuffer: cb, kv: kv, layer: L,
+                                  position: position, keySource: kStage,
+                                  valueSource: vStage, elementCount: Int(kvDim))
+        }
+        let keyView = kv.keyView(layer: L, validTokenCount: Int(seqLen))
+        let valueView = kv.valueView(layer: L, validTokenCount: Int(seqLen))
         try attention.encodeFull(commandBuffer: cb,
                              q: qScratch,
-                             k: kSlot.buffer, kOffset: 0,
-                             v: vSlot.buffer, vOffset: 0,
+                             k: keyView.buffer, kOffset: keyView.offset,
+                             v: valueView.buffer, vOffset: valueView.offset,
                              out: attnOut,
                              headDim: UInt32(headDim),
                              numQHeads: UInt32(cfg.numHeads),
                              numKVHeads: UInt32(numKV),
                              seqLen: seqLen,
-                             scale: Float(cfg.attentionScale))
+                             scale: Float(cfg.attentionScale),
+                             kvFormat: keyView)
         try elementwise.encodeSigmoidGateMul(commandBuffer: cb,
                                          out: attnOut,
                                          gate: attnGateScratch,
@@ -2122,6 +2171,55 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                               keySource: MTLBuffer,
                               valueSource: MTLBuffer,
                               bytesPerToken: Int) throws {
+        if kv.precision.isQuantized {
+            guard let kvQuantizer else {
+                throw ModelError.internalInconsistency(
+                    detail: "quantized KV cache has no quantizer")
+            }
+            let elements = bytesPerToken / MemoryLayout<Float16>.stride
+            let capacity = kv.capacity(layer: layer)
+            let physicalStart = startPosition % capacity
+            let firstSpan = min(tokenCount, capacity - physicalStart)
+            try kvQuantizer.encode(
+                commandBuffer: commandBuffer,
+                source: keySource,
+                sourceTokenStrideElements: elements,
+                destination: kv.keyRangeView(layer: layer, start: startPosition,
+                                             count: firstSpan),
+                tokenCount: firstSpan,
+                elementCount: elements)
+            try kvQuantizer.encode(
+                commandBuffer: commandBuffer,
+                source: valueSource,
+                sourceTokenStrideElements: elements,
+                destination: kv.valueRangeView(layer: layer, start: startPosition,
+                                               count: firstSpan),
+                tokenCount: firstSpan,
+                elementCount: elements)
+            guard firstSpan < tokenCount else { return }
+            let secondCount = tokenCount - firstSpan
+            let secondStart = startPosition + firstSpan
+            let sourceOffset = firstSpan * bytesPerToken
+            try kvQuantizer.encode(
+                commandBuffer: commandBuffer,
+                source: keySource,
+                sourceOffset: sourceOffset,
+                sourceTokenStrideElements: elements,
+                destination: kv.keyRangeView(layer: layer, start: secondStart,
+                                             count: secondCount),
+                tokenCount: secondCount,
+                elementCount: elements)
+            try kvQuantizer.encode(
+                commandBuffer: commandBuffer,
+                source: valueSource,
+                sourceOffset: sourceOffset,
+                sourceTokenStrideElements: elements,
+                destination: kv.valueRangeView(layer: layer, start: secondStart,
+                                               count: secondCount),
+                tokenCount: secondCount,
+                elementCount: elements)
+            return
+        }
         let capacity = kv.capacity(layer: layer)
         let physicalStart = startPosition % capacity
         let firstSpan = min(tokenCount, capacity - physicalStart)
@@ -2157,6 +2255,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                           sourceTokenOffset: firstSpan,
                           tokenCount: secondCount,
                           bytesPerToken: bytesPerToken)
+    }
+
+    private func encodeQuantizedKV(commandBuffer: MTLCommandBuffer,
+                                   kv: KVCacheManager,
+                                   layer: Int,
+                                   position: Int,
+                                   keySource: MTLBuffer,
+                                   valueSource: MTLBuffer,
+                                   elementCount: Int) throws {
+        guard let kvQuantizer else {
+            throw ModelError.internalInconsistency(
+                detail: "quantized KV cache has no quantizer")
+        }
+        try kvQuantizer.encode(
+            commandBuffer: commandBuffer,
+            source: keySource,
+            sourceTokenStrideElements: elementCount,
+            destination: kv.keyRangeView(layer: layer, start: position, count: 1),
+            tokenCount: 1,
+            elementCount: elementCount)
+        try kvQuantizer.encode(
+            commandBuffer: commandBuffer,
+            source: valueSource,
+            sourceTokenStrideElements: elementCount,
+            destination: kv.valueRangeView(layer: layer, start: position, count: 1),
+            tokenCount: 1,
+            elementCount: elementCount)
     }
 
     /// Gated-DeltaNet (linear attention) branch of one chunked-prefill layer.
@@ -2419,6 +2544,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      valueSource: scratch.vStage,
                                      bytesPerToken: bytes / t)
         }
+        let kvView = kv?.keyView(layer: L, validTokenCount: startPosition + t)
         let params = PrefillAttentionParams(
                 startPosition: UInt32(startPosition),
                 queryCount: UInt32(t),
@@ -2430,25 +2556,30 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 kvTokenStrideElements: UInt32(kvDim),
                 qTokenStrideElements: UInt32(qDim),
                 oTokenStrideElements: UInt32(qDim),
-                scale: Float(cfg.attentionScale))
+                scale: Float(cfg.attentionScale),
+                kvBits: UInt32(kvView?.precision.rawValue ?? 16),
+                kvTokenStrideBytes: UInt32(kvView?.stride ?? (kvDim * 2)),
+                kvValueBytes: UInt32(kvView?.valueBytes ?? (kvDim * 2)),
+                kvGroupSize: UInt32(kvView?.groupSize
+                    ?? KVCacheManager.quantizationGroupSize))
         if let kv {
-                let keyBuffer = kv.keyBuffer(layer: L, validTokenCount: startPosition + t)
-                let valueBuffer = kv.valueBuffer(layer: L, validTokenCount: startPosition + t)
+                let keyView = kv.keyView(layer: L, validTokenCount: startPosition + t)
+                let valueView = kv.valueView(layer: L, validTokenCount: startPosition + t)
                 let ringCapacity = kv.ringCapacity(layer: L)
                 let activeRingCapacity = ringCapacity > 0 && startPosition + t > ringCapacity
                     ? UInt32(ringCapacity)
                     : 0
                 try prefillAttention.encodeCausal(commandBuffer: cb,
                                               q: attnQ,
-                                              k: keyBuffer,
-                                              v: valueBuffer,
+                                              k: keyView.buffer,
+                                              v: valueView.buffer,
                                               out: scratch.attentionOutput,
                                               params: params,
                                               kvRingCapacity: activeRingCapacity,
                                               path: prefillAttentionPath)
         } else {
             throw PrefillError.chunkedUnsupported(
-                "chunked prefill attention requires FP16 KV")
+                "chunked prefill attention requires a KV cache")
         }
         if cfg.attnOutputGate {
             try elementwise!.encodeSigmoidGateMul(commandBuffer: cb,
@@ -2941,6 +3072,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else {
             let kSlot = kv?.kSlot(layer: L, position: position) ?? (buffer: kStage, offset: 0)
             let vSlot = kv?.vSlot(layer: L, position: position) ?? (buffer: vStage, offset: 0)
+            let quantizedKV = kv?.precision.isQuantized == true
+            let kWrite = quantizedKV ? (buffer: kStage, offset: 0) : kSlot
+            let vWrite = quantizedKV ? (buffer: vStage, offset: 0) : vSlot
             let q     = try model.qProj(layer: L)
             let k     = try model.kProj(layer: L)
             // Under the K=V quirk full layers reuse k_proj; otherwise
@@ -2962,8 +3096,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 vBiases: vProj.buffer, vBiasesOffset: Int(vProj.biasOffset),
                                 x: normed,
                                 qOut: qScratch,
-                                kOut: kSlot.buffer, kOutOffset: kSlot.offset,
-                                vOut: vSlot.buffer, vOutOffset: vSlot.offset,
+                                kOut: kWrite.buffer, kOutOffset: kWrite.offset,
+                                vOut: vWrite.buffer, vOutOffset: vWrite.offset,
                                 qRows: qDim,
                                 kvRows: kvDim,
                                 n: D)
@@ -2973,10 +3107,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 : UInt32(headDimL / 2)
             try fusedQKVEpilogue.encode(commandBuffer: attnCB,
                                     q: qScratch,
-                                    k: kSlot.buffer,
-                                    kOffset: kSlot.offset,
-                                    v: vSlot.buffer,
-                                    vOffset: vSlot.offset,
+                                    k: kWrite.buffer,
+                                    kOffset: kWrite.offset,
+                                    v: vWrite.buffer,
+                                    vOffset: vWrite.offset,
                                     qWeight: qNorm.buffer,
                                     qWeightOffset: Int(qNorm.offset),
                                     kWeight: kNorm.buffer,
@@ -2989,10 +3123,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     rotatedPairs: rotated,
                                     eps: eps)
 
-            guard kv != nil else {
+            guard let kv else {
                 throw ModelError.internalInconsistency(
-                    detail: "FP16 attention requires an FP16 KV cache")
+                    detail: "attention requires a KV cache")
             }
+            if quantizedKV {
+                try encodeQuantizedKV(commandBuffer: attnCB, kv: kv, layer: L,
+                                      position: position, keySource: kStage,
+                                      valueSource: vStage, elementCount: Int(kvDim))
+            }
+            let keyView = kv.keyView(layer: L, validTokenCount: Int(seqLen))
+            let valueView = kv.valueView(layer: L, validTokenCount: Int(seqLen))
             guard let attentionCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
@@ -3000,16 +3141,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             if isFull {
                 try attention.encodeFull(commandBuffer: attentionCB,
                                      q: qScratch,
-                                     k: kSlot.buffer, kOffset: 0,
-                                     v: vSlot.buffer, vOffset: 0,
+                                     k: keyView.buffer, kOffset: keyView.offset,
+                                     v: valueView.buffer, vOffset: valueView.offset,
                                      out: attnOut,
                                      headDim: UInt32(headDimL),
                                      numQHeads: UInt32(cfg.numHeads),
                                      numKVHeads: UInt32(numKVL),
                                      seqLen: seqLen,
-                                     scale: Float(cfg.attentionScale))
+                                     scale: Float(cfg.attentionScale),
+                                     kvFormat: keyView)
             } else {
-                let ringCapacity = kv?.ringCapacity(layer: L) ?? 0
+                let ringCapacity = kv.ringCapacity(layer: L)
                 let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
                     ? UInt32(ringCapacity)
                     : 0
@@ -3024,7 +3166,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                     seqLen: seqLen,
                                     window: UInt32(cfg.slidingWindow),
                                     scale: Float(cfg.attentionScale),
-                                    ringCapacity: activeRingCapacity)
+                                    ringCapacity: activeRingCapacity,
+                                    kvFormat: keyView)
             }
             try int4.encode(commandBuffer: tailCB,
                         weights: o.buffer, weightsOffset: Int(o.offset),

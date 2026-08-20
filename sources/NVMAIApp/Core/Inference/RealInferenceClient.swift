@@ -189,7 +189,8 @@ actor RealInferenceSession {
 
             onState(.loading(.verifyingWeights))
             let runtimeConfiguration = try key.options.resolvedRuntimeConfiguration(
-                forceLogitsHead: key.forceLogitsHead)
+                forceLogitsHead: key.forceLogitsHead,
+                maxContextTokens: key.maxContext)
             let context: MetalContext
             if let ctx {
                 context = ctx
@@ -275,11 +276,13 @@ actor RealInferenceSession {
         let progress = ProgressState()
         do {
             try request.validate()
+            let kvStorageMode = PrefillKVStorageMode(
+                precision: request.runtimeOptions.kvCachePrecision)
             let executedPrefillMode: PrefillExecutedMode =
                 prefillConfig.mode == .chunked ? .chunked : .off
             let prefillDiagnostics = PrefillExecutionDiagnostics(config: prefillConfig,
                                                                  executedMode: executedPrefillMode,
-                                                                 kvStorageMode: .fp16)
+                                                                 kvStorageMode: kvStorageMode)
             let requestKey = SessionLoadKey(
                 directory: request.modelDirectory.standardizedFileURL,
                 maxContext: request.maxContextTokens,
@@ -374,12 +377,16 @@ actor RealInferenceSession {
                                               prefill: PrefillExecutionDiagnostics(
                                                 config: prefillConfig,
                                                 executedMode: prefillConfig.mode == .chunked ? .chunked : .off,
-                                                kvStorageMode: .fp16))
+                                                kvStorageMode: PrefillKVStorageMode(
+                                                    precision: request.runtimeOptions
+                                                        .kvCachePrecision)))
             continuation.yield(.cancelled(diagnostics))
             continuation.finish(throwing: AppInferenceError.cancelled)
         } catch let prefillError as PrefillError {
             let diagnostics = Self.prefillFailureDiagnostics(config: prefillConfig,
-                                                             kvStorageMode: .fp16,
+                                                             kvStorageMode: PrefillKVStorageMode(
+                                                                precision: request.runtimeOptions
+                                                                    .kvCachePrecision),
                                                              reason: prefillError.description)
             failGeneration(.unknown(prefillError.description),
                            request: request,

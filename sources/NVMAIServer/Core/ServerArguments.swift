@@ -17,6 +17,8 @@ public struct ServerArguments: Equatable, Sendable {
     public let promptCacheDiskDirectory: String?
     public let promptCacheDiskMiB: Int
     public let prefillChunkTokens: Int?
+    public let kvCachePrecision: KVCachePrecision
+    public let ropeScalingMode: RuntimeRoPEScalingMode
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use. Slots are derived from it and the
     /// model's own expert stride, so this is the knob and the slot count is the
@@ -51,8 +53,9 @@ public struct ServerArguments: Equatable, Sendable {
       --port <1...65535>     Loopback port (default 8080).
       --model-id <id>        API model identifier (default derived from the
                              installed model manifest).
-      --max-context <tokens> 4096, 8192, 16384, 32768, 65536, 131072, or 262144
-                             (default 262144).
+      --max-context <tokens> Native: 4096...262144 (default 262144).
+                             With YaRN: 524288 or 1048576 (default 1048576).
+      --rope-scaling <mode>  Context scaling: none or yarn (default none).
       --queue-limit <count>  Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix|multi-prefix>
                              Prompt KV reuse mode (default multi-prefix).
@@ -68,6 +71,7 @@ public struct ServerArguments: Equatable, Sendable {
                              Prefill chunk size: 32, 64, 128, 256, 512,
                              1024, 2048, or 4096 (default 4096 for supported
                              35B-A3B text models).
+      --kv-bits <4|8|16>     KV-cache storage precision (default 8).
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
@@ -101,6 +105,7 @@ public struct ServerArguments: Equatable, Sendable {
         var port = 8080
         var modelIDOverride: String?
         var maxContext = 262_144
+        var maxContextWasSet = false
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .multiPrefix
         var promptCacheMaximumEntries = 4
@@ -108,6 +113,8 @@ public struct ServerArguments: Equatable, Sendable {
         var promptCacheDiskDirectory: String?
         var promptCacheDiskMiB = 8_192
         var prefillChunkTokens: Int?
+        var kvCachePrecision: KVCachePrecision = .int8
+        var ropeScalingMode: RuntimeRoPEScalingMode = .none
         var expertCacheSlots: Int?
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
@@ -156,10 +163,16 @@ public struct ServerArguments: Equatable, Sendable {
                 modelIDOverride = value
             case "--max-context":
                 guard let parsed = Int(value),
-                      RuntimeConfiguration.supportedContextTokens.contains(parsed) else {
+                      (1...RuntimeConfiguration.maximumContextTokens).contains(parsed) else {
                     throw ServerArgumentError.invalid("--max-context is not supported")
                 }
                 maxContext = parsed
+                maxContextWasSet = true
+            case "--rope-scaling":
+                guard let parsed = RuntimeRoPEScalingMode(rawValue: value) else {
+                    throw ServerArgumentError.invalid("--rope-scaling must be none or yarn")
+                }
+                ropeScalingMode = parsed
             case "--queue-limit":
                 guard let parsed = Int(value), (1...64).contains(parsed) else {
                     throw ServerArgumentError.invalid("--queue-limit must be between 1 and 64")
@@ -201,6 +214,12 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--prefill-chunk is not supported")
                 }
                 prefillChunkTokens = parsed
+            case "--kv-bits":
+                guard let bits = Int(value),
+                      let parsed = KVCachePrecision(rawValue: bits) else {
+                    throw ServerArgumentError.invalid("--kv-bits must be 4, 8, or 16")
+                }
+                kvCachePrecision = parsed
             case "--expert-cache-slots":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
@@ -225,6 +244,23 @@ public struct ServerArguments: Equatable, Sendable {
             }
         }
         guard let model else { throw ServerArgumentError.invalid("--model is required") }
+        if ropeScalingMode == .yarn {
+            if !maxContextWasSet {
+                maxContext = RuntimeConfiguration.defaultYaRNContextTokens
+            }
+            guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContext) else {
+                throw ServerArgumentError.invalid(
+                    "YaRN --max-context must be 524288 or 1048576")
+            }
+        } else {
+            guard RuntimeConfiguration.supportedContextTokens.contains(maxContext) else {
+                throw ServerArgumentError.invalid("--max-context is not supported")
+            }
+        }
+        if ropeScalingMode == .yarn, mtpModel != nil {
+            throw ServerArgumentError.invalid(
+                "--mtp-model cannot be combined with --rope-scaling yarn")
+        }
         return ServerArguments(model: model,
                                mtpModel: mtpModel,
                                mtpMemoryMiB: mtpMemoryMiB,
@@ -238,6 +274,8 @@ public struct ServerArguments: Equatable, Sendable {
                                promptCacheDiskDirectory: promptCacheDiskDirectory,
                                promptCacheDiskMiB: promptCacheDiskMiB,
                                prefillChunkTokens: prefillChunkTokens,
+                               kvCachePrecision: kvCachePrecision,
+                               ropeScalingMode: ropeScalingMode,
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,

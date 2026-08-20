@@ -19,9 +19,30 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lru
 }
 
+/// Storage precision for the autoregressive attention key/value cache.
+/// Quantized modes use affine groups of 64 values and keep their scale and
+/// bias alongside each token row; model weights are unaffected.
+public enum KVCachePrecision: Int, Codable, CaseIterable, Sendable {
+    case int4 = 4
+    case int8 = 8
+    case fp16 = 16
+
+    public var label: String { "\(rawValue)-bit" }
+    public var isQuantized: Bool { self != .fp16 }
+}
+
+public enum RuntimeRoPEScalingMode: String, Codable, CaseIterable, Sendable {
+    case none
+    case yarn
+}
+
 public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable {
     case invalidExpertCacheSlots(Int)
     case invalidPrefillChunkTokens(Int)
+    case invalidYaRNContextTokens(Int)
+    case contextRequiresYaRN(Int)
+    case yaRNContextMismatch(maxContext: Int, configured: Int)
+    case yaRNUnsupportedArchitecture
 
     public var description: String {
         switch self {
@@ -29,6 +50,14 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
             return "unsupported expert-cache slot count \(value); allowed: \(RuntimeConfiguration.allowedExpertCacheSlots)"
         case .invalidPrefillChunkTokens(let value):
             return "unsupported prefill chunk size \(value); allowed: \(RuntimeConfiguration.allowedPrefillChunkTokens)"
+        case .invalidYaRNContextTokens(let value):
+            return "unsupported YaRN context \(value); allowed: \(RuntimeConfiguration.supportedYaRNContextTokens)"
+        case .contextRequiresYaRN(let value):
+            return "context \(value) exceeds the native \(RuntimeConfiguration.nativeMaximumContextTokens)-token limit; enable YaRN"
+        case .yaRNContextMismatch(let maxContext, let configured):
+            return "YaRN is configured for \(configured) tokens, but max context is \(maxContext)"
+        case .yaRNUnsupportedArchitecture:
+            return "YaRN requires the Qwen3.5-MoE NeoX sub-dimension RoPE architecture"
         }
     }
 }
@@ -37,7 +66,10 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public static let supportedContextTokens = [
         4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144,
     ]
-    public static let maximumContextTokens = 262_144
+    public static let nativeMaximumContextTokens = 262_144
+    public static let supportedYaRNContextTokens = [524_288, 1_048_576]
+    public static let defaultYaRNContextTokens = 1_048_576
+    public static let maximumContextTokens = 1_048_576
     public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
 
     /// Target bytes for the routed-expert slot cache when no count is given.
@@ -123,6 +155,9 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
+    public let kvCachePrecision: KVCachePrecision
+    public let ropeScalingMode: RuntimeRoPEScalingMode
+    public let yarnContextTokens: Int
 
     public init(expertCacheSlots: Int = 64,
                 expertCachePolicy: RuntimeExpertCachePolicy = .lfu,
@@ -130,12 +165,18 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
-                forceLogitsHead: Bool = false) throws {
+                forceLogitsHead: Bool = false,
+                kvCachePrecision: KVCachePrecision = .int8,
+                ropeScalingMode: RuntimeRoPEScalingMode = .none,
+                yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {
         guard Self.allowedExpertCacheSlots.contains(expertCacheSlots) else {
             throw RuntimeConfigurationError.invalidExpertCacheSlots(expertCacheSlots)
         }
         guard Self.allowedPrefillChunkTokens.contains(prefillChunkTokens) else {
             throw RuntimeConfigurationError.invalidPrefillChunkTokens(prefillChunkTokens)
+        }
+        guard Self.supportedYaRNContextTokens.contains(yarnContextTokens) else {
+            throw RuntimeConfigurationError.invalidYaRNContextTokens(yarnContextTokens)
         }
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
@@ -144,6 +185,24 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
+        self.kvCachePrecision = kvCachePrecision
+        self.ropeScalingMode = ropeScalingMode
+        self.yarnContextTokens = yarnContextTokens
+    }
+
+    public func validate(maxContext: Int) throws {
+        precondition(maxContext > 0, "maxContext must be positive")
+        switch ropeScalingMode {
+        case .none:
+            guard maxContext <= Self.nativeMaximumContextTokens else {
+                throw RuntimeConfigurationError.contextRequiresYaRN(maxContext)
+            }
+        case .yarn:
+            guard maxContext == yarnContextTokens else {
+                throw RuntimeConfigurationError.yaRNContextMismatch(
+                    maxContext: maxContext, configured: yarnContextTokens)
+            }
+        }
     }
 
     public static var production: RuntimeConfiguration {
@@ -153,7 +212,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         try! RuntimeConfiguration()
     }
 
-    /// Production pins the FP16 sliding-window ring on. This is deliberately a
+    /// Production pins the sliding-window ring on. This is deliberately a
     /// constant and not a stored option: `KVCacheManager` takes the flag as a
     /// real parameter (tests construct it both ways to cover the non-ring
     /// path), but the shipping runtime has exactly one supported setting, and

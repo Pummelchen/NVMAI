@@ -8,6 +8,8 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var rdadvisePolicy: String
     public var modelVerification: String
     public var conciseMode: Bool
+    public var kvCacheBits: Int
+    public var ropeScalingMode: String
 
     public init(expertCacheSlots: Int = 32,
                 expertCachePolicy: String = "lfu",
@@ -15,7 +17,9 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 rdadvisePolicy: String = "default",
                 modelVerification: String = "full-sha256",
-                conciseMode: Bool = false) {
+                conciseMode: Bool = false,
+                kvCacheBits: Int = 8,
+                ropeScalingMode: String = "none") {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
@@ -23,6 +27,8 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.conciseMode = conciseMode
+        self.kvCacheBits = kvCacheBits
+        self.ropeScalingMode = ropeScalingMode
     }
 }
 

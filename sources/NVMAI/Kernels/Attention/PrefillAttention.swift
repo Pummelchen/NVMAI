@@ -13,6 +13,10 @@ struct PrefillAttentionParams: Sendable, Equatable {
     var qTokenStrideElements: UInt32
     var oTokenStrideElements: UInt32
     var scale: Float
+    var kvBits: UInt32
+    var kvTokenStrideBytes: UInt32
+    var kvValueBytes: UInt32
+    var kvGroupSize: UInt32
 
     init(startPosition: UInt32,
                 queryCount: UInt32,
@@ -24,7 +28,11 @@ struct PrefillAttentionParams: Sendable, Equatable {
                 kvTokenStrideElements: UInt32,
                 qTokenStrideElements: UInt32,
                 oTokenStrideElements: UInt32,
-                scale: Float) {
+                scale: Float,
+                kvBits: UInt32 = 16,
+                kvTokenStrideBytes: UInt32 = 0,
+                kvValueBytes: UInt32 = 0,
+                kvGroupSize: UInt32 = UInt32(KVCacheManager.quantizationGroupSize)) {
         self.startPosition = startPosition
         self.queryCount = queryCount
         self.headDim = headDim
@@ -36,6 +44,10 @@ struct PrefillAttentionParams: Sendable, Equatable {
         self.qTokenStrideElements = qTokenStrideElements
         self.oTokenStrideElements = oTokenStrideElements
         self.scale = scale
+        self.kvBits = kvBits
+        self.kvTokenStrideBytes = kvTokenStrideBytes
+        self.kvValueBytes = kvValueBytes
+        self.kvGroupSize = kvGroupSize
     }
 }
 
@@ -98,6 +110,7 @@ final class PrefillAttention {
         // sliding-window layers use 256/16/8. A future model that reuses this
         // shape for sliding attention must add a full-visibility check here.
         let tensorOpsShape = requestsTensorOps
+            && params.kvBits == 16
             && kvRingCapacity == 0
             && params.headDim == 512
             && params.numQHeads == 16
@@ -164,8 +177,15 @@ final class PrefillAttention {
                      "q token stride is too small")
         precondition(params.oTokenStrideElements >= params.numQHeads * params.headDim,
                      "output token stride is too small")
-        precondition(params.kvTokenStrideElements >= params.numKVHeads * params.headDim,
-                     "KV token stride is too small")
+        if params.kvBits == 16 {
+            precondition(params.kvTokenStrideElements >= params.numKVHeads * params.headDim,
+                         "KV token stride is too small")
+        } else {
+            precondition(params.kvBits == 4 || params.kvBits == 8,
+                         "KV bits must be 4, 8, or 16")
+            precondition(params.kvTokenStrideBytes > 0,
+                         "quantized KV token stride must be positive")
+        }
         precondition(params.startPosition + params.queryCount <= params.kvValidCount,
                      "kvValidCount must include all in-flight query rows")
     }
@@ -182,7 +202,7 @@ final class PrefillAttention {
                 "attention_prefill_causal_tiled",
                 constants: [MetalFunctionConstant(index: 76, value: .uint32(kvRingCapacity))])
         } catch {
-            preconditionFailure("failed to build FP16 KV ring prefill attention pipeline: \(error)")
+            preconditionFailure("failed to build KV ring prefill attention pipeline: \(error)")
         }
     }
 }

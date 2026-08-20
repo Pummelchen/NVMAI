@@ -455,6 +455,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                             promptCacheDiskDirectory: URL? = nil,
                             promptCacheDiskLimitBytes: Int = 8_192 * 1_048_576,
                             prefillChunkTokens requestedPrefillChunkTokens: Int? = nil,
+                            kvCachePrecision: KVCachePrecision = .int8,
+                            ropeScalingMode: RuntimeRoPEScalingMode = .none,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
                             mtpModelDirectory: URL? = nil,
@@ -517,7 +519,11 @@ public actor ServerModelSession: ServerInferenceBackend {
                     ? RuntimeConfiguration.qwenLongPrefillChunkTokens
                     : loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
-            forceLogitsHead: true)
+            forceLogitsHead: true,
+            kvCachePrecision: kvCachePrecision,
+            ropeScalingMode: ropeScalingMode,
+            yarnContextTokens: ropeScalingMode == .yarn
+                ? maxContext : RuntimeConfiguration.defaultYaRNContextTokens)
         let mtpDecoder: StreamingMTPDecoder?
         let runner: RealForwardRunner
         if let mtpModelDirectory {
@@ -556,6 +562,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             runtime.prefillPolicy.rawValue,
             String(runtime.prefillChunkTokens),
             runtime.headPath.rawValue,
+            String(runtime.kvCachePrecision.rawValue),
+            runtime.ropeScalingMode.rawValue,
+            String(runtime.yarnContextTokens),
         ].joined(separator: ":")
         let runtimeDigest = SHA256.hash(data: Data(runtimeIdentity.utf8))
             .map { String(format: "%02x", $0) }
@@ -565,7 +574,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             sourceSnapshotHash: model.sourceSnapshotHash,
             runtimeProfileHash: runtimeDigest,
             maximumContext: maxContext,
-            kvStorage: PrefillKVStorageMode.fp16.rawValue,
+            kvStorage: runtime.kvCachePrecision.label,
             fp16RingEnabled: runtime.fp16RingEnabled,
             templateSHA256: templateDigest)
         let effectivePromptCacheMode = Self.effectivePromptCacheMode(

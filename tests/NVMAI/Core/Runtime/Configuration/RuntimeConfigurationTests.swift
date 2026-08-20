@@ -6,7 +6,8 @@ import Testing
         #expect(RuntimeConfiguration.supportedContextTokens
             == [4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144])
         #expect(RuntimeConfiguration.supportedContextTokens.last
-            == RuntimeConfiguration.maximumContextTokens)
+            == RuntimeConfiguration.nativeMaximumContextTokens)
+        #expect(RuntimeConfiguration.supportedYaRNContextTokens == [524_288, 1_048_576])
     }
 
     @Test func productionDefaultsAreStable() throws {
@@ -27,6 +28,22 @@ import Testing
         #expect(runtime.prefillChunkTokens == 128)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
         #expect(runtime.headPath == .fusedRows)
+        #expect(runtime.kvCachePrecision == .int8)
+        #expect(runtime.ropeScalingMode == .none)
+    }
+
+    @Test func contextScalingValidationIsFailClosed() throws {
+        let native = try RuntimeConfiguration()
+        try native.validate(maxContext: 262_144)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try native.validate(maxContext: 524_288)
+        }
+        let yarn = try RuntimeConfiguration(ropeScalingMode: .yarn,
+                                            yarnContextTokens: 524_288)
+        try yarn.validate(maxContext: 524_288)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try yarn.validate(maxContext: 1_048_576)
+        }
     }
 
     @Test func retainedControlsReachTypedRuntime() throws {

@@ -61,6 +61,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var conciseMode: Bool
+    public var kvCachePrecision: KVCachePrecision
+    public var ropeScalingMode: RuntimeRoPEScalingMode
 
     public init(expertCacheSlots: Int = 64,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
@@ -68,7 +70,9 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
                 rdadvisePolicy: AppRDAdvicePolicy = .default,
                 modelVerification: AppModelVerification = .fullSha256,
-                conciseMode: Bool = false) {
+                conciseMode: Bool = false,
+                kvCachePrecision: KVCachePrecision = .int8,
+                ropeScalingMode: RuntimeRoPEScalingMode = .none) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
@@ -76,6 +80,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.conciseMode = conciseMode
+        self.kvCachePrecision = kvCachePrecision
+        self.ropeScalingMode = ropeScalingMode
     }
 
     public func validate() throws {
@@ -96,7 +102,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var resultSummary: String {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), FP16 KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        let scaling = ropeScalingMode == .yarn ? "YaRN" : "native RoPE"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
@@ -106,7 +113,10 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         "\(slots)"
     }
 
-    public func resolvedRuntimeConfiguration(forceLogitsHead: Bool) throws -> RuntimeConfiguration {
+    public func resolvedRuntimeConfiguration(
+        forceLogitsHead: Bool,
+        maxContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens
+    ) throws -> RuntimeConfiguration {
         try validate()
         return try RuntimeConfiguration(
             expertCacheSlots: expertCacheSlots,
@@ -114,7 +124,11 @@ public struct AppRuntimeOptions: Equatable, Sendable {
             rdadvisePolicy: rdadvisePolicy.runtimeValue,
             prefillEnabled: prefillEnabled,
             prefillChunkTokens: prefillChunkTokens,
-            forceLogitsHead: forceLogitsHead)
+            forceLogitsHead: forceLogitsHead,
+            kvCachePrecision: kvCachePrecision,
+            ropeScalingMode: ropeScalingMode,
+            yarnContextTokens: ropeScalingMode == .yarn
+                ? maxContextTokens : RuntimeConfiguration.defaultYaRNContextTokens)
     }
 }
 
@@ -126,6 +140,8 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var forceLogitsHead: Bool
+    public var kvCachePrecision: KVCachePrecision
+    public var ropeScalingMode: RuntimeRoPEScalingMode
 
     public init(modelDirectory: URL,
                 maxContextTokens: Int,
@@ -138,5 +154,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
         self.forceLogitsHead = forceLogitsHead
+        self.kvCachePrecision = options.kvCachePrecision
+        self.ropeScalingMode = options.ropeScalingMode
     }
 }

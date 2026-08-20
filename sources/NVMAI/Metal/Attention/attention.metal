@@ -9,8 +9,8 @@ using namespace metal;
 //
 // Layout (caller-side contract):
 //   Q   : [num_q_heads,  head_dim]                      FP16, contiguous.
-//   K   : [seq_len, num_kv_heads, head_dim]             FP16, contiguous.
-//   V   : [seq_len, num_kv_heads, head_dim]             FP16, same shape as K.
+//   K   : [seq_len, num_kv_heads, head_dim]             FP16 or affine INT8/4.
+//   V   : [seq_len, num_kv_heads, head_dim]             Same format as K.
 //         Full attention reuses the raw K projection for V, but its separate
 //         normalization and RoPE paths make these buffers distinct here.
 //   out : [num_q_heads,  head_dim]                      FP16.
@@ -86,6 +86,36 @@ static inline float attn_softmax_exp(float x) {
     return fast::exp(x);
 }
 
+static inline float attn_load_kv(
+    device const uchar* cache,
+    uint physical_position,
+    uint flat_element,
+    uint elements_per_row,
+    uint bits,
+    uint row_stride,
+    uint values_bytes,
+    uint group_size
+) {
+    if (bits == 16u) {
+        device const half* fp16 = reinterpret_cast<device const half*>(cache);
+        return float(fp16[physical_position * elements_per_row + flat_element]);
+    }
+    device const uchar* row = cache + physical_position * row_stride;
+    uint quantized;
+    if (bits == 8u) {
+        quantized = uint(row[flat_element]);
+    } else {
+        const uchar packed = row[flat_element / 2u];
+        quantized = (flat_element & 1u) == 0u
+            ? uint(packed & 0x0fu) : uint(packed >> 4u);
+    }
+    const uint groups = (elements_per_row + group_size - 1u) / group_size;
+    device const half* scales = reinterpret_cast<device const half*>(row + values_bytes);
+    device const half* biases = scales + groups;
+    const uint group = flat_element / group_size;
+    return float(quantized) * float(scales[group]) + float(biases[group]);
+}
+
 // Block reduce: per-SIMD-group simd_sum, write partial to scratch, lane 0 of
 // SIMD-group 0 finishes the merge with a second simd_sum and broadcasts.
 // `scratch` must hold at least `simdgroups` floats; `bcast` is one float used
@@ -132,8 +162,8 @@ inline float block_reduce_sum(float v,
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_partial(
     device const half*  Q             [[buffer(0)]],
-    device const half*  K             [[buffer(1)]],
-    device const half*  V             [[buffer(2)]],
+    device const uchar* K             [[buffer(1)]],
+    device const uchar* V             [[buffer(2)]],
     device       float* m_out         [[buffer(3)]],   // [num_q_heads * num_chunks]
     device       float* d_out         [[buffer(4)]],   // [num_q_heads * num_chunks]
     device       float* o_out         [[buffer(5)]],   // [num_q_heads * num_chunks * head_dim]
@@ -145,6 +175,10 @@ void attention_decode_partial(
     constant     uint&  chunk_len     [[buffer(11)]],
     constant     uint&  num_chunks    [[buffer(12)]],
     constant     float& scale         [[buffer(13)]],
+    constant     uint&  kv_bits       [[buffer(14)]],
+    constant     uint&  kv_stride     [[buffer(15)]],
+    constant     uint&  kv_value_bytes [[buffer(16)]],
+    constant     uint&  kv_group_size [[buffer(17)]],
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]],
@@ -186,12 +220,13 @@ void attention_decode_partial(
     // (-inf, 0, 0), which the combine weights to zero via e^{-inf}.
     for (uint p = p_start; p < p_end; ++p) {
         const uint phys_p = attn_ring_slot(p);
-        device const half* K_row = K + (phys_p * NKV + kv_head) * HD;
-        device const half* V_row = V + (phys_p * NKV + kv_head) * HD;
-
         float partial = 0.0f;
         for (uint i = lid; i < HD; i += lsize) {
-            partial = fma(q_smem[i], float(K_row[i]), partial);
+            const uint flat = kv_head * HD + i;
+            const float kval = attn_load_kv(K, phys_p, flat, NKV * HD,
+                                             kv_bits, kv_stride, kv_value_bytes,
+                                             kv_group_size);
+            partial = fma(q_smem[i], kval, partial);
         }
         float s = block_reduce_sum(partial,
                                    simd_lane_id, simd_group_id, simdgroups,
@@ -205,7 +240,11 @@ void attention_decode_partial(
 
         uint slot = 0;
         for (uint i = lid; i < HD; i += lsize) {
-            o_local[slot] = o_local[slot] * alpha + p_exp * float(V_row[i]);
+            const uint flat = kv_head * HD + i;
+            const float vval = attn_load_kv(V, phys_p, flat, NKV * HD,
+                                             kv_bits, kv_stride, kv_value_bytes,
+                                             kv_group_size);
+            o_local[slot] = o_local[slot] * alpha + p_exp * vval;
             slot += 1;
         }
         m_run = m_new;
@@ -224,8 +263,8 @@ void attention_decode_partial(
 [[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
 void attention_decode_gqa_swa_partial(
     device const half*  Q             [[buffer(0)]],
-    device const half*  K             [[buffer(1)]],
-    device const half*  V             [[buffer(2)]],
+    device const uchar* K             [[buffer(1)]],
+    device const uchar* V             [[buffer(2)]],
     device       float* m_out         [[buffer(3)]],   // [num_q_heads * num_chunks]
     device       float* d_out         [[buffer(4)]],   // [num_q_heads * num_chunks]
     device       float* o_out         [[buffer(5)]],   // [num_q_heads * num_chunks * head_dim]
@@ -237,6 +276,10 @@ void attention_decode_gqa_swa_partial(
     constant     uint&  chunk_len     [[buffer(11)]],
     constant     uint&  num_chunks    [[buffer(12)]],
     constant     float& scale         [[buffer(13)]],
+    constant     uint&  kv_bits       [[buffer(14)]],
+    constant     uint&  kv_stride     [[buffer(15)]],
+    constant     uint&  kv_value_bytes [[buffer(16)]],
+    constant     uint&  kv_group_size [[buffer(17)]],
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]],
@@ -288,12 +331,12 @@ void attention_decode_gqa_swa_partial(
 
     for (uint p = p_start; p < p_end; ++p) {
         const uint phys_p = attn_ring_slot(p);
-        device const half* K_row = K + (phys_p * NKV + kv_head) * HD;
-        device const half* V_row = V + (phys_p * NKV + kv_head) * HD;
-
         float partial = 0.0f;
         for (uint i = local_lid; i < HD; i += threads_per_q) {
-            const float k_val = float(K_row[i]);
+            const uint flat = kv_head * HD + i;
+            const float k_val = attn_load_kv(K, phys_p, flat, NKV * HD,
+                                              kv_bits, kv_stride, kv_value_bytes,
+                                              kv_group_size);
             partial = fma(q_smem[active_q * kAttnMaxHeadDim + i], k_val, partial);
         }
 
@@ -321,7 +364,11 @@ void attention_decode_gqa_swa_partial(
 
         uint slot = 0;
         for (uint i = local_lid; i < HD; i += threads_per_q) {
-            o_local[slot] += p_exp * float(V_row[i]);
+            const uint flat = kv_head * HD + i;
+            const float v_val = attn_load_kv(V, phys_p, flat, NKV * HD,
+                                              kv_bits, kv_stride, kv_value_bytes,
+                                              kv_group_size);
+            o_local[slot] += p_exp * v_val;
             slot += 1;
         }
     }

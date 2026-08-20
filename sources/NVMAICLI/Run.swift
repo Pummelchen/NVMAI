@@ -145,7 +145,11 @@ public func run(args: Args,
             rdadvisePolicy: loadRuntime.rdadvisePolicy,
             prefillChunkTokens: prefillChunkTokens,
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
-            forceLogitsHead: !config.isPureGreedy)
+            forceLogitsHead: !config.isPureGreedy,
+            kvCachePrecision: args.kvCachePrecision,
+            ropeScalingMode: args.ropeScalingMode,
+            yarnContextTokens: args.ropeScalingMode == .yarn
+                ? args.maxContext : RuntimeConfiguration.defaultYaRNContextTokens)
         let runner = try RealForwardRunner(
             model: model,
             context: context,

@@ -662,6 +662,32 @@ kernel void prefill_rope_neox_subdim_block(
                                  float(start_position + t), theta_base);
 }
 
+kernel void prefill_rope_yarn_neox_subdim_block(
+    device half* data [[buffer(0)]],
+    device const float* inverse_frequencies [[buffer(1)]],
+    constant uint& start_position [[buffer(2)]],
+    constant uint& head_dim [[buffer(3)]],
+    constant uint& num_heads [[buffer(4)]],
+    constant uint& token_stride_elems [[buffer(5)]],
+    constant uint& rotary_dim [[buffer(6)]],
+    constant float& attention_factor [[buffer(7)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    const uint pair = gid.x;
+    const uint head = gid.y;
+    const uint token = gid.z;
+    const uint half_rotary = rotary_dim / 2u;
+    if (pair >= half_rotary || head >= num_heads) return;
+    device half* row = data + token * token_stride_elems + head * head_dim;
+    const float angle = float(start_position + token) * inverse_frequencies[pair];
+    const float cosine = cos(angle) * attention_factor;
+    const float sine = sin(angle) * attention_factor;
+    const float x0 = float(row[pair]);
+    const float x1 = float(row[half_rotary + pair]);
+    row[pair] = half(x0 * cosine - x1 * sine);
+    row[half_rotary + pair] = half(x0 * sine + x1 * cosine);
+}
+
 struct PrefillAttentionParams {
     uint startPosition;
     uint queryCount;
@@ -674,7 +700,38 @@ struct PrefillAttentionParams {
     uint qTokenStrideElements;
     uint oTokenStrideElements;
     float scale;
+    uint kvBits;
+    uint kvTokenStrideBytes;
+    uint kvValueBytes;
+    uint kvGroupSize;
 };
+
+static inline float prefill_load_kv(
+    device const uchar* cache,
+    uint physical_position,
+    uint flat_element,
+    constant PrefillAttentionParams& p
+) {
+    const uint elements_per_row = p.numKVHeads * p.headDim;
+    if (p.kvBits == 16u) {
+        device const half* fp16 = reinterpret_cast<device const half*>(cache);
+        return float(fp16[physical_position * p.kvTokenStrideElements + flat_element]);
+    }
+    device const uchar* row = cache + physical_position * p.kvTokenStrideBytes;
+    uint quantized;
+    if (p.kvBits == 8u) {
+        quantized = uint(row[flat_element]);
+    } else {
+        const uchar packed = row[flat_element / 2u];
+        quantized = (flat_element & 1u) == 0u
+            ? uint(packed & 0x0fu) : uint(packed >> 4u);
+    }
+    const uint groups = (elements_per_row + p.kvGroupSize - 1u) / p.kvGroupSize;
+    device const half* scales = reinterpret_cast<device const half*>(row + p.kvValueBytes);
+    device const half* biases = scales + groups;
+    const uint group = flat_element / p.kvGroupSize;
+    return float(quantized) * float(scales[group]) + float(biases[group]);
+}
 
 static inline uint prefill_kv_slot(uint logical) {
     return (is_function_constant_defined(FC_PREFILL_KV_RING_CAP) &&
@@ -710,8 +767,8 @@ static inline float prefill_attention_tg_sum(
 [[kernel, max_total_threads_per_threadgroup(512)]]
 kernel void attention_prefill_causal_tiled(
     device const half* Q [[buffer(0)]],
-    device const half* K [[buffer(1)]],
-    device const half* V [[buffer(2)]],
+    device const uchar* K [[buffer(1)]],
+    device const uchar* V [[buffer(2)]],
     device half* O [[buffer(3)]],
     constant PrefillAttentionParams& p [[buffer(4)]],
     uint3 tg [[threadgroup_position_in_grid]],
@@ -744,9 +801,9 @@ kernel void attention_prefill_causal_tiled(
 
     for (uint key = first; key < last_exclusive; ++key) {
         const uint phys_key = prefill_kv_slot(key);
-        device const half* k_row = K + phys_key * p.kvTokenStrideElements + kvh * p.headDim;
         const float qv = owns ? float(q_row[d]) : 0.0f;
-        const float kv = owns ? float(k_row[d]) : 0.0f;
+        const uint flat = kvh * p.headDim + d;
+        const float kv = owns ? prefill_load_kv(K, phys_key, flat, p) : 0.0f;
         const uint bank = key & 1u;
         const float score = prefill_attention_tg_sum(
             qv * kv,
@@ -759,8 +816,8 @@ kernel void attention_prefill_causal_tiled(
         const float old_scale = row_sum > 0.0f ? fast::exp(row_max - new_max) : 0.0f;
         const float new_scale = fast::exp(score - new_max);
         if (owns) {
-            device const half* v_row = V + phys_key * p.kvTokenStrideElements + kvh * p.headDim;
-            acc = fma(new_scale, float(v_row[d]), acc * old_scale);
+            const float vv = prefill_load_kv(V, phys_key, flat, p);
+            acc = fma(new_scale, vv, acc * old_scale);
         }
         row_sum = row_sum * old_scale + new_scale;
         row_max = new_max;

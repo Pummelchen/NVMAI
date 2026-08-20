@@ -44,9 +44,17 @@ public struct AppGenerationRequest: Equatable, Sendable {
         guard maxNewTokens > 0 else {
             throw AppInferenceError.invalidRequest("Max response length must be greater than zero.")
         }
-        guard (1...RuntimeConfiguration.maximumContextTokens).contains(maxContextTokens) else {
-            throw AppInferenceError.invalidRequest(
-                "Max context must be between 1 and 262144 tokens.")
+        if runtimeOptions.ropeScalingMode == .yarn {
+            guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContextTokens) else {
+                throw AppInferenceError.invalidRequest(
+                    "YaRN context must be 524288 or 1048576 tokens.")
+            }
+        } else {
+            guard (1...RuntimeConfiguration.nativeMaximumContextTokens)
+                .contains(maxContextTokens) else {
+                throw AppInferenceError.invalidRequest(
+                    "Native context must be between 1 and 262144 tokens.")
+            }
         }
         guard temperature >= 0 else {
             throw AppInferenceError.invalidRequest("Temperature cannot be negative.")

@@ -55,6 +55,25 @@ import Testing
         }
     }
 
+    @Test func yarnAcceptsOnlyTheTwoExtendedContextChoices() throws {
+        var options = AppRuntimeOptions()
+        options.ropeScalingMode = .yarn
+        for context in [524_288, 1_048_576] {
+            try AppGenerationRequest(
+                modelDirectory: existingDirectory,
+                prompt: "hello",
+                maxContextTokens: context,
+                runtimeOptions: options).validate()
+        }
+        #expect(throws: AppInferenceError.self) {
+            try AppGenerationRequest(
+                modelDirectory: existingDirectory,
+                prompt: "hello",
+                maxContextTokens: 262_144,
+                runtimeOptions: options).validate()
+        }
+    }
+
     @Test func invalidSlotCountRejected() {
         var options = AppRuntimeOptions()
         options.expertCacheSlots = 7

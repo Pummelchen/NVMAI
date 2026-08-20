@@ -20,18 +20,21 @@ public struct KVView: @unchecked Sendable {
     public let buffer: MTLBuffer
     /// Byte offset of logical position 0. Always 0 under linear storage.
     public let offset: Int
-    /// Bytes per token (numKVHeads * headDim * sizeof(FP16)).
+    /// Bytes per token, including affine metadata for quantized storage.
     public let stride: Int
     /// Number of valid positions written so far (== `position`). Attention reads
     /// `[0, validTokenCount]` (inclusive of the just-written token).
     public let validTokenCount: Int
+    public let precision: KVCachePrecision
+    public let valueBytes: Int
+    public let groupSize: Int
 }
 
-/// Per-layer FP16 K/V storage for the decode loop.
+/// Per-layer K/V storage for the decode loop.
 ///
 /// One K buffer and one V buffer per layer, allocated once in `init` — the
 /// decode hot path never allocates. Linear storage sizes every layer for
-/// `maxContext`; FP16 ring storage caps SWA layers to their physical capacity
+/// `maxContext`; ring storage caps SWA layers to their physical capacity
 /// while full-attention layers remain linear.
 ///
 /// The K/V projection GEMV writes straight into the slot returned by
@@ -46,6 +49,7 @@ public final class KVCacheManager {
     public let config: ArchConfig
     public let maxContext: Int
     public let fp16RingEnabled: Bool
+    public let precision: KVCachePrecision
     /// Retained so `reserve` can allocate; init-only allocation was the previous
     /// invariant and growth deliberately relaxes it.
     private let device: MTLDevice
@@ -55,15 +59,18 @@ public final class KVCacheManager {
     private let strides:  [Int]         // bytes per token, per layer
     private let kinds:    [LayerKind]
     private var capacityTokens: [Int]
+    private let valueBytes: [Int]
 
     public private(set) var position: Int = 0
 
     private static let fp16Size = 2
+    public static let quantizationGroupSize = 64
 
     public init(device: MTLDevice,
                 config: ArchConfig,
                 maxContext: Int,
                 fp16RingEnabled: Bool = false,
+                precision: KVCachePrecision = .fp16,
                 slidingWindow: Int? = nil,
                 maxPrefillChunkTokens: Int = 128) throws {
         precondition(maxContext > 0, "maxContext must be positive")
@@ -71,6 +78,7 @@ public final class KVCacheManager {
         self.device = device
         self.config = config
         self.maxContext = maxContext
+        self.precision = precision
         let ringEnabled = fp16RingEnabled
         self.fp16RingEnabled = ringEnabled
 
@@ -84,11 +92,13 @@ public final class KVCacheManager {
         var st: [Int] = []
         var kd: [LayerKind] = []
         var caps: [Int] = []
+        var valueByteCounts: [Int] = []
         ks.reserveCapacity(config.numLayers)
         vs.reserveCapacity(config.numLayers)
         st.reserveCapacity(config.numLayers)
         kd.reserveCapacity(config.numLayers)
         caps.reserveCapacity(config.numLayers)
+        valueByteCounts.reserveCapacity(config.numLayers)
 
         // Linear-attention layers keep no per-token K/V rows; they share one
         // page-sized placeholder so the parallel arrays stay non-optional.
@@ -114,10 +124,14 @@ public final class KVCacheManager {
                 st.append(0)
                 kd.append(.linear)
                 caps.append(0)
+                valueByteCounts.append(0)
                 continue
             }
             let isFull = maskValue != 0
-            let stride = isFull ? fullStride : swaStride
+            let fp16Stride = isFull ? fullStride : swaStride
+            let elements = fp16Stride / Self.fp16Size
+            let layout = Self.rowLayout(elements: elements, precision: precision)
+            let stride = layout.stride
             // Linear layers start at `initialCapacityTokens` and grow on demand
             // rather than reserving `maxContext` up front. At 262144 tokens a
             // full reservation is 512 MiB per layer, 20 GiB across 40 -- lazily
@@ -146,6 +160,7 @@ public final class KVCacheManager {
             st.append(stride)
             kd.append(isFull ? .full : .swa)
             caps.append(capacity)
+            valueByteCounts.append(layout.valueBytes)
         }
 
         self.kBuffers = ks
@@ -153,6 +168,7 @@ public final class KVCacheManager {
         self.strides  = st
         self.kinds    = kd
         self.capacityTokens = caps
+        self.valueBytes = valueByteCounts
     }
 
     /// Tokens each linear layer is sized for before any growth.
@@ -255,8 +271,8 @@ public final class KVCacheManager {
 
     public func keyView(layer: Int, validTokenCount: Int) -> KVView {
         validateValidTokenCount(validTokenCount)
-        return KVView(buffer: kBuffers[layer], offset: 0, stride: strides[layer],
-                      validTokenCount: validTokenCount)
+        return makeView(buffer: kBuffers[layer], layer: layer,
+                        offset: 0, validTokenCount: validTokenCount)
     }
 
     public func valueView(layer: Int) -> KVView {
@@ -273,8 +289,20 @@ public final class KVCacheManager {
 
     public func valueView(layer: Int, validTokenCount: Int) -> KVView {
         validateValidTokenCount(validTokenCount)
-        return KVView(buffer: vBuffers[layer], offset: 0, stride: strides[layer],
-                      validTokenCount: validTokenCount)
+        return makeView(buffer: vBuffers[layer], layer: layer,
+                        offset: 0, validTokenCount: validTokenCount)
+    }
+
+    public func keyRangeView(layer: Int, start: Int, count: Int) -> KVView {
+        let range = kRange(layer: layer, start: start, count: count)
+        return makeView(buffer: range.buffer, layer: layer, offset: range.offset,
+                        validTokenCount: count)
+    }
+
+    public func valueRangeView(layer: Int, start: Int, count: Int) -> KVView {
+        let range = vRange(layer: layer, start: start, count: count)
+        return makeView(buffer: range.buffer, layer: layer, offset: range.offset,
+                        validTokenCount: count)
     }
 
     /// Advance the position cursor once the current token's K/V are written
@@ -399,6 +427,24 @@ public final class KVCacheManager {
                      "range \(start)..<\(start + count) exceeds maxContext \(maxContext)")
     }
 
+    private func makeView(buffer: MTLBuffer, layer: Int, offset: Int,
+                          validTokenCount: Int) -> KVView {
+        KVView(buffer: buffer, offset: offset, stride: strides[layer],
+               validTokenCount: validTokenCount, precision: precision,
+               valueBytes: valueBytes[layer], groupSize: Self.quantizationGroupSize)
+    }
+
+    private static func rowLayout(elements: Int,
+                                  precision: KVCachePrecision) -> (stride: Int, valueBytes: Int) {
+        if precision == .fp16 {
+            return (elements * fp16Size, elements * fp16Size)
+        }
+        let packed = (elements * precision.rawValue + 7) / 8
+        let alignedPacked = (packed + 1) & ~1
+        let groups = (elements + quantizationGroupSize - 1) / quantizationGroupSize
+        return (alignedPacked + groups * 2 * fp16Size, alignedPacked)
+    }
+
     private func validateValidTokenCount(_ count: Int) {
         precondition(count >= 0, "validTokenCount must be non-negative")
         precondition(count <= maxContext,
@@ -415,7 +461,7 @@ public final class KVCacheManager {
         let capacity = capacityTokens[layer]
         let physicalStart = start % capacity
         precondition(physicalStart + count <= capacity,
-                     "range \(start)..<\(start + count) wraps FP16 KV ring capacity \(capacity)")
+                     "range \(start)..<\(start + count) wraps KV ring capacity \(capacity)")
     }
 
     private func advise(_ buffer: MTLBuffer, pageSize: Int, seen: inout Set<ObjectIdentifier>) {

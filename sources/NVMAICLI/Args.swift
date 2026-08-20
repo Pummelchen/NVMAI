@@ -22,6 +22,8 @@ public struct Args: Equatable, Sendable {
     public var expertCacheSlots: Int
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice?
+    public var kvCachePrecision: KVCachePrecision
+    public var ropeScalingMode: RuntimeRoPEScalingMode
 
     public init(model: String,
                 prompt: String? = nil,
@@ -38,7 +40,9 @@ public struct Args: Equatable, Sendable {
                 concise: Bool = false,
                 expertCacheSlots: Int = 64,
                 rdadvise: String = "default",
-                prefillChunk: PrefillChunkChoice? = nil) {
+                prefillChunk: PrefillChunkChoice? = nil,
+                kvCachePrecision: KVCachePrecision = .int8,
+                ropeScalingMode: RuntimeRoPEScalingMode = .none) {
         self.model = model
         self.prompt = prompt
         self.messagesFile = messagesFile
@@ -51,6 +55,8 @@ public struct Args: Equatable, Sendable {
         self.expertCacheSlots = expertCacheSlots
         self.rdadvise = rdadvise
         self.prefillChunk = prefillChunk
+        self.kvCachePrecision = kvCachePrecision
+        self.ropeScalingMode = ropeScalingMode
         self.seed = seed
         self.stops = stops
         self.quiet = quiet
@@ -93,7 +99,9 @@ extension Args {
 
     options:
       --max-new <int>           Generated-token limit (default 1024).
-      --max-context <int>       Context limit, 1...262144 tokens (default 4096).
+      --max-context <int>       Native context limit, 1...262144 (default 4096).
+                                With YaRN: 524288 or 1048576 (default 1048576).
+      --rope-scaling <mode>     Context scaling: none or yarn (default none).
       --temperature <float>     Sampling temperature (default 0.6; 0 = greedy).
       --top-k <int>             Top-k truncation, 1...256 (default 20; 0 = off).
       --top-p <float>           Nucleus truncation (default 0.95).
@@ -110,6 +118,7 @@ extension Args {
                                 scratch. Allowed: 32, 64, 128, 256, 512,
                                 1024, 2048, 4096; auto covers the prompt with
                                 the smallest allowed chunk.
+      --kv-bits <4|8|16>        KV-cache storage precision (default 8).
       --concise                 Inject the per-quantization concise-mode
                                 system prompt (answers without preamble,
                                 filler, or closing codas).
@@ -125,6 +134,7 @@ extension Args {
         var messagesFile: String?
         var maxNew = 1_024
         var maxContext = 4096
+        var maxContextWasSet = false
         var temperature: Float = 0.6
         var topK: Int? = 20
         var topP: Float? = 0.95
@@ -136,6 +146,8 @@ extension Args {
         var expertCacheSlots = 64
         var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
+        var kvCachePrecision: KVCachePrecision = .int8
+        var ropeScalingMode: RuntimeRoPEScalingMode = .none
 
         var index = 0
         while index < argv.count {
@@ -169,6 +181,13 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 maxContext = parsed
+                maxContextWasSet = true
+            case "--rope-scaling":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = RuntimeRoPEScalingMode(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                ropeScalingMode = parsed
             case "--temperature":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed >= 0, parsed <= 2 else {
@@ -222,6 +241,13 @@ extension Args {
                 } else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+            case "--kv-bits":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let bits = Int(value),
+                      let parsed = KVCachePrecision(rawValue: bits) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                kvCachePrecision = parsed
             case "--stop":
                 stops.append(try takeValue(argv, &index, flag: flag))
             default:
@@ -239,6 +265,16 @@ extension Args {
                 flag: "--top-p",
                 value: "\(topP) requires --top-k between 1 and 256")
         }
+        if ropeScalingMode == .yarn {
+            if !maxContextWasSet {
+                maxContext = RuntimeConfiguration.defaultYaRNContextTokens
+            }
+            guard RuntimeConfiguration.supportedYaRNContextTokens.contains(maxContext) else {
+                throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
+            }
+        } else if maxContext > RuntimeConfiguration.nativeMaximumContextTokens {
+            throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
+        }
         return Args(model: model,
                     prompt: prompt,
                     messagesFile: messagesFile,
@@ -254,7 +290,9 @@ extension Args {
                     concise: concise,
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
-                    prefillChunk: prefillChunk)
+                    prefillChunk: prefillChunk,
+                    kvCachePrecision: kvCachePrecision,
+                    ropeScalingMode: ropeScalingMode)
     }
 
     private static func takeValue(_ argv: [String],

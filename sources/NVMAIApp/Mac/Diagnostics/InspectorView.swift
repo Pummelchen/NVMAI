@@ -1,4 +1,5 @@
 import AppKit
+import NVMAI
 import NVMAIAppCore
 import SwiftUI
 
@@ -72,13 +73,39 @@ struct InspectorView: View {
 
     private var memorySection: some View {
         Section("Memory") {
+            LabeledContent("Context scaling") {
+                Picker("Context scaling", selection: $model.runtimeOptions.ropeScalingMode) {
+                    Text("None").tag(RuntimeRoPEScalingMode.none)
+                    Text("YaRN").tag(RuntimeRoPEScalingMode.yarn)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .onChange(of: model.runtimeOptions.ropeScalingMode) { _, mode in
+                    model.maxContextTokens = mode == .yarn
+                        ? RuntimeConfiguration.defaultYaRNContextTokens
+                        : AppContextLengthOption.twoFiftySixK.tokens
+                }
+            }
             LabeledContent("Context") {
                 Picker("Context", selection: $model.maxContextTokens) {
-                    ForEach(AppContextLengthOption.allCases) { option in
-                        Text(option.menuLabel).tag(option.tokens)
+                    ForEach(contextOptions) { option in
+                        Text(option.menuLabel(
+                            precision: model.runtimeOptions.kvCachePrecision))
+                            .tag(option.tokens)
                     }
                 }
                 .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+            }
+            LabeledContent("KV cache") {
+                Picker("KV cache", selection: $model.runtimeOptions.kvCachePrecision) {
+                    ForEach([KVCachePrecision.fp16, .int8, .int4], id: \.rawValue) { precision in
+                        Text(precision.label).tag(precision)
+                    }
+                }
+                .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
             }
@@ -92,11 +119,17 @@ struct InspectorView: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 4K context and 16 slots and apply after reloading the model.")
+            Text("Quantized KV reduces long-context memory. YaRN extends the model beyond its native 256K context; 1M is selected by default when enabled. These settings apply after reloading the model.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .disabled(model.isRunning || model.loadState.isLoading)
+    }
+
+    private var contextOptions: [AppContextLengthOption] {
+        model.runtimeOptions.ropeScalingMode == .yarn
+            ? AppContextLengthOption.yarnCases
+            : AppContextLengthOption.nativeCases
     }
 
     private var generationSection: some View {

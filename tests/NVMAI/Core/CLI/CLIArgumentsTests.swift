@@ -17,6 +17,29 @@ import Testing
         #expect(arguments.stops.isEmpty)
         #expect(!arguments.quiet)
         #expect(arguments.prefillChunk == nil)
+        #expect(arguments.kvCachePrecision == .int8)
+        #expect(arguments.ropeScalingMode == .none)
+    }
+
+    @Test func kvPrecisionAndYaRNOptionsParse() throws {
+        let yarn = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--kv-bits", "4", "--rope-scaling", "yarn",
+        ])
+        #expect(yarn.kvCachePrecision == .int4)
+        #expect(yarn.ropeScalingMode == .yarn)
+        #expect(yarn.maxContext == 1_048_576)
+        let halfMillion = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--rope-scaling", "yarn", "--max-context", "524288",
+        ])
+        #expect(halfMillion.maxContext == 524_288)
+        #expect(throws: ArgsError.self) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--rope-scaling", "yarn", "--max-context", "262144",
+            ])
+        }
     }
 
     @Test func prefillChunkParsesFixedAndAutoValues() throws {
@@ -108,6 +131,7 @@ import Testing
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--prefill-chunk", "--concise",
+            "--kv-bits", "--rope-scaling",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

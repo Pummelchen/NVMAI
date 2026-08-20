@@ -9,8 +9,11 @@ final class RoPE {
     private let defaultNeoxSWAK: MTLComputePipelineState
     private let proportionalNeoxFullQ: MTLComputePipelineState
     private let proportionalNeoxFullK: MTLComputePipelineState
+    private let yarnNeoxSubdim: MTLComputePipelineState
+    private let yarnInverseFrequencies: MTLBuffer?
+    private let yarnAttentionFactor: Float
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, yarn: YaRNRoPEParameters? = nil) throws {
         self.defaultNeox = try context.pipeline("rope_default_neox")
         self.proportionalNeox = try context.pipeline("rope_proportional_neox")
         self.neoxSubdim = try context.pipeline("rope_neox_subdim")
@@ -24,6 +27,20 @@ final class RoPE {
         self.proportionalNeoxFullK = try Self.specializedPipeline(
             context, "rope_proportional_neox",
             headDim: 512, numHeads: 2, rotatedPairs: 64)
+        self.yarnNeoxSubdim = try context.pipeline("rope_yarn_neox_subdim")
+        self.yarnAttentionFactor = yarn?.attentionFactor ?? 1
+        if let yarn {
+            guard let buffer = yarn.inverseFrequencies.withUnsafeBytes({ bytes -> MTLBuffer? in
+                guard let baseAddress = bytes.baseAddress else { return nil }
+                return context.device.makeBuffer(bytes: baseAddress, length: bytes.count,
+                                                 options: .storageModeShared)
+            }) else {
+                throw MetalError.bufferAllocationFailed("YaRN inverse frequencies")
+            }
+            self.yarnInverseFrequencies = buffer
+        } else {
+            self.yarnInverseFrequencies = nil
+        }
     }
 
     /// Qwen-style partial RoPE: rotation confined to the first `rotaryDim`
@@ -39,6 +56,14 @@ final class RoPE {
                           theta: Float) throws {
         precondition(rotaryDim.isMultiple(of: 2), "rotary_dim must be even")
         precondition(rotaryDim <= headDim, "rotary_dim must not exceed head_dim")
+        if let frequencies = yarnInverseFrequencies {
+            try encodeYaRNNeoxSubdim(commandBuffer: commandBuffer, data: data,
+                                     dataOffset: dataOffset, position: position,
+                                     headDim: headDim, numHeads: numHeads,
+                                     rotaryDim: rotaryDim, numTokens: numTokens,
+                                     frequencies: frequencies)
+            return
+        }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -58,6 +83,34 @@ final class RoPE {
                  pipeline: neoxSubdim,
                  pairs: Int(rotaryDim) / 2,
                  heads: Int(numHeads),
+                 tokens: Int(numTokens))
+        encoder.endEncoding()
+    }
+
+    private func encodeYaRNNeoxSubdim(commandBuffer: MTLCommandBuffer,
+                                      data: MTLBuffer,
+                                      dataOffset: Int,
+                                      position: UInt32,
+                                      headDim: UInt32,
+                                      numHeads: UInt32,
+                                      rotaryDim: UInt32,
+                                      numTokens: UInt32,
+                                      frequencies: MTLBuffer) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(yarnNeoxSubdim)
+        encoder.setBuffer(data, offset: dataOffset, index: 0)
+        encoder.setBuffer(frequencies, offset: 0, index: 1)
+        var pos = position, dim = headDim, heads = numHeads, rotary = rotaryDim
+        var magnitude = yarnAttentionFactor
+        encoder.setBytes(&pos, length: MemoryLayout<UInt32>.size, index: 2)
+        encoder.setBytes(&dim, length: MemoryLayout<UInt32>.size, index: 3)
+        encoder.setBytes(&heads, length: MemoryLayout<UInt32>.size, index: 4)
+        encoder.setBytes(&rotary, length: MemoryLayout<UInt32>.size, index: 5)
+        encoder.setBytes(&magnitude, length: MemoryLayout<Float>.size, index: 6)
+        dispatch(encoder: encoder, pipeline: yarnNeoxSubdim,
+                 pairs: Int(rotaryDim) / 2, heads: Int(numHeads),
                  tokens: Int(numTokens))
         encoder.endEncoding()
     }

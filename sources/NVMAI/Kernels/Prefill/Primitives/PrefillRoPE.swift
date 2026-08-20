@@ -5,11 +5,28 @@ final class PrefillRoPE {
     private let psoDefaultNeox: MTLComputePipelineState
     private let psoProportionalNeox: MTLComputePipelineState
     private let psoNeoxSubdim: MTLComputePipelineState
+    private let psoYaRNNeoxSubdim: MTLComputePipelineState
+    private let yarnInverseFrequencies: MTLBuffer?
+    private let yarnAttentionFactor: Float
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, yarn: YaRNRoPEParameters? = nil) throws {
         self.psoDefaultNeox = try context.pipeline("prefill_rope_default_neox_block")
         self.psoProportionalNeox = try context.pipeline("prefill_rope_proportional_neox_block")
         self.psoNeoxSubdim = try context.pipeline("prefill_rope_neox_subdim_block")
+        self.psoYaRNNeoxSubdim = try context.pipeline("prefill_rope_yarn_neox_subdim_block")
+        self.yarnAttentionFactor = yarn?.attentionFactor ?? 1
+        if let yarn {
+            guard let buffer = yarn.inverseFrequencies.withUnsafeBytes({ bytes -> MTLBuffer? in
+                guard let baseAddress = bytes.baseAddress else { return nil }
+                return context.device.makeBuffer(bytes: baseAddress, length: bytes.count,
+                                                 options: .storageModeShared)
+            }) else {
+                throw MetalError.bufferAllocationFailed("YaRN inverse frequencies")
+            }
+            self.yarnInverseFrequencies = buffer
+        } else {
+            self.yarnInverseFrequencies = nil
+        }
     }
 
     /// Qwen-style partial RoPE over a chunk: rotation confined to the first
@@ -30,6 +47,16 @@ final class PrefillRoPE {
         precondition(rotaryDim <= headDim, "rotaryDim must not exceed headDim")
         precondition(tokenStrideElements >= numHeads * headDim,
                      "token stride is too small")
+        if let frequencies = yarnInverseFrequencies {
+            try encodeYaRNNeoxSubdim(commandBuffer: commandBuffer, data: data,
+                                     dataOffset: dataOffset,
+                                     startPosition: startPosition,
+                                     queryCount: queryCount, headDim: headDim,
+                                     numHeads: numHeads, rotaryDim: rotaryDim,
+                                     tokenStrideElements: tokenStrideElements,
+                                     frequencies: frequencies)
+            return
+        }
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -54,6 +81,40 @@ final class PrefillRoPE {
             threadsPerThreadgroup: MTLSize(width: min(pairs, psoNeoxSubdim.maxTotalThreadsPerThreadgroup),
                                            height: 1,
                                            depth: 1))
+        enc.endEncoding()
+    }
+
+    private func encodeYaRNNeoxSubdim(commandBuffer: MTLCommandBuffer,
+                                      data: MTLBuffer,
+                                      dataOffset: Int,
+                                      startPosition: UInt32,
+                                      queryCount: UInt32,
+                                      headDim: UInt32,
+                                      numHeads: UInt32,
+                                      rotaryDim: UInt32,
+                                      tokenStrideElements: UInt32,
+                                      frequencies: MTLBuffer) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(psoYaRNNeoxSubdim)
+        enc.setBuffer(data, offset: dataOffset, index: 0)
+        enc.setBuffer(frequencies, offset: 0, index: 1)
+        var start = startPosition, hd = headDim, heads = numHeads
+        var stride = tokenStrideElements, rotary = rotaryDim
+        var magnitude = yarnAttentionFactor
+        enc.setBytes(&start, length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&hd, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&heads, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&stride, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&rotary, length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&magnitude, length: MemoryLayout<Float>.size, index: 7)
+        let pairs = Int(rotaryDim) / 2
+        enc.dispatchThreads(
+            MTLSize(width: pairs, height: Int(numHeads), depth: Int(queryCount)),
+            threadsPerThreadgroup: MTLSize(
+                width: min(pairs, psoYaRNNeoxSubdim.maxTotalThreadsPerThreadgroup),
+                height: 1, depth: 1))
         enc.endEncoding()
     }
 

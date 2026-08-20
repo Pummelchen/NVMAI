@@ -27,6 +27,8 @@ do {
         },
         promptCacheDiskLimitBytes: arguments.promptCacheDiskMiB * 1_048_576,
         prefillChunkTokens: arguments.prefillChunkTokens,
+        kvCachePrecision: arguments.kvCachePrecision,
+        ropeScalingMode: arguments.ropeScalingMode,
         expertCacheSlots: arguments.expertCacheSlots,
         expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
         mtpModelDirectory: arguments.mtpModel.map {

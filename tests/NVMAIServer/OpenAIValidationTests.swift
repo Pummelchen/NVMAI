@@ -282,6 +282,34 @@ struct ServerArgumentTests {
         #expect(arguments.promptCacheDiskDirectory == nil)
         #expect(arguments.promptCacheDiskMiB == 8_192)
         #expect(arguments.prefillChunkTokens == nil)
+        #expect(arguments.kvCachePrecision == .int8)
+        #expect(arguments.ropeScalingMode == .none)
+    }
+
+    @Test func parsesKVPrecisionAndYaRNContexts() throws {
+        let defaults = try ServerArguments.parse([
+            "--model", "model.gturbo", "--kv-bits", "16",
+            "--rope-scaling", "yarn",
+        ])
+        #expect(defaults.kvCachePrecision == .fp16)
+        #expect(defaults.ropeScalingMode == .yarn)
+        #expect(defaults.maxContext == 1_048_576)
+        let halfMillion = try ServerArguments.parse([
+            "--model", "model.gturbo", "--rope-scaling", "yarn",
+            "--max-context", "524288",
+        ])
+        #expect(halfMillion.maxContext == 524_288)
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo", "--max-context", "524288",
+            ])
+        }
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo", "--mtp-model", "mtp.gturbo",
+                "--rope-scaling", "yarn",
+            ])
+        }
     }
 
     @Test func acceptsPublicPrefillChunksAndRejectsUnsupportedValues() throws {
