@@ -77,14 +77,14 @@ and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
 
 ## Benchmarks
 
-NVMAI v4.0 median results on a base 8-core M3 MacBook Pro with 24 GB. Ornith
+NVMAI v4.1 median results on a base 8-core M3 MacBook Pro with 24 GB. Ornith
 generated 512 tokens of continuous plain English about an ordinary day in a
 small town; each row used one discarded warmup and three fresh-process runs.
 
 | Quantization | Median decode | Median wall time |
 | --- | ---: | ---: |
-| 4-bit | **15.31 tok/s** | 36.60 s |
-| 8-bit | **8.31 tok/s** | 67.00 s |
+| 4-bit | **16.45 tok/s** | 34.24 s |
+| 8-bit | **8.75 tok/s** | 63.99 s |
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
 native 262K context, prompt cache on, 8-bit KV, and MTP off.
