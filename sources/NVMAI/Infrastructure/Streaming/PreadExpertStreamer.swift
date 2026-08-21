@@ -193,6 +193,19 @@ public enum ExpertCacheLayout: String, Sendable {
     }
 }
 
+/// Raw staging pointers are allocated by Metal and remain valid until the
+/// owning prefetch ring releases them. This wrapper makes that lifetime
+/// invariant explicit at the scheduler boundary.
+/// unchecked-invariant: the ring retains every backing MTLBuffer until this
+/// request has reached a terminal state.
+private final class PrefetchDestinations: @unchecked Sendable {
+    let values: [UnsafeMutableRawPointer]
+
+    init(_ values: [UnsafeMutableRawPointer]) {
+        self.values = values
+    }
+}
+
 /// SSD-backed routed-expert streamer with a fixed per-layer slot cache.
 /// unchecked-invariant: the expert cache bookkeeping is guarded by `cacheLock`,
 /// which is what lets `DispatchQueue.concurrentPerform` fan the misses out
@@ -549,10 +562,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     public func planExpertsCached(experts: [Int],
                                   layer: Int = 0,
-                                  avoidingSlots: Set<Int> = []) throws -> ExpertCachePlan {
+                                  avoidingSlots: Set<Int> = [],
+                                  prefetched: [Int: UnsafeMutableRawPointer] = [:]) throws
+        -> ExpertCachePlan {
         guard let plan = makeExpertCachePlan(layer: layer,
                                              experts: experts,
-                                             avoidingSlots: avoidingSlots) else {
+                                             avoidingSlots: avoidingSlots,
+                                             prefetched: prefetched) else {
             // K10: config-triggered placement failure (too few slots for the
             // requested expert set) is recoverable — throw instead of
             // crashing; the runner already handles thrown errors.
@@ -564,13 +580,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     public func planExpertsCachedIfPossible(experts: [Int],
                                             layer: Int = 0,
-                                            avoidingSlots: Set<Int> = []) -> ExpertCachePlan? {
-        makeExpertCachePlan(layer: layer, experts: experts, avoidingSlots: avoidingSlots)
+                                            avoidingSlots: Set<Int> = [],
+                                            prefetched: [Int: UnsafeMutableRawPointer] = [:])
+        -> ExpertCachePlan? {
+        makeExpertCachePlan(layer: layer, experts: experts, avoidingSlots: avoidingSlots,
+                             prefetched: prefetched)
     }
 
     private func makeExpertCachePlan(layer: Int,
                                      experts: [Int],
-                                     avoidingSlots rawAvoidingSlots: Set<Int>) -> ExpertCachePlan? {
+                                     avoidingSlots rawAvoidingSlots: Set<Int>,
+                                     prefetched: [Int: UnsafeMutableRawPointer])
+        -> ExpertCachePlan? {
         precondition(experts.count <= slotCount,
                      "expert cache needs at least \(experts.count) slots")
         let avoidingSlots = Set(rawAvoidingSlots.filter { $0 >= 0 && $0 < slotCount })
@@ -606,11 +627,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             reserved[slot] = true
         }
 
-        let misses = experts.indices.filter { assignedSlots[$0] == -1 }
+        let candidateMisses = experts.indices.filter { assignedSlots[$0] == -1 }
         let evictable = (0..<slotCount)
             .filter { !reserved[$0] && slotState[$0] != .loading && slotPinCount[$0] == 0 }
             .sorted { shouldEvictSlot($0, before: $1) }
-        guard misses.count <= evictable.count else { return nil }
+        guard candidateMisses.count <= evictable.count else { return nil }
 
         useClock = clock
         for expert in experts where expert >= 0 && expert < expertUseCount.count {
@@ -619,7 +640,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for slot in assignedSlots where slot >= 0 {
             slotLastUse[slot] = clock
         }
-        for (offset, index) in misses.enumerated() {
+        var misses: [Int] = []
+        var adoptedPrefetches: [Int] = []
+        for (offset, index) in candidateMisses.enumerated() {
             let slot = evictable[offset]
             if slotState[slot] == .resident { statisticsEvictions &+= 1 }
             let previousExpert = slotExpert[slot]
@@ -639,7 +662,20 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                      slot: slot,
                                      state: ExpertResidencyEntry.loading,
                                      generation: slotGeneration[slot])
+            if let source = prefetched[experts[index]] {
+                memcpy(slotPointers[slot], source, Int(layout.expertStride))
+                slotState[slot] = .resident
+                publishResidencyUnlocked(expert: experts[index],
+                                         slot: slot,
+                                         state: ExpertResidencyEntry.resident,
+                                         generation: slotGeneration[slot])
+                adoptedPrefetches.append(experts[index])
+            } else {
+                misses.append(index)
+            }
         }
+
+        recordPrefetchAdoptionsUnlocked(adoptedPrefetches)
 
         statisticsPlans &+= 1
         statisticsRequestedExperts &+= UInt64(experts.count)
@@ -1112,6 +1148,55 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             peakLoadingSlots: statisticsPeakLoadingSlots)
     }
 
+    /// A stable snapshot of authoritative cache entries. Loading slots are
+    /// intentionally omitted: their bytes must not be consumed or treated as
+    /// available by a predictor until a successful demand load publishes them.
+    /// Diagnostic and policy code use this before a cache plan reserves slots.
+    public func residentExperts() -> [Int] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return zip(slotExpert, slotState).compactMap { expert, state in
+            state == .resident && expert >= 0 ? expert : nil
+        }.sorted()
+    }
+
+    /// Starts a bounded, raw speculative read. The destination buffers are not
+    /// cache slots, so an incorrect prediction cannot evict an authoritative
+    /// expert. Demand work is always scheduled at higher priority.
+    public func beginPrefetch(experts: [Int],
+                              destinations: [UnsafeMutableRawPointer]) throws
+        -> ExpertLoadOperation {
+        guard experts.count == destinations.count else {
+            throw ModelError.internalInconsistency(
+                detail: "prefetch experts and destinations differ in count")
+        }
+        let offsets = try experts.map { expert -> UInt64 in
+            guard expert >= 0 && expert < layout.expertsPerLayer else {
+                throw ModelError.internalInconsistency(detail: "invalid prefetched expert")
+            }
+            return layout.streamOffset + layout.expertOffset(layer: 0, expert: expert)
+        }
+        let safeDestinations = PrefetchDestinations(destinations)
+        let operation = ExpertLoadOperation()
+        ExpertIOScheduler.shared.submit(priority: .speculative) { [self, operation, safeDestinations] in
+            operation.markInFlight()
+            do {
+                if let boundedReader {
+                    try boundedReader.fetch(offsets: offsets, into: safeDestinations.values)
+                } else {
+                    for (offset, destination) in zip(offsets, safeDestinations.values) {
+                        try readFull(into: destination, fileOffset: offset,
+                                     count: Int(layout.expertStride))
+                    }
+                }
+                operation.finish(.success(()))
+            } catch {
+                operation.finish(.failure(error))
+            }
+        }
+        return operation
+    }
+
     private func finishPlanExecution(_ plan: ExpertCachePlan,
                                      succeeded: Bool,
                                      elapsedNanos: UInt64) {
@@ -1215,6 +1300,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         statisticsMaximumLoadNanos = max(statisticsMaximumLoadNanos, elapsedNanos)
         let bucket = Self.latencyBucketIndex(nanos: elapsedNanos)
         statisticsLatencyHistogram[bucket] &+= 1
+        for expert in experts where expert >= 0 && expert < expertLoadCount.count {
+            if expertLoadCount[expert] > 0 { statisticsReloads &+= 1 }
+            expertLoadCount[expert] &+= 1
+        }
+    }
+
+    private func recordPrefetchAdoptionsUnlocked(_ experts: [Int]) {
         for expert in experts where expert >= 0 && expert < expertLoadCount.count {
             if expertLoadCount[expert] > 0 { statisticsReloads &+= 1 }
             expertLoadCount[expert] &+= 1

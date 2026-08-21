@@ -102,13 +102,16 @@ extension Model {
 
     public func planRoutedExperts(layer: Int,
                                   experts: [Int],
-                                  avoidingSlots: Set<Int> = []) throws -> RoutedExpertFetchPlan? {
+                                  avoidingSlots: Set<Int> = [],
+                                  prefetched: [Int: MTLBuffer] = [:]) throws
+        -> RoutedExpertFetchPlan? {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
+        let prefetchPointers = prefetched.mapValues { $0.contents() }
         return RoutedExpertFetchPlan(
-            layer: layer,
-            cachePlan: try streamer.planExpertsCached(experts: experts, avoidingSlots: validSlots))
+            layer: layer, cachePlan: try streamer.planExpertsCached(
+                experts: experts, avoidingSlots: validSlots, prefetched: prefetchPointers))
     }
 
     public func planRoutedExpertsIfPossible(layer: Int,
@@ -147,6 +150,31 @@ extension Model {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         return streamer.expertResidencyResources()
+    }
+
+    /// Returns only fully valid routed experts immediately before cache
+    /// planning. This is used by the optional v4.3 trace probe and never
+    /// changes cache state or inference behavior.
+    public func routedExpertResidentIDs(layer: Int) throws -> [Int] {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        return streamer.residentExperts()
+    }
+
+    public func routedExpertByteStride(layer: Int) throws -> Int {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        return Int(streamer.layout.expertStride)
+    }
+
+    public func beginRoutedExpertPrefetch(layer: Int,
+                                           experts: [Int],
+                                           into buffers: [MTLBuffer]) throws
+        -> ExpertLoadOperation {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        return try streamer.beginPrefetch(experts: experts,
+                                          destinations: buffers.map { $0.contents() })
     }
 
     func pinRoutedExperts(for plan: RoutedExpertFetchPlan) throws -> RoutedExpertLease {

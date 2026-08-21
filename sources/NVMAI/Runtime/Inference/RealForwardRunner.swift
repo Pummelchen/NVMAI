@@ -200,6 +200,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let zeroResidual: MTLBuffer  // [D] FP16 zeros — for routed branch base
     private let outIndices: MTLBuffer    // [topK] UInt32
     private let outWeights: MTLBuffer    // [topK] FP16
+    /// Trace-only next-layer router result. It is never read by inference.
+    private let prefetchPredictionIndices: MTLBuffer
+    private let prefetchPredictionWeights: MTLBuffer
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     private let moeActs: MTLBuffer       // [topK * FmoE] FP16
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
@@ -283,6 +286,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let expertIOSynchronization: RuntimeExpertIOSynchronization
     private let expertIOSubmission: RuntimeExpertIOSubmission
     private let expertIOBackend: ExpertIOBackend
+    private let predictivePrefetch: ExpertPrefetchRing?
+    private let predictivePrefetchTopM: Int
     public let rdadviseEnabled: Bool
     public let rdadvisePolicyMode: RDAdvicePolicyMode
     private var rdadviseSkipUntilPosition: Int = -1
@@ -318,6 +323,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
+        let rawPrefetchEnabled = ProcessInfo.processInfo.environment[
+            "NVMAI_PREDICTIVE_PREFETCH"] == "1"
+        let rawPrefetchTopM = Int(ProcessInfo.processInfo.environment[
+            "NVMAI_PREFETCH_TOP_M"] ?? "4") ?? 4
+        guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
+            throw ModelError.internalInconsistency(
+                detail: "NVMAI_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
+        }
+        self.predictivePrefetchTopM = rawPrefetchTopM
+        self.predictivePrefetch = rawPrefetchEnabled
+            ? try ExpertPrefetchRing(
+                device: context.device,
+                expertStride: model.routedExpertByteStride(layer: 0),
+                slotCount: rawPrefetchTopM)
+            : nil
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
         self.rdadviseAdaptiveState = RDAdviceAdaptivePolicyState(
@@ -457,6 +477,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         memset(self.zeroResidual.contents(), 0, self.zeroResidual.length)
         self.outIndices    = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.outIndices")
         self.outWeights    = try buf(cfg.topKExperts, label: "decode.outWeights")
+        self.prefetchPredictionIndices = try buf(
+            cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.prefetchPredictionIndices")
+        self.prefetchPredictionWeights = try buf(
+            cfg.topKExperts, label: "decode.prefetchPredictionWeights")
         self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize, label: "decode.moeActs")
         self.moeHitActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.moeHitActiveSlots")
         self.moeMissActiveSlots = try buf(cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.moeMissActiveSlots")
@@ -1040,6 +1064,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
     }()
 
+    /// JSONL trace for the v4.3 predictive-prefetch qualification probe.
+    /// It deliberately records only exact routing and authoritative cache
+    /// residency before planning; enabling it cannot submit I/O or alter cache
+    /// decisions. Kept separate from NVMAI_ROUTE_TRACE for compatibility.
+    private let prefetchTraceFD: Int32 = {
+        guard let path = ProcessInfo.processInfo.environment["NVMAI_PREFETCH_TRACE"],
+              !path.isEmpty else { return -1 }
+        return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+    }()
+
+    private var nextLayerPredictionEnabled: Bool {
+        prefetchTraceFD >= 0 || predictivePrefetch != nil
+    }
+
     public func resetKernelGPUTimings() {
         kernelGPUTimings.removeAll(keepingCapacity: true)
     }
@@ -1151,6 +1189,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             if n <= 0 { break }
             written += n
+        }
+    }
+
+    /// Appends one exact pre-plan routing/cache observation. `resident` is
+    /// captured before cache planning so a later miss reservation cannot make
+    /// the trace falsely report an expert as absent.
+    private func recordPrefetchTrace(layer: Int,
+                                     position: Int,
+                                     experts: [Int],
+                                     misses: [Int],
+                                     resident: [Int],
+                                     nextLayerPrediction: [Int]) {
+        guard prefetchTraceFD >= 0 else { return }
+        let line = "{\"position\":\(position),\"layer\":\(layer),\"experts\":\(experts),\"misses\":\(misses),\"resident\":\(resident),\"next_layer_prediction\":\(nextLayerPrediction)}\n"
+        let bytes = Array(line.utf8)
+        var written = 0
+        while written < bytes.count {
+            let count = bytes.withUnsafeBytes { raw -> Int in
+                write(prefetchTraceFD, raw.baseAddress!.advanced(by: written),
+                      bytes.count - written)
+            }
+            if count <= 0 { break }
+            written += count
         }
     }
 
@@ -1658,6 +1719,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             let postAttn = try model.postAttnNorm(layer: L)
             let sharedProj = sharedExpertProjections[L]
             let routerW  = try model.router(layer: L)
+            let nextRouterW: TensorView?
+            if nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
+                nextRouterW = try model.router(layer: L + 1)
+            } else {
+                nextRouterW = nil
+            }
             let residencyResources = decodeExpertExecution == .gpuResidency
                 ? try model.routedExpertResidency(layer: L) : nil
             let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
@@ -1708,6 +1775,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 perExpertScaleOffset: perExpertScale.offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+            if let nextRouterW {
+                // Probe only: score the next router against the current
+                // post-attention normalized residual. The exact router above
+                // remains authoritative; this result is emitted solely to
+                // NVMAI_PREFETCH_TRACE for predictor qualification.
+                try moe.encodeRouter(commandBuffer: tailCB,
+                    weights: nextRouterW.buffer, weightsOffset: Int(nextRouterW.offset),
+                    scales: nextRouterW.buffer, scalesOffset: Int(nextRouterW.scaleOffset),
+                    biases: nextRouterW.buffer, biasesOffset: Int(nextRouterW.biasOffset),
+                    hidden: routedX,
+                    effectiveScale: effectiveScaleBuffers[L + 1],
+                    perExpertScale: perExpertScale.buffer,
+                    perExpertScaleOffset: perExpertScale.offset,
+                    outIndices: prefetchPredictionIndices,
+                    outWeights: prefetchPredictionWeights,
+                    numExperts: UInt32(cfg.numExperts), d: D,
+                    topK: UInt32(cfg.topKExperts))
+            }
             if let residencyResources {
                 try moe.encodeResidencyClassification(
                     commandBuffer: tailCB,
@@ -1750,6 +1835,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 pendingRoutedCommand = nil
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+            let predictedNextLayer: [Int]
+            if nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
+                let ptr = prefetchPredictionIndices.contents().bindMemory(
+                    to: UInt32.self, capacity: cfg.topKExperts)
+                predictedNextLayer = (0..<cfg.topKExperts).map {
+                    min(Int(ptr[$0]), cfg.numExperts - 1)
+                }
+            } else {
+                predictedNextLayer = []
+            }
 
             // CPU readback to fetch routed-expert blobs from disk. The expert
             // id list is reused host scratch (R16); the runner is single-flight
@@ -1762,7 +1857,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 pending: &pendingRoutedCommand,
                 bodyStart: tBodyStart, cb1Start: tCb1Start,
                 waitMark: tWait, waitNanos: waitNanos,
-                previousRoutedMicros: prevRoutedUs)
+                previousRoutedMicros: prevRoutedUs,
+                predictedNextLayer: predictedNextLayer)
         }
         if let pending = pendingRoutedCommand {
             try finishPendingRoutedCommand(pending, waitIfNeeded: true)
@@ -3443,7 +3539,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         cb1Start tCb1Start: UInt64,
         waitMark tWait: UInt64,
         waitNanos: UInt64,
-        previousRoutedMicros prevRoutedUs: Double
+        previousRoutedMicros prevRoutedUs: Double,
+        predictedNextLayer: [Int]
     ) async throws {
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
@@ -3462,11 +3559,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let routedOffsets = try model.routedExpertOffsets(layer: L)
         let topK = UInt32(cfg.topKExperts)
         let canUsePlannedFetch = cfg.topKExperts <= MoE.maxStreamedExperts
+        let residentBeforePlan = prefetchTraceFD >= 0
+            ? try model.routedExpertResidentIDs(layer: L) : []
+        let readyPrefetches = predictivePrefetch?.readyBuffers(layer: L, experts: experts) ?? [:]
         let cachePlanStarted = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let plannedFetch = canUsePlannedFetch
-            ? try model.planRoutedExperts(layer: L, experts: experts)
+            ? try model.planRoutedExperts(
+                layer: L, experts: experts, prefetched: readyPrefetches)
             : nil
         totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
+        if !readyPrefetches.isEmpty {
+            predictivePrefetch?.consume(layer: L, experts: Set(readyPrefetches.keys))
+        }
+        let missesForTrace = plannedFetch.map { plan in
+            plan.misses.map { experts[$0] }
+        } ?? experts
+        recordPrefetchTrace(layer: L, position: position, experts: experts,
+                            misses: missesForTrace, resident: residentBeforePlan,
+                            nextLayerPrediction: predictedNextLayer)
         let expertLease = try plannedFetch.map { try model.pinRoutedExperts(for: $0) }
         // v4.2 Phase B: once slots and generations are reserved and pinned,
         // submit real storage immediately. Hit partitioning, argument binding,
@@ -3695,6 +3805,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     totalExposedIoNanos &+= tIoStart + layerIo - overlapEnd
                 }
             }
+        }
+        if let predictivePrefetch, L + 1 < cfg.numLayers {
+            let resident = Set(try model.routedExpertResidentIDs(layer: L + 1))
+            try predictivePrefetch.begin(
+                model: model, layer: L + 1,
+                experts: Array(predictedNextLayer.prefix(predictivePrefetchTopM)),
+                resident: resident)
         }
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
         decodeRoutedOffsetsScratch.removeAll(keepingCapacity: true)

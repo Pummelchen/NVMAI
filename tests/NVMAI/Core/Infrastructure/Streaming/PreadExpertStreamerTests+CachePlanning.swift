@@ -96,6 +96,24 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  @Test func residentSnapshotExcludesLoadingEntries() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+
+    _ = try streamer.loadExpertsCached(experts: [1, 3])
+    #expect(streamer.residentExperts() == [1, 3])
+
+    let plan = try streamer.planExpertsCached(experts: [2])
+    #expect(plan.misses == [0])
+    #expect(streamer.residentExperts() == [1, 3])
+
+    _ = try streamer.executeExpertCachePlan(plan)
+    #expect(streamer.residentExperts() == [1, 2, 3])
+  }
+
   @Test func submittedCacheLoadCompletesWithoutCallerExecutingReads() async throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }

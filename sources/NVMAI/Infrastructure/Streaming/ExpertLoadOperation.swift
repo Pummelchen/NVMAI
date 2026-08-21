@@ -156,29 +156,58 @@ public final class ExpertLoadOperation: @unchecked Sendable {
     }
 }
 
+enum ExpertIOPriority: Sendable {
+    case demand
+    case speculative
+}
+
 /// Persistent bounded submission service. The C pread backend owns the actual
-/// fixed reader threads; these queues replace per-layer use of the process-wide
-/// global queue and bound the number of batches entering those pools.
-/// unchecked-invariant: worker selection is locked and queues are immutable.
+/// fixed reader threads; this service gives queued demand batches precedence
+/// over queued speculative batches.
+/// unchecked-invariant: both queues are read and mutated only under `condition`.
 final class ExpertIOScheduler: @unchecked Sendable {
     static let shared = ExpertIOScheduler(workerCount: 4)
 
-    private let workers: [DispatchQueue]
-    private let selectionLock = NSLock()
-    private var nextWorker = 0
+    private let condition = NSCondition()
+    private var demandQueue: [@Sendable () -> Void] = []
+    private var speculativeQueue: [@Sendable () -> Void] = []
 
     init(workerCount: Int) {
         precondition(workerCount > 0)
-        workers = (0..<workerCount).map { index in
+        for index in 0..<workerCount {
             DispatchQueue(label: "NVMAI.expert-io.\(index)", qos: .userInitiated)
+                .async { [weak self] in
+                    self?.runWorker()
+                }
         }
     }
 
     func submit(_ work: @escaping @Sendable () -> Void) {
-        selectionLock.lock()
-        let worker = workers[nextWorker]
-        nextWorker = (nextWorker + 1) % workers.count
-        selectionLock.unlock()
-        worker.async(execute: work)
+        submit(priority: .demand, work)
+    }
+
+    func submit(priority: ExpertIOPriority, _ work: @escaping @Sendable () -> Void) {
+        condition.lock()
+        switch priority {
+        case .demand:
+            demandQueue.append(work)
+        case .speculative:
+            speculativeQueue.append(work)
+        }
+        condition.signal()
+        condition.unlock()
+    }
+
+    private func runWorker() {
+        while true {
+            condition.lock()
+            while demandQueue.isEmpty && speculativeQueue.isEmpty {
+                condition.wait()
+            }
+            let work = demandQueue.isEmpty
+                ? speculativeQueue.removeFirst() : demandQueue.removeFirst()
+            condition.unlock()
+            work()
+        }
     }
 }
