@@ -21,6 +21,14 @@ public final class ExpertLoadOperation: @unchecked Sendable {
 
     public let submittedNanos: UInt64
     public let completionToken: ExpertIOCompletionToken?
+    /// Present only for the Metal-I/O staging route. The dependent compute
+    /// command owns the copy into the expert cache and must release it after
+    /// that command completes.
+    let metalStagingTransfer: MetalExpertStagingTransfer?
+    /// A staged Metal load is not resident until the event-gated GPU blit has
+    /// completed. Pread writes cache slots directly and therefore remains
+    /// false.
+    let requiresGPUFinalization: Bool
     private var startedAtNanos: UInt64 = 0
     private var completedAtNanos: UInt64 = 0
 
@@ -30,12 +38,20 @@ public final class ExpertLoadOperation: @unchecked Sendable {
     init(completionToken: ExpertIOCompletionToken? = nil,
          eventCoordinator: ExpertIOEventCoordinator? = nil,
          backendSignalsEvent: Bool = false,
+         metalStagingTransfer: MetalExpertStagingTransfer? = nil,
+         requiresGPUFinalization: Bool = false,
          submittedNanos: UInt64 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) {
+        precondition(!requiresGPUFinalization || metalStagingTransfer != nil,
+                     "a staged Metal load requires a staging transfer")
         self.completionToken = completionToken
         self.eventCoordinator = eventCoordinator
         self.backendSignalsEvent = backendSignalsEvent
+        self.metalStagingTransfer = metalStagingTransfer
+        self.requiresGPUFinalization = requiresGPUFinalization
         self.submittedNanos = submittedNanos
     }
+
+    func releaseStagingTransfer() { metalStagingTransfer?.release() }
 
     public var state: ExpertLoadOperationState {
         condition.withLock { currentState }

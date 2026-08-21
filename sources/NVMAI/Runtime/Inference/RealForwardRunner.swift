@@ -3300,6 +3300,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
                                     waitIfNeeded: Bool) throws {
         defer { pending.expertLease?.release() }
+        // A staged Metal-I/O batch owns its source buffers until the compute
+        // command has completed. If any command/error path exits early, leave
+        // the cache entries empty rather than retaining a LOADING slot.
+        var finalizedStagingTransfer = false
+        defer {
+            if let operation = pending.storageOperation {
+                if operation.storage.requiresGPUFinalization,
+                   !finalizedStagingTransfer {
+                    model.failRoutedExpertStagingTransfer(plan: operation.plan)
+                }
+                operation.storage.releaseStagingTransfer()
+            }
+        }
         if waitIfNeeded {
             if let sharedCB = pending.sharedCB {
                 try waitForCompletion(sharedCB)
@@ -3318,6 +3331,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // wait. A failed read is surfaced after safe no-op kernels have
             // prevented incomplete slot bytes from being dereferenced.
             try operation.storage.wait()
+            if operation.storage.requiresGPUFinalization {
+                try model.finalizeRoutedExpertStagingTransfer(plan: operation.plan)
+                finalizedStagingTransfer = true
+            }
             totalIOQueueNanos &+= operation.storage.submissionToStartNanos
             totalIoNanos &+= operation.storage.loadNanos
             totalMissIoNanos &+= operation.storage.loadNanos
@@ -3456,7 +3473,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // and command encoding below now overlap the reader queue.
         let shouldSubmitImmediately = expertIOSubmission == .immediate
             || expertIOSynchronization == .event
-        let plannedLoad = expertIOBackend == .pread && shouldSubmitImmediately
+        let plannedLoad = shouldSubmitImmediately
             ? try plannedFetch.map {
                 try model.beginFetchRoutedExperts(
                     plan: $0,
@@ -3696,6 +3713,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let ioStatus = ioToken.map { ($0.status, $0.statusOffset) }
         if let token = ioToken {
             routedCB.encodeWaitForEvent(token.event, value: token.value)
+        }
+        if let stagingTransfer = eventLoad?.storage.metalStagingTransfer {
+            // The compute command references cache slots only after it has
+            // waited for the MTLIO staging event. This is deliberately a GPU
+            // blit, not a CPU memcpy or a completion-handler submission.
+            try stagingTransfer.encodeCopy(commandBuffer: routedCB)
         }
         let splitArgBuf = phase1HitCB != nil && !phase1MissSlots.isEmpty
             ? phase1HitSplitArgBuf

@@ -81,6 +81,13 @@ public struct Model {
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
+        /// One staging ring is shared by every lazy layer streamer. Allocating
+        /// one per layer would turn a small event bridge into hundreds of MiB
+        /// of undeclared working set.
+        var metalStagingPool: MetalExpertStagingPool?
+        /// Layer files need separate handles, but not separate MTLIO queues.
+        /// One queue prevents prefill from exhausting Metal-I/O worker threads.
+        var metalIOService: MetalExpertIOService?
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
@@ -418,12 +425,35 @@ public struct Model {
         case .pread(let configuredSlotCount):
             slotCount = configuredSlotCount
         }
+        let metalStagingPool: MetalExpertStagingPool?
+        let metalIOService: MetalExpertIOService?
+        if try ExpertIOBackend.environmentValue() == .metal {
+            if streamersBox.metalStagingPool == nil {
+                streamersBox.metalStagingPool = try MetalExpertStagingPool(
+                    device: device,
+                    byteCount: Int(packedExpertsLayout.expertStride),
+                    // Decode routes at most top-8 experts. A single exclusive
+                    // lease keeps native MTLIO shared-event values ordered.
+                    slotCapacity: 8)
+            }
+            if streamersBox.metalIOService == nil {
+                streamersBox.metalIOService = try MetalExpertIOService(
+                    device: device, maximumCommandsInFlight: 4)
+            }
+            metalStagingPool = streamersBox.metalStagingPool
+            metalIOService = streamersBox.metalIOService
+        } else {
+            metalStagingPool = nil
+            metalIOService = nil
+        }
         streamersBox.streamers[L] = try PreadExpertStreamer(
             layout: layout,
             device: device,
             slotCount: slotCount,
             cachePolicy: expertCachePolicy,
-            eventCoordinator: expertIOEventCoordinator)
+            eventCoordinator: expertIOEventCoordinator,
+            metalStagingPool: metalStagingPool,
+            metalIOService: metalIOService)
     }
 
     /// Test hook: how many layer files have been opened so far.

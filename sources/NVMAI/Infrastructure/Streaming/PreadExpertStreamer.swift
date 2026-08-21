@@ -229,6 +229,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private let boundedReader: ParallelExpertReader?
     private let metalReader: MetalExpertReader?
     private let eventCoordinator: ExpertIOEventCoordinator?
+    private let metalStagingPool: MetalExpertStagingPool?
+    private let metalIOService: MetalExpertIOService?
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
     private let slotBufferOffsets: [UInt64]
@@ -269,7 +271,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 device: MTLDevice,
                 slotCount: Int,
                 cachePolicy: ExpertCachePolicy = .lfu,
-                eventCoordinator: ExpertIOEventCoordinator? = nil) throws {
+                eventCoordinator: ExpertIOEventCoordinator? = nil,
+                metalStagingPool: MetalExpertStagingPool? = nil,
+                metalIOService: MetalExpertIOService? = nil) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
@@ -283,6 +287,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             self.cachePolicy = cachePolicy
         }
         self.eventCoordinator = eventCoordinator
+        self.metalStagingPool = metalStagingPool
+        self.metalIOService = metalIOService
         self.ioBackend = try ExpertIOBackend.environmentValue()
         self.cacheLayout = try ExpertCacheLayout.environmentValue()
         let pageSize = Int(getpagesize())
@@ -402,10 +408,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         // in the macOS page cache and invalidate the declared RAM budget.
         if ioBackend == .metal {
             do {
-                self.metalReader = try MetalExpertReader(
-                    path: layout.path,
-                    device: device,
-                    maximumCommandsInFlight: 4)
+                if let metalIOService {
+                    self.metalReader = try MetalExpertReader(
+                        path: layout.path, device: device, service: metalIOService)
+                } else {
+                    // Direct construction remains useful for focused tests;
+                    // Model opens pass the one shared service above.
+                    self.metalReader = try MetalExpertReader(
+                        path: layout.path, device: device, maximumCommandsInFlight: 4)
+                }
             } catch {
                 unwind()
                 throw error
@@ -690,7 +701,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         eventDriven: Bool = false
     ) throws -> ExpertLoadOperation {
         let token: ExpertIOCompletionToken?
-        if eventDriven && metalReader == nil {
+        if eventDriven {
             guard let eventCoordinator else {
                 throw ModelError.internalInconsistency(
                     detail: "event-driven expert I/O requested without a shared event")
@@ -699,15 +710,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         } else {
             token = nil
         }
-        let operation = ExpertLoadOperation(
-            completionToken: token,
-            eventCoordinator: eventCoordinator,
-            backendSignalsEvent: false)
         guard !plan.misses.isEmpty else {
+            let operation = ExpertLoadOperation(
+                completionToken: token,
+                eventCoordinator: eventCoordinator,
+                backendSignalsEvent: false)
             operation.finish(.success(()))
             return operation
         }
         if let metalReader {
+            if eventDriven {
+                return try beginEventDrivenMetalReads(
+                    plan, reader: metalReader, token: token)
+            }
+            let operation = ExpertLoadOperation(
+                completionToken: token,
+                eventCoordinator: eventCoordinator,
+                backendSignalsEvent: false)
             operation.markInFlight()
             let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             do {
@@ -749,6 +768,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
             return operation
         }
+        let operation = ExpertLoadOperation(
+            completionToken: token,
+            eventCoordinator: eventCoordinator,
+            backendSignalsEvent: false)
         ExpertIOScheduler.shared.submit { [self, operation] in
             operation.markInFlight()
             do {
@@ -757,6 +780,61 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             } catch {
                 operation.finish(.failure(error))
             }
+        }
+        return operation
+    }
+
+    private func beginEventDrivenMetalReads(
+        _ plan: ExpertCachePlan,
+        reader: MetalExpertReader,
+        token: ExpertIOCompletionToken?
+    ) throws -> ExpertLoadOperation {
+        guard let token,
+              let stagingLease = metalStagingPool?.tryAcquire(count: plan.misses.count)
+        else {
+            throw ModelError.internalInconsistency(
+                detail: "event-driven Metal I/O staging ring is unavailable")
+        }
+        let transfer = try makeMetalStagingTransfer(plan: plan, stagingLease: stagingLease)
+        let operation = ExpertLoadOperation(
+            completionToken: token,
+            eventCoordinator: eventCoordinator,
+            // MTLIO writes the status word and signals the event in command
+            // order. Its handler records terminal state but never wakes the
+            // decode task to encode a fixup.
+            backendSignalsEvent: true,
+            metalStagingTransfer: transfer,
+            requiresGPUFinalization: true)
+        operation.markInFlight()
+        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        do {
+            try beginMetalReads(
+                plan,
+                reader: reader,
+                destinations: stagingLease.buffers,
+                destinationOffsets: [Int](repeating: 0, count: stagingLease.buffers.count),
+                completionToken: token) { [self, operation] result in
+                    switch result {
+                    case .success:
+                        // Cache slots remain LOADING. The runner publishes
+                        // RESIDENT only after its event-gated blit completes.
+                        finishPlanExecution(
+                            plan,
+                            succeeded: true,
+                            elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
+                        operation.finish(.success(()))
+                    case .failure(let error):
+                        finishPlanExecution(
+                            plan,
+                            succeeded: false,
+                            elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
+                        operation.finish(.failure(error))
+                    }
+                }
+        } catch {
+            finishPlanExecution(plan, succeeded: false, elapsedNanos: 0)
+            operation.releaseStagingTransfer()
+            operation.finish(.failure(error))
         }
         return operation
     }
@@ -783,6 +861,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private func beginMetalReads(
         _ plan: ExpertCachePlan,
         reader: MetalExpertReader,
+        destinations explicitDestinations: [MTLBuffer]? = nil,
+        destinationOffsets explicitDestinationOffsets: [Int]? = nil,
         completionToken: ExpertIOCompletionToken?,
         completion: @escaping @Sendable (Result<Void, any Error>) -> Void
     ) throws {
@@ -794,15 +874,42 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             offsets.append(try fileOffset(plan: plan, index: index))
             destinations.append(slotBuffers[plan.assignedSlots[index]])
         }
+        let finalDestinations = explicitDestinations ?? destinations
+        let finalDestinationOffsets = explicitDestinationOffsets ?? plan.misses.map {
+            Int(slotBufferOffsets[plan.assignedSlots[$0]])
+        }
         try reader.beginFetch(
             offsets: offsets,
-            into: destinations,
+            into: finalDestinations,
             byteCount: Int(layout.expertStride),
-            destinationOffsets: plan.misses.map {
-                Int(slotBufferOffsets[plan.assignedSlots[$0]])
-            },
+            destinationOffsets: finalDestinationOffsets,
             completionToken: completionToken,
             completion: completion)
+    }
+
+    private func makeMetalStagingTransfer(
+        plan: ExpertCachePlan,
+        stagingLease: MetalExpertStagingLease
+    ) throws -> MetalExpertStagingTransfer {
+        var destinations: [MTLBuffer] = []
+        var destinationOffsets: [Int] = []
+        destinations.reserveCapacity(plan.misses.count)
+        destinationOffsets.reserveCapacity(plan.misses.count)
+        for index in plan.misses {
+            let slot = plan.assignedSlots[index]
+            guard slot >= 0, slot < slotBuffers.count else {
+                stagingLease.release()
+                throw ModelError.internalInconsistency(
+                    detail: "Metal I/O staging transfer references an invalid cache slot")
+            }
+            destinations.append(slotBuffers[slot])
+            destinationOffsets.append(Int(slotBufferOffsets[slot]))
+        }
+        return MetalExpertStagingTransfer(
+            lease: stagingLease,
+            destinations: destinations,
+            destinationOffsets: destinationOffsets,
+            byteCount: Int(layout.expertStride))
     }
 
     private func executeBoundedReads(_ plan: ExpertCachePlan,
@@ -1048,6 +1155,34 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             publishResidencyUnlocked(expert: plan.experts[index],
                                      slot: slot,
                                      state: ExpertResidencyEntry.resident,
+                                     generation: plan.assignedGenerations[index])
+        }
+    }
+
+    /// The Metal staging route copies into cache slots on the GPU after the
+    /// MTLIO event. Its slots cannot become resident until that command buffer
+    /// has completed, otherwise a later layer could read bytes still owned by
+    /// the blit engine.
+    func markStagedMetalPlanResident(_ plan: ExpertCachePlan) throws {
+        try markPlanMissesResident(plan)
+    }
+
+    /// Clears a staged load if its event-gated transfer command fails. This is
+    /// intentionally separate from `finishPlanExecution`: I/O may have
+    /// succeeded and been accounted for, while the GPU copy did not complete.
+    func failStagedMetalPlan(_ plan: ExpertCachePlan) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for index in plan.misses {
+            let slot = plan.assignedSlots[index]
+            guard slot >= 0, slot < slotCount,
+                  slotGeneration[slot] == plan.assignedGenerations[index],
+                  slotState[slot] == .loading else { continue }
+            slotState[slot] = .empty
+            slotExpert[slot] = -1
+            publishResidencyUnlocked(expert: plan.experts[index],
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.empty,
                                      generation: plan.assignedGenerations[index])
         }
     }

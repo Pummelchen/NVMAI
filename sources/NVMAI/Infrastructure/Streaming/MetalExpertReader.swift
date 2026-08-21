@@ -1,6 +1,28 @@
 import Foundation
 import Metal
 
+/// One bounded MTLIO queue shared by all lazy per-layer readers in a model.
+/// Keeping a queue per layer lets prompt ingestion create 40 queues and exhaust
+/// the system's Metal-I/O worker limit before decode reaches its event path.
+/// unchecked-invariant: queue is immutable and Metal serializes its commands.
+public final class MetalExpertIOService: @unchecked Sendable {
+    fileprivate let queue: MTLIOCommandQueue
+
+    init(device: MTLDevice, maximumCommandsInFlight: Int = 4) throws {
+        precondition(maximumCommandsInFlight > 0)
+        let descriptor = MTLIOCommandQueueDescriptor()
+        descriptor.type = .concurrent
+        descriptor.priority = .high
+        descriptor.maxCommandBufferCount = maximumCommandsInFlight
+        descriptor.maxCommandsInFlight = maximumCommandsInFlight
+        do {
+            self.queue = try device.makeIOCommandQueue(descriptor: descriptor)
+        } catch {
+            throw MetalExpertReader.Failure.queueCreation(String(describing: error))
+        }
+    }
+}
+
 /// Experimental Metal I/O reader for direct file-to-slot-buffer loads.
 ///
 /// The production streamer deliberately remains on `F_NOCACHE` pread until an
@@ -27,23 +49,19 @@ public final class MetalExpertReader: @unchecked Sendable {
         }
     }
 
-    private let queue: MTLIOCommandQueue
+    private let ioService: MetalExpertIOService
     private let fileHandle: MTLIOFileHandle
 
-    public init(path: String,
-                device: MTLDevice,
-                maximumCommandsInFlight: Int = 4) throws {
-        precondition(maximumCommandsInFlight > 0)
-        let descriptor = MTLIOCommandQueueDescriptor()
-        descriptor.type = .concurrent
-        descriptor.priority = .high
-        descriptor.maxCommandBufferCount = maximumCommandsInFlight
-        descriptor.maxCommandsInFlight = maximumCommandsInFlight
-        do {
-            self.queue = try device.makeIOCommandQueue(descriptor: descriptor)
-        } catch {
-            throw Failure.queueCreation(String(describing: error))
-        }
+    public convenience init(path: String,
+                            device: MTLDevice,
+                            maximumCommandsInFlight: Int = 4) throws {
+        let service = try MetalExpertIOService(
+            device: device, maximumCommandsInFlight: maximumCommandsInFlight)
+        try self.init(path: path, device: device, service: service)
+    }
+
+    init(path: String, device: MTLDevice, service: MetalExpertIOService) throws {
+        self.ioService = service
         do {
             self.fileHandle = try device.makeIOFileHandle(
                 url: URL(fileURLWithPath: path))
@@ -67,7 +85,7 @@ public final class MetalExpertReader: @unchecked Sendable {
             completion(.success(()))
             return
         }
-        let commandBuffer = queue.makeCommandBuffer()
+        let commandBuffer = ioService.queue.makeCommandBuffer()
         commandBuffer.label = "NVMAI expert-slot loads"
         for index in offsets.indices {
             let offset = offsets[index]

@@ -179,6 +179,28 @@ extension Model {
                 eventDriven: eventDriven))
     }
 
+    /// Publishes the cache slots filled by an event-gated Metal staging copy.
+    /// Call only after the command buffer that copied staging into the slots
+    /// has completed; until then the cache deliberately reports these experts
+    /// as `LOADING` to both CPU and GPU residency lookups.
+    func finalizeRoutedExpertStagingTransfer(
+        plan: RoutedExpertFetchPlan
+    ) throws {
+        try ensureLayerOpened(plan.layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        try streamer.markStagedMetalPlanResident(plan.cachePlan)
+    }
+
+    /// Clears a staged plan whose dependent GPU command failed before its
+    /// staging bytes could become a valid cache entry.
+    func failRoutedExpertStagingTransfer(
+        plan: RoutedExpertFetchPlan
+    ) {
+        guard (try? ensureLayerOpened(plan.layer)) != nil else { return }
+        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        streamer.failStagedMetalPlan(plan.cachePlan)
+    }
+
     public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }

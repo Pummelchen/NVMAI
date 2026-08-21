@@ -64,4 +64,44 @@ import Testing
         let bytes = UnsafeRawBufferPointer(start: destination.contents(), count: page)
         #expect(bytes.allSatisfy { $0 == 0x5a })
     }
+
+    @Test func eventGatedStagingCopyPublishesOnlyAfterMetalIO() throws {
+        let page = 16_384
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("metal-io-staging-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(repeating: 0xa7, count: page).write(to: url)
+
+        let context = try MetalContext()
+        let coordinator = try #require(ExpertIOEventCoordinator(device: context.device))
+        let token = try coordinator.reserve()
+        let stagingPool = try MetalExpertStagingPool(
+            device: context.device, byteCount: page, slotCapacity: 1)
+        let lease = try #require(stagingPool.tryAcquire(count: 1))
+        let destination = try #require(context.device.makeBuffer(
+            length: page, options: .storageModeShared))
+        memset(destination.contents(), 0, page)
+        let transfer = MetalExpertStagingTransfer(
+            lease: lease, destinations: [destination], destinationOffsets: [0],
+            byteCount: page)
+        let reader = try MetalExpertReader(path: url.path, device: context.device)
+
+        // Commit the dependent compute work immediately. There is deliberately
+        // no host completion wait between MTLIO submission and the GPU copy.
+        try reader.beginFetch(
+            offsets: [0], into: lease.buffers, byteCount: page,
+            completionToken: token) { _ in }
+        let compute = try #require(context.queue.makeCommandBuffer())
+        compute.encodeWaitForEvent(token.event, value: token.value)
+        try transfer.encodeCopy(commandBuffer: compute)
+        compute.commit()
+        compute.waitUntilCompleted()
+        defer { transfer.release() }
+
+        #expect(compute.status == .completed)
+        #expect(token.status.contents().advanced(by: token.statusOffset)
+            .load(as: UInt32.self) == UInt32(MTLIOStatus.complete.rawValue))
+        let bytes = UnsafeRawBufferPointer(start: destination.contents(), count: page)
+        #expect(bytes.allSatisfy { $0 == 0xa7 })
+    }
 }
