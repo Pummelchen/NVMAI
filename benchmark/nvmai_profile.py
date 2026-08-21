@@ -13,14 +13,14 @@ from collections.abc import Mapping
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_MODEL_PATH = ROOT / "models/ornith-1.5_35B_A3B_4Bit"
+DEFAULT_MODEL_PATH = ROOT / "models/ornith-1.5_35B_A3B_8Bit"
 DEFAULT_API_MODEL = "ornith-1.5-35b-a3b"
 DEFAULT_CONTEXT_TOKENS = 262_144
 DEFAULT_PROMPT_CACHE_MODE = "multi-prefix"
 DEFAULT_PROMPT_CACHE_MEMORY_MIB = 256
 DEFAULT_EXPERT_CACHE_BUDGET = "8G"
 DEFAULT_KV_BITS = 8
-DEFAULT_CONCISE = True
+DEFAULT_CONCISE = False
 DEFAULT_FAST_ALIAS = False
 DEFAULT_MTP = False
 SUPPORTED_THINKING_MODES = ("off", "on")

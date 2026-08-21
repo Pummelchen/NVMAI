@@ -15,6 +15,8 @@ class OrnithFourProgramMatrixTests(unittest.TestCase):
         }
         self.assertEqual(len(cells), 8)
         self.assertEqual(benchmark.MAX_TURNS_PER_PROGRAM, 25)
+        self.assertEqual(benchmark.MATRIX_QUANT_BITS, (8, 4))
+        self.assertEqual(benchmark.MATRIX_BOOLEAN_VALUES, (False, True))
 
     def test_safe_path_rejects_escape(self) -> None:
         with tempfile.TemporaryDirectory(dir=benchmark.ROOT / ".build") as directory:

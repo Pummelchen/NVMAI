@@ -131,7 +131,7 @@ struct QwenRepackPlannerTests {
     }
 
     @Test func ornithSourcesArePinnedAndSixBitRemainsUnsupported() {
-        #expect(SupportedModelSource.default == .ornith15)
+        #expect(SupportedModelSource.default == .ornith15_8bit)
         #expect(SupportedModelSource.named("ornith15") == .ornith15)
         #expect(SupportedModelSource.named("ornith15-8bit") == .ornith15_8bit)
         #expect(SupportedModelSource.named("ornith15-6bit") == nil)

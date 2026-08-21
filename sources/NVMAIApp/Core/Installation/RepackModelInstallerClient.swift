@@ -23,7 +23,7 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
     private let runDiscard: DiscardRunner
     private let taskState = InstallTaskState()
 
-    public init(descriptor: AppModelInstallDescriptor = .ornith15) {
+    public init(descriptor: AppModelInstallDescriptor = .ornith15_8bit) {
         self.descriptor = descriptor
         self.runInstall = { outputDirectory, progress in
             let paths = try RemoteInstallPaths(outputDirectory: outputDirectory.path)
@@ -46,7 +46,7 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
         }
     }
 
-    init(descriptor: AppModelInstallDescriptor = .ornith15,
+    init(descriptor: AppModelInstallDescriptor = .ornith15_8bit,
          runInstall: @escaping InstallRunner,
          runDiscard: @escaping DiscardRunner = { _ in }) {
         self.descriptor = descriptor

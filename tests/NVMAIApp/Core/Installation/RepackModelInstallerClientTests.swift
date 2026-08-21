@@ -5,6 +5,10 @@ import Testing
 @testable import NVMAIAppCore
 
 @Suite struct RepackModelInstallerClientTests {
+    @Test func defaultInstallerUsesOrnithEightBit() {
+        #expect(RepackModelInstallerClient().descriptor == .ornith15_8bit)
+    }
+
     @Test func mapsCoreProgressAndCompletion() async throws {
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("scripted.gturbo")

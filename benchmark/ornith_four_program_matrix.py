@@ -65,6 +65,8 @@ SAMPLING = {
     "seed": 1234,
 }
 MAX_TURNS_PER_PROGRAM = 25
+MATRIX_QUANT_BITS = (8, 4)
+MATRIX_BOOLEAN_VALUES = (False, True)
 
 SYSTEM_PROMPT = """You are a careful coding agent in a controlled tool-use benchmark.
 Repair the one assigned file, execute it with run_program, and continue until its public check
@@ -797,9 +799,9 @@ def main() -> int:
         "sampling": SAMPLING,
         "expected_final_result": EXPECTED_FINAL,
         "matrix": {
-            "quant_bits": [4, 8],
-            "concise": [False, True],
-            "thinking": [False, True],
+            "quant_bits": list(MATRIX_QUANT_BITS),
+            "concise": list(MATRIX_BOOLEAN_VALUES),
+            "thinking": list(MATRIX_BOOLEAN_VALUES),
             "cells": 8,
         },
         "protocol": {
@@ -818,7 +820,8 @@ def main() -> int:
     })
     write_json(output / "environment.json", environment)
     print(f"OUTPUT {output}", flush=True)
-    cells = list(itertools.product((4, 8), (False, True), (False, True)))
+    cells = list(itertools.product(
+        MATRIX_QUANT_BITS, MATRIX_BOOLEAN_VALUES, MATRIX_BOOLEAN_VALUES))
     records: list[dict[str, Any]] = []
     try:
         for index, (quant, concise, thinking) in enumerate(cells, 1):

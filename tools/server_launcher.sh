@@ -10,8 +10,8 @@
 #
 # With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
 # (fast/full), then the quantization, then default/concise mode, then
-# thinking off/on. Every choice has a default (codex / full / 4-bit /
-# concise / thinking off), so pressing Enter through the prompts launches
+# thinking off/on. Every choice has a default (codex / full / 8-bit /
+# standard / thinking off), so pressing Enter through the prompts launches
 # that configuration. The server runtime is pinned to native 262,144-token
 # context, a 256 MiB multi-prefix prompt cache, an 8 GiB routed-expert
 # cache, 8-bit KV, and MTP off. Stops any stale
@@ -74,18 +74,18 @@ else
   esac
 fi
 
-# --- 3) quantization: 4-bit (default) / 8-bit ---  (6-bit withdrawn)
+# --- 3) quantization: 8-bit (default) / 4-bit ---  (6-bit withdrawn)
 quant="${3:-}"
 if [[ -z "$quant" ]]; then
   echo ""
   echo "Which quantization?"
-  echo "  1) 4-bit"
-  echo "  3) 8-bit"
-  printf "Choice [1-3] (default 1): "
+  echo "  1) 8-bit (default)"
+  echo "  2) 4-bit"
+  printf "Choice [1-2] (default 1): "
   read -r quant_choice || exit 1
   case "${quant_choice:-1}" in
-    1) quant=4bit ;;
-    3) quant=8bit ;;
+    1) quant=8bit ;;
+    2) quant=4bit ;;
     *) echo "invalid choice: $quant_choice" >&2; exit 2 ;;
   esac
 fi
@@ -95,7 +95,7 @@ case "$quant" in
   *) echo "unknown quantization: $quant (4|8)" >&2; exit 2 ;;
 esac
 
-# --- 4) NVMAI mode: concise (default) or standard ---
+# --- 4) NVMAI mode: standard (default) or concise ---
 if [[ -n "${4:-}" ]]; then
   case "$4" in
     default|1) mode_suffix="" ; mode_word=default ;;
@@ -105,11 +105,11 @@ if [[ -n "${4:-}" ]]; then
 else
   echo ""
   echo "Which NVMAI mode?"
-  echo "  1) Standard"
-  echo "  2) Concise (terse answers, default)"
-  printf "Choice [1-2] (default 2): "
+  echo "  1) Standard (default)"
+  echo "  2) Concise (terse answers)"
+  printf "Choice [1-2] (default 1): "
   read -r mode_choice || exit 1
-  case "${mode_choice:-2}" in
+  case "${mode_choice:-1}" in
     1) mode_suffix="" ; mode_word=default ;;
     2) mode_suffix="_concise" ; mode_word=concise ;;
     *) echo "invalid choice: $mode_choice" >&2; exit 2 ;;

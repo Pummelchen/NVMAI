@@ -2,7 +2,7 @@
 """Reproducible Ornith coding-client and NVMAI feature benchmark rounds.
 
 The default ``coder`` round runs Codex, Qwen Code, OpenCode, and (through the
-adjacent loopback adapter) Claude Code against Ornith 4-bit with fixed short,
+adjacent loopback adapter) Claude Code against Ornith 8-bit with fixed short,
 medium, and long prompts using the production benchmark profile. The opt-in
 ``features`` round uses direct OpenAI requests to
 isolate prompt-cache, fast-alias, and concise-mode behavior on Ornith, then
@@ -211,7 +211,7 @@ def wait_http(url: str, timeout: float = 300) -> None:
 
 
 def start_server(*, output: pathlib.Path, family: str, quant: int, port: int,
-                 label: str, cache: bool = True, concise: bool = True,
+                 label: str, cache: bool = True, concise: bool = False,
                  mtp: bool = False) -> RunningProcess:
     model = MODEL_PATHS[family][quant]
     command = server_command(
@@ -531,7 +531,7 @@ def run_coder_round(args: argparse.Namespace, output: pathlib.Path, prompts: dic
         model = manifest_api_model(model_path)
         server = start_server(
             output=output, family="ornith", quant=quant, port=port,
-            cache=True, concise=True, mtp=False, label=f"coder-ornith-q{quant}",
+            cache=True, concise=False, mtp=False, label=f"coder-ornith-q{quant}",
         )
         adapter: RunningProcess | None = None
         try:
@@ -566,7 +566,7 @@ def run_coder_round(args: argparse.Namespace, output: pathlib.Path, prompts: dic
                         "key": key, "round": "coder", "status": "ok" if result["exit_code"] == 0 else "failed",
                         "phase": phase, "repetition": repetition, "family": "ornith",
                         "quantization": quant, "cache": True, "mtp": False,
-                        "fast": False, "concise": True,
+                        "fast": False, "concise": False,
                         "client": client, "prompt": prompt_name,
                         "prompt_sha256": sha256_text(prompts[prompt_name]), "model": model,
                         "server_log": log_delta, "quality": quality, "finished_at": utc_now(),
@@ -767,7 +767,7 @@ def run_feature_round(args: argparse.Namespace, output: pathlib.Path,
     # Each case gets a fresh server so a previous prompt cannot warm the first
     # request of a later cache-enabled cell.
     ornith_cases = itertools.product(
-        args.quantizations, (False, True), (False, True), (False, True), args.prompts
+        args.quantizations, (True, False), (False, True), (False, True), args.prompts
     )
     done = completed_keys(results)
     for quant, cache, concise, fast, prompt_name in ornith_cases:
@@ -844,7 +844,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--round", choices=("coder", "features", "all"), default="coder")
     parser.add_argument("--output", type=pathlib.Path)
-    parser.add_argument("--quantizations", nargs="+", type=int, choices=(4, 8), default=[4])
+    parser.add_argument("--quantizations", nargs="+", type=int, choices=(4, 8), default=[8])
     parser.add_argument("--clients", nargs="+", choices=("codex", "qwen", "opencode", "claude"))
     parser.add_argument("--prompts", nargs="+", choices=("short", "medium", "long"),
                         default=["short", "medium", "long"])
@@ -882,12 +882,12 @@ def main() -> int:
     environment["prompt_sha256"] = {name: sha256_text(value) for name, value in prompts.items()}
     environment["arguments"] = vars(args) | {"output": str(output)}
     environment["default_profile"] = {
-        "model": "ornith-1.5-35b-a3b-4bit",
+        "model": "ornith-1.5-35b-a3b-8bit",
         "context_tokens": DEFAULT_CONTEXT_TOKENS,
         "prompt_cache": "multi-prefix",
         "kv_bits": DEFAULT_KV_BITS,
         "mtp": False,
-        "concise": True,
+        "concise": False,
         "fast_alias": False,
         "thinking": DEFAULT_THINKING_MODE,
     }

@@ -651,8 +651,8 @@ def parse_args() -> argparse.Namespace:
         "--profiles",
         nargs="+",
         choices=("on", "off"),
-        default=["on", "off"],
-        help="Concise profiles to run in order (default: on off)",
+        default=["off", "on"],
+        help="Concise profiles to run in order (default: off on)",
     )
     return parser.parse_args()
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Cut a release the way 3.6 was cut. Verifies, builds clean, packages binaries
+# Verify, clean-build, package, and optionally publish an NVMAI release.
 # with a checksum, and publishes a GitHub Release from an existing tag.
 #
-#   tools/release.sh v3.7                  # dry run: verify, build, package, stop
-#   tools/release.sh v3.7 --publish        # same, then create the Release
-#   tools/release.sh v3.7 --publish --notes path/to/notes.md
+#   tools/release.sh v4.0                  # dry run: verify, build, package, stop
+#   tools/release.sh v4.0 --publish        # same, then create the Release
+#   tools/release.sh v4.0 --publish --notes path/to/notes.md
 #
 # Dry run is the default on purpose: publishing is public and irreversible in
 # the sense that watchers are notified immediately. Run it once without
@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
 done
 
 VERSION="${TAG#v}"
-STAGE_ROOT="${TMPDIR:-/tmp}/nvmai-release-$VERSION"
+STAGE_ROOT="$ROOT/.build/releases/nvmai-release-$VERSION"
 STAGE="$STAGE_ROOT/nvmai-$VERSION-macos-arm64"
 ARCHIVE="$STAGE_ROOT/nvmai-$VERSION-macos-arm64.tar.gz"
 SCRATCH="$STAGE_ROOT/build"
@@ -62,6 +62,9 @@ gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 \
   && die "a Release for $TAG already exists on $REPO"
 echo "  tag $TAG at $(git rev-parse --short HEAD), tree clean, no existing Release"
 
+rm -rf "$STAGE_ROOT"
+mkdir -p "$STAGE_ROOT"
+
 # --- gates ------------------------------------------------------------------
 step "gates"
 "$SCRIPT_DIR/lint.sh" || die "tools/lint.sh failed"
@@ -72,10 +75,10 @@ grep -q 'Test run with .* passed' "$STAGE_ROOT.testlog" 2>/dev/null \
 
 # The golden baseline is the only check that exercises real inference. Skip it
 # only when no model is installed — never to make a mismatch go away.
-if [ -f "$ROOT/models/ornith-1.5_35B_A3B_4Bit/verified-install.json" ]; then
-  "$SCRIPT_DIR/golden-baseline.sh" --check 4 || die "golden baseline mismatch"
+if [ -f "$ROOT/models/ornith-1.5_35B_A3B_8Bit/verified-install.json" ]; then
+  "$SCRIPT_DIR/golden-baseline.sh" --check 8 || die "golden baseline mismatch"
 elif compgen -G "$ROOT/models/*/verified-install.json" >/dev/null; then
-  die "Ornith 1.5 4-bit baseline model is not installed"
+  die "Ornith 1.5 8-bit baseline model is not installed"
 else
   echo "  no installed model; skipping golden baseline (state this in the notes)"
 fi
@@ -124,8 +127,9 @@ yourself after verifying the checksum published with this archive:
 
   xattr -dr com.apple.quarantine /path/to/nvmai-$VERSION-macos-arm64
 
-No model weights are included. Install one with NVMAIRepack (the 4-bit download
-is about 19.5 GB) as described in the README.
+No model weights are included. NVMAIRepack defaults to Ornith 1.5 8-bit (about
+36.9 GB); 4-bit remains available explicitly. The runtime defaults to standard
+answers with thinking off, as described in the README and Wiki.
 TXT
 
 step "package"

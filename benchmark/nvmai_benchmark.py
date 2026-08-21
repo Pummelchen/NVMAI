@@ -412,7 +412,7 @@ def run_config(cache_mode, mtp_config, config_label, port, verify=True,
             "mtp_config": mtp_config,
             "runtime_profile": {
                 "context_tokens": DEFAULT_CONTEXT_TOKENS, "kv_bits": DEFAULT_KV_BITS,
-                "concise": True, "fast_alias": False,
+                "concise": False, "fast_alias": False,
                 "thinking": DEFAULT_THINKING_MODE,
             },
             "results": results,

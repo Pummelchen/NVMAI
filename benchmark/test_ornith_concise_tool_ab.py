@@ -1,12 +1,18 @@
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import ornith_concise_tool_ab as benchmark
 
 
 class OrnithConciseToolABTests(unittest.TestCase):
+    def test_default_profile_runs_standard_before_concise(self) -> None:
+        with patch.object(sys, "argv", ["ornith_concise_tool_ab.py"]):
+            self.assertEqual(benchmark.parse_args().profiles, ["off", "on"])
+
     def test_safe_path_rejects_escape(self) -> None:
         with tempfile.TemporaryDirectory(dir=benchmark.ROOT / ".build") as directory:
             workspace = pathlib.Path(directory)

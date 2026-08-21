@@ -115,8 +115,8 @@ import NVMAIRepackCore
     #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15") == fourBit)
     #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15-8bit") == eightBit)
     #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36") == .qwen36)
-    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36-6bit") == fourBit)
-    #expect(AppModelInstallDescriptor.selectedDescriptor(for: nil) == fourBit)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36-6bit") == eightBit)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: nil) == eightBit)
   }
 
   @MainActor

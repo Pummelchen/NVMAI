@@ -39,9 +39,9 @@
 
 - **Follow-up cache:** Exact live and multi-prefix prompt-state reuse avoids
   repeating compatible prefill work across conversation turns.
-- **Concise mode:** The launch scripts enable a terse system prompt by default
-  to reduce unnecessary generated tokens and response time without changing
-  model weights; standard mode remains selectable.
+- **Concise mode:** An optional terse system prompt reduces generated text for
+  workloads that benefit from it; standard responses are the default because
+  they generalized more reliably in the coding/tooling qualification.
 - **Fast alias:** The chat-only `-fast` model alias strips coding-agent
   boilerplate before prefill for quicker direct answers, while the base alias
   preserves tools and agent loops.
@@ -64,8 +64,9 @@
 > experts SSD-streamed with the same bounded-memory design. Ornith's native MTP
 > draft is available as an optional experimental sidecar; current M3 benchmarks
 > do not show a speed benefit. Vision is not included, and Qwen 3.6 remains
-> supported. **Ornith 1.5 4-bit is now the default installer, app, launcher,
-> benchmark, and real-inference test baseline.**
+> supported. **Ornith 1.5 8-bit is the default installer, app, launcher,
+> benchmark, and real-inference test baseline; Concise and Thinking default
+> to off.**
 
 [![Published Ornith 1.5 benchmark overview](assets/stats.png)](https://ornith.ai/ornith_1_5.html)
 

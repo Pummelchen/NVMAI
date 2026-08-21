@@ -4,7 +4,7 @@
 # pass". Phase 2 of the production audit needs this before RealForwardRunner
 # is decomposed.
 #
-#   tools/golden-baseline.sh [4|8 ...]       # default: Ornith 4-bit
+#   tools/golden-baseline.sh [4|8 ...]       # default: Ornith 8-bit
 #   tools/golden-baseline.sh --check [...]   # compare against the stored file
 #
 # Determinism comes from greedy decoding: --temperature 0 with a fixed seed and
@@ -28,7 +28,7 @@ SEED="${SEED:-1234}"
 
 mode=capture
 if [ "${1:-}" = "--check" ]; then mode=check; shift; fi
-quants=("$@"); [ ${#quants[@]} -eq 0 ] && quants=(4)
+quants=("$@"); [ ${#quants[@]} -eq 0 ] && quants=(8)
 
 if [ ! -x "$CLI" ]; then
   echo "missing $CLI — run: swift build -c release" >&2

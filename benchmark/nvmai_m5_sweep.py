@@ -86,7 +86,6 @@ def run_once(cli: str, model: str, slots: int, chunk: int, prompt_file: str,
            "--max-context", str(max_context),
            "--rope-scaling", "none",
            "--kv-bits", "8",
-           "--concise",
            "--max-new", str(max_new)]
     # Every return below carries slots/chunk, so a failed run is still
     # attributable to its configuration in the CSV.
