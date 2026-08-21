@@ -1673,7 +1673,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             tailCB.commit()
             // Queued before the wait below, not after: the GPU runs the shared
             // MLP while the CPU blocks on tailCB for the routing.
-            let sharedCB = try encodeAndCommitSharedExpert(layer: L)
+            let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
+            let sharedCB = try encodeAndCommitSharedExpert(
+                layer: L,
+                completionClock: overlapCompletionClock)
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try waitForCompletion(tailCB)
             recordKernelGPU(role: "attn_norm_qkv", attnCB)
@@ -1698,6 +1701,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 layer: L, position: position, sharedProj: sharedProj,
                 attnCB: attnCB, tailCB: tailCB,
                 sharedCB: sharedCB,
+                overlapCompletionClock: overlapCompletionClock,
                 pending: &pendingRoutedCommand,
                 bodyStart: tBodyStart, cb1Start: tCb1Start,
                 waitMark: tWait, waitNanos: waitNanos,
@@ -3284,7 +3288,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `attn_tail_router -> shared_expert` transition -- 0.197 ms per layer of
     /// command-buffer round trip during which the GPU had nothing queued, and
     /// the largest single component of decode's idle time.
-    private func encodeAndCommitSharedExpert(layer L: Int) throws -> MTLCommandBuffer {
+    private func encodeAndCommitSharedExpert(
+        layer L: Int,
+        completionClock: CommandCompletionClock?
+    ) throws -> MTLCommandBuffer {
         let sharedProj = sharedExpertProjections[L]
         let D = UInt32(cfg.hiddenSize)
         guard let sharedCB = ctx.queue.makeCommandBuffer() else {
@@ -3317,6 +3324,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                 gate: sharedScalarGateBuf!,
                                                 count: cfg.hiddenSize)
         }
+        completionClock?.track(sharedCB)
         sharedCB.commit()
         return sharedCB
     }
@@ -3335,6 +3343,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         attnCB: MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
         sharedCB: MTLCommandBuffer,
+        overlapCompletionClock: CommandCompletionClock?,
         pending pendingRoutedCommand: inout PendingRoutedCommand?,
         bodyStart tBodyStart: UInt64,
         cb1Start tCb1Start: UInt64,
@@ -3368,7 +3377,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // A thrown fetch/encode must not make a hit slot evictable
                 // while its already-committed phase-1 command is still reading.
                 if let phase1HitCB, let expertLease {
-                    phase1HitCB.addCompletedHandler { _ in expertLease.release() }
+                    try? waitForCompletion(phase1HitCB)
+                    expertLease.release()
                 } else {
                     expertLease?.release()
                 }
@@ -3456,13 +3466,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
 
         if let cb = phase1HitCB {
+            overlapCompletionClock?.track(cb)
             cb.commit()
         }
         let missCount = plannedFetch?.misses.count ?? experts.count
-        let completionClock: CommandCompletionClock? =
-            runnerStatsEnabled && missCount > 0 ? CommandCompletionClock() : nil
-        completionClock?.track(sharedCB)
-        if let phase1HitCB { completionClock?.track(phase1HitCB) }
+        let completionClock = missCount > 0 ? overlapCompletionClock : nil
         let expectedOverlapCompletions = phase1HitCB == nil ? 1 : 2
         if rdadviseEnabled && rdadvisePolicyMode != .off {
             let requestedMisses = missCount
