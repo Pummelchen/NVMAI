@@ -3661,6 +3661,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             // below, so no successful completion has to resume this task.
             blobs = try model.routedExpertBuffers(for: eventLoad.plan)
             totalExpertIOHostWaitsAvoided &+= 1
+        } else if let plannedFetch, plannedFetch.misses.isEmpty {
+            // An all-hit layer has already pinned its current slot generations.
+            // Do not manufacture a completed storage operation and an async
+            // continuation only to retrieve the same cache views.
+            blobs = try model.routedExpertBuffers(for: plannedFetch)
+            totalExpertIOHostWaitsAvoided &+= 1
         } else if let plannedLoad {
             totalExpertIOHostWaits &+= plannedLoad.plan.misses.isEmpty ? 0 : 1
             blobs = try await plannedLoad.completion()
