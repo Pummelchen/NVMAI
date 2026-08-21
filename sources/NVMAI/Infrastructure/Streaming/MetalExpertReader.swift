@@ -52,31 +52,79 @@ public final class MetalExpertReader: @unchecked Sendable {
         }
     }
 
-    public func fetch(offsets: [UInt64],
-                      into buffers: [MTLBuffer],
-                      byteCount: Int) throws {
+    public func beginFetch(
+        offsets: [UInt64],
+        into buffers: [MTLBuffer],
+        byteCount: Int,
+        destinationOffsets: [Int]? = nil,
+        completionToken: ExpertIOCompletionToken? = nil,
+        completion: @escaping @Sendable (Result<Void, any Error>) -> Void
+    ) throws {
         precondition(offsets.count == buffers.count)
+        precondition(destinationOffsets == nil || destinationOffsets?.count == buffers.count)
         precondition(byteCount > 0)
-        guard !offsets.isEmpty else { return }
+        guard !offsets.isEmpty else {
+            completion(.success(()))
+            return
+        }
         let commandBuffer = queue.makeCommandBuffer()
         commandBuffer.label = "NVMAI expert-slot loads"
-        for (offset, buffer) in zip(offsets, buffers) {
-            guard buffer.length >= byteCount,
+        for index in offsets.indices {
+            let offset = offsets[index]
+            let buffer = buffers[index]
+            let destinationOffset = destinationOffsets?[index] ?? 0
+            guard destinationOffset >= 0,
+                  buffer.length - destinationOffset >= byteCount,
                   offset <= UInt64(Int.max) else {
                 throw Failure.load("source or destination range is out of bounds")
             }
             commandBuffer.load(
                 buffer,
-                offset: 0,
+                offset: destinationOffset,
                 size: byteCount,
                 sourceHandle: fileHandle,
                 sourceHandleOffset: Int(offset))
         }
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        guard commandBuffer.status == .complete else {
-            throw Failure.load(commandBuffer.error?.localizedDescription
-                ?? "status \(commandBuffer.status.rawValue)")
+        if let completionToken {
+            // The status copy is ordered after every load. Metal writes
+            // MTLIOStatusComplete (3) or an error state before signalling the
+            // event, so the dependent compute kernels can gate safely without
+            // a host callback.
+            commandBuffer.copyStatus(
+                buffer: completionToken.status,
+                offset: completionToken.statusOffset)
+            commandBuffer.signalEvent(completionToken.event,
+                                      value: completionToken.value)
         }
+        commandBuffer.addCompletedHandler { commandBuffer in
+            guard commandBuffer.status == .complete else {
+                completion(.failure(Failure.load(
+                    commandBuffer.error?.localizedDescription
+                        ?? "status \(commandBuffer.status.rawValue)")))
+                return
+            }
+            completion(.success(()))
+        }
+        commandBuffer.commit()
+    }
+
+    public func fetch(offsets: [UInt64],
+                      into buffers: [MTLBuffer],
+                      byteCount: Int,
+                      destinationOffsets: [Int]? = nil) throws {
+        let condition = NSCondition()
+        nonisolated(unsafe) var result: Result<Void, any Error>?
+        try beginFetch(offsets: offsets, into: buffers, byteCount: byteCount,
+                       destinationOffsets: destinationOffsets) { outcome in
+            condition.lock()
+            result = outcome
+            condition.signal()
+            condition.unlock()
+        }
+        condition.lock()
+        while result == nil { condition.wait() }
+        let outcome = result!
+        condition.unlock()
+        try outcome.get()
     }
 }

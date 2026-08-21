@@ -23,6 +23,12 @@ constant bool FC_MOE_USE_FC [[function_constant(3)]];
 // and the fused INT8 shared-expert kernel.
 constant bool FC_MOE_ACT_SILU [[function_constant(4)]];
 constant uint FC_MOE_WEIGHT_BITS [[function_constant(5)]];
+constant bool FC_MOE_EVENT_GATED [[function_constant(6)]];
+
+static inline bool moe_io_ready(device const uint* io_status) {
+    return !(is_function_constant_defined(FC_MOE_EVENT_GATED) && FC_MOE_EVENT_GATED)
+        || io_status[0] == 1u || io_status[0] == 3u;
+}
 
 static inline uint moe_weight_bits() {
     return is_function_constant_defined(FC_MOE_WEIGHT_BITS)
@@ -80,6 +86,49 @@ static inline float gelu_pytorch_tanh(float x) {
     // equivalent to the saturated result at FP32 precision.
     inner = clamp(inner, -20.0f, 20.0f);
     return 0.5f * x * (1.0f + tanh(inner));
+}
+
+struct ExpertResidencyGPU {
+    uint slot;
+    uint state;
+    ulong generation;
+};
+
+/// Classifies the router's exact top-k result against the CPU-published cache
+/// map. Only eight positions are touched; one lane avoids atomics and preserves
+/// router order in both compact lists.
+kernel void moe_classify_expert_residency(
+    device const uint* topk_indices [[buffer(0)]],
+    device const ExpertResidencyGPU* residency [[buffer(1)]],
+    device uint* hit_count [[buffer(2)]],
+    device uint* hit_positions [[buffer(3)]],
+    device uint* miss_count [[buffer(4)]],
+    device uint* miss_positions [[buffer(5)]],
+    device uint* miss_experts [[buffer(6)]],
+    device uint* resolved_slots [[buffer(7)]],
+    device ulong* resolved_generations [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
+    constant uint& num_experts [[buffer(10)]],
+    uint lane [[thread_index_in_threadgroup]]) {
+    if (lane != 0) return;
+    uint hits = 0, misses = 0;
+    for (uint position = 0; position < top_k; ++position) {
+        const uint expert = min(topk_indices[position], num_experts - 1u);
+        const ExpertResidencyGPU entry = residency[expert];
+        if (entry.state == 2u && entry.slot != 0xffffffffu) {
+            hit_positions[hits++] = position;
+            resolved_slots[position] = entry.slot;
+            resolved_generations[position] = entry.generation;
+        } else {
+            miss_positions[misses] = position;
+            miss_experts[misses] = expert;
+            ++misses;
+            resolved_slots[position] = 0xffffffffu;
+            resolved_generations[position] = entry.generation;
+        }
+    }
+    hit_count[0] = hits;
+    miss_count[0] = misses;
 }
 
 static inline float moe_hidden_activation(float x) {
@@ -598,10 +647,12 @@ kernel void moe_phase1_gate_up_act_u16load(
     constant uint& D [[buffer(4)]],
     constant uint& F [[buffer(5)]],
     constant uint& top_k [[buffer(6)]],
+    device const uint* io_status [[buffer(7)]],
     uint tg_idx [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
+    if (!moe_io_ready(io_status)) return;
     // 16 rows per threadgroup with the activation staged in threadgroup
     // memory. Each simdgroup redundantly loads the full x (the shared input),
     // then a barrier makes it visible to the row loops.
@@ -641,10 +692,12 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
     constant uint& top_k [[buffer(6)]],
     device const uint* active_slots [[buffer(7)]],
     constant uint& active_count [[buffer(8)]],
+    device const uint* io_status [[buffer(9)]],
     uint tg_idx [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
+    if (!moe_io_ready(io_status)) return;
     constexpr uint rows_per_tg = 16;
     threadgroup half xt[kMoEXMaxD];
     const uint DD = moe_fc_d(D);
@@ -681,10 +734,12 @@ kernel void moe_phase1_gate_up_act_u16load_r16(
     constant uint& D [[buffer(4)]],
     constant uint& F [[buffer(5)]],
     constant uint& top_k [[buffer(6)]],
+    device const uint* io_status [[buffer(7)]],
     uint tg_idx [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
+    if (!moe_io_ready(io_status)) return;
     constexpr uint rows_per_tg = 16;
     moe_phase1_gate_up_act_u16load_body(
         routed, routed_offsets, x, acts, moe_fc_d(D), moe_fc_f(F),
@@ -699,10 +754,12 @@ kernel void moe_phase1_gate_up_act_u16load_r8(
     constant uint& D [[buffer(4)]],
     constant uint& F [[buffer(5)]],
     constant uint& top_k [[buffer(6)]],
+    device const uint* io_status [[buffer(7)]],
     uint tg_idx [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
+    if (!moe_io_ready(io_status)) return;
     constexpr uint rows_per_tg = 8;
     moe_phase1_gate_up_act_u16load_body(
         routed, routed_offsets, x, acts, moe_fc_d(D), moe_fc_f(F),
@@ -718,6 +775,7 @@ kernel void moe_phase2_down_reduce_k8(
     device half* y [[buffer(5)]],
     constant uint& D [[buffer(6)]],
     constant uint& F [[buffer(7)]],
+    device const uint* io_status [[buffer(8)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg_idx [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
@@ -726,6 +784,10 @@ kernel void moe_phase2_down_reduce_k8(
     const uint DD = moe_fc_d(D);
     const uint FF = moe_fc_f(F);
     if (d >= DD) return;
+    if (!moe_io_ready(io_status)) {
+        if (sg_idx == 0 && lane == 0) y[d] = residual[d];
+        return;
+    }
 
     device const uint8_t* base = routed.blob[sg_idx];
     const ExpertOffsets re = routed_offsets;
@@ -752,10 +814,11 @@ kernel void moe_affine_phase1_gate_up_act(
     constant ExpertOffsets& re [[buffer(1)]],
     device const half* x [[buffer(2)]], device half* acts [[buffer(3)]],
     constant uint& D [[buffer(4)]], constant uint& F [[buffer(5)]],
-    constant uint& top_k [[buffer(6)]],
+    constant uint& top_k [[buffer(6)]], device const uint* io_status [[buffer(7)]],
     uint tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
+    if (!moe_io_ready(io_status)) return;
     constexpr uint rows_per_tg = 16;
     const uint DD = moe_fc_d(D), FF = moe_fc_f(F), TK = moe_fc_top_k(top_k);
     const uint rowg = tg * rows_per_tg + sg;
@@ -776,10 +839,11 @@ kernel void moe_affine_phase1_gate_up_act_subset(
     device const half* x [[buffer(2)]], device half* acts [[buffer(3)]],
     constant uint& D [[buffer(4)]], constant uint& F [[buffer(5)]],
     constant uint& top_k [[buffer(6)]], device const uint* active_slots [[buffer(7)]],
-    constant uint& active_count [[buffer(8)]],
+    constant uint& active_count [[buffer(8)]], device const uint* io_status [[buffer(9)]],
     uint tg [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
+    if (!moe_io_ready(io_status)) return;
     constexpr uint rows_per_tg = 16;
     const uint DD = moe_fc_d(D), FF = moe_fc_f(F), TK = moe_fc_top_k(top_k);
     const uint rowg = tg * rows_per_tg + sg;
@@ -802,12 +866,17 @@ kernel void moe_affine_phase2_down_reduce_k8(
     device const half* acts [[buffer(2)]], device const half* routing_w [[buffer(3)]],
     device const half* residual [[buffer(4)]], device half* y [[buffer(5)]],
     constant uint& D [[buffer(6)]], constant uint& F [[buffer(7)]],
+    device const uint* io_status [[buffer(8)]],
     uint d [[threadgroup_position_in_grid]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
     threadgroup float partial[8];
     const uint DD = moe_fc_d(D), FF = moe_fc_f(F);
     if (d >= DD) return;
+    if (!moe_io_ready(io_status)) {
+        if (sg == 0 && lane == 0) y[d] = residual[d];
+        return;
+    }
     device const uint8_t* base = routed.blob[sg];
     const float value = moe_affine_gemv_row_simd(
         base + re.down_W_off, (device const bfloat*)(base + re.down_s_off),

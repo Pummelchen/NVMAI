@@ -401,6 +401,15 @@ private struct RunnerCounterSnapshot {
     let missIo: UInt64
     let exposedIo: UInt64
     let hitFixupLayers: UInt64
+    let routerReadback: UInt64
+    let cachePlan: UInt64
+    let ioQueue: UInt64
+    let ioCompletionToFixup: UInt64
+    let ioHostWaits: UInt64
+    let ioHostWaitsAvoided: UInt64
+    let gpuClassifiedHits: UInt64
+    let gpuClassifiedMisses: UInt64
+    let gpuAllHitLayers: UInt64
     let expertStreaming: ExpertStreamingStatistics
 }
 
@@ -485,7 +494,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         let context = try reusingContext ?? MetalContext()
         let loadRuntime = try RuntimeConfiguration(
             forceLogitsHead: true,
-            decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue())
+            decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue(),
+            expertIOSynchronization: try RuntimeExpertIOSynchronization.environmentValue(),
+            expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue())
         let slotOverride = ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
         // Precedence: --expert-cache-slots flag, then the env override, then a
@@ -530,6 +541,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: true,
             decodeExpertExecution: loadRuntime.decodeExpertExecution,
+            expertIOSynchronization: loadRuntime.expertIOSynchronization,
+            expertIOSubmission: loadRuntime.expertIOSubmission,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
             yarnContextTokens: ropeScalingMode == .yarn
@@ -868,6 +881,15 @@ public actor ServerModelSession: ServerInferenceBackend {
             missIo: runner.totalMissIoNanos,
             exposedIo: runner.totalExposedIoNanos,
             hitFixupLayers: runner.totalHitFixupLayers,
+            routerReadback: runner.totalRouterReadbackNanos,
+            cachePlan: runner.totalCachePlanNanos,
+            ioQueue: runner.totalIOQueueNanos,
+            ioCompletionToFixup: runner.totalIOCompletionToFixupSubmitNanos,
+            ioHostWaits: runner.totalExpertIOHostWaits,
+            ioHostWaitsAvoided: runner.totalExpertIOHostWaitsAvoided,
+            gpuClassifiedHits: runner.totalGPUClassifiedHits,
+            gpuClassifiedMisses: runner.totalGPUClassifiedMisses,
+            gpuAllHitLayers: runner.totalGPUResidencyAllHitLayers,
             expertStreaming: runner.expertStreamingStatistics())
         runner.resetKernelGPUTimings()
         var completed = false
@@ -1197,86 +1219,95 @@ public actor ServerModelSession: ServerInferenceBackend {
                 decodeRate))
         }
         if ProcessInfo.processInfo.environment["NVMAI_RUNNER_STATS"] != nil {
-            let tokens = max(1, result.newTokens)
-            let ms: (UInt64, UInt64) -> Double = { delta, base in
-                Double(delta > base ? delta - base : 0) / Double(tokens) / 1_000_000
-            }
-            let cb1 = ms(runner.totalCb1Nanos, runnerSnapshot.cb1)
-            let io = ms(runner.totalIoNanos, runnerSnapshot.io)
-            let cb2 = ms(runner.totalCb2Nanos, runnerSnapshot.cb2)
-            let head = ms(runner.totalHeadNanos, runnerSnapshot.head)
-            let headFused = ms(runner.totalHeadFusedNanos, runnerSnapshot.headFused)
-            let rdadvise = ms(runner.totalRDAdviseNanos, runnerSnapshot.rdadvise)
-            let wait = ms(runner.totalWaitNanos, runnerSnapshot.wait)
-            let body = ms(runner.totalBodyNanos, runnerSnapshot.body)
-            let missIoNanos = runner.totalMissIoNanos - runnerSnapshot.missIo
-            let exposedIoNanos = runner.totalExposedIoNanos - runnerSnapshot.exposedIo
-            let hiddenPercent = missIoNanos == 0 ? 100.0
-                : 100 * (1 - Double(exposedIoNanos) / Double(missIoNanos))
-            let hitFixupLayers = runner.totalHitFixupLayers - runnerSnapshot.hitFixupLayers
-            let calls = runner.totalRDAdviseCalls - runnerSnapshot.rdadviseCalls
-            let bytes = Double(runner.totalRDAdviseBytes - runnerSnapshot.rdadviseBytes)
-                / 1_048_576
-            let expert = runner.expertStreamingStatistics()
-                .subtracting(runnerSnapshot.expertStreaming)
-            let readMiB = Double(expert.bytesRead) / 1_048_576
-            let p50 = Double(expert.loadLatencyPercentile(0.50)) / 1_000_000
-            let p95 = Double(expert.loadLatencyPercentile(0.95)) / 1_000_000
-            let p99 = Double(expert.loadLatencyPercentile(0.99)) / 1_000_000
-            print(String(
-                format: "NVMAI runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
-                    + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
-                    + "wait_ms=%.3f body_ms=%.3f "
-                    + "rdadvise_calls=%llu rdadvise_mib=%.1f "
-                    + "expert_hit_rate=%.4f expert_hits=%llu expert_misses=%llu "
-                    + "expert_evictions=%llu expert_reloads=%llu expert_read_mib=%.1f "
-                    + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
-                    + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f "
-                    + "hit_fixup_layers=%llu",
-                cb1, io, cb2, head, headFused, rdadvise, wait, body, calls, bytes,
-                expert.hitRate, expert.hits, expert.misses, expert.evictions,
-                expert.reloads, readMiB, p50, p95, p99, hiddenPercent,
-                hitFixupLayers))
+            emitRunnerDiagnostics(result: result, snapshot: runnerSnapshot)
         }
         if ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
-            let tokens = max(1, result.newTokens)
-            let summary = runner.kernelGPUTimingSummary()
-            var totalGPU: Double = 0
-            for entry in summary {
-                totalGPU += entry.millis
-            }
-            for entry in summary {
-                print(String(
-                    format: "NVMAI kernel role=%@ gpu_ms=%.3f per_token_ms=%.3f "
-                        + "count=%d",
-                    entry.role, entry.millis, entry.millis / Double(tokens),
-                    entry.count))
-            }
-            // total_gpu_ms sums the roles, and roles overlap by design (the
-            // routed MoE buffer runs under the next layer's attention), so it
-            // can exceed the elapsed time. busy_ms merges the intervals, so
-            // busy/span is real occupancy: near 100% means GPU-bound and only
-            // cheaper kernels help; well under means idle gaps worth closing.
-            let occupancy = runner.kernelGPUOccupancy()
-            print(String(format: "NVMAI kernel total_gpu_ms=%.3f "
-                + "gpu_share_of_decode=%.1f%%",
-                totalGPU,
-                result.decodeSeconds > 0
-                    ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
-            for gap in runner.kernelGPUGaps().prefix(8) {
-                print(String(
-                    format: "NVMAI gap %@ total_ms=%.1f per_token_ms=%.3f count=%d",
-                    gap.transition, gap.millis, gap.millis / Double(tokens), gap.count))
-            }
-            print(String(format: "NVMAI kernel busy_ms=%.3f span_ms=%.3f "
-                + "occupancy=%.1f%% busy_share_of_decode=%.1f%% "
-                + "busy_per_token_ms=%.3f",
-                occupancy.busyMillis, occupancy.spanMillis,
-                occupancy.spanMillis > 0
-                    ? occupancy.busyMillis / occupancy.spanMillis * 100 : 0,
-                result.decodeSeconds > 0
-                    ? occupancy.busyMillis / (result.decodeSeconds * 1000) * 100 : 0,
-                occupancy.busyMillis / Double(tokens)))
+            emitKernelDiagnostics(result: result)
         }
+    }
+
+    private func emitRunnerDiagnostics(
+        result: RawDecodeResult,
+        snapshot: RunnerCounterSnapshot
+    ) {
+        let tokens = max(1, result.newTokens)
+        let ms: (UInt64, UInt64) -> Double = { delta, base in
+            Double(delta > base ? delta - base : 0) / Double(tokens) / 1_000_000
+        }
+        let missIoNanos = runner.totalMissIoNanos - snapshot.missIo
+        let exposedIoNanos = runner.totalExposedIoNanos - snapshot.exposedIo
+        let hiddenPercent = missIoNanos == 0 ? 100.0
+            : 100 * (1 - Double(exposedIoNanos) / Double(missIoNanos))
+        let expert = runner.expertStreamingStatistics()
+            .subtracting(snapshot.expertStreaming)
+        let gpuHits = runner.totalGPUClassifiedHits - snapshot.gpuClassifiedHits
+        let gpuMisses = runner.totalGPUClassifiedMisses - snapshot.gpuClassifiedMisses
+        let gpuAllHit = runner.totalGPUResidencyAllHitLayers - snapshot.gpuAllHitLayers
+        print(String(
+            format: "NVMAI runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
+                + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
+                + "wait_ms=%.3f body_ms=%.3f rdadvise_calls=%llu rdadvise_mib=%.1f "
+                + "expert_hit_rate=%.4f expert_hits=%llu expert_misses=%llu "
+                + "expert_evictions=%llu expert_reloads=%llu expert_read_mib=%.1f "
+                + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
+                + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f hit_fixup_layers=%llu "
+                + "router_readback_ms=%.4f cache_plan_ms=%.4f io_queue_ms=%.4f "
+                + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
+                + "io_host_waits_avoided=%llu gpu_classified_hits=%llu "
+                + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu",
+            ms(runner.totalCb1Nanos, snapshot.cb1),
+            ms(runner.totalIoNanos, snapshot.io),
+            ms(runner.totalCb2Nanos, snapshot.cb2),
+            ms(runner.totalHeadNanos, snapshot.head),
+            ms(runner.totalHeadFusedNanos, snapshot.headFused),
+            ms(runner.totalRDAdviseNanos, snapshot.rdadvise),
+            ms(runner.totalWaitNanos, snapshot.wait),
+            ms(runner.totalBodyNanos, snapshot.body),
+            runner.totalRDAdviseCalls - snapshot.rdadviseCalls,
+            Double(runner.totalRDAdviseBytes - snapshot.rdadviseBytes) / 1_048_576,
+            expert.hitRate, expert.hits, expert.misses, expert.evictions,
+            expert.reloads, Double(expert.bytesRead) / 1_048_576,
+            Double(expert.loadLatencyPercentile(0.50)) / 1_000_000,
+            Double(expert.loadLatencyPercentile(0.95)) / 1_000_000,
+            Double(expert.loadLatencyPercentile(0.99)) / 1_000_000,
+            hiddenPercent, runner.totalHitFixupLayers - snapshot.hitFixupLayers,
+            ms(runner.totalRouterReadbackNanos, snapshot.routerReadback),
+            ms(runner.totalCachePlanNanos, snapshot.cachePlan),
+            ms(runner.totalIOQueueNanos, snapshot.ioQueue),
+            ms(runner.totalIOCompletionToFixupSubmitNanos, snapshot.ioCompletionToFixup),
+            runner.totalExpertIOHostWaits - snapshot.ioHostWaits,
+            runner.totalExpertIOHostWaitsAvoided - snapshot.ioHostWaitsAvoided,
+            gpuHits, gpuMisses, gpuAllHit))
+    }
+
+    private func emitKernelDiagnostics(result: RawDecodeResult) {
+        let tokens = max(1, result.newTokens)
+        let summary = runner.kernelGPUTimingSummary()
+        let totalGPU = summary.reduce(0) { $0 + $1.millis }
+        for entry in summary {
+            print(String(
+                format: "NVMAI kernel role=%@ gpu_ms=%.3f per_token_ms=%.3f count=%d",
+                entry.role, entry.millis, entry.millis / Double(tokens), entry.count))
+        }
+        // Role sums overlap by design. Merged busy/span is the actual queue
+        // occupancy and distinguishes useful concurrency from idle gaps.
+        let occupancy = runner.kernelGPUOccupancy()
+        print(String(format: "NVMAI kernel total_gpu_ms=%.3f gpu_share_of_decode=%.1f%%",
+            totalGPU,
+            result.decodeSeconds > 0
+                ? totalGPU / (result.decodeSeconds * 1000) * 100 : 0))
+        for gap in runner.kernelGPUGaps().prefix(8) {
+            print(String(
+                format: "NVMAI gap %@ total_ms=%.1f per_token_ms=%.3f count=%d",
+                gap.transition, gap.millis, gap.millis / Double(tokens), gap.count))
+        }
+        print(String(format: "NVMAI kernel busy_ms=%.3f span_ms=%.3f "
+            + "occupancy=%.1f%% busy_share_of_decode=%.1f%% busy_per_token_ms=%.3f",
+            occupancy.busyMillis, occupancy.spanMillis,
+            occupancy.spanMillis > 0
+                ? occupancy.busyMillis / occupancy.spanMillis * 100 : 0,
+            result.decodeSeconds > 0
+                ? occupancy.busyMillis / (result.decodeSeconds * 1000) * 100 : 0,
+            occupancy.busyMillis / Double(tokens)))
     }
 }

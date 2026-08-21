@@ -1,5 +1,10 @@
 # NVMAI v4.0 — core design
 
+> Historical design record. For the implemented scheduler and measured current
+> decisions, see [v4.1 expert streaming](v4.1-expert-streaming-engine.md) and
+> [v4.2 expert streaming](v4.2-expert-streaming-engine.md). Later measurements
+> supersede speculative performance claims in this document.
+
 Clean-sheet rewrite of the inference core, targeting the physical limits of an
 M3 MacBook Pro **while streaming weights from SSD**. Streaming is not a fallback
 here; it is the product. The goal is a 35B MoE running with a small, declared RAM

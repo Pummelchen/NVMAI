@@ -96,6 +96,53 @@ extension PreadExpertStreamerTests {
     }
   }
 
+  @Test func submittedCacheLoadCompletesWithoutCallerExecutingReads() async throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let context = try MetalContext()
+    let coordinator = try #require(ExpertIOEventCoordinator(device: context.device))
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: context.device,
+      slotCount: 4, eventCoordinator: coordinator)
+    let plan = try streamer.planExpertsCached(experts: [3, 1, 2])
+
+    let operation = try streamer.beginExpertCachePlan(plan, eventDriven: true)
+    try await operation.completion()
+
+    #expect(operation.state == .completed)
+    let token = try #require(operation.completionToken)
+    #expect(token.event.signaledValue >= token.value)
+    for (index, result) in streamer.expertCachePlanBuffers(plan).enumerated() {
+      let got = Self.bytes(of: result.buffer, offset: result.offset,
+                           count: Self.expertStride)
+      #expect(got.allSatisfy { $0 == Self.tagByte(plan.experts[index]) })
+    }
+  }
+
+  @Test func contiguousPoolUsesAlignedNonOverlappingSlotOffsets() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    setenv("NVMAI_EXPERT_CACHE_LAYOUT", "pool", 1)
+    defer { unsetenv("NVMAI_EXPERT_CACHE_LAYOUT") }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+    let plan = try streamer.planExpertsCached(experts: [0, 1, 2, 3])
+    let operation = try streamer.beginExpertCachePlan(plan)
+    try operation.wait()
+    let buffers = streamer.expertCachePlanBuffers(plan)
+
+    #expect(streamer.cacheLayout == .pool)
+    #expect(buffers.allSatisfy { $0.buffer === buffers[0].buffer })
+    #expect(Set(buffers.map(\.offset)).count == 4)
+    #expect(buffers.allSatisfy { Int($0.offset).isMultiple(of: Int(getpagesize())) })
+    for (index, result) in buffers.enumerated() {
+      let got = Self.bytes(of: result.buffer, offset: result.offset,
+                           count: Self.expertStride)
+      #expect(got.allSatisfy { $0 == Self.tagByte(index) })
+    }
+  }
+
   @Test func plannedCacheBuffersExposeReservedSlotsBeforeExecute() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }

@@ -40,6 +40,7 @@ final class MoE {
     private let routerGemvSpecializedPSO: MTLComputePipelineState
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
+    private let residencyClassifyPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
     private let phase1U16SpecializedPSO: MTLComputePipelineState
@@ -49,6 +50,7 @@ final class MoE {
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
+    private let alwaysReadyIOStatus: MTLBuffer
 
     /// `specializedD`/`specializedF`/`specializedNumExperts` describe the
     /// production shape this instance specializes for (the specialized
@@ -59,6 +61,7 @@ final class MoE {
          siluActivation: Bool = false,
          routedWeightBits: Int = 4,
          routerWeightBits: Int = 8,
+         eventGatedIO: Bool = false,
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128) throws {
@@ -73,12 +76,13 @@ final class MoE {
         let weightConstants = routedWeightBits == 4 ? [] : [
             MetalFunctionConstant(index: 5, value: .uint32(UInt32(routedWeightBits)))
         ]
+        let ioConstants = [MetalFunctionConstant(index: 6, value: .bool(eventGatedIO))]
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),
             MetalFunctionConstant(index: 2, value: .uint32(Self.realDecodeTopK)),
             MetalFunctionConstant(index: 3, value: .bool(true)),
-        ] + activationConstants + weightConstants
+        ] + activationConstants + weightConstants + ioConstants
         let routerConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 40, value: .uint32(specializedNumExperts)),
             MetalFunctionConstant(index: 41, value: .uint32(specializedD)),
@@ -100,6 +104,7 @@ final class MoE {
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8",
             constants: routerConstants)
+        self.residencyClassifyPSO = try context.pipeline("moe_classify_expert_residency")
         let phase1Name = routedWeightBits == 4
             ? "moe_phase1_gate_up_act_u16load" : "moe_affine_phase1_gate_up_act"
         let phase1SubsetName = routedWeightBits == 4
@@ -107,17 +112,17 @@ final class MoE {
         let phase2Name = routedWeightBits == 4
             ? "moe_phase2_down_reduce_k8" : "moe_affine_phase2_down_reduce_k8"
         self.phase1U16PSO = try context.pipeline(
-            phase1Name, constants: activationConstants + weightConstants)
+            phase1Name, constants: activationConstants + weightConstants + ioConstants)
         self.phase1U16SpecializedPSO = try context.pipeline(
             phase1Name,
             constants: moeConstants)
         self.phase1SubsetU16PSO = try context.pipeline(
-            phase1SubsetName, constants: activationConstants + weightConstants)
+            phase1SubsetName, constants: activationConstants + weightConstants + ioConstants)
         self.phase1SubsetU16SpecializedPSO = try context.pipeline(
             phase1SubsetName,
             constants: moeConstants)
         self.phase2ReduceK8PSO = try context.pipeline(
-            phase2Name, constants: weightConstants)
+            phase2Name, constants: weightConstants + ioConstants)
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
             phase2Name,
             constants: moeConstants)
@@ -125,10 +130,15 @@ final class MoE {
         guard let logits = context.device.makeBuffer(
             length: 256 * MemoryLayout<Float>.stride,
             options: .storageModeShared),
+              let readyStatus = context.device.makeBuffer(
+            length: MemoryLayout<UInt32>.stride,
+            options: .storageModeShared),
               let phase1Function = context.library.makeFunction(name: phase1Name) else {
             throw MetalError.noDevice
         }
         self.routerLogits = logits
+        readyStatus.contents().storeBytes(of: UInt32(1), as: UInt32.self)
+        self.alwaysReadyIOStatus = readyStatus
         self.routedArgEncoder = phase1Function.makeArgumentEncoder(bufferIndex: 0)
         guard let reusable = context.device.makeBuffer(
             length: routedArgEncoder.encodedLength,
@@ -203,21 +213,63 @@ final class MoE {
     }
 
     func makeRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
-                                         topK: UInt32) -> MTLBuffer? {
+                                         topK: UInt32,
+                                         routedBufferOffsets: [Int]? = nil) -> MTLBuffer? {
         validate(routedBlobs: routedBlobs, topK: topK)
         guard let buffer = routedBlobs.first?.device.makeBuffer(
             length: routedArgEncoder.encodedLength,
             options: .storageModeShared) else {
             return nil
         }
-        encodeRoutedArgumentBuffer(buffer, routedBlobs: routedBlobs)
+        encodeRoutedArgumentBuffer(buffer, routedBlobs: routedBlobs,
+                                   routedBufferOffsets: routedBufferOffsets)
         return buffer
     }
 
+    func encodeResidencyClassification(
+        commandBuffer: MTLCommandBuffer,
+        topKIndices: MTLBuffer,
+        residencyTable: MTLBuffer,
+        hitCount: MTLBuffer,
+        hitPositions: MTLBuffer,
+        missCount: MTLBuffer,
+        missPositions: MTLBuffer,
+        missExperts: MTLBuffer,
+        resolvedSlots: MTLBuffer,
+        resolvedGenerations: MTLBuffer,
+        topK: UInt32,
+        numExperts: UInt32
+    ) throws {
+        precondition(topK <= UInt32(Self.maxStreamedExperts))
+        var topKValue = topK
+        var expertCount = numExperts
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(residencyClassifyPSO)
+        encoder.setBuffer(topKIndices, offset: 0, index: 0)
+        encoder.setBuffer(residencyTable, offset: 0, index: 1)
+        encoder.setBuffer(hitCount, offset: 0, index: 2)
+        encoder.setBuffer(hitPositions, offset: 0, index: 3)
+        encoder.setBuffer(missCount, offset: 0, index: 4)
+        encoder.setBuffer(missPositions, offset: 0, index: 5)
+        encoder.setBuffer(missExperts, offset: 0, index: 6)
+        encoder.setBuffer(resolvedSlots, offset: 0, index: 7)
+        encoder.setBuffer(resolvedGenerations, offset: 0, index: 8)
+        encoder.setBytes(&topKValue, length: MemoryLayout<UInt32>.stride, index: 9)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 10)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
     func makeReusedRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
-                                               topK: UInt32) -> MTLBuffer {
+                                               topK: UInt32,
+                                               routedBufferOffsets: [Int]? = nil) -> MTLBuffer {
         validate(routedBlobs: routedBlobs, topK: topK)
-        encodeRoutedArgumentBuffer(reusableRoutedArgBuffer, routedBlobs: routedBlobs)
+        encodeRoutedArgumentBuffer(reusableRoutedArgBuffer, routedBlobs: routedBlobs,
+                                   routedBufferOffsets: routedBufferOffsets)
         return reusableRoutedArgBuffer
     }
 
@@ -230,7 +282,9 @@ final class MoE {
         acts: MTLBuffer,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
     ) throws {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
@@ -252,6 +306,9 @@ final class MoE {
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
+                          offset: ioStatus == nil ? 0 : ioStatusOffset,
+                          index: 7)
         // Phase-1 uses 16 rows per threadgroup (threadgroup-staged x), so the
         // dispatch is (topK*f)/16 groups of 512 threads.
         encoder.dispatchThreadgroups(
@@ -272,7 +329,9 @@ final class MoE {
         activeCount: UInt32,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
     ) throws {
         guard activeCount > 0 else { return }
         validate(routedBlobs: routedBlobs, topK: topK)
@@ -301,6 +360,9 @@ final class MoE {
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBuffer(activeSlots, offset: 0, index: 7)
         encoder.setBytes(&active, length: MemoryLayout<UInt32>.stride, index: 8)
+        encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
+                          offset: ioStatus == nil ? 0 : ioStatusOffset,
+                          index: 9)
         // Phase-1 uses 16 rows per threadgroup (threadgroup-staged x).
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(activeCount * f) + 15) / 16, height: 1, depth: 1),
@@ -319,7 +381,9 @@ final class MoE {
         y: MTLBuffer,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        ioStatus: MTLBuffer? = nil,
+        ioStatusOffset: Int = 0
     ) throws {
         validate(routedBlobs: routedBlobs, topK: topK)
         var dimension = d
@@ -341,6 +405,9 @@ final class MoE {
         encoder.setBuffer(y, offset: 0, index: 5)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
+        encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
+                          offset: ioStatus == nil ? 0 : ioStatusOffset,
+                          index: 8)
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
@@ -353,10 +420,16 @@ final class MoE {
     }
 
     private func encodeRoutedArgumentBuffer(_ buffer: MTLBuffer,
-                                            routedBlobs: [MTLBuffer]) {
+                                            routedBlobs: [MTLBuffer],
+                                            routedBufferOffsets: [Int]?) {
+        precondition(routedBufferOffsets == nil
+                     || routedBufferOffsets?.count == routedBlobs.count)
         routedArgEncoder.setArgumentBuffer(buffer, offset: 0)
         for (index, blob) in routedBlobs.enumerated() {
-            routedArgEncoder.setBuffer(blob, offset: 0, index: index)
+            routedArgEncoder.setBuffer(
+                blob,
+                offset: routedBufferOffsets?[index] ?? 0,
+                index: index)
         }
     }
 

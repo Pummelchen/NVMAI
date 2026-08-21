@@ -118,7 +118,9 @@ public func run(args: Args,
             expertCacheSlots: args.expertCacheSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             forceLogitsHead: !config.isPureGreedy,
-            decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue())
+            decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue(),
+            expertIOSynchronization: try RuntimeExpertIOSynchronization.environmentValue(),
+            expertIOSubmission: try RuntimeExpertIOSubmission.environmentValue())
 
         guard MTLCreateSystemDefaultDevice() != nil else {
             return errored(stderr, "no Metal device", 1)
@@ -151,6 +153,8 @@ public func run(args: Args,
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: !config.isPureGreedy,
             decodeExpertExecution: loadRuntime.decodeExpertExecution,
+            expertIOSynchronization: loadRuntime.expertIOSynchronization,
+            expertIOSubmission: loadRuntime.expertIOSubmission,
             kvCachePrecision: args.kvCachePrecision,
             ropeScalingMode: args.ropeScalingMode,
             yarnContextTokens: args.ropeScalingMode == .yarn

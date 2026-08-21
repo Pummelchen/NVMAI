@@ -71,9 +71,36 @@ import Testing
         #expect(try RuntimeDecodeExpertExecution.environmentValue([
             "NVMAI_DECODE_EXPERT_EXECUTION": "barrier",
         ]) == .barrier)
+        #expect(try RuntimeDecodeExpertExecution.environmentValue([
+            "NVMAI_DECODE_EXPERT_EXECUTION": "gpu-residency",
+        ]) == .gpuResidency)
         #expect(throws: RuntimeConfigurationError.self) {
             try RuntimeDecodeExpertExecution.environmentValue([
                 "NVMAI_DECODE_EXPERT_EXECUTION": "typo",
+            ])
+        }
+    }
+
+    @Test func expertIOSynchronizationEnvironmentIsFailClosed() throws {
+        #expect(try RuntimeExpertIOSynchronization.environmentValue([:]) == .host)
+        #expect(try RuntimeExpertIOSynchronization.environmentValue([
+            "NVMAI_EXPERT_IO_SYNC": "event",
+        ]) == .event)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try RuntimeExpertIOSynchronization.environmentValue([
+                "NVMAI_EXPERT_IO_SYNC": "typo",
+            ])
+        }
+    }
+
+    @Test func expertIOSubmissionEnvironmentIsFailClosed() throws {
+        #expect(try RuntimeExpertIOSubmission.environmentValue([:]) == .deferred)
+        #expect(try RuntimeExpertIOSubmission.environmentValue([
+            "NVMAI_EXPERT_IO_SUBMISSION": "immediate",
+        ]) == .immediate)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try RuntimeExpertIOSubmission.environmentValue([
+                "NVMAI_EXPERT_IO_SUBMISSION": "typo",
             ])
         }
     }

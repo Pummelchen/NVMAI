@@ -73,6 +73,7 @@ public struct Model {
     /// while still letting accessors mutate layer state via a serial queue.
     let streamersBox: StreamersBox
     let streamersQueue: DispatchQueue
+    let expertIOEventCoordinator: ExpertIOEventCoordinator?
 
     /// unchecked-invariant: every access goes through `streamersQueue`, the
     /// serial queue on the owning Model. The box exists so Model can stay a
@@ -112,6 +113,7 @@ public struct Model {
         self.sharedTargetWeights = sharedTargetWeights
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "NVMAI.expert-streamers")
+        self.expertIOEventCoordinator = ExpertIOEventCoordinator(device: device)
     }
 
     // MARK: - Resident accessors
@@ -420,7 +422,8 @@ public struct Model {
             layout: layout,
             device: device,
             slotCount: slotCount,
-            cachePolicy: expertCachePolicy)
+            cachePolicy: expertCachePolicy,
+            eventCoordinator: expertIOEventCoordinator)
     }
 
     /// Test hook: how many layer files have been opened so far.

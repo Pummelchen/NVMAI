@@ -158,6 +158,7 @@ public struct ExpertStreamingStatistics: Sendable, Equatable {
 public enum ExpertCachePolicy: String, Sendable {
     case lru
     case lfu
+    case agingLFU = "aging-lfu"
 }
 
 public enum ExpertIOBackend: String, Sendable {
@@ -176,6 +177,22 @@ public enum ExpertIOBackend: String, Sendable {
     }
 }
 
+public enum ExpertCacheLayout: String, Sendable {
+    case perSlot = "per-slot"
+    case pool
+
+    static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> ExpertCacheLayout {
+        guard let raw = environment["NVMAI_EXPERT_CACHE_LAYOUT"] else { return .perSlot }
+        guard let layout = ExpertCacheLayout(rawValue: raw) else {
+            throw ModelError.internalInconsistency(
+                detail: "unsupported NVMAI_EXPERT_CACHE_LAYOUT '\(raw)'; allowed: per-slot, pool")
+        }
+        return layout
+    }
+}
+
 /// SSD-backed routed-expert streamer with a fixed per-layer slot cache.
 /// unchecked-invariant: the expert cache bookkeeping is guarded by `cacheLock`,
 /// which is what lets `DispatchQueue.concurrentPerform` fan the misses out
@@ -189,6 +206,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public let slotCount: Int
     public let cachePolicy: ExpertCachePolicy
     public let ioBackend: ExpertIOBackend
+    public let cacheLayout: ExpertCacheLayout
+    public let poolSlotStride: Int
 
     private let fd: Int32
 
@@ -209,8 +228,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// account for is the product; throughput is what is being traded for it.
     private let boundedReader: ParallelExpertReader?
     private let metalReader: MetalExpertReader?
+    private let eventCoordinator: ExpertIOEventCoordinator?
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
+    private let slotBufferOffsets: [UInt64]
+    private let residencyTable: MTLBuffer
 
     private var nextSlot = 0
 
@@ -246,12 +268,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public init(layout: StreamLayout,
                 device: MTLDevice,
                 slotCount: Int,
-                cachePolicy: ExpertCachePolicy = .lfu) throws {
+                cachePolicy: ExpertCachePolicy = .lfu,
+                eventCoordinator: ExpertIOEventCoordinator? = nil) throws {
         precondition(slotCount > 0, "slotCount must be positive")
         self.layout = layout
         self.slotCount = slotCount
-        self.cachePolicy = cachePolicy
+        if let rawPolicy = ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_POLICY"] {
+            guard let experimentalPolicy = ExpertCachePolicy(rawValue: rawPolicy) else {
+                throw ModelError.internalInconsistency(
+                    detail: "unsupported NVMAI_EXPERT_CACHE_POLICY '\(rawPolicy)'; allowed: lfu, lru, aging-lfu")
+            }
+            self.cachePolicy = experimentalPolicy
+        } else {
+            self.cachePolicy = cachePolicy
+        }
+        self.eventCoordinator = eventCoordinator
         self.ioBackend = try ExpertIOBackend.environmentValue()
+        self.cacheLayout = try ExpertCacheLayout.environmentValue()
         let pageSize = Int(getpagesize())
 
         let openedFD = open(layout.path, O_RDONLY)
@@ -277,10 +310,31 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
+        // The pool base retains the validated 2 MiB allocation alignment.
+        // Individual offsets need only VM-page alignment for pread and Metal;
+        // rounding every slot to 2 MiB inflated the 8-bit pool by several GiB.
+        self.poolSlotStride = allocationSize
         var pointers: [UnsafeMutableRawPointer] = []
         var buffers: [MTLBuffer] = []
+        var bufferOffsets: [UInt64] = []
         pointers.reserveCapacity(slotCount)
         buffers.reserveCapacity(slotCount)
+        bufferOffsets.reserveCapacity(slotCount)
+        guard let residencyTable = device.makeBuffer(
+            length: max(1, layout.expertsPerLayer)
+                * MemoryLayout<ExpertResidencyEntry>.stride,
+            options: .storageModeShared)
+        else {
+            close(openedFD)
+            throw StreamerError.bufferWrapFailed
+        }
+        self.residencyTable = residencyTable
+        let residencyEntries = residencyTable.contents()
+            .bindMemory(to: ExpertResidencyEntry.self,
+                        capacity: max(1, layout.expertsPerLayer))
+        for expert in 0..<max(1, layout.expertsPerLayer) {
+            residencyEntries[expert] = ExpertResidencyEntry()
+        }
 
         func unwind() {
             for index in buffers.count..<pointers.count {
@@ -289,9 +343,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             close(openedFD)
         }
 
-        for _ in 0..<slotCount {
+        if cacheLayout == .pool {
+            let (poolBytes, overflow) = poolSlotStride.multipliedReportingOverflow(by: slotCount)
+            guard !overflow else {
+                unwind()
+                throw StreamerError.allocFailed(errno: EOVERFLOW)
+            }
             var raw: UnsafeMutableRawPointer?
-            let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
+            let result = posix_memalign(&raw, Self.scratchAlignment, poolBytes)
             guard result == 0, let pointer = raw else {
                 unwind()
                 throw StreamerError.allocFailed(errno: result)
@@ -300,14 +359,42 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             nonisolated(unsafe) let capturedPointer = pointer
             guard let buffer = device.makeBuffer(
                 bytesNoCopy: pointer,
-                length: allocationSize,
+                length: poolBytes,
                 options: .storageModeShared,
                 deallocator: { _, _ in free(capturedPointer) })
             else {
                 unwind()
                 throw StreamerError.bufferWrapFailed
             }
-            buffers.append(buffer)
+            for slot in 0..<slotCount {
+                if slot > 0 {
+                    pointers.append(pointer.advanced(by: slot * poolSlotStride))
+                }
+                buffers.append(buffer)
+                bufferOffsets.append(UInt64(slot * poolSlotStride))
+            }
+        } else {
+            for _ in 0..<slotCount {
+                var raw: UnsafeMutableRawPointer?
+                let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
+                guard result == 0, let pointer = raw else {
+                    unwind()
+                    throw StreamerError.allocFailed(errno: result)
+                }
+                pointers.append(pointer)
+                nonisolated(unsafe) let capturedPointer = pointer
+                guard let buffer = device.makeBuffer(
+                    bytesNoCopy: pointer,
+                    length: allocationSize,
+                    options: .storageModeShared,
+                    deallocator: { _, _ in free(capturedPointer) })
+                else {
+                    unwind()
+                    throw StreamerError.bufferWrapFailed
+                }
+                buffers.append(buffer)
+                bufferOffsets.append(0)
+            }
         }
 
         // Fail closed when bounded I/O was requested. Falling through to an
@@ -343,6 +430,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         self.slotPointers = pointers
         self.slotBuffers = buffers
+        self.slotBufferOffsets = bufferOffsets
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.slotState = [SlotState](repeating: .empty, count: slotCount)
@@ -404,8 +492,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             throw StreamerError.offsetOutOfRange(regionOffset)
         }
         slotGeneration[slot] &+= 1
+        let previousExpert = slotExpert[slot]
+        if previousExpert >= 0 {
+            publishResidencyUnlocked(expert: previousExpert,
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.empty,
+                                     generation: slotGeneration[slot])
+        }
         slotExpert[slot] = expert
         slotState[slot] = .loading
+        publishResidencyUnlocked(expert: expert,
+                                 slot: slot,
+                                 state: ExpertResidencyEntry.loading,
+                                 generation: slotGeneration[slot])
         let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         do {
             try readFull(
@@ -413,15 +512,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 fileOffset: layout.streamOffset + regionOffset,
                 count: Int(layout.expertStride))
             slotState[slot] = .resident
+            publishResidencyUnlocked(expert: expert,
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.resident,
+                                     generation: slotGeneration[slot])
             slotLastUse[slot] = useClock
             recordSuccessfulLoadsUnlocked(
                 experts: [expert], elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
         } catch {
             slotState[slot] = .empty
             slotExpert[slot] = -1
+            publishResidencyUnlocked(expert: expert,
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.empty,
+                                     generation: slotGeneration[slot])
             throw error
         }
-        return (slotBuffers[slot], 0, layout.expertStride)
+        return (slotBuffers[slot], slotBufferOffsets[slot], layout.expertStride)
     }
 
     public func loadExpertsCached(experts: [Int]) throws
@@ -461,6 +568,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         defer { cacheLock.unlock() }
 
         let clock = useClock + 1
+        if cachePolicy == .agingLFU,
+           statisticsPlans > 0,
+           statisticsPlans.isMultiple(of: 1_024) {
+            for expert in expertUseCount.indices {
+                expertUseCount[expert] >>= 1
+            }
+        }
         var assignedSlots = [Int](repeating: -1, count: experts.count)
         var reserved = [Bool](repeating: false, count: slotCount)
         // Loading slots are not valid hits and cannot be reassigned.
@@ -497,12 +611,23 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for (offset, index) in misses.enumerated() {
             let slot = evictable[offset]
             if slotState[slot] == .resident { statisticsEvictions &+= 1 }
+            let previousExpert = slotExpert[slot]
             assignedSlots[index] = slot
             reserved[slot] = true
             slotGeneration[slot] &+= 1
             slotExpert[slot] = experts[index]
             slotLastUse[slot] = clock
             slotState[slot] = .loading
+            if previousExpert >= 0 {
+                publishResidencyUnlocked(expert: previousExpert,
+                                         slot: slot,
+                                         state: ExpertResidencyEntry.empty,
+                                         generation: slotGeneration[slot])
+            }
+            publishResidencyUnlocked(expert: experts[index],
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.loading,
+                                     generation: slotGeneration[slot])
         }
 
         statisticsPlans &+= 1
@@ -557,6 +682,85 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return expertCachePlanBuffers(plan)
     }
 
+    /// Submits the plan to the persistent storage service and returns before
+    /// any read has to complete. Reserved generations are already pinned by
+    /// the caller, so the destination pointers remain valid for the operation.
+    public func beginExpertCachePlan(
+        _ plan: ExpertCachePlan,
+        eventDriven: Bool = false
+    ) throws -> ExpertLoadOperation {
+        let token: ExpertIOCompletionToken?
+        if eventDriven && metalReader == nil {
+            guard let eventCoordinator else {
+                throw ModelError.internalInconsistency(
+                    detail: "event-driven expert I/O requested without a shared event")
+            }
+            token = try eventCoordinator.reserve()
+        } else {
+            token = nil
+        }
+        let operation = ExpertLoadOperation(
+            completionToken: token,
+            eventCoordinator: eventCoordinator,
+            backendSignalsEvent: false)
+        guard !plan.misses.isEmpty else {
+            operation.finish(.success(()))
+            return operation
+        }
+        if let metalReader {
+            operation.markInFlight()
+            let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            do {
+                try beginMetalReads(
+                    plan,
+                    reader: metalReader,
+                    // A native MTLIO signal cross-queued with a waiting compute
+                    // buffer deadlocked on the qualification M3. Keep Metal I/O
+                    // nonblocking, but bridge its completion handler through
+                    // the same proven coordinator used by bounded pread.
+                    completionToken: nil) { [self, operation] result in
+                        switch result {
+                        case .success:
+                            do {
+                                try markPlanMissesResident(plan)
+                                finishPlanExecution(
+                                    plan,
+                                    succeeded: true,
+                                    elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
+                                operation.finish(.success(()))
+                            } catch {
+                                finishPlanExecution(
+                                    plan,
+                                    succeeded: false,
+                                    elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
+                                operation.finish(.failure(error))
+                            }
+                        case .failure(let error):
+                            finishPlanExecution(
+                                plan,
+                                succeeded: false,
+                                elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
+                            operation.finish(.failure(error))
+                        }
+                    }
+            } catch {
+                finishPlanExecution(plan, succeeded: false, elapsedNanos: 0)
+                operation.finish(.failure(error))
+            }
+            return operation
+        }
+        ExpertIOScheduler.shared.submit { [self, operation] in
+            operation.markInFlight()
+            do {
+                _ = try executeExpertCachePlan(plan)
+                operation.finish(.success(()))
+            } catch {
+                operation.finish(.failure(error))
+            }
+        }
+        return operation
+    }
+
     private func executeMetalReads(_ plan: ExpertCachePlan,
                                    reader: MetalExpertReader) throws {
         var offsets: [UInt64] = []
@@ -570,7 +774,35 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         try reader.fetch(
             offsets: offsets,
             into: destinations,
-            byteCount: Int(layout.expertStride))
+            byteCount: Int(layout.expertStride),
+            destinationOffsets: plan.misses.map {
+                Int(slotBufferOffsets[plan.assignedSlots[$0]])
+            })
+    }
+
+    private func beginMetalReads(
+        _ plan: ExpertCachePlan,
+        reader: MetalExpertReader,
+        completionToken: ExpertIOCompletionToken?,
+        completion: @escaping @Sendable (Result<Void, any Error>) -> Void
+    ) throws {
+        var offsets: [UInt64] = []
+        var destinations: [MTLBuffer] = []
+        offsets.reserveCapacity(plan.misses.count)
+        destinations.reserveCapacity(plan.misses.count)
+        for index in plan.misses {
+            offsets.append(try fileOffset(plan: plan, index: index))
+            destinations.append(slotBuffers[plan.assignedSlots[index]])
+        }
+        try reader.beginFetch(
+            offsets: offsets,
+            into: destinations,
+            byteCount: Int(layout.expertStride),
+            destinationOffsets: plan.misses.map {
+                Int(slotBufferOffsets[plan.assignedSlots[$0]])
+            },
+            completionToken: completionToken,
+            completion: completion)
     }
 
     private func executeBoundedReads(_ plan: ExpertCachePlan,
@@ -625,8 +857,26 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
         return plan.assignedSlots.map { slot in
-            (slotBuffers[slot], UInt64(0), layout.expertStride)
+            (slotBuffers[slot], slotBufferOffsets[slot], layout.expertStride)
         }
+    }
+
+    public func expertResidencyResources() -> ExpertResidencyResources {
+        ExpertResidencyResources(
+            table: residencyTable,
+            expertPool: cacheLayout == .pool ? slotBuffers.first : nil,
+            poolSlotStride: UInt64(poolSlotStride),
+            expertStride: layout.expertStride,
+            expertCount: layout.expertsPerLayer)
+    }
+
+    public func residencyEntry(expert: Int) -> ExpertResidencyEntry {
+        precondition(expert >= 0 && expert < layout.expertsPerLayer)
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return residencyTable.contents()
+            .bindMemory(to: ExpertResidencyEntry.self,
+                        capacity: layout.expertsPerLayer)[expert]
     }
 
     public func adviseExpertCachePlanMisses(_ plan: ExpertCachePlan) -> ExpertIOAdviceResult {
@@ -772,6 +1022,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                slotState[slot] == .loading {
                 slotState[slot] = .empty
                 slotExpert[slot] = -1
+                publishResidencyUnlocked(expert: plan.experts[index],
+                                         slot: slot,
+                                         state: ExpertResidencyEntry.empty,
+                                         generation: plan.assignedGenerations[index])
             }
         }
     }
@@ -791,7 +1045,30 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             slotState[slot] = .resident
             slotExpert[slot] = plan.experts[index]
             slotLastUse[slot] = useClock
+            publishResidencyUnlocked(expert: plan.experts[index],
+                                     slot: slot,
+                                     state: ExpertResidencyEntry.resident,
+                                     generation: plan.assignedGenerations[index])
         }
+    }
+
+    /// CPU publication occurs under the cache lock. A loading entry is visible
+    /// immediately after reservation; resident is written only after every
+    /// byte lands. Event-driven consumers additionally wait on the batch's
+    /// shared-event value, which is the CPU/GPU release/acquire boundary.
+    private func publishResidencyUnlocked(expert: Int,
+                                          slot: Int,
+                                          state: UInt32,
+                                          generation: UInt64) {
+        guard expert >= 0 && expert < layout.expertsPerLayer else { return }
+        let entries = residencyTable.contents()
+            .bindMemory(to: ExpertResidencyEntry.self,
+                        capacity: layout.expertsPerLayer)
+        entries[expert] = ExpertResidencyEntry(
+            slot: state == ExpertResidencyEntry.empty
+                ? ExpertResidencyEntry.notResidentSlot : UInt32(slot),
+            state: state,
+            generation: generation)
     }
 
     private func recordSuccessfulLoadsUnlocked(experts: [Int], elapsedNanos: UInt64) {

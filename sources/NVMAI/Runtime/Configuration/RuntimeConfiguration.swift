@@ -30,6 +30,7 @@ public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
 public enum RuntimeDecodeExpertExecution: String, Codable, Sendable {
     case hitFixup = "hit-fixup"
     case barrier
+    case gpuResidency = "gpu-residency"
 
     public static func environmentValue(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
@@ -39,6 +40,36 @@ public enum RuntimeDecodeExpertExecution: String, Codable, Sendable {
         }
         guard let value = RuntimeDecodeExpertExecution(rawValue: raw) else {
             throw RuntimeConfigurationError.invalidDecodeExpertExecution(raw)
+        }
+        return value
+    }
+}
+
+public enum RuntimeExpertIOSynchronization: String, Codable, Sendable {
+    case host
+    case event
+
+    public static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RuntimeExpertIOSynchronization {
+        guard let raw = environment["NVMAI_EXPERT_IO_SYNC"] else { return .host }
+        guard let value = RuntimeExpertIOSynchronization(rawValue: raw) else {
+            throw RuntimeConfigurationError.invalidExpertIOSynchronization(raw)
+        }
+        return value
+    }
+}
+
+public enum RuntimeExpertIOSubmission: String, Codable, Sendable {
+    case deferred
+    case immediate
+
+    public static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RuntimeExpertIOSubmission {
+        guard let raw = environment["NVMAI_EXPERT_IO_SUBMISSION"] else { return .deferred }
+        guard let value = RuntimeExpertIOSubmission(rawValue: raw) else {
+            throw RuntimeConfigurationError.invalidExpertIOSubmission(raw)
         }
         return value
     }
@@ -69,6 +100,8 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case yaRNContextMismatch(maxContext: Int, configured: Int)
     case yaRNUnsupportedArchitecture
     case invalidDecodeExpertExecution(String)
+    case invalidExpertIOSynchronization(String)
+    case invalidExpertIOSubmission(String)
 
     public var description: String {
         switch self {
@@ -85,7 +118,11 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
         case .yaRNUnsupportedArchitecture:
             return "YaRN requires the Qwen3.5-MoE NeoX sub-dimension RoPE architecture"
         case .invalidDecodeExpertExecution(let value):
-            return "unsupported decode expert execution '\(value)'; allowed: hit-fixup, barrier"
+            return "unsupported decode expert execution '\(value)'; allowed: hit-fixup, barrier, gpu-residency"
+        case .invalidExpertIOSynchronization(let value):
+            return "unsupported expert I/O synchronization '\(value)'; allowed: host, event"
+        case .invalidExpertIOSubmission(let value):
+            return "unsupported expert I/O submission '\(value)'; allowed: deferred, immediate"
         }
     }
 }
@@ -184,6 +221,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
     public let decodeExpertExecution: RuntimeDecodeExpertExecution
+    public let expertIOSynchronization: RuntimeExpertIOSynchronization
+    public let expertIOSubmission: RuntimeExpertIOSubmission
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let yarnContextTokens: Int
@@ -196,6 +235,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
                 forceLogitsHead: Bool = false,
                 decodeExpertExecution: RuntimeDecodeExpertExecution = .hitFixup,
+                expertIOSynchronization: RuntimeExpertIOSynchronization = .host,
+                expertIOSubmission: RuntimeExpertIOSubmission = .deferred,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {
@@ -216,6 +257,8 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
         self.decodeExpertExecution = decodeExpertExecution
+        self.expertIOSynchronization = expertIOSynchronization
+        self.expertIOSubmission = expertIOSubmission
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
         self.yarnContextTokens = yarnContextTokens

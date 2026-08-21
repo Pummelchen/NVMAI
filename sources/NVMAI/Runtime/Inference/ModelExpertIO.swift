@@ -28,6 +28,36 @@ final class RoutedExpertLease: @unchecked Sendable {
     func release() { cacheLease.release() }
 }
 
+/// Model-level storage ticket. Expert views are derivable from the reserved
+/// plan immediately; callers must await `completion()` before consuming miss
+/// slots unless a GPU event dependency enforces the same ordering.
+/// unchecked-invariant: immutable model, plan, and thread-safe storage ticket.
+public final class RoutedExpertLoadOperation: @unchecked Sendable {
+    public let plan: RoutedExpertFetchPlan
+    public let storage: ExpertLoadOperation
+    private let model: Model
+
+    init(model: Model,
+         plan: RoutedExpertFetchPlan,
+         storage: ExpertLoadOperation) {
+        self.model = model
+        self.plan = plan
+        self.storage = storage
+    }
+
+    public var state: ExpertLoadOperationState { storage.state }
+
+    public func wait() throws -> [TensorView] {
+        try storage.wait()
+        return try model.routedExpertBuffers(for: plan)
+    }
+
+    public func completion() async throws -> [TensorView] {
+        try await storage.completion()
+        return try model.routedExpertBuffers(for: plan)
+    }
+}
+
 extension Model {
     public func routedExpertStatistics() -> ExpertStreamingStatistics {
         let streamers = streamersQueue.sync { streamersBox.streamers.compactMap { $0 } }
@@ -113,6 +143,12 @@ extension Model {
             experts: plan.experts)
     }
 
+    public func routedExpertResidency(layer: Int) throws -> ExpertResidencyResources {
+        try ensureLayerOpened(layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        return streamer.expertResidencyResources()
+    }
+
     func pinRoutedExperts(for plan: RoutedExpertFetchPlan) throws -> RoutedExpertLease {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
@@ -126,21 +162,21 @@ extension Model {
     }
 
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {
+        try await beginFetchRoutedExperts(plan: plan).completion()
+    }
+
+    public func beginFetchRoutedExperts(
+        plan: RoutedExpertFetchPlan,
+        eventDriven: Bool = false
+    ) throws -> RoutedExpertLoadOperation {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let buffers = try streamer.executeExpertCachePlan(plan.cachePlan)
-                    continuation.resume(returning: Self.makeExpertViews(
-                        buffers,
-                        layer: plan.layer,
-                        experts: plan.experts))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-        }
+        return RoutedExpertLoadOperation(
+            model: self,
+            plan: plan,
+            storage: try streamer.beginExpertCachePlan(
+                plan.cachePlan,
+                eventDriven: eventDriven))
     }
 
     public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
