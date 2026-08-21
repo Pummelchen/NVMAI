@@ -28,6 +28,7 @@ import Testing
         #expect(runtime.prefillChunkTokens == 128)
         #expect(runtime.prefillAttentionPath == .fullTensorOps2DPreferred)
         #expect(runtime.headPath == .fusedRows)
+        #expect(runtime.decodeExpertExecution == .hitFixup)
         #expect(runtime.kvCachePrecision == .int8)
         #expect(runtime.ropeScalingMode == .none)
     }
@@ -54,13 +55,27 @@ import Testing
             prefillEnabled: false,
             prefillChunkTokens: 64,
             prefillAttentionPath: .causalTiled,
-            forceLogitsHead: true)
+            forceLogitsHead: true,
+            decodeExpertExecution: .barrier)
         #expect(runtime.expertCacheSlots == 32)
         #expect(runtime.modelExpertCachePolicy == .lru)
         #expect(runtime.rdadviseEnabled)
         #expect(runtime.prefillConfig == .off)
         #expect(runtime.prefillAttentionPath == .causalTiled)
         #expect(runtime.headPath == .logits)
+        #expect(runtime.decodeExpertExecution == .barrier)
+    }
+
+    @Test func decodeExpertExecutionEnvironmentIsFailClosed() throws {
+        #expect(try RuntimeDecodeExpertExecution.environmentValue([:]) == .hitFixup)
+        #expect(try RuntimeDecodeExpertExecution.environmentValue([
+            "NVMAI_DECODE_EXPERT_EXECUTION": "barrier",
+        ]) == .barrier)
+        #expect(throws: RuntimeConfigurationError.self) {
+            try RuntimeDecodeExpertExecution.environmentValue([
+                "NVMAI_DECODE_EXPERT_EXECUTION": "typo",
+            ])
+        }
     }
 
     @Test(arguments: [32, 64, 128, 256, 512, 1_024, 2_048, 4_096])

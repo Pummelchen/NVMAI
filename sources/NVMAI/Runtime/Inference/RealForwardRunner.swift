@@ -270,6 +270,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// `forceLogitsHead: true` or they read a never-written buffer.
     private let useFusedGreedyHead: Bool
     private let prefillAttentionPath: RuntimePrefillAttentionPath
+    private let decodeExpertExecution: RuntimeDecodeExpertExecution
     public let rdadviseEnabled: Bool
     public let rdadvisePolicyMode: RDAdvicePolicyMode
     private var rdadviseSkipUntilPosition: Int = -1
@@ -301,6 +302,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
+        self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
         self.rdadviseAdaptiveState = RDAdviceAdaptivePolicyState(
@@ -950,6 +952,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // loop-body wall. body = cb1 + wait + readback/plan + rdadvise + io + cb2.
     public private(set) var totalWaitNanos: UInt64 = 0
     public private(set) var totalBodyNanos: UInt64 = 0
+    public private(set) var totalMissIoNanos: UInt64 = 0
+    public private(set) var totalExposedIoNanos: UInt64 = 0
+    public private(set) var totalHitFixupLayers: UInt64 = 0
     public private(set) var lastGreedyToken: UInt32 = 0
     public var usesFusedGreedyHead: Bool { useFusedGreedyHead }
     public private(set) var totalRDAdviseNanos: UInt64 = 0
@@ -957,6 +962,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public private(set) var totalRDAdviseBytes: UInt64 = 0
     public private(set) var totalRDAdviseFailures: UInt64 = 0
     public private(set) var totalRDAdviseSkipped: UInt64 = 0
+
+    public func expertStreamingStatistics() -> ExpertStreamingStatistics {
+        model.routedExpertStatistics()
+    }
 
     private func recordRDAdvice(_ result: ExpertIOAdviceResult, wallNanos: UInt64) {
         totalRDAdviseNanos &+= wallNanos
@@ -979,6 +988,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private var kernelGPUTimings: [KernelGPUTiming] = []
     private let kernelGPUTimingsEnabled =
         ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil
+    private let runnerStatsEnabled =
+        ProcessInfo.processInfo.environment["NVMAI_RUNNER_STATS"] != nil
 
     /// Open file descriptor for NVMAI_ROUTE_TRACE, or -1. Opened once and
     /// never closed: the runner lives as long as the process, and a decode
@@ -3188,11 +3199,43 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let cb: MTLCommandBuffer
         let sharedCB: MTLCommandBuffer?
         let phase1HitCB: MTLCommandBuffer?
+        let expertLease: RoutedExpertLease?
+        let kernelRole: String
         let encodeAndCommitNanos: UInt64
+    }
+
+    /// Diagnostic-only completion clock used to measure the I/O tail left
+    /// after already-runnable GPU work. It is allocated only with
+    /// NVMAI_RUNNER_STATS, never in the production hot path.
+    /// unchecked-invariant: completion timestamps are mutated and read only
+    /// while holding `lock`.
+    private final class CommandCompletionClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completionCount = 0
+        private var latestCompletion: UInt64 = 0
+
+        func track(_ commandBuffer: MTLCommandBuffer) {
+            commandBuffer.addCompletedHandler { [self] _ in
+                lock.lock()
+                completionCount += 1
+                latestCompletion = max(
+                    latestCompletion,
+                    clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
+                lock.unlock()
+            }
+        }
+
+        func latest(expected: Int) -> UInt64? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard completionCount == expected else { return nil }
+            return latestCompletion
+        }
     }
 
     private func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
                                     waitIfNeeded: Bool) throws {
+        defer { pending.expertLease?.release() }
         if waitIfNeeded {
             if let sharedCB = pending.sharedCB {
                 try waitForCompletion(sharedCB)
@@ -3219,7 +3262,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let phase1HitCB = pending.phase1HitCB {
             recordKernelGPU(role: "moe_phase1_hit", phase1HitCB)
         }
-        recordKernelGPU(role: "moe_phase1_2_routed", pending.cb)
+        recordKernelGPU(role: pending.kernelRole, pending.cb)
         totalCb2Nanos &+= pending.encodeAndCommitNanos
     }
 
@@ -3313,28 +3356,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         let routedOffsets = try model.routedExpertOffsets(layer: L)
         let topK = UInt32(cfg.topKExperts)
-        let canPlanPhase1HitSplit =
-            cfg.topKExperts <= MoE.maxStreamedExperts
-        let plannedFetch = canPlanPhase1HitSplit
+        let canUsePlannedFetch = cfg.topKExperts <= MoE.maxStreamedExperts
+        let plannedFetch = canUsePlannedFetch
             ? try model.planRoutedExperts(layer: L, experts: experts)
             : nil
+        let expertLease = try plannedFetch.map { try model.pinRoutedExperts(for: $0) }
+        var transferredExpertLease = false
         var phase1HitCB: MTLCommandBuffer?
+        defer {
+            if !transferredExpertLease {
+                // A thrown fetch/encode must not make a hit slot evictable
+                // while its already-committed phase-1 command is still reading.
+                if let phase1HitCB, let expertLease {
+                    phase1HitCB.addCompletedHandler { _ in expertLease.release() }
+                } else {
+                    expertLease?.release()
+                }
+            }
+        }
         var phase1HitSplitArgBuf: MTLBuffer?
         decodeHitSplitRoutedBufsScratch.removeAll(keepingCapacity: true)
         decodeHitSlotsScratch.removeAll(keepingCapacity: true)
         decodeMissSlotsScratch.removeAll(keepingCapacity: true)
+
+        if let plan = plannedFetch, decodeExpertExecution == .hitFixup {
+            DecodeExpertPartition.populate(
+                topK: cfg.topKExperts,
+                missIndices: plan.misses,
+                hits: &decodeHitSlotsScratch,
+                misses: &decodeMissSlotsScratch)
+        }
+        // Capture the populated arrays. Capturing them before `populate` made
+        // empty value-semantic snapshots and silently disabled hit/fixup.
         let phase1HitSlots = decodeHitSlotsScratch
         let phase1MissSlots = decodeMissSlotsScratch
-
-        if let plan = plannedFetch {
-            let missSet = Set(plan.misses)
-            for index in 0..<cfg.topKExperts where !missSet.contains(index) {
-                decodeHitSlotsScratch.append(UInt32(index))
-            }
-            for miss in plan.misses {
-                decodeMissSlotsScratch.append(UInt32(miss))
-            }
-        }
         func encodeRoutedPhase1Full(
             _ cb: MTLCommandBuffer,
             argBuf: MTLBuffer,
@@ -3403,8 +3458,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if let cb = phase1HitCB {
             cb.commit()
         }
+        let missCount = plannedFetch?.misses.count ?? experts.count
+        let completionClock: CommandCompletionClock? =
+            runnerStatsEnabled && missCount > 0 ? CommandCompletionClock() : nil
+        completionClock?.track(sharedCB)
+        if let phase1HitCB { completionClock?.track(phase1HitCB) }
+        let expectedOverlapCompletions = phase1HitCB == nil ? 1 : 2
         if rdadviseEnabled && rdadvisePolicyMode != .off {
-            let requestedMisses = plannedFetch?.misses.count ?? experts.count
+            let requestedMisses = missCount
             let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
                 layer: L,
                 missCount: requestedMisses)
@@ -3437,6 +3498,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
         totalIoNanos &+= layerIo
+        if missCount > 0 {
+            totalMissIoNanos &+= layerIo
+            if let latest = completionClock?.latest(expected: expectedOverlapCompletions) {
+                let overlapEnd = max(tIoStart, latest)
+                if overlapEnd < tIoStart + layerIo {
+                    totalExposedIoNanos &+= tIoStart + layerIo - overlapEnd
+                }
+            }
+        }
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
         for blob in blobs {
             decodeRoutedBufsScratch.append(blob.buffer)
@@ -3461,6 +3531,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             routedBlobs: routedBufs,
             topK: topK)
         if splitArgBuf != nil {
+            totalHitFixupLayers &+= 1
             writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
             try encodeRoutedPhase1Subset(
                 routedCB,
@@ -3498,7 +3569,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             cb: routedCB,
             sharedCB: sharedCB,
             phase1HitCB: phase1HitCB,
+            expertLease: expertLease,
+            kernelRole: splitArgBuf == nil
+                ? "moe_phase1_2_routed"
+                : "moe_phase1_miss_fixup_phase2",
             encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+        transferredExpertLease = true
         totalBodyNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tBodyStart
         if ProcessInfo.processInfo.environment["NVMAI_LAYER_TRACE"] != nil,
            position < 3 || position % 16 == 0 {

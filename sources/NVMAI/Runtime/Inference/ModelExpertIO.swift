@@ -16,7 +16,24 @@ public struct RoutedExpertFetchPlan: Sendable {
     }
 }
 
+/// unchecked-invariant: the wrapped cache lease is thread-safe and immutable;
+/// this forwarding owner adds no mutable state.
+final class RoutedExpertLease: @unchecked Sendable {
+    private let cacheLease: ExpertCacheLease
+
+    init(cacheLease: ExpertCacheLease) {
+        self.cacheLease = cacheLease
+    }
+
+    func release() { cacheLease.release() }
+}
+
 extension Model {
+    public func routedExpertStatistics() -> ExpertStreamingStatistics {
+        let streamers = streamersQueue.sync { streamersBox.streamers.compactMap { $0 } }
+        return streamers.reduce(.zero) { $0.adding($1.statistics()) }
+    }
+
     public func routedExpertOffsets(layer: Int) throws -> MoEExpertOffsets {
         let expert = try packedExpertsLayout.expert(layer: layer, expert: 0)
         func offset(_ role: String) -> UInt32 {
@@ -94,6 +111,12 @@ extension Model {
             streamer.expertCachePlanBuffers(plan.cachePlan),
             layer: plan.layer,
             experts: plan.experts)
+    }
+
+    func pinRoutedExperts(for plan: RoutedExpertFetchPlan) throws -> RoutedExpertLease {
+        try ensureLayerOpened(plan.layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        return RoutedExpertLease(cacheLease: try streamer.pin(plan.cachePlan))
     }
 
     public func adviseRoutedExperts(plan: RoutedExpertFetchPlan) throws -> ExpertIOAdviceResult {

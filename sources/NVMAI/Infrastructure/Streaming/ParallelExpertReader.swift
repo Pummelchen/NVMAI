@@ -32,8 +32,10 @@ import NVMAIKernelsC
 /// cache and a declared RAM budget means what it says. Allowing the page cache
 /// makes repeat reads faster but grows a second, unbounded cache in exactly the
 /// memory this project exists to leave alone.
-public final class ParallelExpertReader {
-    /// unchecked-invariant: the C reader owns a fixed pool created in `init` and
+/// unchecked-invariant: the C reader serializes batch publication under its
+/// mutex and this wrapper stores no mutable Swift state.
+public final class ParallelExpertReader: @unchecked Sendable {
+    /// The C reader owns a fixed pool created in `init` and
     /// serialises every batch behind its own mutex, so concurrent `fetch` calls
     /// are safe at the C level. This type adds no Swift mutable state -- the two
     /// stored properties are immutable after init -- so there is nothing here for

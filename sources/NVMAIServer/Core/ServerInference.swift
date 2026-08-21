@@ -398,6 +398,10 @@ private struct RunnerCounterSnapshot {
     let rdadviseBytes: UInt64
     let wait: UInt64
     let body: UInt64
+    let missIo: UInt64
+    let exposedIo: UInt64
+    let hitFixupLayers: UInt64
+    let expertStreaming: ExpertStreamingStatistics
 }
 
 public actor ServerModelSession: ServerInferenceBackend {
@@ -479,7 +483,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         // unload/reload cycles (MetalContext.deinit documents that queue
         // teardown is not deinit-safe). Nil for every ordinary caller.
         let context = try reusingContext ?? MetalContext()
-        let loadRuntime = try RuntimeConfiguration(forceLogitsHead: true)
+        let loadRuntime = try RuntimeConfiguration(
+            forceLogitsHead: true,
+            decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue())
         let slotOverride = ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_SLOTS"]
             .flatMap(Int.init)
         // Precedence: --expert-cache-slots flag, then the env override, then a
@@ -523,6 +529,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                     : loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: true,
+            decodeExpertExecution: loadRuntime.decodeExpertExecution,
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
             yarnContextTokens: ropeScalingMode == .yarn
@@ -857,7 +864,11 @@ public actor ServerModelSession: ServerInferenceBackend {
             rdadviseCalls: runner.totalRDAdviseCalls,
             rdadviseBytes: runner.totalRDAdviseBytes,
             wait: runner.totalWaitNanos,
-            body: runner.totalBodyNanos)
+            body: runner.totalBodyNanos,
+            missIo: runner.totalMissIoNanos,
+            exposedIo: runner.totalExposedIoNanos,
+            hitFixupLayers: runner.totalHitFixupLayers,
+            expertStreaming: runner.expertStreamingStatistics())
         runner.resetKernelGPUTimings()
         var completed = false
         defer {
@@ -1198,15 +1209,34 @@ public actor ServerModelSession: ServerInferenceBackend {
             let rdadvise = ms(runner.totalRDAdviseNanos, runnerSnapshot.rdadvise)
             let wait = ms(runner.totalWaitNanos, runnerSnapshot.wait)
             let body = ms(runner.totalBodyNanos, runnerSnapshot.body)
+            let missIoNanos = runner.totalMissIoNanos - runnerSnapshot.missIo
+            let exposedIoNanos = runner.totalExposedIoNanos - runnerSnapshot.exposedIo
+            let hiddenPercent = missIoNanos == 0 ? 100.0
+                : 100 * (1 - Double(exposedIoNanos) / Double(missIoNanos))
+            let hitFixupLayers = runner.totalHitFixupLayers - runnerSnapshot.hitFixupLayers
             let calls = runner.totalRDAdviseCalls - runnerSnapshot.rdadviseCalls
             let bytes = Double(runner.totalRDAdviseBytes - runnerSnapshot.rdadviseBytes)
                 / 1_048_576
+            let expert = runner.expertStreamingStatistics()
+                .subtracting(runnerSnapshot.expertStreaming)
+            let readMiB = Double(expert.bytesRead) / 1_048_576
+            let p50 = Double(expert.loadLatencyPercentile(0.50)) / 1_000_000
+            let p95 = Double(expert.loadLatencyPercentile(0.95)) / 1_000_000
+            let p99 = Double(expert.loadLatencyPercentile(0.99)) / 1_000_000
             print(String(
                 format: "NVMAI runner cb1_ms=%.3f io_ms=%.3f cb2_ms=%.3f "
                     + "head_ms=%.3f head_fused_ms=%.3f rdadvise_ms=%.3f "
                     + "wait_ms=%.3f body_ms=%.3f "
-                    + "rdadvise_calls=%llu rdadvise_mib=%.1f",
-                cb1, io, cb2, head, headFused, rdadvise, wait, body, calls, bytes))
+                    + "rdadvise_calls=%llu rdadvise_mib=%.1f "
+                    + "expert_hit_rate=%.4f expert_hits=%llu expert_misses=%llu "
+                    + "expert_evictions=%llu expert_reloads=%llu expert_read_mib=%.1f "
+                    + "expert_load_p50_ms=%.3f expert_load_p95_ms=%.3f "
+                    + "expert_load_p99_ms=%.3f io_hidden_pct=%.2f "
+                    + "hit_fixup_layers=%llu",
+                cb1, io, cb2, head, headFused, rdadvise, wait, body, calls, bytes,
+                expert.hitRate, expert.hits, expert.misses, expert.evictions,
+                expert.reloads, readMiB, p50, p95, p99, hiddenPercent,
+                hitFixupLayers))
         }
         if ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
             let tokens = max(1, result.newTokens)

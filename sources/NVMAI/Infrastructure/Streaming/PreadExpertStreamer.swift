@@ -47,16 +47,111 @@ public struct ExpertCachePlan: Sendable, Equatable {
     public let layer: Int
     public let experts: [Int]
     public let assignedSlots: [Int]
+    /// Slot incarnation captured when this plan reserved or hit each slot.
+    /// A command may use the slot only while this generation still matches.
+    public let assignedGenerations: [UInt64]
     public let misses: [Int]
     public let hits: Int
 
-    public init(experts: [Int], assignedSlots: [Int], misses: [Int], hits: Int,
+    public init(experts: [Int], assignedSlots: [Int],
+                assignedGenerations: [UInt64], misses: [Int], hits: Int,
                 layer: Int = 0) {
         self.experts = experts
         self.assignedSlots = assignedSlots
+        self.assignedGenerations = assignedGenerations
         self.misses = misses
         self.hits = hits
         self.layer = layer
+    }
+}
+
+public struct ExpertStreamingStatistics: Sendable, Equatable {
+    public let plans: UInt64
+    public let requestedExperts: UInt64
+    public let hits: UInt64
+    public let misses: UInt64
+    public let bytesRead: UInt64
+    public let readOperations: UInt64
+    public let evictions: UInt64
+    public let reloads: UInt64
+    public let loadBatches: UInt64
+    public let totalLoadNanos: UInt64
+    public let maximumLoadNanos: UInt64
+    public let latencyHistogram: [UInt64]
+    public let residentSlots: Int
+    public let loadingSlots: Int
+    public let pinnedSlots: Int
+    public let peakLoadingSlots: Int
+
+    public var hitRate: Double {
+        requestedExperts == 0 ? 0 : Double(hits) / Double(requestedExperts)
+    }
+
+    /// An upper-bound estimate from a fixed, bounded power-of-two histogram.
+    public func loadLatencyPercentile(_ percentile: Double) -> UInt64 {
+        guard loadBatches > 0 else { return 0 }
+        let clamped = min(1, max(0, percentile))
+        let rank = max(UInt64(1), UInt64(ceil(clamped * Double(loadBatches))))
+        var cumulative: UInt64 = 0
+        for (index, count) in latencyHistogram.enumerated() {
+            cumulative &+= count
+            if cumulative >= rank {
+                return PreadExpertStreamer.latencyBucketUpperBound(index: index)
+            }
+        }
+        return UInt64.max
+    }
+
+    public static let zero = ExpertStreamingStatistics(
+        plans: 0, requestedExperts: 0, hits: 0, misses: 0,
+        bytesRead: 0, readOperations: 0, evictions: 0, reloads: 0,
+        loadBatches: 0, totalLoadNanos: 0, maximumLoadNanos: 0,
+        latencyHistogram: [UInt64](repeating: 0, count: 17),
+        residentSlots: 0, loadingSlots: 0, pinnedSlots: 0, peakLoadingSlots: 0)
+
+    func adding(_ other: ExpertStreamingStatistics) -> ExpertStreamingStatistics {
+        ExpertStreamingStatistics(
+            plans: plans &+ other.plans,
+            requestedExperts: requestedExperts &+ other.requestedExperts,
+            hits: hits &+ other.hits,
+            misses: misses &+ other.misses,
+            bytesRead: bytesRead &+ other.bytesRead,
+            readOperations: readOperations &+ other.readOperations,
+            evictions: evictions &+ other.evictions,
+            reloads: reloads &+ other.reloads,
+            loadBatches: loadBatches &+ other.loadBatches,
+            totalLoadNanos: totalLoadNanos &+ other.totalLoadNanos,
+            maximumLoadNanos: max(maximumLoadNanos, other.maximumLoadNanos),
+            latencyHistogram: zip(latencyHistogram, other.latencyHistogram)
+                .map { $0 &+ $1 },
+            residentSlots: residentSlots + other.residentSlots,
+            loadingSlots: loadingSlots + other.loadingSlots,
+            pinnedSlots: pinnedSlots + other.pinnedSlots,
+            peakLoadingSlots: max(peakLoadingSlots, other.peakLoadingSlots))
+    }
+
+    public func subtracting(_ baseline: ExpertStreamingStatistics) -> ExpertStreamingStatistics {
+        func delta(_ value: UInt64, _ base: UInt64) -> UInt64 {
+            value >= base ? value - base : 0
+        }
+        return ExpertStreamingStatistics(
+            plans: delta(plans, baseline.plans),
+            requestedExperts: delta(requestedExperts, baseline.requestedExperts),
+            hits: delta(hits, baseline.hits),
+            misses: delta(misses, baseline.misses),
+            bytesRead: delta(bytesRead, baseline.bytesRead),
+            readOperations: delta(readOperations, baseline.readOperations),
+            evictions: delta(evictions, baseline.evictions),
+            reloads: delta(reloads, baseline.reloads),
+            loadBatches: delta(loadBatches, baseline.loadBatches),
+            totalLoadNanos: delta(totalLoadNanos, baseline.totalLoadNanos),
+            maximumLoadNanos: maximumLoadNanos,
+            latencyHistogram: zip(latencyHistogram, baseline.latencyHistogram)
+                .map { delta($0, $1) },
+            residentSlots: residentSlots,
+            loadingSlots: loadingSlots,
+            pinnedSlots: pinnedSlots,
+            peakLoadingSlots: peakLoadingSlots)
     }
 }
 
@@ -65,11 +160,27 @@ public enum ExpertCachePolicy: String, Sendable {
     case lfu
 }
 
-/// `pread`-based routed-expert streamer with a fixed per-layer slot cache.
+public enum ExpertIOBackend: String, Sendable {
+    case pread
+    case metal
+
+    static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> ExpertIOBackend {
+        guard let raw = environment["NVMAI_EXPERT_IO_BACKEND"] else { return .pread }
+        guard let backend = ExpertIOBackend(rawValue: raw) else {
+            throw ModelError.internalInconsistency(
+                detail: "unsupported NVMAI_EXPERT_IO_BACKEND '\(raw)'; allowed: pread, metal")
+        }
+        return backend
+    }
+}
+
+/// SSD-backed routed-expert streamer with a fixed per-layer slot cache.
 /// unchecked-invariant: the expert cache bookkeeping is guarded by `cacheLock`,
 /// which is what lets `DispatchQueue.concurrentPerform` fan the misses out
-/// across threads. The mmap'd slot storage is written only inside that lock
-/// and read only after it, so concurrent readers see completed slots.
+/// across threads. Slot state is published only after all direct reads finish,
+/// so concurrent planners never treat partial bytes as resident.
 public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }
@@ -77,6 +188,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public let layout: StreamLayout
     public let slotCount: Int
     public let cachePolicy: ExpertCachePolicy
+    public let ioBackend: ExpertIOBackend
 
     private let fd: Int32
 
@@ -96,20 +208,39 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// difference, so "a 35B model in 1 GB" stops being true. A footprint you can
     /// account for is the product; throughput is what is being traded for it.
     private let boundedReader: ParallelExpertReader?
+    private let metalReader: MetalExpertReader?
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
 
     private var nextSlot = 0
 
+    private enum SlotState: UInt8 {
+        case empty
+        case loading
+        case resident
+    }
+
     private var slotExpert: [Int]
     private var slotLastUse: [Int]
+    private var slotState: [SlotState]
+    private var slotGeneration: [UInt64]
+    private var slotPinCount: [Int]
     private var expertUseCount: [Int]
+    private var expertLoadCount: [Int]
     private var useClock = 0
-    /// K12: slots whose pread fill has been planned but not yet completed.
-    /// Set under `cacheLock` by `makeExpertCachePlan` for miss slots, cleared
-    /// when the fill lands. Concurrent plans and round-robin loads skip and
-    /// never overwrite these slots.
-    private var slotPendingFill: [Bool]
+    private var statisticsPlans: UInt64 = 0
+    private var statisticsRequestedExperts: UInt64 = 0
+    private var statisticsHits: UInt64 = 0
+    private var statisticsMisses: UInt64 = 0
+    private var statisticsBytesRead: UInt64 = 0
+    private var statisticsReadOperations: UInt64 = 0
+    private var statisticsEvictions: UInt64 = 0
+    private var statisticsReloads: UInt64 = 0
+    private var statisticsLoadBatches: UInt64 = 0
+    private var statisticsTotalLoadNanos: UInt64 = 0
+    private var statisticsMaximumLoadNanos: UInt64 = 0
+    private var statisticsLatencyHistogram = [UInt64](repeating: 0, count: 17)
+    private var statisticsPeakLoadingSlots = 0
     private let cacheLock = NSLock()
 
     public init(layout: StreamLayout,
@@ -120,6 +251,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.layout = layout
         self.slotCount = slotCount
         self.cachePolicy = cachePolicy
+        self.ioBackend = try ExpertIOBackend.environmentValue()
         let pageSize = Int(getpagesize())
 
         let openedFD = open(layout.path, O_RDONLY)
@@ -178,16 +310,34 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             buffers.append(buffer)
         }
 
-        // Best-effort: if the reader cannot be created, fall through to the
-        // cached path rather than failing the load. A footprint policy is not
-        // worth refusing to run over.
-        if ProcessInfo.processInfo.environment["NVMAI_BOUNDED_IO"] != "0" {
-            self.boundedReader = try? ParallelExpertReader(
-                path: layout.path,
-                expertStride: Int(layout.expertStride),
-                threads: 4,
-                bypassCache: true)
+        // Fail closed when bounded I/O was requested. Falling through to an
+        // ordinary descriptor would silently create an unbounded second cache
+        // in the macOS page cache and invalidate the declared RAM budget.
+        if ioBackend == .metal {
+            do {
+                self.metalReader = try MetalExpertReader(
+                    path: layout.path,
+                    device: device,
+                    maximumCommandsInFlight: 4)
+            } catch {
+                unwind()
+                throw error
+            }
+            self.boundedReader = nil
+        } else if ProcessInfo.processInfo.environment["NVMAI_BOUNDED_IO"] != "0" {
+            self.metalReader = nil
+            do {
+                self.boundedReader = try ParallelExpertReader(
+                    path: layout.path,
+                    expertStride: Int(layout.expertStride),
+                    threads: 4,
+                    bypassCache: true)
+            } catch {
+                unwind()
+                throw error
+            }
         } else {
+            self.metalReader = nil
             self.boundedReader = nil
         }
 
@@ -195,8 +345,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotBuffers = buffers
         self.slotExpert = [Int](repeating: -1, count: slotCount)
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
-        self.slotPendingFill = [Bool](repeating: false, count: slotCount)
+        self.slotState = [SlotState](repeating: .empty, count: slotCount)
+        self.slotGeneration = [UInt64](repeating: 0, count: slotCount)
+        self.slotPinCount = [Int](repeating: 0, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
+        self.expertLoadCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
     }
 
     deinit {
@@ -207,14 +360,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
         // K12: slot selection and fill share one critical section so the
         // round-robin path never lands on a slot a concurrent plan reserved
-        // (slotPendingFill) and no fill can interleave with another pread.
+        // (`loading`) and no fill can interleave with another pread.
         cacheLock.lock()
         defer { cacheLock.unlock() }
         var candidate = nextSlot
         var scanned = 0
-        while slotPendingFill[candidate] && scanned < slotCount {
+        while (slotState[candidate] == .loading || slotPinCount[candidate] > 0)
+            && scanned < slotCount {
             candidate = (candidate + 1) % slotCount
             scanned += 1
+        }
+        guard scanned < slotCount else {
+            throw ModelError.expertCacheUnplaceable(
+                detail: "all \(slotCount) expert-cache slots are loading or pinned")
         }
         nextSlot = (candidate + 1) % slotCount
         return try loadExpertUnlocked(layer: layer, expert: expert, slot: candidate)
@@ -230,6 +388,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         // into this slot while the pread is in flight.
         cacheLock.lock()
         defer { cacheLock.unlock() }
+        guard slotState[slot] != .loading, slotPinCount[slot] == 0 else {
+            throw ModelError.expertCacheUnplaceable(
+                detail: "expert-cache slot \(slot) is loading or pinned")
+        }
         return try loadExpertUnlocked(layer: layer, expert: expert, slot: slot)
     }
 
@@ -241,13 +403,24 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         guard regionOffset + layout.expertStride <= layout.streamSize else {
             throw StreamerError.offsetOutOfRange(regionOffset)
         }
-        try readFull(
-            into: slotPointers[slot],
-            fileOffset: layout.streamOffset + regionOffset,
-            count: Int(layout.expertStride))
-        slotPendingFill[slot] = false
+        slotGeneration[slot] &+= 1
         slotExpert[slot] = expert
-        slotLastUse[slot] = useClock
+        slotState[slot] = .loading
+        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        do {
+            try readFull(
+                into: slotPointers[slot],
+                fileOffset: layout.streamOffset + regionOffset,
+                count: Int(layout.expertStride))
+            slotState[slot] = .resident
+            slotLastUse[slot] = useClock
+            recordSuccessfulLoadsUnlocked(
+                experts: [expert], elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
+        } catch {
+            slotState[slot] = .empty
+            slotExpert[slot] = -1
+            throw error
+        }
         return (slotBuffers[slot], 0, layout.expertStride)
     }
 
@@ -290,15 +463,15 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         let clock = useClock + 1
         var assignedSlots = [Int](repeating: -1, count: experts.count)
         var reserved = [Bool](repeating: false, count: slotCount)
-        // K12: slots with a fill already planned by an in-flight plan are not
-        // assignable until their execute completes.
-        for slot in 0..<slotCount where slotPendingFill[slot] {
+        // Loading slots are not valid hits and cannot be reassigned.
+        for slot in 0..<slotCount where slotState[slot] == .loading {
             reserved[slot] = true
         }
 
         for index in experts.indices {
             for slot in 0..<slotCount
-                where !reserved[slot] && slotExpert[slot] == experts[index] {
+                where !reserved[slot] && slotState[slot] == .resident
+                    && slotExpert[slot] == experts[index] {
                 assignedSlots[index] = slot
                 reserved[slot] = true
                 break
@@ -310,7 +483,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
         let misses = experts.indices.filter { assignedSlots[$0] == -1 }
         let evictable = (0..<slotCount)
-            .filter { !reserved[$0] && !slotPendingFill[$0] }
+            .filter { !reserved[$0] && slotState[$0] != .loading && slotPinCount[$0] == 0 }
             .sorted { shouldEvictSlot($0, before: $1) }
         guard misses.count <= evictable.count else { return nil }
 
@@ -323,16 +496,27 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
         for (offset, index) in misses.enumerated() {
             let slot = evictable[offset]
+            if slotState[slot] == .resident { statisticsEvictions &+= 1 }
             assignedSlots[index] = slot
             reserved[slot] = true
-            slotExpert[slot] = -1
+            slotGeneration[slot] &+= 1
+            slotExpert[slot] = experts[index]
             slotLastUse[slot] = clock
-            slotPendingFill[slot] = true
+            slotState[slot] = .loading
         }
+
+        statisticsPlans &+= 1
+        statisticsRequestedExperts &+= UInt64(experts.count)
+        statisticsHits &+= UInt64(experts.count - misses.count)
+        statisticsMisses &+= UInt64(misses.count)
+        statisticsPeakLoadingSlots = max(
+            statisticsPeakLoadingSlots,
+            slotState.count(where: { $0 == .loading }))
 
         return ExpertCachePlan(
             experts: experts,
             assignedSlots: assignedSlots,
+            assignedGenerations: assignedSlots.map { slotGeneration[$0] },
             misses: misses,
             hits: experts.count - misses.count,
             layer: layer)
@@ -344,101 +528,96 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                      "expert cache plan exceeds slot count")
         precondition(plan.assignedSlots.count == plan.experts.count,
                      "expert cache plan slot count mismatch")
+        precondition(plan.assignedGenerations.count == plan.experts.count,
+                     "expert cache plan generation count mismatch")
 
-        // K12: hold the cache lock across the pread fills. `makeExpertCachePlan`
-        // reserved the miss slots under the same lock (slotPendingFill), and
-        // the fills complete here under it, so no concurrent plan or
-        // round-robin load can clobber a slot mid-pread. This serializes the
-        // fills (previously concurrentPerform) — correctness first; the fills
-        // are the only writers of slot contents.
-        //
-        // Parallel fills are now the default (NVMAI_PARALLEL_IO=0 to disable):
-        // each miss preads into its own slot reserved by the plan, pread on a
-        // shared fd is thread-safe, and this path runs only in the decode
-        // fetch, which is single-flight (awaited before the next layer's plan;
-        // the prefill uses a separate tile fetch). The only shared state is
-        // the bookkeeping, guarded by a small lock. Measured on the 4-bit M3:
-        // IO wall 41.2 -> 30.9 ms/token and decode 9.98 -> 12.80 tok/s (+28%)
-        // with the idle CPU cores doing the fills in parallel.
-        // Bounded-footprint fill: F_NOCACHE reads through a persistent pool, so
-        // the slot cache is the machine's only copy of expert weights and the
-        // declared budget is the real footprint. The concurrentPerform path below
-        // leaves reads in the unified buffer cache, which measured 12.5 GB/s at 8
-        // slots -- three times the device ceiling, i.e. the page cache silently
-        // holding what the slots do not, in memory the budget never counted.
-        if let reader = boundedReader, !plan.misses.isEmpty {
-            var offsets: [UInt64] = []
-            var destinations: [UnsafeMutableRawPointer] = []
-            offsets.reserveCapacity(plan.misses.count)
-            destinations.reserveCapacity(plan.misses.count)
-            for index in plan.misses {
-                let expert = plan.experts[index]
-                let regionOffset = layout.expertOffset(layer: plan.layer, expert: expert)
-                guard regionOffset + layout.expertStride <= layout.streamSize else {
-                    throw StreamerError.offsetOutOfRange(regionOffset)
-                }
-                offsets.append(layout.streamOffset + regionOffset)
-                destinations.append(slotPointers[plan.assignedSlots[index]])
-            }
-            try reader.fetch(offsets: offsets, into: destinations)
-            cacheLock.lock()
-            for index in plan.misses {
-                let slot = plan.assignedSlots[index]
-                slotPendingFill[slot] = false
-                slotExpert[slot] = plan.experts[index]
-                slotLastUse[slot] = useClock
-            }
-            cacheLock.unlock()
-            return expertCachePlanBuffers(plan)
+        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        var succeeded = false
+        defer {
+            finishPlanExecution(
+                plan,
+                succeeded: succeeded,
+                elapsedNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started)
         }
-        if ProcessInfo.processInfo.environment["NVMAI_PARALLEL_IO"] != "0",
-           plan.misses.count > 1 {
+
+        if !plan.misses.isEmpty {
+            if let metalReader {
+                try executeMetalReads(plan, reader: metalReader)
+            } else if let boundedReader {
+                try executeBoundedReads(plan, reader: boundedReader)
+            } else {
+                let parallel = ProcessInfo.processInfo.environment["NVMAI_PARALLEL_IO"] != "0"
+                    && plan.misses.count > 1
+                try executeCachedPreads(plan, parallel: parallel)
+            }
+            try markPlanMissesResident(plan)
+        }
+
+        succeeded = true
+        return expertCachePlanBuffers(plan)
+    }
+
+    private func executeMetalReads(_ plan: ExpertCachePlan,
+                                   reader: MetalExpertReader) throws {
+        var offsets: [UInt64] = []
+        var destinations: [MTLBuffer] = []
+        offsets.reserveCapacity(plan.misses.count)
+        destinations.reserveCapacity(plan.misses.count)
+        for index in plan.misses {
+            offsets.append(try fileOffset(plan: plan, index: index))
+            destinations.append(slotBuffers[plan.assignedSlots[index]])
+        }
+        try reader.fetch(
+            offsets: offsets,
+            into: destinations,
+            byteCount: Int(layout.expertStride))
+    }
+
+    private func executeBoundedReads(_ plan: ExpertCachePlan,
+                                     reader: ParallelExpertReader) throws {
+        var offsets: [UInt64] = []
+        var destinations: [UnsafeMutableRawPointer] = []
+        offsets.reserveCapacity(plan.misses.count)
+        destinations.reserveCapacity(plan.misses.count)
+        for index in plan.misses {
+            offsets.append(try fileOffset(plan: plan, index: index))
+            destinations.append(slotPointers[plan.assignedSlots[index]])
+        }
+        try reader.fetch(offsets: offsets, into: destinations)
+    }
+
+    private func executeCachedPreads(_ plan: ExpertCachePlan,
+                                     parallel: Bool) throws {
+        if parallel {
             let firstError = Mutex<Error?>(nil)
-            DispatchQueue.concurrentPerform(iterations: plan.misses.count) { i in
-                let index = plan.misses[i]
-                let slot = plan.assignedSlots[index]
-                let expert = plan.experts[index]
+            DispatchQueue.concurrentPerform(iterations: plan.misses.count) { offset in
                 do {
-                    let regionOffset = layout.expertOffset(layer: plan.layer, expert: expert)
-                    guard regionOffset + layout.expertStride <= layout.streamSize else {
-                        throw StreamerError.offsetOutOfRange(regionOffset)
-                    }
-                    try readFull(
-                        into: slotPointers[slot],
-                        fileOffset: layout.streamOffset + regionOffset,
-                        count: Int(layout.expertStride))
-                    cacheLock.lock()
-                    slotPendingFill[slot] = false
-                    slotExpert[slot] = expert
-                    slotLastUse[slot] = useClock
-                    cacheLock.unlock()
+                    try readPlanMiss(plan, index: plan.misses[offset])
                 } catch {
                     firstError.withLock { if $0 == nil { $0 = error } }
                 }
             }
             if let error = firstError.withLock({ $0 }) { throw error }
-            return expertCachePlanBuffers(plan)
+            return
         }
+        for index in plan.misses { try readPlanMiss(plan, index: index) }
+    }
 
-        cacheLock.lock()
-        defer { cacheLock.unlock() }
-        for index in plan.misses {
-            let slot = plan.assignedSlots[index]
-            let expert = plan.experts[index]
-            let regionOffset = layout.expertOffset(layer: plan.layer, expert: expert)
-            guard regionOffset + layout.expertStride <= layout.streamSize else {
-                throw StreamerError.offsetOutOfRange(regionOffset)
-            }
-            try readFull(
-                into: slotPointers[slot],
-                fileOffset: layout.streamOffset + regionOffset,
-                count: Int(layout.expertStride))
-            slotPendingFill[slot] = false
-            slotExpert[slot] = expert
-            slotLastUse[slot] = useClock
+    private func readPlanMiss(_ plan: ExpertCachePlan, index: Int) throws {
+        try readFull(
+            into: slotPointers[plan.assignedSlots[index]],
+            fileOffset: try fileOffset(plan: plan, index: index),
+            count: Int(layout.expertStride))
+    }
+
+    private func fileOffset(plan: ExpertCachePlan, index: Int) throws -> UInt64 {
+        let regionOffset = layout.expertOffset(
+            layer: plan.layer,
+            expert: plan.experts[index])
+        guard regionOffset + layout.expertStride <= layout.streamSize else {
+            throw StreamerError.offsetOutOfRange(regionOffset)
         }
-
-        return expertCachePlanBuffers(plan)
+        return layout.streamOffset + regionOffset
     }
 
     public func expertCachePlanBuffers(_ plan: ExpertCachePlan)
@@ -462,7 +641,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     public func adviseExpertMisses(experts: [Int]) -> ExpertIOAdviceResult {
         cacheLock.lock()
-        let misses = experts.filter { !slotExpert.contains($0) }
+        let misses = experts.filter { expert in
+            !slotExpert.indices.contains { slot in
+                slotState[slot] == .resident && slotExpert[slot] == expert
+            }
+        }
         cacheLock.unlock()
         return adviseRanges(expertAdviceRanges(experts: misses, layer: 0), requested: misses.count)
     }
@@ -515,6 +698,131 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return slotLastUse[lhs] < slotLastUse[rhs]
     }
 
+    func pin(_ plan: ExpertCachePlan) throws -> ExpertCacheLease {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard plan.assignedSlots.count == plan.experts.count,
+              plan.assignedGenerations.count == plan.experts.count else {
+            throw ModelError.internalInconsistency(
+                detail: "cannot pin an incomplete expert-cache plan")
+        }
+        for index in plan.experts.indices {
+            let slot = plan.assignedSlots[index]
+            guard slot >= 0, slot < slotCount,
+                  slotGeneration[slot] == plan.assignedGenerations[index],
+                  slotExpert[slot] == plan.experts[index],
+                  slotState[slot] != .empty else {
+                throw ModelError.internalInconsistency(
+                    detail: "expert-cache plan became stale before GPU pin")
+            }
+        }
+        for slot in plan.assignedSlots { slotPinCount[slot] &+= 1 }
+        return ExpertCacheLease(
+            streamer: self,
+            slots: plan.assignedSlots,
+            generations: plan.assignedGenerations)
+    }
+
+    fileprivate func unpin(slots: [Int], generations: [UInt64]) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for (slot, generation) in zip(slots, generations)
+            where slot >= 0 && slot < slotCount && slotGeneration[slot] == generation {
+            precondition(slotPinCount[slot] > 0, "expert-cache slot pin underflow")
+            slotPinCount[slot] -= 1
+        }
+    }
+
+    public func statistics() -> ExpertStreamingStatistics {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return ExpertStreamingStatistics(
+            plans: statisticsPlans,
+            requestedExperts: statisticsRequestedExperts,
+            hits: statisticsHits,
+            misses: statisticsMisses,
+            bytesRead: statisticsBytesRead,
+            readOperations: statisticsReadOperations,
+            evictions: statisticsEvictions,
+            reloads: statisticsReloads,
+            loadBatches: statisticsLoadBatches,
+            totalLoadNanos: statisticsTotalLoadNanos,
+            maximumLoadNanos: statisticsMaximumLoadNanos,
+            latencyHistogram: statisticsLatencyHistogram,
+            residentSlots: slotState.count(where: { $0 == .resident }),
+            loadingSlots: slotState.count(where: { $0 == .loading }),
+            pinnedSlots: slotPinCount.count(where: { $0 > 0 }),
+            peakLoadingSlots: statisticsPeakLoadingSlots)
+    }
+
+    private func finishPlanExecution(_ plan: ExpertCachePlan,
+                                     succeeded: Bool,
+                                     elapsedNanos: UInt64) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if succeeded {
+            recordSuccessfulLoadsUnlocked(
+                experts: plan.misses.map { plan.experts[$0] },
+                elapsedNanos: elapsedNanos)
+            return
+        }
+        for index in plan.misses {
+            let slot = plan.assignedSlots[index]
+            if slotGeneration[slot] == plan.assignedGenerations[index],
+               slotState[slot] == .loading {
+                slotState[slot] = .empty
+                slotExpert[slot] = -1
+            }
+        }
+    }
+
+    private func markPlanMissesResident(_ plan: ExpertCachePlan) throws {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for index in plan.misses {
+            let slot = plan.assignedSlots[index]
+            guard slotGeneration[slot] == plan.assignedGenerations[index] else {
+                throw ModelError.internalInconsistency(
+                    detail: "expert-cache slot generation changed during expert load")
+            }
+        }
+        for index in plan.misses {
+            let slot = plan.assignedSlots[index]
+            slotState[slot] = .resident
+            slotExpert[slot] = plan.experts[index]
+            slotLastUse[slot] = useClock
+        }
+    }
+
+    private func recordSuccessfulLoadsUnlocked(experts: [Int], elapsedNanos: UInt64) {
+        guard !experts.isEmpty else { return }
+        statisticsBytesRead &+= UInt64(experts.count) * layout.expertStride
+        statisticsReadOperations &+= UInt64(experts.count)
+        statisticsLoadBatches &+= 1
+        statisticsTotalLoadNanos &+= elapsedNanos
+        statisticsMaximumLoadNanos = max(statisticsMaximumLoadNanos, elapsedNanos)
+        let bucket = Self.latencyBucketIndex(nanos: elapsedNanos)
+        statisticsLatencyHistogram[bucket] &+= 1
+        for expert in experts where expert >= 0 && expert < expertLoadCount.count {
+            if expertLoadCount[expert] > 0 { statisticsReloads &+= 1 }
+            expertLoadCount[expert] &+= 1
+        }
+    }
+
+    private static func latencyBucketIndex(nanos: UInt64) -> Int {
+        var bound: UInt64 = 125_000
+        for index in 0..<16 {
+            if nanos <= bound { return index }
+            bound &*= 2
+        }
+        return 16
+    }
+
+    static func latencyBucketUpperBound(index: Int) -> UInt64 {
+        guard index < 16 else { return UInt64.max }
+        return 125_000 << UInt64(index)
+    }
+
     private func expertAdviceRanges(experts: [Int],
                                     layer: Int) -> [(offset: UInt64, count: UInt64)] {
         experts.compactMap { expert in
@@ -563,4 +871,38 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             filled += readCount
         }
     }
+}
+
+/// Pins exact slot generations until every GPU command using them completes.
+/// Release is idempotent so error cleanup and normal command completion can
+/// safely converge on the same lifetime operation.
+/// unchecked-invariant: immutable slot metadata is published at init and the
+/// only mutable release flag is guarded by `lock`; streamer state has its own lock.
+final class ExpertCacheLease: @unchecked Sendable {
+    private weak var streamer: PreadExpertStreamer?
+    private let slots: [Int]
+    private let generations: [UInt64]
+    private let lock = NSLock()
+    private var released = false
+
+    fileprivate init(streamer: PreadExpertStreamer,
+                     slots: [Int],
+                     generations: [UInt64]) {
+        self.streamer = streamer
+        self.slots = slots
+        self.generations = generations
+    }
+
+    func release() {
+        lock.lock()
+        guard !released else {
+            lock.unlock()
+            return
+        }
+        released = true
+        lock.unlock()
+        streamer?.unpin(slots: slots, generations: generations)
+    }
+
+    deinit { release() }
 }

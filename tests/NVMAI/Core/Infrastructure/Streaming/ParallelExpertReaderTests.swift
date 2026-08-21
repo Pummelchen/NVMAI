@@ -93,6 +93,37 @@ import Foundation
         }
     }
 
+    @Test func concurrentCallersCannotOverwritePublishedBatch() async throws {
+        let url = try Self.makeFixture(count: 32)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let reader = try ParallelExpertReader(path: url.path,
+                                             expertStride: Self.stride,
+                                             threads: 4)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for worker in 0..<2 {
+                group.addTask {
+                    try Self.withDestinations(4) { buffers in
+                        for round in 0..<50 {
+                            let ids = (0..<4).map {
+                                UInt32((worker * 13 + round * 4 + $0) % 32)
+                            }
+                            try reader.fetch(experts: ids, into: buffers)
+                            for (index, expert) in ids.enumerated() {
+                                let byte = buffers[index]
+                                    .assumingMemoryBound(to: UInt8.self)[0]
+                                guard byte == UInt8(Int(expert) % 251) else {
+                                    throw ParallelExpertReader.Failure.readFailed(errno: EIO)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
     @Test func emptyFetchIsANoOp() throws {
         let url = try Self.makeFixture(count: 4)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -116,7 +147,7 @@ import Foundation
         let reader = try ParallelExpertReader(path: url.path,
                                              expertStride: Self.stride,
                                              threads: 2)
-        Self.withDestinations(1) { bufs in
+        _ = Self.withDestinations(1) { bufs in
             #expect(throws: ParallelExpertReader.Failure.self) {
                 try reader.fetch(experts: [99], into: bufs)
             }

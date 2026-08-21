@@ -1,3 +1,5 @@
+import Foundation
+
 public enum RuntimeHeadPath: String, Codable, Sendable {
     case fusedRows = "fused-rows"
     case logits
@@ -17,6 +19,29 @@ public enum RuntimePrefillAttentionPath: String, Codable, Sendable {
 public enum RuntimeExpertCachePolicy: String, Codable, Sendable {
     case lfu
     case lru
+}
+
+/// Decode scheduling for SSD-backed routed experts.
+///
+/// `hitFixup` commits phase 1 for resident experts while cache misses are read,
+/// then computes only the missed experts before the common reduction. `barrier`
+/// preserves the former all-experts-after-I/O path as a correctness/performance
+/// control for A/B measurements.
+public enum RuntimeDecodeExpertExecution: String, Codable, Sendable {
+    case hitFixup = "hit-fixup"
+    case barrier
+
+    public static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RuntimeDecodeExpertExecution {
+        guard let raw = environment["NVMAI_DECODE_EXPERT_EXECUTION"] else {
+            return .hitFixup
+        }
+        guard let value = RuntimeDecodeExpertExecution(rawValue: raw) else {
+            throw RuntimeConfigurationError.invalidDecodeExpertExecution(raw)
+        }
+        return value
+    }
 }
 
 /// Storage precision for the autoregressive attention key/value cache.
@@ -43,6 +68,7 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
     case contextRequiresYaRN(Int)
     case yaRNContextMismatch(maxContext: Int, configured: Int)
     case yaRNUnsupportedArchitecture
+    case invalidDecodeExpertExecution(String)
 
     public var description: String {
         switch self {
@@ -58,6 +84,8 @@ public enum RuntimeConfigurationError: Error, CustomStringConvertible, Equatable
             return "YaRN is configured for \(configured) tokens, but max context is \(maxContext)"
         case .yaRNUnsupportedArchitecture:
             return "YaRN requires the Qwen3.5-MoE NeoX sub-dimension RoPE architecture"
+        case .invalidDecodeExpertExecution(let value):
+            return "unsupported decode expert execution '\(value)'; allowed: hit-fixup, barrier"
         }
     }
 }
@@ -155,6 +183,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public let prefillChunkTokens: Int
     public let prefillAttentionPath: RuntimePrefillAttentionPath
     public let headPath: RuntimeHeadPath
+    public let decodeExpertExecution: RuntimeDecodeExpertExecution
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let yarnContextTokens: Int
@@ -166,6 +195,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 prefillAttentionPath: RuntimePrefillAttentionPath = .fullTensorOps2DPreferred,
                 forceLogitsHead: Bool = false,
+                decodeExpertExecution: RuntimeDecodeExpertExecution = .hitFixup,
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 yarnContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens) throws {
@@ -185,6 +215,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         self.prefillChunkTokens = prefillChunkTokens
         self.prefillAttentionPath = prefillAttentionPath
         self.headPath = forceLogitsHead ? .logits : .fusedRows
+        self.decodeExpertExecution = decodeExpertExecution
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
         self.yarnContextTokens = yarnContextTokens

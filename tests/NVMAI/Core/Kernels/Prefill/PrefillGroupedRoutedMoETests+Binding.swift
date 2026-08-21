@@ -85,11 +85,13 @@ extension PrefillGroupedRoutedMoETests {
     let firstPlan = ExpertCachePlan(
       experts: [0, 1, 2, 3],
       assignedSlots: [0, 1, 2, 3],
+      assignedGenerations: [1, 1, 1, 1],
       misses: [0, 1, 2, 3],
       hits: 0)
     let secondPlan = ExpertCachePlan(
       experts: [4, 5, 6, 7],
       assignedSlots: [0, 1, 2, 3],
+      assignedGenerations: [2, 2, 2, 2],
       misses: [0, 1, 2, 3],
       hits: 0)
     var lifetime = PrefillStreamedTileSlotLifetime()

@@ -22,6 +22,7 @@ struct nvmai_expert_reader {
     pthread_mutex_t lock;
     pthread_cond_t work_ready;   // a batch was published, or shutdown
     pthread_cond_t work_done;    // outstanding hit zero
+    pthread_cond_t batch_idle;   // prior submitter cleared the published batch
 
     // Current batch. Valid only while outstanding > 0.
     const uint32_t *expert_ids;   // one of these two is non-NULL
@@ -134,9 +135,18 @@ nvmai_expert_reader *nvmai_expert_reader_create(const char *path,
     for (int i = 0; i < threads; ++i) {
         r->fds[i] = open(path, O_RDONLY);
         if (r->fds[i] >= 0 && bypass_cache) {
-            // Best-effort: a kernel that refuses F_NOCACHE costs footprint
-            // predictability, not correctness, so it must not fail the open.
-            (void)fcntl(r->fds[i], F_NOCACHE, 1);
+            // Bounded memory is a correctness contract. Silently continuing
+            // without F_NOCACHE would create an undeclared page-cache working
+            // set, so an unsupported descriptor must fail the reader.
+            if (fcntl(r->fds[i], F_NOCACHE, 1) != 0) {
+                int err = errno;
+                close(r->fds[i]);
+                r->fds[i] = -1;
+                for (int j = 0; j < i; ++j) { close(r->fds[j]); }
+                free(r);
+                if (out_errno) { *out_errno = err; }
+                return NULL;
+            }
         }
         if (r->fds[i] < 0) {
             int err = errno;
@@ -147,13 +157,23 @@ nvmai_expert_reader *nvmai_expert_reader_create(const char *path,
         }
     }
 
-    if (pthread_mutex_init(&r->lock, NULL) != 0
-        || pthread_cond_init(&r->work_ready, NULL) != 0
-        || pthread_cond_init(&r->work_done, NULL) != 0) {
-        for (int j = 0; j < threads; ++j) { close(r->fds[j]); }
-        free(r);
-        if (out_errno) { *out_errno = ENOMEM; }
-        return NULL;
+    if (pthread_mutex_init(&r->lock, NULL) != 0) {
+        goto sync_init_failed;
+    }
+    if (pthread_cond_init(&r->work_ready, NULL) != 0) {
+        pthread_mutex_destroy(&r->lock);
+        goto sync_init_failed;
+    }
+    if (pthread_cond_init(&r->work_done, NULL) != 0) {
+        pthread_cond_destroy(&r->work_ready);
+        pthread_mutex_destroy(&r->lock);
+        goto sync_init_failed;
+    }
+    if (pthread_cond_init(&r->batch_idle, NULL) != 0) {
+        pthread_cond_destroy(&r->work_done);
+        pthread_cond_destroy(&r->work_ready);
+        pthread_mutex_destroy(&r->lock);
+        goto sync_init_failed;
     }
 
     // Publish thread identities under the lock before any worker looks for its
@@ -177,6 +197,7 @@ nvmai_expert_reader *nvmai_expert_reader_create(const char *path,
         for (int j = 0; j < threads; ++j) { close(r->fds[j]); }
         pthread_cond_destroy(&r->work_ready);
         pthread_cond_destroy(&r->work_done);
+        pthread_cond_destroy(&r->batch_idle);
         pthread_mutex_destroy(&r->lock);
         free(r);
         if (out_errno) { *out_errno = EAGAIN; }
@@ -184,6 +205,12 @@ nvmai_expert_reader *nvmai_expert_reader_create(const char *path,
     }
     pthread_mutex_unlock(&r->lock);
     return r;
+
+sync_init_failed:
+    for (int j = 0; j < threads; ++j) { close(r->fds[j]); }
+    free(r);
+    if (out_errno) { *out_errno = ENOMEM; }
+    return NULL;
 }
 
 void nvmai_expert_reader_destroy(nvmai_expert_reader *r) {
@@ -202,6 +229,7 @@ void nvmai_expert_reader_destroy(nvmai_expert_reader *r) {
     }
     pthread_cond_destroy(&r->work_ready);
     pthread_cond_destroy(&r->work_done);
+    pthread_cond_destroy(&r->batch_idle);
     pthread_mutex_destroy(&r->lock);
     free(r);
 }
@@ -212,6 +240,18 @@ static int submit_batch(nvmai_expert_reader *r,
                         void *const *destinations,
                         size_t count) {
     pthread_mutex_lock(&r->lock);
+    // A caller owns the published pointers until its workers finish and it
+    // clears the batch below. Without this predicate a second caller could
+    // overwrite those pointers while the first caller was waiting, corrupting
+    // destinations and leaving both callers blocked on the wrong outstanding
+    // count.
+    while (r->count > 0 && !r->shutting_down) {
+        pthread_cond_wait(&r->batch_idle, &r->lock);
+    }
+    if (r->shutting_down) {
+        pthread_mutex_unlock(&r->lock);
+        return ECANCELED;
+    }
     r->offsets = offsets;
     r->expert_ids = expert_ids;
     r->destinations = destinations;
@@ -232,6 +272,7 @@ static int submit_batch(nvmai_expert_reader *r,
     r->expert_ids = NULL;
     r->offsets = NULL;
     r->destinations = NULL;
+    pthread_cond_broadcast(&r->batch_idle);
     pthread_mutex_unlock(&r->lock);
     return rc;
 }
