@@ -58,6 +58,13 @@ public struct Model {
     public var routerWeightBits: Int { manifest.quant?.router.weightBits ?? 8 }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
     public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
+    /// The manifest's recorded digest of `model_weights.bin`. The manifest is
+    /// itself bound by the install receipt, so this is a trustworthy identity
+    /// for anything derived from these weights — the ANE prefill sidecar uses
+    /// it to refuse a sidecar exported from a different model.
+    public var weightsDigestFromManifest: String? {
+        manifest.files["model_weights.bin"]?.sha256
+    }
     var mtpResidentTensorBytes: Int { residentBuffer.buffer.length }
     var mtpExpertStrideBytes: Int { Int(packedExpertsLayout.expertStride) }
 

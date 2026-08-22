@@ -78,7 +78,7 @@ def bf16_to_f32(raw: bytes) -> np.ndarray:
     return (u16.astype(np.uint32) << 16).view(np.float32)
 
 
-def load_tensor(handle, entry) -> np.ndarray:
+def load_tensor(handle, entry, weight_bits: int = 4) -> np.ndarray:
     rows, cols = entry["shape"][0], entry["shape"][1]
     if entry["dtype"] == 1:                                   # bf16
         handle.seek(entry["offset"])
@@ -86,10 +86,15 @@ def load_tensor(handle, entry) -> np.ndarray:
         return flat.reshape([d for d in entry["shape"] if d] or [flat.size])
     handle.seek(entry["offset"])
     packed = np.frombuffer(handle.read(entry["size"]), dtype=np.uint8)
-    packed = packed.reshape(rows, cols // 2)
-    q = np.empty((rows, cols), dtype=np.float32)
-    q[:, 0::2] = (packed & 0x0F).astype(np.float32)
-    q[:, 1::2] = (packed >> 4).astype(np.float32)
+    if weight_bits == 8:
+        q = packed.reshape(rows, cols).astype(np.float32)
+    elif weight_bits == 4:
+        packed = packed.reshape(rows, cols // 2)
+        q = np.empty((rows, cols), dtype=np.float32)
+        q[:, 0::2] = (packed & 0x0F).astype(np.float32)
+        q[:, 1::2] = (packed >> 4).astype(np.float32)
+    else:
+        raise SystemExit(f"unsupported attention weightBits {weight_bits}")
     handle.seek(entry["scale"][0])
     scales = bf16_to_f32(handle.read(entry["scale"][1])).reshape(rows, cols // 64)
     handle.seek(entry["bias"][0])
@@ -97,10 +102,12 @@ def load_tensor(handle, entry) -> np.ndarray:
     return q * np.repeat(scales, 64, axis=1) + np.repeat(biases, 64, axis=1)
 
 
-def load_layer_weights(handle, entries, layer: int) -> dict[str, np.ndarray]:
+def load_layer_weights(handle, entries, layer: int,
+                       weight_bits: int = 4) -> dict[str, np.ndarray]:
     prefix = f"language_model.model.layers.{layer}.self_attn."
     def get(name):
-        return load_tensor(handle, entries[prefix + name])
+        return load_tensor(handle, entries[prefix + name],
+                           weight_bits=weight_bits)
     return {
         "wq": get("q_proj.weight").astype(np.float16),
         "wk": get("k_proj.weight").astype(np.float16),
@@ -286,13 +293,18 @@ def main() -> int:
     manifest = json.load(open(model_dir / "manifest.json"))
     if manifest["arch"]["family"] != "qwen36":
         raise SystemExit("ANE prefill export supports the qwen36 family only")
+    # Attention weights are 4-bit in the 4-bit build and 8-bit in the 8-bit
+    # build; both dequantize to the same fp16 graph, so only the unpack
+    # differs. The sidecar itself is fp16 either way.
+    weight_bits = manifest["quant"]["attention"]["weightBits"]
 
     out_dir = model_dir / "ane_prefill"
     out_dir.mkdir(exist_ok=True)
     entries = read_index(weights_bin)
     handle = open(weights_bin, "rb")
     for layer in layers:
-        weights = load_layer_weights(handle, entries, layer)
+        weights = load_layer_weights(handle, entries, layer,
+                                     weight_bits=weight_bits)
         stage = out_dir / f".stage_layer_{layer}"
         if stage.exists():
             shutil.rmtree(stage)
@@ -318,12 +330,14 @@ def main() -> int:
     meta = {
         "version": EXPORT_VERSION,
         "family": "qwen36",
+        "sourceWeightBits": weight_bits,
         "chunkTokens": CHUNK,
         "histories": histories,
         "layers": layers,
-        "weightsSha256": json.load(
-            open(model_dir / "verified-install.json"))["files"][
-                "model_weights.bin"]["sha256"],
+        # Binds the sidecar to the exact weights it was built from. The
+        # runtime refuses a mismatch: a sidecar from different weights would
+        # compute plausible-looking but wrong attention.
+        "weightsSha256": manifest["files"]["model_weights.bin"]["sha256"],
     }
     with open(out_dir / "ane_prefill.json", "w") as fh:
         json.dump(meta, fh, indent=2)

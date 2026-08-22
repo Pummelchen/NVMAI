@@ -131,6 +131,7 @@ public enum RuntimeSamplerPath: String, Codable, Sendable {
 /// temperature is applied only to the final categorical draw.
 final class Sampler {
     private let softcap: LogitSoftcapSoftmax
+    private let softcapTiled: LogitSoftcapSoftmaxTiled?
     private let sampleKernel: Sample
     private let topK64Kernel: SampleTopK64
     private let samplerPath: RuntimeSamplerPath
@@ -153,6 +154,7 @@ final class Sampler {
     init(context: MetalContext, vocab: Int = 262_144,
                 logitSoftcap: Float = 30.0) throws {
         self.softcap = try LogitSoftcapSoftmax(context: context)
+        self.softcapTiled = try LogitSoftcapSoftmaxTiled(context: context, vocab: vocab)
         self.sampleKernel = try Sample(context: context)
         self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab)
         self.samplerPath = try RuntimeSamplerPath.environmentValue()
@@ -181,8 +183,18 @@ final class Sampler {
                                           history: history,
                                           penalty: config.repetitionPenalty)
         }
-        try softcap.encode(commandBuffer: commandBuffer,
-                           logits: logits, probs: probs, v: v, softcap: logitSoftcap)
+        // The tiled front-end follows the same path selection as the Top-K
+        // half: `generic` forces the single-threadgroup pair so an A/B
+        // measures both halves of the sampler, not one.
+        if samplerPath == .tiled, let softcapTiled {
+            try softcapTiled.encode(commandBuffer: commandBuffer,
+                                    logits: logits, probs: probs, v: v,
+                                    softcap: logitSoftcap)
+        } else {
+            try softcap.encode(commandBuffer: commandBuffer,
+                               logits: logits, probs: probs, v: v,
+                               softcap: logitSoftcap)
+        }
 
         let isGreedy = config.temperature == 0
         let seed = Self.seedFor(config: config, position: position)

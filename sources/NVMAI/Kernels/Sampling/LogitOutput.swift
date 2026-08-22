@@ -44,6 +44,99 @@ final class LogitSoftcapSoftmax {
     }
 }
 
+/// Tiled `logit_softcap_softmax`: same math, spread across the device.
+///
+/// The single-threadgroup original ran two full-vocabulary passes in one
+/// 256-thread threadgroup; at V = 248,320 that left the rest of the GPU idle
+/// for both. Stage 1 reduces 4,096-entry tiles to (max, sum-of-exp) pairs,
+/// stage 2 merges them, stage 3 normalizes across the whole grid. Numerically
+/// identical up to reduction order (online-softmax rescaling is associative
+/// in exact arithmetic; both forms are pinned against each other in tests).
+final class LogitSoftcapSoftmaxTiled {
+    private static let tile = 4096
+
+    private let stage1PSO: MTLComputePipelineState
+    private let mergePSO: MTLComputePipelineState
+    private let normalizePSO: MTLComputePipelineState
+    private let tileMax: MTLBuffer
+    private let tileSum: MTLBuffer
+    private let pair: MTLBuffer
+    private let tiles: Int
+    let vocab: Int
+
+    init(context: MetalContext, vocab: Int) throws {
+        precondition(vocab > 0, "vocab must be positive")
+        self.vocab = vocab
+        self.tiles = (vocab + Self.tile - 1) / Self.tile
+        self.stage1PSO = try context.pipeline("logit_softcap_softmax_tiled_stage1")
+        self.mergePSO = try context.pipeline("logit_softcap_softmax_tiled_merge")
+        self.normalizePSO = try context.pipeline("logit_softcap_softmax_tiled_normalize")
+        guard let tileMax = context.device.makeBuffer(
+                  length: tiles * MemoryLayout<Float>.stride,
+                  options: .storageModePrivate),
+              let tileSum = context.device.makeBuffer(
+                  length: tiles * MemoryLayout<Float>.stride,
+                  options: .storageModePrivate),
+              let pair = context.device.makeBuffer(
+                  length: 2 * MemoryLayout<Float>.stride,
+                  options: .storageModePrivate)
+        else { throw MetalError.noDevice }
+        self.tileMax = tileMax
+        self.tileSum = tileSum
+        self.pair = pair
+    }
+
+    func encode(commandBuffer: MTLCommandBuffer,
+                logits: MTLBuffer,
+                probs: MTLBuffer,
+                v: UInt32,
+                softcap: Float = 30.0) throws {
+        precondition(Int(v) == vocab, "vocab mismatch: built for \(vocab), got \(v)")
+        var vVar = v
+        var softcapVar = softcap
+        var tileCount = UInt32(tiles)
+        let threads = MTLSize(width: 256, height: 1, depth: 1)
+
+        guard let enc1 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc1.setComputePipelineState(stage1PSO)
+        enc1.setBuffer(logits, offset: 0, index: 0)
+        enc1.setBuffer(tileMax, offset: 0, index: 1)
+        enc1.setBuffer(tileSum, offset: 0, index: 2)
+        enc1.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 3)
+        enc1.setBytes(&softcapVar, length: MemoryLayout<Float>.size, index: 4)
+        enc1.dispatchThreadgroups(MTLSize(width: tiles, height: 1, depth: 1),
+                                  threadsPerThreadgroup: threads)
+        enc1.endEncoding()
+
+        guard let enc2 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc2.setComputePipelineState(mergePSO)
+        enc2.setBuffer(tileMax, offset: 0, index: 0)
+        enc2.setBuffer(tileSum, offset: 0, index: 1)
+        enc2.setBuffer(pair, offset: 0, index: 2)
+        enc2.setBytes(&tileCount, length: MemoryLayout<UInt32>.size, index: 3)
+        enc2.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                  threadsPerThreadgroup: threads)
+        enc2.endEncoding()
+
+        guard let enc3 = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc3.setComputePipelineState(normalizePSO)
+        enc3.setBuffer(logits, offset: 0, index: 0)
+        enc3.setBuffer(probs, offset: 0, index: 1)
+        enc3.setBuffer(pair, offset: 0, index: 2)
+        enc3.setBytes(&vVar, length: MemoryLayout<UInt32>.size, index: 3)
+        enc3.setBytes(&softcapVar, length: MemoryLayout<Float>.size, index: 4)
+        enc3.dispatchThreads(MTLSize(width: vocab, height: 1, depth: 1),
+                             threadsPerThreadgroup: threads)
+        enc3.endEncoding()
+    }
+}
+
 /// Swift wrapper for `sample`.
 ///
 /// Reads softmaxed probabilities (output of `LogitSoftcapSoftmax`) and writes

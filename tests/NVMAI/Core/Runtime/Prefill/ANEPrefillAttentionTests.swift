@@ -28,7 +28,34 @@ import Testing
         #expect(throws: PrefillError.self) {
             _ = try ANEPrefillAttention(modelDirectory: empty,
                                         device: ctx.device,
-                                        hiddenSize: 2048, kvDim: 512)
+                                        hiddenSize: 2048, kvDim: 512,
+                                        weightsSha256: nil)
+        }
+    }
+
+    @Test func sidecarExportedFromDifferentWeightsIsRejected() throws {
+        let ctx = try MetalContext()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ane-test-\(UUID().uuidString)")
+        let sidecar = dir.appendingPathComponent("ane_prefill")
+        try FileManager.default.createDirectory(
+            at: sidecar, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let meta: [String: Any] = [
+            "version": 1, "family": "qwen36", "chunkTokens": 4096,
+            "histories": [0], "layers": [3], "weightsSha256": String(repeating: "a", count: 64),
+        ]
+        try JSONSerialization.data(withJSONObject: meta)
+            .write(to: sidecar.appendingPathComponent("ane_prefill.json"))
+        // Matching digest loads; a different one must fail closed rather than
+        // computing plausible-looking attention from the wrong weights.
+        _ = try ANEPrefillAttention(modelDirectory: dir, device: ctx.device,
+                                    hiddenSize: 2048, kvDim: 512,
+                                    weightsSha256: String(repeating: "A", count: 64))
+        #expect(throws: PrefillError.self) {
+            _ = try ANEPrefillAttention(modelDirectory: dir, device: ctx.device,
+                                        hiddenSize: 2048, kvDim: 512,
+                                        weightsSha256: String(repeating: "b", count: 64))
         }
     }
 
@@ -50,7 +77,8 @@ import Testing
             .write(to: sidecar.appendingPathComponent("ane_prefill.json"))
         let ane = try ANEPrefillAttention(modelDirectory: dir,
                                           device: ctx.device,
-                                          hiddenSize: 2048, kvDim: 512)
+                                          hiddenSize: 2048, kvDim: 512,
+                                          weightsSha256: nil)
         #expect(ane.maxPromptTokens == 8192)
         #expect(ane.coveredLayers == Set([3, 7]))
 
@@ -96,7 +124,8 @@ import Testing
             .write(to: sidecar.appendingPathComponent("ane_prefill.json"))
         let ane = try ANEPrefillAttention(modelDirectory: dir,
                                           device: ctx.device,
-                                          hiddenSize: 16, kvDim: 4)
+                                          hiddenSize: 16, kvDim: 4,
+                                          weightsSha256: nil)
         let kPtr = ane.stagingK.contents().bindMemory(to: Float16.self,
                                                       capacity: 8 * 4)
         for index in 0..<(8 * 4) { kPtr[index] = Float16(index) }

@@ -27,6 +27,15 @@ public enum RuntimePrefillANE: String, Codable, Sendable {
     }
 }
 
+/// Transfers a loaded `MLModel` out of a background load task.
+///
+/// unchecked-invariant: the box is created inside the loading task, handed to
+/// exactly one awaiting consumer, and never mutated; the prefill loop that
+/// consumes it is single-flight, so no two threads ever hold the same model.
+private struct LoadedModelBox: @unchecked Sendable {
+    let model: MLModel
+}
+
 /// Runs the full-attention prefill block on the Neural Engine.
 ///
 /// One multifunction `.mlpackage` per full-attention layer holds functions
@@ -50,6 +59,9 @@ final class ANEPrefillAttention: @unchecked Sendable {
         let chunkTokens: Int
         let histories: [Int]
         let layers: [Int]
+        /// SHA-256 of the `model_weights.bin` the sidecar was exported from,
+        /// copied out of that model's install receipt at export time.
+        let weightsSha256: String?
     }
 
     static let expectedVersion = 1
@@ -81,6 +93,13 @@ final class ANEPrefillAttention: @unchecked Sendable {
     /// followed to ~2 tok/s. One-at-a-time bounds the ANE footprint to a
     /// single context at ~0.5 s reload cost per layer-chunk.
     private var residentModel: (layer: Int, history: Int, model: MLModel)?
+    /// In-flight load of the *next* layer's model, started as soon as this
+    /// layer's prediction returns so the ~0.5 s load overlaps the GPU's MoE
+    /// stage instead of serializing in front of the next prediction. At most
+    /// one is outstanding, which keeps the one-resident-arena rule intact:
+    /// the preloaded model only becomes resident when `model(layer:history:)`
+    /// adopts it, and that is the same moment the previous one is dropped.
+    private var preloaded: (layer: Int, history: Int, task: Task<LoadedModelBox, Error>)?
     private var masks: [Int: MLMultiArray] = [:]
     private var maskStorage: [Int: UnsafeMutableRawPointer] = [:]
     /// Token-major fp16 K/V rows per layer, at absolute prompt positions, so
@@ -92,8 +111,14 @@ final class ANEPrefillAttention: @unchecked Sendable {
     private(set) var shadowTokens = 0
     private var loggedFallback = false
 
+    /// - Parameter weightsSha256: the model's own recorded `model_weights.bin`
+    ///   digest, taken from its install receipt. A sidecar exported from
+    ///   different weights computes plausible-looking but wrong attention, and
+    ///   nothing downstream would catch it — so the binding is checked here
+    ///   and fails closed. Nil skips the check (no receipt available) and says
+    ///   so, rather than silently trusting.
     init(modelDirectory: URL, device: MTLDevice,
-         hiddenSize: Int, kvDim: Int) throws {
+         hiddenSize: Int, kvDim: Int, weightsSha256: String?) throws {
         let dir = modelDirectory.appendingPathComponent("ane_prefill")
         let metaURL = dir.appendingPathComponent("ane_prefill.json")
         guard FileManager.default.fileExists(atPath: metaURL.path) else {
@@ -110,6 +135,18 @@ final class ANEPrefillAttention: @unchecked Sendable {
         guard meta.family == "qwen36" else {
             throw PrefillError.chunkedUnsupported(
                 "ANE prefill sidecar family '\(meta.family)' is not qwen36")
+        }
+        if let weightsSha256, let exported = meta.weightsSha256 {
+            guard exported.lowercased() == weightsSha256.lowercased() else {
+                throw PrefillError.chunkedUnsupported(
+                    "ANE prefill sidecar was exported from different weights "
+                    + "(sidecar \(exported.prefix(12))..., model "
+                    + "\(weightsSha256.prefix(12))...); re-export it for this model")
+            }
+        } else {
+            print("NVMAI ane-prefill: sidecar/weights binding unverified "
+                  + "(no receipt digest available); a stale sidecar would not "
+                  + "be detected")
         }
         self.chunkTokens = meta.chunkTokens
         self.histories = Set(meta.histories)
@@ -182,7 +219,36 @@ final class ANEPrefillAttention: @unchecked Sendable {
            cached.layer == layer, cached.history == history {
             return cached.model
         }
+        if let pending = preloaded, pending.layer == layer,
+           pending.history == history {
+            preloaded = nil
+            // Drop the old arena only once the new model is in hand, then
+            // adopt it — never two resident at once for longer than the
+            // handover itself.
+            let loaded = try await pending.task.value.model
+            residentModel = (layer, history, loaded)
+            return loaded
+        }
+        // A preload for a different layer is now useless; await and discard it
+        // rather than leaking an arena behind the resident one.
+        if let stale = preloaded {
+            preloaded = nil
+            _ = try? await stale.task.value
+        }
         residentModel = nil
+        let compiled = try await compiledModelURL(layer: layer)
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .cpuAndNeuralEngine
+        configuration.functionName = "h\(history)"
+        let loaded = try MLModel(contentsOf: compiled,
+                                 configuration: configuration)
+        residentModel = (layer, history, loaded)
+        return loaded
+    }
+
+    /// The on-disk compiled model for `layer`, compiling it from the package
+    /// on first use and whenever the package is newer.
+    private func compiledModelURL(layer: Int) async throws -> URL {
         let package = packageDir.appendingPathComponent("layer_\(layer).mlpackage")
         let compiled = compiledDir.appendingPathComponent("layer_\(layer).mlmodelc")
         let fm = FileManager.default
@@ -200,13 +266,17 @@ final class ANEPrefillAttention: @unchecked Sendable {
             _ = try? fm.removeItem(at: compiled)
             try fm.moveItem(at: temporary, to: compiled)
         }
+        return compiled
+    }
+
+    /// The compile-and-load half of `model(layer:history:)`, without touching
+    /// `residentModel` — safe to run detached for a preload.
+    private func loadModel(layer: Int, history: Int) async throws -> MLModel {
+        let compiled = try await compiledModelURL(layer: layer)
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuAndNeuralEngine
         configuration.functionName = "h\(history)"
-        let loaded = try MLModel(contentsOf: compiled,
-                                 configuration: configuration)
-        residentModel = (layer, history, loaded)
-        return loaded
+        return try MLModel(contentsOf: compiled, configuration: configuration)
     }
 
     /// Drops the loaded Core ML model and its ANE context. Called when
@@ -214,6 +284,24 @@ final class ANEPrefillAttention: @unchecked Sendable {
     /// expert cache for residency; cheap no-op when nothing is loaded.
     func releaseModels() {
         residentModel = nil
+        preloaded?.task.cancel()
+        preloaded = nil
+    }
+
+    /// Starts loading `layer`'s model for `history` in the background, if it
+    /// is not already resident or in flight. Called right after a prediction
+    /// returns, so the load runs while the caller encodes and executes the
+    /// layer's MoE stage on the GPU.
+    func preload(layer: Int, history: Int) {
+        if let cached = residentModel,
+           cached.layer == layer, cached.history == history { return }
+        if let pending = preloaded,
+           pending.layer == layer, pending.history == history { return }
+        preloaded?.task.cancel()
+        preloaded = (layer, history, Task { [self] in
+            LoadedModelBox(model: try await loadModel(layer: layer,
+                                                      history: history))
+        })
     }
 
     private func mask(history: Int) throws -> MLMultiArray {

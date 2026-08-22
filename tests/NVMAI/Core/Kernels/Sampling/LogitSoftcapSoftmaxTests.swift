@@ -109,4 +109,55 @@ import NVMAIValidationSupport
         #expect(c < 0.5, "softcap reference should not saturate: c=\(c)")
         #expect(abs(g - c) / c < Tolerance.fp16Reduction, "g=\(g) c=\(c)")
     }
+
+    /// The tiled front-end must agree with the single-threadgroup original.
+    ///
+    /// Online-softmax rescaling is associative in exact arithmetic, so the two
+    /// differ only by fp32 reduction order; at the production vocabulary that
+    /// is far below fp16 storage precision. This is the gate that lets the
+    /// tiled form serve production sampling.
+    @Test func tiledMatchesSingleThreadgroupAcrossVocabularies() throws {
+        let ctx = try MetalContext()
+        let single = try LogitSoftcapSoftmax(context: ctx)
+        for vocab in [248_320, 4_096, 4_097, 1_003] {
+            let tiled = try LogitSoftcapSoftmaxTiled(context: ctx, vocab: vocab)
+            guard let logits = ctx.device.makeBuffer(
+                      length: vocab * MemoryLayout<Float16>.stride,
+                      options: .storageModeShared),
+                  let a = ctx.device.makeBuffer(
+                      length: vocab * MemoryLayout<Float16>.stride,
+                      options: .storageModeShared),
+                  let b = ctx.device.makeBuffer(
+                      length: vocab * MemoryLayout<Float16>.stride,
+                      options: .storageModeShared)
+            else { throw MetalError.noDevice }
+            let src = logits.contents().bindMemory(to: Float16.self,
+                                                   capacity: vocab)
+            var state: UInt64 = 0x9E3779B97F4A7C15
+            for index in 0..<vocab {
+                state = state &* 6364136223846793005 &+ 1442695040888963407
+                let unit = Float(state >> 40) / Float(1 << 24)
+                src[index] = Float16(unit * 24 - 12)
+            }
+            let cb = ctx.queue.makeCommandBuffer()!
+            try single.encode(commandBuffer: cb, logits: logits, probs: a,
+                              v: UInt32(vocab), softcap: 0)
+            try tiled.encode(commandBuffer: cb, logits: logits, probs: b,
+                             v: UInt32(vocab), softcap: 0)
+            cb.commit()
+            cb.waitUntilCompleted()
+            let pa = a.contents().bindMemory(to: Float16.self, capacity: vocab)
+            let pb = b.contents().bindMemory(to: Float16.self, capacity: vocab)
+            var worst: Float = 0
+            var sumTiled: Float = 0
+            for index in 0..<vocab {
+                worst = max(worst, abs(Float(pa[index]) - Float(pb[index])))
+                sumTiled += Float(pb[index])
+            }
+            #expect(worst < 1e-5,
+                    "vocab \(vocab): worst |single - tiled| = \(worst)")
+            #expect(abs(sumTiled - 1) < 5e-2,
+                    "vocab \(vocab): tiled probabilities sum to \(sumTiled)")
+        }
+    }
 }

@@ -142,6 +142,121 @@ void logit_softcap_softmax(
 }
 
 // ----------------------------------------------------------------------------
+// Tiled softcap+softmax. Same math as `logit_softcap_softmax`, but the two
+// full-vocabulary passes are spread across the device instead of running in
+// one 256-thread threadgroup. Stage 1 emits per-tile (max, sum-of-exp)
+// partials; stage 2 merges them into a single (max, 1/sum); stage 3
+// normalizes. At V = 248,320 the single-threadgroup form left the rest of the
+// GPU idle for both passes, which is the same pathology the tiled Top-K
+// reduction removed from the selection half.
+constant constexpr uint kSoftmaxTile = 4096;
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void logit_softcap_softmax_tiled_stage1(
+    device const half*  logits   [[buffer(0)]],
+    device float*       out_max  [[buffer(1)]],
+    device float*       out_sum  [[buffer(2)]],
+    constant uint&      V        [[buffer(3)]],
+    constant float&     softcap  [[buffer(4)]],
+    uint  group            [[threadgroup_position_in_grid]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial_m[kLogitMaxSimdGroups];
+    threadgroup float partial_d[kLogitMaxSimdGroups];
+    const uint base = group * kSoftmaxTile;
+    const uint end  = min(base + kSoftmaxTile, V);
+
+    float m = -INFINITY;
+    float d = 0.0f;
+    for (uint i = base + lid; i < end; i += lsize) {
+        float z  = softcap_value(float(logits[i]), softcap);
+        float mn = max(m, z);
+        float scale = (m == -INFINITY) ? 0.0f : logit_softmax_exp(m - mn);
+        d = d * scale + logit_softmax_exp(z - mn);
+        m = mn;
+    }
+    float m_simd = simd_max(m);
+    float d_simd = simd_sum((m == -INFINITY) ? 0.0f : d * logit_softmax_exp(m - m_simd));
+    if (simd_lane_id == 0) {
+        partial_m[simd_group_id] = m_simd;
+        partial_d[simd_group_id] = d_simd;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group_id == 0) {
+        float mp = (simd_lane_id < simdgroups) ? partial_m[simd_lane_id] : -INFINITY;
+        float dp = (simd_lane_id < simdgroups) ? partial_d[simd_lane_id] : 0.0f;
+        float m_all = simd_max(mp);
+        float d_all = simd_sum((mp == -INFINITY) ? 0.0f : dp * logit_softmax_exp(mp - m_all));
+        if (simd_lane_id == 0) {
+            out_max[group] = m_all;
+            out_sum[group] = d_all;
+        }
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void logit_softcap_softmax_tiled_merge(
+    device const float* in_max   [[buffer(0)]],
+    device const float* in_sum   [[buffer(1)]],
+    device float*       out_pair [[buffer(2)]],   // [max, 1/sum]
+    constant uint&      tiles    [[buffer(3)]],
+    uint  lid              [[thread_position_in_threadgroup]],
+    uint  lsize            [[threads_per_threadgroup]],
+    uint  simd_lane_id     [[thread_index_in_simdgroup]],
+    uint  simd_group_id    [[simdgroup_index_in_threadgroup]],
+    uint  simdgroups       [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float partial_m[kLogitMaxSimdGroups];
+    threadgroup float partial_d[kLogitMaxSimdGroups];
+    float m = -INFINITY;
+    float d = 0.0f;
+    for (uint i = lid; i < tiles; i += lsize) {
+        float tm = in_max[i];
+        float mn = max(m, tm);
+        float scale = (m == -INFINITY) ? 0.0f : logit_softmax_exp(m - mn);
+        float contribution = (tm == -INFINITY)
+            ? 0.0f : in_sum[i] * logit_softmax_exp(tm - mn);
+        d = d * scale + contribution;
+        m = mn;
+    }
+    float m_simd = simd_max(m);
+    float d_simd = simd_sum((m == -INFINITY) ? 0.0f : d * logit_softmax_exp(m - m_simd));
+    if (simd_lane_id == 0) {
+        partial_m[simd_group_id] = m_simd;
+        partial_d[simd_group_id] = d_simd;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group_id == 0) {
+        float mp = (simd_lane_id < simdgroups) ? partial_m[simd_lane_id] : -INFINITY;
+        float dp = (simd_lane_id < simdgroups) ? partial_d[simd_lane_id] : 0.0f;
+        float m_all = simd_max(mp);
+        float d_all = simd_sum((mp == -INFINITY) ? 0.0f : dp * logit_softmax_exp(mp - m_all));
+        if (simd_lane_id == 0) {
+            out_pair[0] = m_all;
+            out_pair[1] = (d_all > 0.0f) ? (1.0f / d_all) : 0.0f;
+        }
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void logit_softcap_softmax_tiled_normalize(
+    device const half*  logits   [[buffer(0)]],
+    device half*        probs    [[buffer(1)]],
+    device const float* pair     [[buffer(2)]],
+    constant uint&      V        [[buffer(3)]],
+    constant float&     softcap  [[buffer(4)]],
+    uint  gid [[thread_position_in_grid]]
+) {
+    if (gid >= V) return;
+    const float z = softcap_value(float(logits[gid]), softcap);
+    probs[gid] = half(logit_softmax_exp(z - pair[0]) * pair[1]);
+}
+
+// ----------------------------------------------------------------------------
 // K9: sample
 //
 // Reads softmaxed probabilities and writes one token id. Behaviour:

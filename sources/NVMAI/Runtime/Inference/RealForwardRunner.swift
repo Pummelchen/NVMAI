@@ -360,7 +360,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 modelDirectory: model.directoryURL,
                 device: context.device,
                 hiddenSize: model.config.hiddenSize,
-                kvDim: model.config.numFullKVHeads * model.config.fullHeadDim)
+                kvDim: model.config.numFullKVHeads * model.config.fullHeadDim,
+                weightsSha256: model.weightsDigestFromManifest)
             : nil
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -1756,6 +1757,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
         try await ane.predict(layer: L, history: startPosition, tokenCount: t)
         ane.appendShadow(layer: L, startPosition: startPosition, tokenCount: t)
+        // Start the next covered layer's model load now: it overlaps the MoE
+        // stage the caller is about to encode and run on the GPU, which is
+        // roughly an order of magnitude longer than the ~0.5 s load.
+        if let next = ((L + 1)..<cfg.numLayers).first(where: {
+            ane.coveredLayers.contains($0)
+        }) {
+            ane.preload(layer: next, history: startPosition)
+        }
 
         guard let next = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
