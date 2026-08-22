@@ -85,6 +85,33 @@ enum SamplePath: Sendable, Equatable {
     case hostPenalty
 }
 
+/// Which Top-K implementation serves a `1...64` sampled request.
+///
+/// `tiled` is production: a three-stage reduction that keeps the top 64 of
+/// every 1,024-entry tile, so the whole vocabulary reaches one final tile in
+/// three dispatches. `generic` forces the older single-threadgroup kernel that
+/// extracts Top-K in k full vocabulary passes.
+///
+/// The two are required to agree token-for-token — `SampleTopK64Tests` pins
+/// that across k, temperature, and seed — so this exists to measure the
+/// difference, not to choose behavior. It is the control arm that made the
+/// +30.07% (4-bit) / +11.36% (8-bit) qualification an interleaved same-binary
+/// A/B instead of a comparison against a separately-built baseline.
+public enum RuntimeSamplerPath: String, Codable, Sendable {
+    case tiled
+    case generic
+
+    public static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RuntimeSamplerPath {
+        guard let raw = environment["NVMAI_SAMPLER_PATH"] else { return .tiled }
+        guard let value = RuntimeSamplerPath(rawValue: raw) else {
+            throw GeneratorError.invalidSamplerPath(raw)
+        }
+        return value
+    }
+}
+
 /// Turns `GenerationConfig` + a logits buffer into one token id, staying
 /// GPU-resident wherever the kernels allow.
 ///
@@ -106,6 +133,7 @@ final class Sampler {
     private let softcap: LogitSoftcapSoftmax
     private let sampleKernel: Sample
     private let topK64Kernel: SampleTopK64
+    private let samplerPath: RuntimeSamplerPath
     let vocab: Int
     private let logitSoftcap: Float
 
@@ -127,6 +155,7 @@ final class Sampler {
         self.softcap = try LogitSoftcapSoftmax(context: context)
         self.sampleKernel = try Sample(context: context)
         self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab)
+        self.samplerPath = try RuntimeSamplerPath.environmentValue()
         self.vocab = vocab
         self.logitSoftcap = logitSoftcap
     }
@@ -157,14 +186,27 @@ final class Sampler {
 
         let isGreedy = config.temperature == 0
         let seed = Self.seedFor(config: config, position: position)
-        if config.temperature > 0,
-           config.topK == 64 {
+        // The tiled reduction serves every k it can reconstruct from a
+        // top-64-per-tile stage 1, which is all of 1...64 — not just 64. The
+        // production default is Top-K 20, so gating on `== 64` sent every
+        // shipped token to the generic kernel instead, and that kernel takes
+        // k full passes over a 262,144-entry vocabulary from a single
+        // 256-thread threadgroup. Measured at the published 4-bit profile,
+        // widening this gate is worth 16.656 -> 21.454 tok/s (+28.8%), with
+        // the head_logits->embed gap falling from 15.45 ms to 1.41 ms/token.
+        // k > 64, k == 0 (top-k disabled, k becomes 256), and greedy stay on
+        // the generic path, which remains the reference implementation.
+        if samplerPath == .tiled,
+           config.temperature > 0,
+           let requestedK = config.topK,
+           (1...64).contains(requestedK) {
             try topK64Kernel.encode(commandBuffer: commandBuffer,
                                     probs: probs,
                                     outToken: outToken,
                                     temperature: config.temperature,
                                     topP: config.topP ?? 1.0,
-                                    seed: seed)
+                                    seed: seed,
+                                    topK: UInt32(requestedK))
         } else {
             try sampleKernel.encode(commandBuffer: commandBuffer,
                                     probs: probs, outToken: outToken, v: v,

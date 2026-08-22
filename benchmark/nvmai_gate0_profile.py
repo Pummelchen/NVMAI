@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import json
 import os
@@ -59,6 +60,7 @@ PROMPT = (
 MAX_TOKENS = 512
 TEMPERATURE = 0.6
 SEED = 42
+TOP_K = 20  # GenerationDefaults.topK; overridable with --top-k for A/B probes
 
 QUANTS = {
     "4bit": ROOT / "models/ornith-1.5_35B_A3B_4Bit",
@@ -150,7 +152,8 @@ def preflight(max_gpu_percent: int) -> None:
             "with the published benchmark.")
 
 
-def launch(quant: str, port: int, log_name: str) -> subprocess.Popen:
+def launch(quant: str, port: int, log_name: str,
+           sampler_path: str | None = None) -> subprocess.Popen:
     binary = ROOT / ".build/arm64-apple-macosx/release/NVMAIServer"
     if not binary.exists():
         raise SystemExit(f"missing release binary: {binary}")
@@ -158,6 +161,8 @@ def launch(quant: str, port: int, log_name: str) -> subprocess.Popen:
     env = server_environment()
     env["NVMAI_RUNNER_STATS"] = "1"
     env["NVMAI_KERNEL_STATS"] = "1"
+    if sampler_path:
+        env["NVMAI_SAMPLER_PATH"] = sampler_path
     log = open(benchmark_log_path(log_name), "w")
     proc = subprocess.Popen(cmd, env=env, stdout=log,
                             stderr=subprocess.STDOUT)
@@ -186,7 +191,7 @@ def generate(port: int) -> dict | None:
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": TEMPERATURE,
         "top_p": 0.95,
-        "top_k": 20,
+        "top_k": TOP_K,
         "presence_penalty": 0.0,
         "seed": SEED,
         "max_completion_tokens": MAX_TOKENS,
@@ -202,10 +207,15 @@ def generate(port: int) -> dict | None:
         print(f"  ERROR: request failed: {exc}", flush=True)
         return None
     usage = body.get("usage") or {}
+    choices = body.get("choices") or [{}]
+    text = ((choices[0].get("message") or {}).get("content")) or ""
     return {
         "wall_s": round(time.time() - start, 3),
         "completion_tokens": usage.get("completion_tokens"),
         "prompt_tokens": usage.get("prompt_tokens"),
+        # Sampling changes are only safe if the token stream is unchanged at a
+        # fixed seed, so every run carries a digest of what it actually emitted.
+        "completion_sha256": hashlib.sha256(text.encode()).hexdigest()[:16],
     }
 
 
@@ -326,6 +336,7 @@ def summarize(quant: str, rows: list[dict]) -> dict:
         "io_host_waits", "io_host_waits_avoided", "hit_fixup_layers",
         "completion_tokens",
     ]
+    digests = sorted({r.get("completion_sha256") for r in rows if r.get("completion_sha256")})
     summary = {
         "quant": quant,
         "runs": len(rows),
@@ -351,6 +362,7 @@ def summarize(quant: str, rows: list[dict]) -> dict:
         for name, values in sorted(gaps.items(),
                                    key=lambda kv: -statistics.median(kv[1]))
     }
+    summary["completion_sha256"] = digests
     summary["raw"] = rows
     return summary
 
@@ -391,17 +403,24 @@ def report(summaries: list[dict]) -> None:
                    if busy <= 35 else
                    "MIXED — neither branch of the Gate 0 rule fires cleanly")
         print(f"  VERDICT: {verdict}")
+        digests = s.get("completion_sha256") or []
+        print(f"  output digest    {digests}"
+              f"{'  (RUNS DISAGREE)' if len(digests) > 1 else ''}")
 
 
 def main() -> int:
+    global TOP_K
     parser = argparse.ArgumentParser()
     parser.add_argument("--quant", choices=sorted(QUANTS), action="append")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--top-k", type=int, default=TOP_K,
+                        help="probe override; production default is 20")
     parser.add_argument("--allow-busy-gpu", action="store_true",
                         help="measure even if another process holds the GPU; "
                              "results are not comparable with the benchmark")
     args = parser.parse_args()
+    TOP_K = args.top_k
 
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)

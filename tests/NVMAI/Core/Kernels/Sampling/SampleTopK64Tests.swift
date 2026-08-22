@@ -33,6 +33,20 @@ import Testing
         try GenerationConfig(temperature: 0, topK: nil, topP: 0.95).validate()
     }
 
+    @Test func samplerPathControlDefaultsToTiledAndFailsClosed() throws {
+        #expect(try RuntimeSamplerPath.environmentValue([:]) == .tiled)
+        #expect(try RuntimeSamplerPath.environmentValue(
+            ["NVMAI_SAMPLER_PATH": "tiled"]) == .tiled)
+        #expect(try RuntimeSamplerPath.environmentValue(
+            ["NVMAI_SAMPLER_PATH": "generic"]) == .generic)
+        #expect(throws: GeneratorError.self) {
+            try RuntimeSamplerPath.environmentValue(["NVMAI_SAMPLER_PATH": "fast"])
+        }
+        #expect(throws: GeneratorError.self) {
+            try RuntimeSamplerPath.environmentValue(["NVMAI_SAMPLER_PATH": ""])
+        }
+    }
+
     private final class Rig {
         let context: MetalContext
         let current: Sample
@@ -73,14 +87,15 @@ import Testing
 
         func draw(seed: UInt64,
                   temperature: Float = 1.0,
-                  topP: Float) throws -> (current: UInt32, candidate: UInt32) {
+                  topP: Float,
+                  topK: Int = 64) throws -> (current: UInt32, candidate: UInt32) {
             let cb = context.queue.makeCommandBuffer()!
             try current.encode(commandBuffer: cb,
                            probs: probs,
                            outToken: currentOutput,
                            v: UInt32(vocab),
                            temperature: temperature,
-                           topK: 64,
+                           topK: UInt32(topK),
                            topP: topP,
                            seed: seed)
             try candidate.encode(commandBuffer: cb,
@@ -88,7 +103,8 @@ import Testing
                              outToken: candidateOutput,
                              temperature: temperature,
                              topP: topP,
-                             seed: seed)
+                             seed: seed,
+                             topK: UInt32(topK))
             cb.commit()
             cb.waitUntilCompleted()
             return (currentOutput.contents().load(as: UInt32.self),
@@ -140,5 +156,59 @@ import Testing
             if result.candidate >= 61 { sawLastThree = true }
         }
         #expect(sawLastThree, "Top-P incorrectly truncated the renormalized Top-64 set")
+    }
+
+    /// The tiled reduction serves every k in 1...64, not only 64.
+    ///
+    /// Stage 1 keeps the top 64 of each tile, so the top k of the vocabulary
+    /// is a strict subset of its output for any k <= 64 and the final stage
+    /// only has to cut there. This is the claim that lets the production
+    /// default (Top-K 20) leave the generic k-full-vocabulary-passes kernel,
+    /// so it is pinned against that kernel rather than against a golden list.
+    @Test func everyKUpToSixtyFourMatchesTheGenericSampler() throws {
+        let rig = try Rig(vocab: 262_144)
+        rig.write { i in
+            let mixed = UInt64(i) &* 6364136223846793005 &+ 1442695040888963407
+            return Float(UInt32(mixed >> 40) + 1) * (1.0 / 16_777_217.0)
+        }
+
+        for topK in [1, 2, 7, 20, 33, 63, 64] {
+            for temperature: Float in [0.6, 1.0] {
+                for seed: UInt64 in [1, 42, 0x1234_5678_9ABC_DEF0] {
+                    let result = try rig.draw(seed: seed,
+                                              temperature: temperature,
+                                              topP: 0.95,
+                                              topK: topK)
+                    #expect(result.candidate == result.current,
+                            "k \(topK), t \(temperature), seed \(seed): candidate \(result.candidate) current \(result.current)")
+                }
+            }
+        }
+    }
+
+    /// Top-K must cut before the Top-P scan, not after.
+    ///
+    /// A flat distribution puts the 0.95 nucleus far beyond rank 64, so
+    /// Top-P never fires and both orders agree. This uses a distribution whose
+    /// nucleus lands *inside* the top 64, which is the only shape that can
+    /// tell the two orders apart: cutting after Top-P would keep the whole
+    /// nucleus at small k, where the generic kernel keeps exactly k.
+    @Test func topKCutsBeforeTopPWhenTheNucleusIsNarrow() throws {
+        let rig = try Rig(vocab: 1_003)
+        // Geometric decay: the top ~30 entries already carry >95% of the mass.
+        rig.write { i in i < 128 ? Float(pow(0.85, Double(i))) : 0 }
+
+        for topK in [3, 8, 20, 64] {
+            for seed: UInt64 in [1, 5, 99, 4_242] {
+                let result = try rig.draw(seed: seed,
+                                          temperature: 1.0,
+                                          topP: 0.95,
+                                          topK: topK)
+                #expect(result.candidate == result.current,
+                        "k \(topK), seed \(seed): candidate \(result.candidate) current \(result.current)")
+                #expect(result.candidate < UInt32(topK),
+                        "k \(topK) selected index \(result.candidate), outside the top k of a decreasing distribution")
+            }
+        }
     }
 }

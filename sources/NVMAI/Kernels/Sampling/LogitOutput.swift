@@ -165,12 +165,19 @@ final class SampleTopK64 {
         self.stage2Indices = stage2Indices
     }
 
+    /// Selects one token from the top `topK` of the distribution.
+    ///
+    /// `topK` may be any value in `1...64`: stage 1 keeps the top 64 of every
+    /// tile, so the top `k` of the vocabulary is a strict subset of what the
+    /// reduction already computes, and the final stage simply cuts there. The
+    /// name is historical — this serves the whole `1...64` range, not only 64.
     public func encode(commandBuffer: MTLCommandBuffer,
                        probs: MTLBuffer,
                        outToken: MTLBuffer,
                        temperature: Float,
                        topP: Float,
-                       seed: UInt64) throws {
+                       seed: UInt64,
+                       topK: UInt32 = 64) throws {
         // K26: the final stage reweights survivors as p^(1/temperature), so
         // temperature == 0 would produce pow(·, inf) garbage. Greedy sampling
         // must go through the fused lm_head (or the `sample` kernel's
@@ -178,6 +185,8 @@ final class SampleTopK64 {
         // temperature 0.
         precondition(temperature > 0,
                      "SampleTopK64 requires temperature > 0 (pow(v, 1/T) is undefined at T=0); greedy must use the fused head")
+        precondition((1...64).contains(topK),
+                     "SampleTopK64 serves k in 1...64; stage 1 keeps 64 per tile, so a larger k is not recoverable from its output")
         let threads = MTLSize(width: 256, height: 1, depth: 1)
 
         guard let enc1 = commandBuffer.makeComputeCommandEncoder() else {
@@ -218,10 +227,12 @@ final class SampleTopK64 {
         var temp = temperature
         var p = topP
         var rngSeed = seed
+        var k = topK
         enc3.setBytes(&finalCount, length: MemoryLayout<UInt32>.size, index: 3)
         enc3.setBytes(&temp, length: MemoryLayout<Float>.size, index: 4)
         enc3.setBytes(&p, length: MemoryLayout<Float>.size, index: 5)
         enc3.setBytes(&rngSeed, length: MemoryLayout<UInt64>.size, index: 6)
+        enc3.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 7)
         enc3.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
                                   threadsPerThreadgroup: threads)
         enc3.endEncoding()

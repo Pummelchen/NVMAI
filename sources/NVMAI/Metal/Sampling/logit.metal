@@ -574,6 +574,7 @@ void sample_topk64_final(
     constant float& temperature [[buffer(4)]],
     constant float& top_p [[buffer(5)]],
     constant uint64_t& seed [[buffer(6)]],
+    constant uint& top_k [[buffer(7)]],
     uint lid [[thread_position_in_threadgroup]]) {
     threadgroup float values[1024];
     threadgroup uint indices[1024];
@@ -592,6 +593,16 @@ void sample_topk64_final(
                && isfinite(values[kept])) {
             kept += 1;
         }
+
+        // Top-K caps the working set *before* the Top-P scan, which is what
+        // makes this path bit-identical to the generic `sample` kernel for
+        // k <= 64. There, only k slots are ever extracted, so the cumulative
+        // mass Top-P compares against is the mass of the top k — not of the
+        // top 64. Cutting after Top-P instead would let a distribution whose
+        // 0.95 mass is reached at rank 30 keep 30 candidates at k=20, where
+        // the generic kernel keeps 20. Order matters; this is not a clamp
+        // that can be moved for tidiness.
+        kept = min(kept, max(1u, top_k));
 
         if (top_p > 0.0f && top_p < 1.0f) {
             float cumulative = 0.0f;
