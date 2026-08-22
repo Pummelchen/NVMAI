@@ -37,6 +37,14 @@
 
 ### Performance Improvements
 
+- **Tiled Top-K sampling:** Production sampling (Top-K 1–64) runs a
+  three-stage tiled GPU reduction, cutting per-token sampling cost from
+  15.5 ms to 1.4 ms with a token-for-token identical stream — the main
+  source of the v4.6 decode gain.
+- **ANE prefill (experimental, opt-in):** `NVMAI_PREFILL_ANE=on` runs
+  full-attention prefill blocks on the Neural Engine from a one-time
+  exported Core ML sidecar, roughly halving long-prompt time to first
+  token; short prompts and decode are untouched.
 - **Follow-up cache:** Exact live and multi-prefix prompt-state reuse avoids
   repeating compatible prefill work across conversation turns.
 - **Concise mode:** An optional terse system prompt reduces generated text for
@@ -77,17 +85,21 @@ and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
 
 ## Benchmarks
 
-NVMAI v4.1 median results on a base 8-core M3 MacBook Pro with 24 GB. Ornith
+NVMAI v4.6 median results on a base 8-core M3 MacBook Pro with 24 GB. Ornith
 generated 512 tokens of continuous plain English about an ordinary day in a
 small town; each row used one discarded warmup and three fresh-process runs.
 
-| Quantization | Median decode | Median wall time |
-| --- | ---: | ---: |
-| 4-bit | **16.45 tok/s** | 34.24 s |
-| 8-bit | **8.75 tok/s** | 63.99 s |
+| Quantization | Median decode | Median wall time | Change from v4.1 |
+| --- | ---: | ---: | ---: |
+| 4-bit | **22.53 tok/s** | 25.59 s | **+37.0%** |
+| 8-bit | **9.40 tok/s** | 59.48 s | **+7.4%** |
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
-native 262K context, prompt cache on, 8-bit KV, and MTP off.
+native 262K context, prompt cache on, 8-bit KV, and MTP off. The gain over
+v4.1 is the tiled Top-K sampler; the sampled token stream at a fixed seed is
+unchanged. With the experimental opt-in ANE prefill enabled, a 6,103-token
+prompt additionally measured **2.31x** faster prefill (132.9 s → 57.5 s) with
+decode speed unchanged.
 
 [Full benchmark results](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
 
