@@ -227,13 +227,15 @@ public func runRawCompletion(producer: any LogitProducer,
                 tokenID = Int32(bitPattern: token)
             case .logitsWritten:
                 tokenID = try sampleOnce(scratch: scratch, context: context,
-                                     history: history, config: config, position: generated)
+                                     history: history, config: config, position: generated,
+                                     timing: fusedRunner)
             }
         } else if fusedGreedy {
             tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
         } else {
             tokenID = try sampleOnce(scratch: scratch, context: context,
-                                 history: history, config: config, position: generated)
+                                 history: history, config: config, position: generated,
+                                 timing: fusedRunner)
         }
         generated += 1
         uncommittedBoundaryTokenIDs = [tokenID]
@@ -390,8 +392,17 @@ private func runStreamingMTPCompletion(
         uncommittedBoundaryTokenIDs: uncommitted)
 }
 
+/// Samples one token id.
+///
+/// `timing` is the runner whose `NVMAI_KERNEL_STATS` timeline this command
+/// buffer joins, when the producer is one. Without it the sampler's GPU span
+/// is invisible to the role summary *and* to the gap accounting, so it lands
+/// inside the `head_logits->embed` transition and inflates what reads as idle.
+/// That is not hypothetical: it hid a 15.45 ms/token Top-K kernel until the
+/// gap was traced by hand.
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
-                        history: [Int32], config: GenerationConfig, position: Int) throws -> Int32 {
+                        history: [Int32], config: GenerationConfig, position: Int,
+                        timing: RealForwardRunner? = nil) throws -> Int32 {
     guard let cb = context.queue.makeCommandBuffer() else {
         throw ModelError.residentBufferWrapFailed
     }
@@ -399,5 +410,6 @@ private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
                                history: history, config: config, position: position,
                                outToken: scratch.outToken)
     cb.commit(); cb.waitUntilCompleted()
+    timing?.recordKernelGPU(role: "sample", cb)
     return Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
 }
