@@ -41,11 +41,28 @@ MODELS = {
 }
 
 
+# A pinned, self-contained prompt body. It was previously built from README.md
+# and AGENTS.md, which made the benchmark silently non-reproducible: editing
+# those files changed the prompt length (6,103 -> 6,593 tokens between two
+# runs) and therefore the quadratic attention cost, so the arms of different
+# sweeps were not comparable. A benchmark prompt must never be derived from
+# files under active edit.
+_PARAGRAPH = (
+    "The runtime keeps routed mixture-of-experts weights on solid-state "
+    "storage and loads only the experts that the router selects for each "
+    "token, so a large model runs inside a small declared memory budget. "
+    "Attention state is held in a compressed key-value cache whose precision "
+    "is chosen independently of the weight precision. Prefill processes the "
+    "prompt in fixed chunks, while decode emits one token at a time and is "
+    "bounded by memory bandwidth rather than arithmetic. "
+)
+
+
 def build_prompt() -> str:
-    base = (open(ROOT / "README.md").read() + "\n"
-            + open(ROOT / "AGENTS.md").read())
-    return ("Summarize the following project documentation in 40 words.\n\n"
-            + base + base)[:56000]
+    """~56,000 characters of stable English prose (about 6K tokens), matching
+    the scale of the original workload and independent of repository files."""
+    return ("Summarize the following technical description in 40 words.\n\n"
+            + _PARAGRAPH * 119)
 
 
 def launch(quant: str, ane: bool, log_name: str) -> None:

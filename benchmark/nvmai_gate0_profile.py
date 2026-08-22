@@ -117,6 +117,43 @@ def idle_gpu_utilization() -> int | None:
     return max(values) if values else None
 
 
+def machine_load() -> dict:
+    """Whole-machine contention signals a model run is sensitive to."""
+    out: dict = {}
+    try:
+        ps = subprocess.run(["ps", "-Ao", "%cpu,comm", "-r"],
+                            capture_output=True, text=True, timeout=15).stdout
+        rows = []
+        for line in ps.splitlines()[1:]:
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                try:
+                    rows.append((float(parts[0]), parts[1]))
+                except ValueError:
+                    pass
+        mine = ("NVMAIServer", "NVMAICLI", "python")
+        out["busy_processes"] = [
+            (c, n) for c, n in rows[:8]
+            if c >= 25 and not any(m in n for m in mine)]
+    except (OSError, subprocess.SubprocessError):
+        out["busy_processes"] = []
+    try:
+        mp = subprocess.run(["memory_pressure", "-Q"],
+                            capture_output=True, text=True, timeout=15).stdout
+        m = re.search(r"free percentage:\s*(\d+)", mp)
+        out["free_percent"] = int(m.group(1)) if m else None
+    except (OSError, subprocess.SubprocessError):
+        out["free_percent"] = None
+    try:
+        sw = subprocess.run(["sysctl", "-n", "vm.swapusage"],
+                            capture_output=True, text=True, timeout=15).stdout
+        m = re.search(r"used\s*=\s*([0-9.]+)M", sw)
+        out["swap_used_mb"] = float(m.group(1)) if m else None
+    except (OSError, subprocess.SubprocessError):
+        out["swap_used_mb"] = None
+    return out
+
+
 def preflight(max_gpu_percent: int) -> None:
     """Refuse to run if another model process is live (AGENTS.md rule), or if
     another application is already consuming the GPU.
@@ -150,6 +187,33 @@ def preflight(max_gpu_percent: int) -> None:
             "Quit whatever is using the GPU, or pass --allow-busy-gpu to "
             "measure anyway. Results from a contended GPU are not comparable "
             "with the published benchmark.")
+
+    # CPU and memory contention are as invalidating as GPU contention and far
+    # less visible. A busy machine does not merely add noise here: it pushes
+    # the expert slot cache out of RAM, and a run whose hit rate collapses
+    # (0.277 against a normal 0.877 was observed) reports timings that look
+    # like a code regression and are not one. Checked, not assumed.
+    if max_gpu_percent < 100:
+        load = machine_load()
+        problems = []
+        if load["busy_processes"]:
+            listing = ", ".join(f"{n.split('/')[-1]} {c:.0f}%"
+                                for c, n in load["busy_processes"])
+            problems.append(f"other processes are busy: {listing}")
+        if load["free_percent"] is not None and load["free_percent"] < 55:
+            problems.append(
+                f"only {load['free_percent']}% of memory is free; the expert "
+                "cache will not stay resident")
+        if load["swap_used_mb"] is not None and load["swap_used_mb"] > 3072:
+            problems.append(
+                f"{load['swap_used_mb']:.0f} MB of swap is in use; let the "
+                "machine settle before measuring")
+        if problems:
+            raise SystemExit(
+                "refusing to start: the machine is not idle.\n  - "
+                + "\n  - ".join(problems)
+                + "\nQuit the busy applications, or pass --allow-busy-gpu to "
+                "measure anyway (results will not be comparable).")
 
 
 def launch(quant: str, port: int, log_name: str,
