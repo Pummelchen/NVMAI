@@ -205,6 +205,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let prefetchPredictionWeights: MTLBuffer
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     private let moeActs: MTLBuffer       // [topK * FmoE] FP16
+    /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
+    /// output buffers plus two persistent routed argument buffers, created on
+    /// first verify. Per-row buffers are deliberately *separate allocations*,
+    /// not offsets into one: Metal hazard tracking is whole-buffer, so a
+    /// shared acts buffer would falsely serialize row 1's phase 1 behind
+    /// row 0's phase 2 and cost real GPU concurrency. The rewrite-per-layer
+    /// hazard on the argument buffers is safe because the pair schedule waits
+    /// on each layer's routed command before the next layer re-encodes them.
+    private var verifyPairActs: [MTLBuffer] = []
+    private var verifyPairY: [MTLBuffer] = []
+    private var verifyPairArgBuffers: [MTLBuffer] = []
     private let moeHitActiveSlots: MTLBuffer // [topK] UInt32
     private let moeMissActiveSlots: MTLBuffer // [topK] UInt32
     private let residencyHitCount: MTLBuffer
@@ -736,13 +747,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// merely to break even. Faster projections cannot help -- the attention
     /// side already amortizes across both rows via `useTwoRowProjection`, and
     /// the expert side is bounded by the union above, not by matmul shape.
+    /// Parsed once: the schedule cannot change mid-process, and
+    /// ProcessInfo.environment is a dictionary copy per call.
+    private static let mtpVerifyScheduleResult =
+        Result { try RuntimeMTPVerifySchedule.environmentValue() }
+
     func verifyGreedyPair(_ tokens: [Int32],
                           startPosition: Int) async throws -> TargetPairVerification {
         guard tokens.count == 2 else {
             throw PrefillError.chunkedUnsupported("MTP verification requires exactly two tokens")
         }
+        let schedule = try Self.mtpVerifyScheduleResult.get()
+        // The pair schedule plans the union of both rows' experts as one
+        // cache plan, which needs the slot cache to hold at least 2*topK.
+        // Below that (a sub-1 GiB budget) the tile path remains correct.
+        let slotCount = model.routedExpertCacheSlotCount() ?? 0
+        let pairMoE = schedule == .pair && slotCount >= 2 * cfg.topKExperts
         let config = PrefillRuntimeConfig.production(chunkTokens: 32)
         let scratch = try ensurePrefillScratch(config: config)
+        let tBackbone = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try await executePrefillChunk(tokens: tokens[...],
                                       startPosition: startPosition,
                                       outputMode: .logits,
@@ -751,7 +774,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                       config: config,
                                       writeFinalHead: false,
                                       snapshotGDNAfterFirstToken: true,
-                                      useTwoRowProjection: true)
+                                      useTwoRowProjection: true,
+                                      pairRoutedMoE: pairMoE)
+        let tHead = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
 
         let finalNorm = try model.finalNorm()
         let lm = try model.lmHead()
@@ -765,29 +790,28 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                   destinationOffset: 0,
                   size: 2 * cfg.hiddenSize * MemoryLayout<Float16>.stride)
         blit.endEncoding()
-        let logitsStride = cfg.vocabSize * MemoryLayout<Float16>.stride
-        for row in 0..<2 {
-            try prefillFinalRowHead.encodeLogits(
-                commandBuffer: cb,
-                hiddenBlock: scratch.hidden,
-                row: row,
-                rowStrideElements: cfg.hiddenSize,
-                normWeight: finalNorm.buffer,
-                normWeightOffset: Int(finalNorm.offset),
-                weights: lm.buffer,
-                weightsOffset: Int(lm.offset),
-                scales: lm.buffer,
-                scalesOffset: Int(lm.scaleOffset),
-                biases: lm.buffer,
-                biasesOffset: Int(lm.biasOffset),
-                logits: verificationLogits,
-                logitsOffset: row * logitsStride,
-                d: UInt32(cfg.hiddenSize),
-                vocab: UInt32(cfg.vocabSize),
-                rmsEps: 1e-6)
-        }
+        // One lm_head weight read for both rows. The former per-row loop
+        // read the model's largest tensor twice per verify pass.
+        try prefillFinalRowHead.encodeLogitsPair(
+            commandBuffer: cb,
+            hiddenBlock: scratch.hidden,
+            rowStrideElements: cfg.hiddenSize,
+            normWeight: finalNorm.buffer,
+            normWeightOffset: Int(finalNorm.offset),
+            weights: lm.buffer,
+            weightsOffset: Int(lm.offset),
+            scales: lm.buffer,
+            scalesOffset: Int(lm.scaleOffset),
+            biases: lm.buffer,
+            biasesOffset: Int(lm.biasOffset),
+            logits: verificationLogits,
+            d: UInt32(cfg.hiddenSize),
+            vocab: UInt32(cfg.vocabSize),
+            rmsEps: 1e-6)
         cb.commit()
         try waitForCompletion(cb)
+        recordKernelGPU(role: "verify_head", cb)
+        let tArgmax = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
 
         let logits = verificationLogits.contents()
             .assumingMemoryBound(to: Float16.self)
@@ -804,11 +828,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             }
             return Int32(best)
         }
+        let first = argmax(row: 0)
+        let second = argmax(row: 1)
+        let tDone = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         return TargetPairVerification(
-            predictionAfterFirst: argmax(row: 0),
-            predictionAfterSecond: argmax(row: 1),
+            predictionAfterFirst: first,
+            predictionAfterSecond: second,
             hiddenRows: Data(bytes: verificationHidden.contents(),
-                             count: 2 * cfg.hiddenSize * MemoryLayout<Float16>.stride))
+                             count: 2 * cfg.hiddenSize * MemoryLayout<Float16>.stride),
+            backboneNanos: tHead &- tBackbone,
+            headNanos: tArgmax &- tHead,
+            argmaxNanos: tDone &- tArgmax)
     }
 
     /// Advance the one-layer MTP sidecar with aligned `(target hidden,
@@ -1465,7 +1495,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                      writeFinalHead: Bool,
                                      preparedHidden: MTLBuffer? = nil,
                                      snapshotGDNAfterFirstToken: Bool = false,
-                                     useTwoRowProjection: Bool = false) async throws {
+                                     useTwoRowProjection: Bool = false,
+                                     pairRoutedMoE: Bool = false) async throws {
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires a KV cache")
@@ -1619,14 +1650,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                    t: UInt32(t),
                                    d: UInt32(D),
                                    eps: eps)
-            try await encodeRoutedMoEPrefill(
-                cb: &cb, layer: L, views: views, scratch: scratch,
-                tokenCount: t, hiddenSize: D,
-                layerStart: prefillLayerStart,
-                routeNanos: &prefillRouteNanos,
-                tileNanos: &prefillTileNanos,
-                tailNanos: &prefillTailNanos,
-                activeExperts: &prefillActiveExperts)
+            if pairRoutedMoE, t == 2 {
+                try await encodeRoutedMoEVerifyPair(
+                    cb: &cb, layer: L, views: views, scratch: scratch,
+                    hiddenSize: D)
+            } else {
+                try await encodeRoutedMoEPrefill(
+                    cb: &cb, layer: L, views: views, scratch: scratch,
+                    tokenCount: t, hiddenSize: D,
+                    layerStart: prefillLayerStart,
+                    routeNanos: &prefillRouteNanos,
+                    tileNanos: &prefillTileNanos,
+                    tailNanos: &prefillTailNanos,
+                    activeExperts: &prefillActiveExperts)
+            }
         }
 
         if prefillProfile {
@@ -2852,6 +2889,241 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         try waitForCompletion(finalCB)
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
+        }
+    }
+
+    /// Routed-MoE stage for the width-2 MTP verify pass (B2 pair schedule).
+    ///
+    /// Replaces the prefill tile scheduler for exactly this shape. One union
+    /// cache plan covers both rows' experts, so a shared expert is read from
+    /// SSD once; the miss fetch runs as one parallel batch overlapped with the
+    /// shared-expert GPU work instead of per-tile awaits behind a synchronous
+    /// shared-expert wait; and the routed math uses the decode phase-1/phase-2
+    /// kernels per row, which B1 measured at roughly a third of the grouped
+    /// tile kernels' GPU cost at width 2. Numerics are unchanged: phase 2
+    /// reduces each row's experts in router order with the shared branch as
+    /// its residual, exactly as decode does.
+    ///
+    /// lint:allow-long one layer's verify-MoE stage is a single ordered
+    /// pipeline in the same shape as its decode and tile siblings: route
+    /// readback, union plan, overlapped fetch, per-row encode, commit.
+    private func encodeRoutedMoEVerifyPair(
+        cb: inout MTLCommandBuffer,
+        layer L: Int,
+        views: LayerPrefillQKVViews,
+        scratch: PrefillChunkScratchBuffers,
+        hiddenSize D: Int
+    ) async throws {
+        let t = 2
+        let topK = UInt32(cfg.topKExperts)
+        let FmoE = UInt32(cfg.moeIntermediateSize)
+        let halfBytes = MemoryLayout<Float16>.stride
+        let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
+            (onesPerExpertScale!, 0)
+        try prefillRouter.encodeBlock(
+                    commandBuffer: cb,
+                    weights: views.router.buffer,
+                    weightsOffset: Int(views.router.offset),
+                    scales: views.router.buffer,
+                    scalesOffset: Int(views.router.scaleOffset),
+                    biases: views.router.buffer,
+                    biasesOffset: Int(views.router.biasOffset),
+                    hidden: scratch.routedX,
+                    effectiveScale: effectiveScaleBuffers[L],
+                    perExpertScale: perExpertScale.buffer,
+                    perExpertScaleOffset: perExpertScale.offset,
+                    outIndices: scratch.routeIDs,
+                    outWeights: scratch.routeWeights,
+                    queryCount: UInt32(t),
+                    numExperts: UInt32(cfg.numExperts),
+                    d: UInt32(D),
+                    topK: topK,
+                    hiddenStrideElements: UInt32(D))
+        cb.commit()
+        try waitForCompletion(cb)
+        recordKernelGPU(role: "prefill_attn_router", cb)
+
+        let idPtr = scratch.routeIDs.contents()
+            .bindMemory(to: UInt32.self, capacity: t * cfg.topKExperts)
+        var rowExperts = [[Int]](repeating: [], count: t)
+        var union: [Int] = []
+        var unionIndex: [Int: Int] = [:]
+        for row in 0..<t {
+            for k in 0..<cfg.topKExperts {
+                let expert = min(Int(idPtr[row * cfg.topKExperts + k]),
+                                 cfg.numExperts - 1)
+                rowExperts[row].append(expert)
+                if unionIndex[expert] == nil {
+                    unionIndex[expert] = union.count
+                    union.append(expert)
+                }
+            }
+        }
+
+        let plan = try model.planRoutedExperts(layer: L, experts: union)
+        let lease = try plan.map { try model.pinRoutedExperts(for: $0) }
+        var leaseTransferred = false
+        defer { if !leaseTransferred { lease?.release() } }
+
+        // Shared expert for both rows, committed WITHOUT a host wait so its
+        // GPU work overlaps the union miss fetch below. The tile path's
+        // synchronous wait here was one of B1's three structural findings.
+        guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let sharedProj = sharedExpertProjections[L]
+        try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                                            x: scratch.routedX,
+                                            y: scratch.h1,
+                                            gate: sharedProj.gate,
+                                            up: sharedProj.up,
+                                            down: sharedProj.down,
+                                            scratchGate: scratch.sharedGateScratch,
+                                            scratchUp: scratch.sharedUpScratch,
+                                            scratchAct: scratch.sharedActScratch,
+                                            queryCount: t,
+                                            d: D,
+                                            intermediate: cfg.intermediateSize,
+                                            xStrideElements: D,
+                                            yStrideElements: D)
+        if cfg.sharedExpertGated {
+            let gateView = sharedProj.scalarGate!
+            for row in 0..<t {
+                try int8ScalarGate!.encode(
+                    commandBuffer: sharedCB,
+                    weights: gateView.buffer,
+                    weightsOffset: Int(gateView.offset),
+                    scales: gateView.buffer,
+                    scalesOffset: Int(gateView.scaleOffset),
+                    biases: gateView.buffer,
+                    biasesOffset: Int(gateView.biasOffset),
+                    x: scratch.routedX,
+                    xOffset: row * D * halfBytes,
+                    y: scratch.sharedScalarGate,
+                    yOffset: row * halfBytes,
+                    m: 1, n: UInt32(D))
+            }
+            for row in 0..<t {
+                try elementwise!.encodeSigmoidScalarMul(
+                    commandBuffer: sharedCB,
+                    y: scratch.h1,
+                    yOffset: row * D * halfBytes,
+                    gate: scratch.sharedScalarGate,
+                    gateOffset: row * halfBytes,
+                    count: D)
+            }
+        }
+        sharedCB.commit()
+
+        let blobs: [TensorView]
+        if let plan {
+            if plan.misses.isEmpty {
+                blobs = try model.routedExpertBuffers(for: plan)
+            } else {
+                let load = try model.beginFetchRoutedExperts(plan: plan)
+                blobs = try await load.completion()
+            }
+        } else {
+            blobs = try await model.fetchRoutedExperts(layer: L, experts: union)
+        }
+
+        while verifyPairActs.count < t {
+            guard let made = ctx.device.makeBuffer(
+                length: cfg.topKExperts * cfg.moeIntermediateSize * halfBytes,
+                options: .storageModePrivate) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            made.label = "verify.pair.acts.\(verifyPairActs.count)"
+            verifyPairActs.append(made)
+        }
+        while verifyPairY.count < t {
+            guard let made = ctx.device.makeBuffer(
+                length: D * halfBytes,
+                options: .storageModePrivate) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            made.label = "verify.pair.y.\(verifyPairY.count)"
+            verifyPairY.append(made)
+        }
+        while verifyPairArgBuffers.count < t {
+            guard let made = moe.makeEmptyRoutedArgumentBuffer(device: ctx.device) else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            made.label = "verify.pair.args.\(verifyPairArgBuffers.count)"
+            verifyPairArgBuffers.append(made)
+        }
+
+        let routedOffsets = try model.routedExpertOffsets(layer: L)
+        guard let routedCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        var rowBlobBuffers: [[MTLBuffer]] = []
+        for row in 0..<t {
+            var rowBufs: [MTLBuffer] = []
+            var rowOffsets: [Int] = []
+            rowBufs.reserveCapacity(cfg.topKExperts)
+            rowOffsets.reserveCapacity(cfg.topKExperts)
+            for expert in rowExperts[row] {
+                let view = blobs[unionIndex[expert]!]
+                rowBufs.append(view.buffer)
+                rowOffsets.append(Int(view.offset))
+            }
+            rowBlobBuffers.append(rowBufs)
+            let argBuf = verifyPairArgBuffers[row]
+            moe.writeRoutedArgumentBuffer(argBuf,
+                                          routedBlobs: rowBufs,
+                                          topK: topK,
+                                          routedBufferOffsets: rowOffsets)
+            try moe.encodeRoutedPersistentPhase1U16Load(
+                commandBuffer: routedCB,
+                routedArgBuffer: argBuf,
+                routedBlobs: rowBufs,
+                routedOffsets: routedOffsets,
+                x: scratch.routedX,
+                xOffset: row * D * halfBytes,
+                acts: verifyPairActs[row],
+                d: UInt32(D),
+                f: FmoE,
+                topK: topK)
+        }
+        for row in 0..<t {
+            try moe.encodeRoutedPersistentPhase2Reduce(
+                commandBuffer: routedCB,
+                routedArgBuffer: verifyPairArgBuffers[row],
+                routedBlobs: rowBlobBuffers[row],
+                routedOffsets: routedOffsets,
+                acts: verifyPairActs[row],
+                routingWeights: scratch.routeWeights,
+                routingWeightsOffset: row * cfg.topKExperts * halfBytes,
+                residual: scratch.h1,
+                residualOffset: row * D * halfBytes,
+                y: verifyPairY[row],
+                d: UInt32(D),
+                f: FmoE,
+                topK: topK)
+        }
+        // Phase 2 already folded the shared branch (h1 rows as residual), so
+        // the tail is one residual add per row — the writes into `hidden`
+        // serialize on each other, but they are elementwise and tiny.
+        for row in 0..<t {
+            try elementwise!.encodeResidualAdd(commandBuffer: routedCB,
+                                           hidden: scratch.hidden,
+                                           hiddenOffset: row * D * halfBytes,
+                                           delta: verifyPairY[row],
+                                           count: D)
+        }
+        routedCB.commit()
+        try waitForCompletion(routedCB)
+        recordKernelGPU(role: "prefill_shared_expert", sharedCB)
+        recordKernelGPU(role: "verify_routed_pair", routedCB)
+        lease?.release()
+        leaseTransferred = true
+
+        if L + 1 < cfg.numLayers {
+            guard let nextCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            cb = nextCB
         }
     }
 

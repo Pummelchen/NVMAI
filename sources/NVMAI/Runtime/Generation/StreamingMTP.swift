@@ -97,6 +97,7 @@ public enum StreamingMTPError: Error, Equatable, CustomStringConvertible {
     case greedyOnly
     case draftNotReady
     case yaRNUnsupported
+    case invalidVerifySchedule(String)
     /// A logic invariant the decoder believes is impossible was violated.
     /// Distinct from `.draftNotReady` so a genuine internal bug is debuggable
     /// instead of masquerading as "call advance before prepare" (R24).
@@ -120,6 +121,8 @@ public enum StreamingMTPError: Error, Equatable, CustomStringConvertible {
             "MTP draft state has not been aligned with the target prompt"
         case .yaRNUnsupported:
             "MTP cannot use YaRN until its 65536-token draft cache supports extended logical positions"
+        case .invalidVerifySchedule(let value):
+            "unsupported MTP verify schedule '\(value)'; allowed: pair, tile"
         case .internalInconsistency(let detail):
             "MTP internal inconsistency: \(detail)"
         }
@@ -138,6 +141,12 @@ struct TargetPairVerification: Sendable {
     let predictionAfterSecond: Int32
     /// Two contiguous FP16 pre-final-norm target hidden rows.
     let hiddenRows: Data
+    /// Phase attribution for the B1 investigation (docs/v4.4 Track B):
+    /// wall nanos in the 40-layer prefill-path traversal, the two-row final
+    /// head command buffer, and the two CPU argmax scans respectively.
+    let backboneNanos: UInt64
+    let headNanos: UInt64
+    let argmaxNanos: UInt64
 }
 
 struct MTPPrefillResult: Sendable {
@@ -150,6 +159,38 @@ public struct MTPStatistics: Sendable, Equatable {
     public private(set) var acceptedTokens = 0
     public private(set) var targetBackbonePasses = 0
     public private(set) var emittedTokens = 0
+
+    /// Wall-clock phase attribution across all `advance` calls, in
+    /// nanoseconds. Recording is unconditional — a handful of clock reads per
+    /// ~100 ms pass — because the B1 question ("where does the 1.965x verify
+    /// cost actually go?") must be answerable from any qualification run, not
+    /// only specially instrumented ones.
+    public private(set) var proposalNanos: UInt64 = 0
+    public private(set) var checkpointNanos: UInt64 = 0
+    public private(set) var verifyNanos: UInt64 = 0
+    public private(set) var verifyBackboneNanos: UInt64 = 0
+    public private(set) var verifyHeadNanos: UInt64 = 0
+    public private(set) var verifyArgmaxNanos: UInt64 = 0
+    public private(set) var commitNanos: UInt64 = 0
+    public private(set) var rollbackNanos: UInt64 = 0
+
+    mutating func recordPhases(proposal: UInt64,
+                               checkpoint: UInt64,
+                               verify: UInt64,
+                               verifyBackbone: UInt64,
+                               verifyHead: UInt64,
+                               verifyArgmax: UInt64,
+                               commit: UInt64,
+                               rollback: UInt64) {
+        proposalNanos &+= proposal
+        checkpointNanos &+= checkpoint
+        verifyNanos &+= verify
+        verifyBackboneNanos &+= verifyBackbone
+        verifyHeadNanos &+= verifyHead
+        verifyArgmaxNanos &+= verifyArgmax
+        commitNanos &+= commit
+        rollbackNanos &+= rollback
+    }
 
     public var acceptanceRate: Double {
         draftedTokens == 0 ? 0 : Double(acceptedTokens) / Double(draftedTokens)
@@ -172,6 +213,32 @@ public struct MTPDecodeBatch: Sendable, Equatable {
     public let backedPrefixCount: Int
     public let acceptedDraft: Bool
     public let statistics: MTPStatistics
+}
+
+/// Which routed-MoE schedule serves the width-2 MTP verify pass.
+///
+/// `pair` is the B2 schedule: one union cache plan over both rows' experts,
+/// one parallel miss fetch overlapped with the shared expert, and the decode
+/// phase-1/phase-2 kernels per row. `tile` is the pre-B2 behavior — the
+/// width-4096 prefill tile scheduler at width 2 — kept as the measured
+/// control arm. B1 attributed the old verify's 2.30x-token backbone to that
+/// path: per-tile fetches degraded the hit rate 81% -> 75.1% and read 497 MB
+/// per pass against a 1.585x union model, the shared expert was waited on
+/// synchronously so nothing overlapped the fetch, and the grouped tile
+/// kernels cost ~71 ms/pass GPU against ~22 for the decode kernels.
+public enum RuntimeMTPVerifySchedule: String, Codable, Sendable {
+    case pair
+    case tile
+
+    public static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> RuntimeMTPVerifySchedule {
+        guard let raw = environment["NVMAI_MTP_VERIFY"] else { return .pair }
+        guard let value = RuntimeMTPVerifySchedule(rawValue: raw) else {
+            throw StreamingMTPError.invalidVerifySchedule(raw)
+        }
+        return value
+    }
 }
 
 /// Target-verified greedy native-MTP session. The target always verifies the draft; a
@@ -297,6 +364,7 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
 
     func advance(boundaryToken: Int32) async throws -> MTPDecodeBatch {
         guard let boundaryHidden else { throw StreamingMTPError.draftNotReady }
+        let tProposal = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let draftToken = try await draft.advanceMTP(
             tokens: [boundaryToken][...],
             targetHiddenRows: boundaryHidden,
@@ -310,15 +378,19 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
                 "draft advance returned no prediction token")
         }
 
+        let tCheckpoint = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let checkpoint = try target.captureSpeculativeCheckpoint(
             maximumBytes: memoryPlan.targetRollbackBytes)
+        let tVerify = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let verification = try await target.verifyGreedyPair(
             [boundaryToken, draftToken],
             startPosition: checkpoint.position)
+        let tAfterVerify = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let rowBytes = targetConfig.hiddenSize * MemoryLayout<Float16>.stride
         let hiddenAfterBoundary = verification.hiddenRows.subdata(in: 0..<rowBytes)
         let accepted = verification.predictionAfterFirst == draftToken
         if accepted {
+            let tCommit = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             _ = try await draft.advanceMTP(
                 tokens: [draftToken][...],
                 targetHiddenRows: hiddenAfterBoundary,
@@ -326,6 +398,15 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
                 predictNext: false)
             self.boundaryHidden = verification.hiddenRows.subdata(in: rowBytes..<(2 * rowBytes))
             statistics.record(accepted: true, emitted: 2, targetPasses: 1)
+            statistics.recordPhases(
+                proposal: tCheckpoint &- tProposal,
+                checkpoint: tVerify &- tCheckpoint,
+                verify: tAfterVerify &- tVerify,
+                verifyBackbone: verification.backboneNanos,
+                verifyHead: verification.headNanos,
+                verifyArgmax: verification.argmaxNanos,
+                commit: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tCommit,
+                rollback: 0)
             return MTPDecodeBatch(
                 tokenIDs: [draftToken, verification.predictionAfterSecond],
                 backedPrefixCount: 1,
@@ -336,10 +417,20 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
         // The proposal pass appended one draft KV row. It represented a
         // prediction that the target rejected, so align with Qwen's reference
         // loop by trimming it before the verified replacement is processed.
+        let tRollback = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try draft.rewindMTP(to: draft.continuationPosition - 1)
         try target.rollbackSpeculativeCheckpoint(checkpoint)
         self.boundaryHidden = hiddenAfterBoundary
         statistics.record(accepted: false, emitted: 1, targetPasses: 1)
+        statistics.recordPhases(
+            proposal: tCheckpoint &- tProposal,
+            checkpoint: tVerify &- tCheckpoint,
+            verify: tAfterVerify &- tVerify,
+            verifyBackbone: verification.backboneNanos,
+            verifyHead: verification.headNanos,
+            verifyArgmax: verification.argmaxNanos,
+            commit: 0,
+            rollback: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) &- tRollback)
         return MTPDecodeBatch(tokenIDs: [verification.predictionAfterFirst],
                               backedPrefixCount: 0,
                               acceptedDraft: false,

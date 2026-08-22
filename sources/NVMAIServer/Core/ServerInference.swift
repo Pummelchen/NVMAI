@@ -1209,6 +1209,27 @@ public actor ServerModelSession: ServerInferenceBackend {
                 decodeRate,
                 Double(activeMTP.memoryPlan.requiredBytes) / 1_048_576,
                 Double(activeMTP.memoryPlan.budgetBytes) / 1_048_576))
+            if ProcessInfo.processInfo.environment["NVMAI_RUNNER_STATS"] != nil,
+               stats.targetBackbonePasses > 0 {
+                // Per-pass phase attribution for the Track B1 investigation:
+                // where a verify pass's wall time actually goes. Milliseconds
+                // averaged over the request's target passes.
+                let passes = Double(stats.targetBackbonePasses)
+                let ms: (UInt64) -> Double = { Double($0) / passes / 1_000_000 }
+                print(String(format:
+                    "NVMAI mtp-phases per_pass_ms proposal=%.3f checkpoint=%.3f "
+                        + "verify=%.3f verify_backbone=%.3f verify_head=%.3f "
+                        + "verify_argmax=%.3f commit=%.3f rollback=%.3f passes=%d",
+                    ms(stats.proposalNanos),
+                    ms(stats.checkpointNanos),
+                    ms(stats.verifyNanos),
+                    ms(stats.verifyBackboneNanos),
+                    ms(stats.verifyHeadNanos),
+                    ms(stats.verifyArgmaxNanos),
+                    ms(stats.commitNanos),
+                    ms(stats.rollbackNanos),
+                    stats.targetBackbonePasses))
+            }
         } else {
             let decodeRate = result.decodeSeconds > 0
                 ? Double(result.newTokens) / result.decodeSeconds : 0

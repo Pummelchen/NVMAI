@@ -6,6 +6,7 @@ final class PrefillFinalRowHeadInt4 {
     private let int4: DequantInt4GEMV?
     private let affine: AffineQuantGEMV?
     private let normed: MTLBuffer
+    private let normedPair: MTLBuffer
     private let maxD: Int
 
     init(context: MetalContext, maxD: Int = 2816, weightBits: Int = 4) throws {
@@ -18,10 +19,81 @@ final class PrefillFinalRowHeadInt4 {
             : try AffineQuantGEMV(context: context, weightBits: weightBits)
         self.maxD = maxD
         guard let normed = context.device.makeBuffer(length: maxD * MemoryLayout<Float16>.size,
-                                                     options: .storageModePrivate) else {
+                                                     options: .storageModePrivate),
+              let normedPair = context.device.makeBuffer(length: 2 * maxD * MemoryLayout<Float16>.size,
+                                                         options: .storageModePrivate) else {
             throw MetalError.noDevice
         }
         self.normed = normed
+        self.normedPair = normedPair
+    }
+
+    /// Logits for two consecutive hidden rows with one lm_head weight read.
+    ///
+    /// The single-row `encodeLogits` reads the full lm_head once per call, so
+    /// an MTP verify paid the model's largest weight twice per pass. The
+    /// two-row GEMV serves both rows from one traversal — the same
+    /// amortization `useTwoRowProjection` already applies to attention.
+    /// Writes `[2, vocab]` FP16 logits contiguously at `logits`.
+    func encodeLogitsPair(commandBuffer: MTLCommandBuffer,
+                          hiddenBlock: MTLBuffer,
+                          rowStrideElements: Int,
+                          normWeight: MTLBuffer,
+                          normWeightOffset: Int = 0,
+                          weights: MTLBuffer,
+                          weightsOffset: Int = 0,
+                          scales: MTLBuffer,
+                          scalesOffset: Int = 0,
+                          biases: MTLBuffer,
+                          biasesOffset: Int = 0,
+                          logits: MTLBuffer,
+                          d: UInt32,
+                          vocab: UInt32,
+                          rmsEps: Float) throws {
+        precondition(rowStrideElements >= Int(d), "row stride must cover d")
+        precondition(Int(d) <= maxD, "d=\(d) exceeds maxD=\(maxD)")
+        precondition(d % UInt32(Quantization.groupSize) == 0,
+                     "d must be a multiple of \(Quantization.groupSize)")
+        let halfBytes = MemoryLayout<Float16>.size
+        for row in 0..<2 {
+            try rms.encodeBF16W(commandBuffer: commandBuffer,
+                            x: hiddenBlock,
+                            xOffset: row * rowStrideElements * halfBytes,
+                            weight: normWeight,
+                            weightOffset: normWeightOffset,
+                            out: normedPair,
+                            outOffset: row * Int(d) * halfBytes,
+                            d: d,
+                            eps: rmsEps)
+        }
+        if let affine {
+            try affine.encodeTwoRows(commandBuffer: commandBuffer,
+                          weights: weights,
+                          weightsOffset: weightsOffset,
+                          scales: scales,
+                          scalesOffset: scalesOffset,
+                          biases: biases,
+                          biasesOffset: biasesOffset,
+                          x: normedPair,
+                          y: logits,
+                          m: vocab,
+                          n: d)
+        } else {
+            guard let int4 else {
+                preconditionFailure("PrefillFinalRowHeadInt4 has neither affine nor int4 GEMV (weightBits init contract broken)")
+            }
+            try int4.encodeTwoRows(commandBuffer: commandBuffer,
+                         weights: weights,
+                         weightsOffset: weightsOffset,
+                         scales: scales,
+                         scalesOffset: scalesOffset,
+                         biases: biases,
+                         biasesOffset: biasesOffset,
+                         x: normedPair,
+                         y: logits,
+                         m: vocab,
+                         n: d)
+        }
     }
 
     func encodeLogits(commandBuffer: MTLCommandBuffer,

@@ -121,6 +121,22 @@ import Foundation
     /// completion via `runRawCompletion` (which routes StreamingMTPDecoder
     /// producers through `runStreamingMTPCompletion`). Asserts tokens are
     /// emitted and the acceptance metrics are reported on the decoder.
+    @Test func verifyScheduleControlDefaultsToPairAndFailsClosed() throws {
+        #expect(try RuntimeMTPVerifySchedule.environmentValue([:]) == .pair)
+        #expect(try RuntimeMTPVerifySchedule.environmentValue(
+            ["NVMAI_MTP_VERIFY": "pair"]) == .pair)
+        #expect(try RuntimeMTPVerifySchedule.environmentValue(
+            ["NVMAI_MTP_VERIFY": "tile"]) == .tile)
+        #expect(throws: StreamingMTPError.self) {
+            try RuntimeMTPVerifySchedule.environmentValue(
+                ["NVMAI_MTP_VERIFY": "fast"])
+        }
+        #expect(throws: StreamingMTPError.self) {
+            try RuntimeMTPVerifySchedule.environmentValue(
+                ["NVMAI_MTP_VERIFY": ""])
+        }
+    }
+
     @Test func mtpDecodeLoopEmitsTokensAndReportsAcceptance() async throws {
         let targetDir = try QwenToySynthetic.write()
         defer { try? FileManager.default.removeItem(at: targetDir) }

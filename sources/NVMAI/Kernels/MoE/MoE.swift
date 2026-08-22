@@ -264,6 +264,25 @@ final class MoE {
         encoder.endEncoding()
     }
 
+    /// An argument buffer with no views encoded yet, for callers that
+    /// re-encode per use via `writeRoutedArgumentBuffer`.
+    func makeEmptyRoutedArgumentBuffer(device: MTLDevice) -> MTLBuffer? {
+        device.makeBuffer(length: routedArgEncoder.encodedLength,
+                          options: .storageModeShared)
+    }
+
+    /// Re-encode the views of an argument buffer created by
+    /// `makeRoutedArgumentBuffer`. The caller owns the hazard: the buffer must
+    /// not be rewritten while a committed command still reads it.
+    func writeRoutedArgumentBuffer(_ buffer: MTLBuffer,
+                                   routedBlobs: [MTLBuffer],
+                                   topK: UInt32,
+                                   routedBufferOffsets: [Int]? = nil) {
+        validate(routedBlobs: routedBlobs, topK: topK)
+        encodeRoutedArgumentBuffer(buffer, routedBlobs: routedBlobs,
+                                   routedBufferOffsets: routedBufferOffsets)
+    }
+
     func makeReusedRoutedArgumentBuffer(routedBlobs: [MTLBuffer],
                                                topK: UInt32,
                                                routedBufferOffsets: [Int]? = nil) -> MTLBuffer {
@@ -279,7 +298,9 @@ final class MoE {
         routedBlobs: [MTLBuffer],
         routedOffsets: MoEExpertOffsets,
         x: MTLBuffer,
+        xOffset: Int = 0,
         acts: MTLBuffer,
+        actsOffset: Int = 0,
         d: UInt32,
         f: UInt32,
         topK: UInt32,
@@ -301,8 +322,8 @@ final class MoE {
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
-        encoder.setBuffer(x, offset: 0, index: 2)
-        encoder.setBuffer(acts, offset: 0, index: 3)
+        encoder.setBuffer(x, offset: xOffset, index: 2)
+        encoder.setBuffer(acts, offset: actsOffset, index: 3)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
@@ -376,9 +397,13 @@ final class MoE {
         routedBlobs: [MTLBuffer],
         routedOffsets: MoEExpertOffsets,
         acts: MTLBuffer,
+        actsOffset: Int = 0,
         routingWeights: MTLBuffer,
+        routingWeightsOffset: Int = 0,
         residual: MTLBuffer,
+        residualOffset: Int = 0,
         y: MTLBuffer,
+        yOffset: Int = 0,
         d: UInt32,
         f: UInt32,
         topK: UInt32,
@@ -399,10 +424,10 @@ final class MoE {
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
-        encoder.setBuffer(acts, offset: 0, index: 2)
-        encoder.setBuffer(routingWeights, offset: 0, index: 3)
-        encoder.setBuffer(residual, offset: 0, index: 4)
-        encoder.setBuffer(y, offset: 0, index: 5)
+        encoder.setBuffer(acts, offset: actsOffset, index: 2)
+        encoder.setBuffer(routingWeights, offset: routingWeightsOffset, index: 3)
+        encoder.setBuffer(residual, offset: residualOffset, index: 4)
+        encoder.setBuffer(y, offset: yOffset, index: 5)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
         encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
