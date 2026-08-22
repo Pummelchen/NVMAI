@@ -2941,7 +2941,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     hiddenStrideElements: UInt32(D))
         cb.commit()
         try waitForCompletion(cb)
-        recordKernelGPU(role: "prefill_attn_router", cb)
+        recordKernelGPU(role: cfg.layerIsLinear(L) ? "prefill_gdn_router"
+                            : "prefill_attn_router", cb)
 
         let idPtr = scratch.routeIDs.contents()
             .bindMemory(to: UInt32.self, capacity: t * cfg.topKExperts)
@@ -3176,7 +3177,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 // Prefill had no occupancy instrumentation at all: these buffers
                 // never reached recordKernelGPU, so NVMAI_KERNEL_STATS reported
                 // only the decode tokens of a request and prefill looked idle.
-                recordKernelGPU(role: "prefill_attn_router", cb)
+                // Split by layer kind: the Track A go/no-go needs to know how
+                // the attention-block time divides between full-attention
+                // layers (whole block is ANE-expressible) and Gated-DeltaNet
+                // layers (only the dense projections are; the recurrent scan
+                // is not representable in a static Core ML graph).
+                recordKernelGPU(role: cfg.layerIsLinear(L) ? "prefill_gdn_router"
+                                    : "prefill_attn_router", cb)
 
                 let routeCount = t * cfg.topKExperts
                 let idPtr = scratch.routeIDs.contents()
