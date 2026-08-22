@@ -298,6 +298,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     private let expertIOSubmission: RuntimeExpertIOSubmission
     private let expertIOBackend: ExpertIOBackend
     private let predictivePrefetch: ExpertPrefetchRing?
+    private let anePrefill: ANEPrefillAttention?
     private let predictivePrefetchTopM: Int
     public let rdadviseEnabled: Bool
     public let rdadvisePolicyMode: RDAdvicePolicyMode
@@ -348,6 +349,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 device: context.device,
                 expertStride: model.routedExpertByteStride(layer: 0),
                 slotCount: rawPrefetchTopM)
+            : nil
+        // Track A: the ANE prefill sidecar, opt-in. Only the qwen36 target
+        // family qualifies (the one-layer MTP draft has no exported sidecar
+        // and must stay silently on the GPU); with the switch on and the
+        // sidecar missing, construction fails closed with the export command.
+        self.anePrefill = try RuntimePrefillANE.environmentValue() == .on
+                && model.config.family == .qwen36
+            ? try ANEPrefillAttention(
+                modelDirectory: model.directoryURL,
+                device: context.device,
+                hiddenSize: model.config.hiddenSize,
+                kvDim: model.config.numFullKVHeads * model.config.fullHeadDim)
             : nil
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
@@ -1595,6 +1608,25 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 vocab: UInt32(cfg.vocabSize))
         }
 
+        // Track A: whether this chunk's full-attention layers run on the ANE.
+        // The MTP verify (two-row projection / GDN snapshot), MTP adapter
+        // chunks (preparedHidden), non-4096 chunk configs, and prompts beyond
+        // the sidecar's history variants all stay on the GPU; continuity is
+        // enforced inside eligibleChunk so a fallback mid-prompt sticks for
+        // the rest of the request.
+        let aneChunk: ANEPrefillAttention? = {
+            guard let ane = anePrefill,
+                  !snapshotGDNAfterFirstToken,
+                  !useTwoRowProjection,
+                  !pairRoutedMoE,
+                  preparedHidden == nil,
+                  ane.eligibleChunk(startPosition: startPosition,
+                                    tokenCount: tokens.count,
+                                    configChunkTokens: config.chunkTokens)
+            else { return nil }
+            return ane
+        }()
+
         let prefillProfile = ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] != nil
         var prefillRouteNanos: UInt64 = 0
         var prefillTileNanos: UInt64 = 0
@@ -1627,6 +1659,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     tokenCount: t, hiddenSize: D,
                     snapshotGDNAfterFirstToken: snapshotGDNAfterFirstToken,
                     useTwoRowProjection: useTwoRowProjection)
+            } else if let ane = aneChunk, ane.coveredLayers.contains(L) {
+                try await runANEFullAttentionPrefill(
+                    ane: ane, cb: &cb, layer: L, scratch: scratch,
+                    tokenCount: t, hiddenSize: D,
+                    startPosition: startPosition, kvDim: kvDim)
             } else {
                 try encodeFullAttentionPrefill(
                     cb: cb, layer: L, views: views, scratch: scratch,
@@ -1683,8 +1720,64 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                 outputMode: outputMode)
         }
 
+        aneChunk?.finishChunk(startPosition: startPosition,
+                              tokenCount: tokens.count)
         kv?.advance(by: tokens.count)
         prefillChunkState.markCommitted()
+    }
+
+    /// One full-attention layer's prefill attention on the Neural Engine
+    /// (Track A). The layer's input norm is already encoded on `cb`; this
+    /// stages it out, waits, predicts, and rebinds `cb` so the rest of the
+    /// layer (KV quantization, residual, MoE) proceeds exactly as on the GPU
+    /// path — `stagingK`/`stagingV` stand in for `kStage`/`vStage` and the
+    /// attention output is blitted into `h1` for the generic residual tail.
+    private func runANEFullAttentionPrefill(
+        ane: ANEPrefillAttention,
+        cb: inout MTLCommandBuffer,
+        layer L: Int,
+        scratch: PrefillChunkScratchBuffers,
+        tokenCount t: Int,
+        hiddenSize D: Int,
+        startPosition: Int,
+        kvDim: Int
+    ) async throws {
+        let halfBytes = MemoryLayout<Float16>.stride
+        guard let stage = cb.makeBlitCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        stage.copy(from: scratch.normed, sourceOffset: 0,
+                   to: ane.stagingNormed, destinationOffset: 0,
+                   size: t * D * halfBytes)
+        stage.endEncoding()
+        cb.commit()
+        try waitForCompletion(cb)
+        recordKernelGPU(role: "prefill_ane_stage", cb)
+
+        try await ane.predict(layer: L, history: startPosition, tokenCount: t)
+        ane.appendShadow(layer: L, startPosition: startPosition, tokenCount: t)
+
+        guard let next = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        cb = next
+        if let kv {
+            try copyPrefillKVToCache(commandBuffer: cb,
+                                     kv: kv,
+                                     layer: L,
+                                     startPosition: startPosition,
+                                     tokenCount: t,
+                                     keySource: ane.stagingK,
+                                     valueSource: ane.stagingV,
+                                     bytesPerToken: kvDim * halfBytes)
+        }
+        guard let out = cb.makeBlitCommandEncoder() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        out.copy(from: ane.stagingOut, sourceOffset: 0,
+                 to: scratch.h1, destinationOffset: 0,
+                 size: t * D * halfBytes)
+        out.endEncoding()
     }
 
     /// lint:allow-long the orchestrator for one decode step, in the same
@@ -1699,6 +1792,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             throw PrefillError.prefillCursorMismatch(
                 "produce cursor \(kvPosition) != position \(position)")
         }
+        // Decode must not share RAM with an idle ANE context (Track A):
+        // prompts that end exactly on a chunk boundary reach here with the
+        // last model still resident. No-op when ANE prefill is off or empty.
+        anePrefill?.releaseModels()
         try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(
