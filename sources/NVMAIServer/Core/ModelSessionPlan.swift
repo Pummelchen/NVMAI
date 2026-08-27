@@ -39,6 +39,7 @@ enum ServerModelIdentity {
         switch family {
         case .qwen36: return "qwen3.6-35b-a3b"
         case .qwen36MTP: return "qwen3.6-35b-a3b-mtp"
+        case .qwen38flash: return "qwen3.8-flash-next"
         }
     }
 }

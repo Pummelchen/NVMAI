@@ -197,6 +197,10 @@ public enum ManifestReader {
             allowedRouterBits = [4, 8]
         case .qwen36:
             allowedRouterBits = [8]
+        case .qwen38flash:
+            // The community MLX checkpoints quantize the router at the model's
+            // uniform width (4 or 8 bits, group 32).
+            allowedRouterBits = [4, 8]
         }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
             ("embedding", quant.embedding, Self.supportedWeightBits),
