@@ -76,6 +76,9 @@ def launch(quant: str, ane: bool, log_name: str) -> None:
     g0._servers.append(proc)
 
 
+MAX_TOKENS = 48
+
+
 def generate(prompt: str, max_tokens: int) -> dict | None:
     payload = json.dumps({
         "model": DEFAULT_API_MODEL,
@@ -110,7 +113,7 @@ def one_run(quant: str, ane: bool, prompt: str, tag: str) -> dict:
     if not g0.wait_ready(PORT):
         g0._terminate_all()
         raise SystemExit(f"[{quant}/{arm}] server not healthy")
-    result = generate(prompt, 48)
+    result = generate(prompt, MAX_TOKENS)
     g0._terminate_all()
     if result is None:
         raise SystemExit(f"[{quant}/{arm}] request failed")
@@ -131,7 +134,15 @@ def main() -> int:
     parser.add_argument("--quant", choices=sorted(MODELS), default="4bit")
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--allow-busy-gpu", action="store_true")
+    # 48 tokens is enough to prove decode still runs, but far too short to
+    # separate a one-time expert-cache re-warm after prefill from a real
+    # steady-state rate change: at 8-bit the two differ by 100x in cost.
+    parser.add_argument("--max-tokens", type=int, default=48,
+                        help="generated tokens per run; raise it to measure "
+                             "steady-state decode rather than the transient")
     args = parser.parse_args()
+    global MAX_TOKENS
+    MAX_TOKENS = args.max_tokens
 
     signal.signal(signal.SIGINT, g0._on_signal)
     signal.signal(signal.SIGTERM, g0._on_signal)
