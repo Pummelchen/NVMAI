@@ -197,12 +197,26 @@ verified geometry above and adds facts the config/source audit could not show:
 - **MTP is multi-step trained** for higher real acceptance, and its
   full-attention layers use QSA too. Still last in phasing; the 35 B verify
   economics don't transfer, so it would need fresh qualification.
-- **Reasoning effort may no longer be binary.** The QwenCloud API exposes
-  `reasoning_effort` levels `low|medium|xhigh` plus `enable_thinking`. If
-  the open-weights chat template defines these levels, the NVMAI thinking
-  switch (binary off/on for Ornith/Qwen 3.6) must grow a per-family effort
-  control for this model. **Verify against the HF chat template at release**
-  before wiring the server/CLI surface.
+- **Reasoning effort is not binary — verified and implemented.** The pinned
+  upstream `chat_template.jinja` (fetched 2026-08-27) defines
+  `reasoning_effort` `low|medium|xhigh` (default `xhigh`) while
+  `enable_thinking` is on: `xhigh` and `low` inject an instruction sentence
+  at the head of the system block, `medium` injects nothing, and invalid
+  values raise. Thinking on also pre-opens `<think>\n` in the generation
+  prompt (the off branch emits the closed block), and upstream
+  `generation_config.json` defaults to temperature 1.0 / Top-K 20 /
+  Top-P 0.95 — a per-family sampling-default question for P1. NVMAI now has
+  the per-family control: `ModelFamily.reasoningControl` gates
+  `--reasoning-effort` / `NVMAI_REASONING_EFFORT` / the API's
+  `reasoning_effort` field (binary families reject them; effort is a
+  load-time control validated against the manifest family), the tokenizer
+  passes the effort into the bundled template and mirrors its system-block
+  injection on the manual ChatML path, and the real template renders
+  correctly under the Swift Jinja engine (fixture-tested, including the
+  effort sentences). Remaining P1 wiring: `ManifestReader.peekIdentity`
+  must learn to report `qwen38flash` (it derives qwen36/qwen36MTP from
+  layer shape today), and the Mac app picker stays binary until the model
+  is installable.
 - **Totals as marketed**: 125 B backbone + 51 B n-gram + 6 B active/token;
   native 262,144 context, YaRN to 1M — matching the ArchConfig. Weights are
   live on HF/ModelScope (bf16 official); still no official MLX artifact, so

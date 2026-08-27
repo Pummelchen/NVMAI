@@ -138,13 +138,41 @@ import Testing
         }
     }
 
+    @Test func reasoningEffortParsesOnlyTheTemplateLevels() throws {
+        let parsed = try Args.parse([
+            "--model", "m.gturbo", "--prompt", "hi",
+            "--thinking", "on", "--reasoning-effort", "low",
+        ])
+        #expect(parsed.reasoningEffort == .low)
+        let unset = try Args.parse(["--model", "m.gturbo", "--prompt", "hi"])
+        #expect(unset.reasoningEffort == nil)
+        // The template defines low, medium, and xhigh; "high" does not exist.
+        #expect(throws: ArgsError.invalidValue(flag: "--reasoning-effort",
+                                               value: "high")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--thinking", "on", "--reasoning-effort", "high",
+            ])
+        }
+    }
+
+    @Test func reasoningEffortRequiresThinkingOn() {
+        #expect(throws: ArgsError.invalidValue(
+            flag: "--reasoning-effort", value: "low requires --thinking on")) {
+            _ = try Args.parse([
+                "--model", "m.gturbo", "--prompt", "hi",
+                "--reasoning-effort", "low",
+            ])
+        }
+    }
+
     @Test func helpListsExactlyThePublicOptions() {
         let expected: Set<String> = [
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--help",
             "--rdadvise", "--expert-cache-slots", "--prefill-chunk", "--concise",
-            "--kv-bits", "--rope-scaling", "--thinking",
+            "--kv-bits", "--rope-scaling", "--thinking", "--reasoning-effort",
         ]
         let words = Args.usage.split { $0.isWhitespace || $0 == "(" || $0 == ")" }
         let options = Set(words.map(String.init).filter { $0.hasPrefix("--") })

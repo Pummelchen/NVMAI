@@ -21,6 +21,7 @@ public actor NVMAIHTTPServer {
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
+    private let reasoningProfile: ServerReasoningProfile
     private let childChannels = ChildChannelRegistry(
         maximumChannels: maximumConcurrentConnections)
     private var channel: Channel?
@@ -30,12 +31,14 @@ public actor NVMAIHTTPServer {
                 queueLimit: Int,
                 backend: any ServerInferenceBackend,
                 heartbeatInterval: TimeAmount = .seconds(5),
+                reasoningProfile: ServerReasoningProfile = .default,
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
         self.backend = backend
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
+        self.reasoningProfile = reasoningProfile
     }
 
     public func start(port: Int) async throws -> Channel {
@@ -43,6 +46,7 @@ public actor NVMAIHTTPServer {
         let backend = self.backend
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
+        let reasoningProfile = self.reasoningProfile
         let childChannels = self.childChannels
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 16)
@@ -58,6 +62,7 @@ public actor NVMAIHTTPServer {
                         backend: backend,
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
+                        reasoningProfile: reasoningProfile,
                         childChannels: childChannels))
                 }
             }
@@ -145,6 +150,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
+    private let reasoningProfile: ServerReasoningProfile
     private let childChannels: ChildChannelRegistry
     private var head: HTTPRequestHead?
     private var body = ByteBuffer()
@@ -170,8 +176,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          backend: any ServerInferenceBackend,
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
+         reasoningProfile: ServerReasoningProfile,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
+        self.reasoningProfile = reasoningProfile
         self.backend = backend
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
@@ -342,7 +350,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let decoded = try JSONDecoder().decode(
                 OpenAIChatRequest.self, from: Data(body.readableBytesView))
             let request = try OpenAIRequestValidator.validate(
-                decoded, modelID: modelID, maxContext: backend.maximumContext)
+                decoded, modelID: modelID, maxContext: backend.maximumContext,
+                reasoningProfile: reasoningProfile)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -484,7 +493,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
             let chatRequest = try ResponsesAPIMapper.chatRequest(decoded)
             let request = try OpenAIRequestValidator.validate(
-                chatRequest, modelID: modelID, maxContext: backend.maximumContext)
+                chatRequest, modelID: modelID, maxContext: backend.maximumContext,
+                reasoningProfile: reasoningProfile)
             let responseID = ResponsesAPIBuilder.responseID()
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -594,10 +604,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                       store: Bool?) -> EventLoopFuture<Void> {
         let response = ResponsesAPIBuilder.responseObject(
             id: id, created: created, model: modelID, status: "in_progress",
-            output: [], usage: nil, store: store ?? false)
+            output: [], usage: nil, store: store ?? false,
+            reasoningEffort: reasoningProfile.effectiveEffort)
         let createdEvent = ResponsesAPIBuilder.responseObject(
             id: id, created: created, model: modelID, status: "in_progress",
-            output: [], usage: nil, store: store ?? false)
+            output: [], usage: nil, store: store ?? false,
+            reasoningEffort: reasoningProfile.effectiveEffort)
         var frames = Data()
         if let frame = Self.eventFrame(name: "response.created",
                                        object: ["type": "response.created", "response": response]),
@@ -760,7 +772,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             object: ["type": "response.completed",
                      "response": ResponsesAPIBuilder.responseObject(
                         id: id, created: created, model: modelID, status: "completed",
-                        output: output, usage: completion.usage)]) {
+                        output: output, usage: completion.usage,
+                        reasoningEffort: reasoningProfile.effectiveEffort)]) {
             _ = outbox.enqueue(frame)
         }
         outbox.enqueueTerminal([Self.doneFrame()], closeWhenDrained: false)
@@ -775,7 +788,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         writeJSON(context, status: .ok, object:
                   ResponsesAPIBuilder.responseObject(
                     id: id, created: created, model: modelID, status: "completed",
-                    output: output, usage: completion.usage))
+                    output: output, usage: completion.usage,
+                    reasoningEffort: reasoningProfile.effectiveEffort))
     }
 
     private func writeCompletion(_ context: ChannelHandlerContext,

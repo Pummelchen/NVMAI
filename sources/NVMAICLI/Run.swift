@@ -52,9 +52,18 @@ public func run(args: Args,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
         let modelURL = URL(fileURLWithPath: args.model)
+        // Reasoning effort is defined per family; check it against the
+        // installed manifest before any heavier work. An unreadable manifest
+        // is left for the model load below, which reports it better.
+        if args.reasoningEffort != nil,
+           let family = try? ManifestReader.peekFamily(directoryURL: modelURL) {
+            try family.validateReasoning(thinkingMode: args.thinkingMode,
+                                         effort: args.reasoningEffort)
+        }
         let tokenizer = try await GFTokenizer.load(
             forModelDirectory: modelURL,
-            thinkingMode: args.thinkingMode)
+            thinkingMode: args.thinkingMode,
+            reasoningEffort: args.reasoningEffort)
         // Concise mode injects a per-quantization system prompt. The routed
         // expert bit width comes from the manifest so the right prompt
         // variant is selected before the full model load.

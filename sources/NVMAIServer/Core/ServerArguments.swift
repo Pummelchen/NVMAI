@@ -20,6 +20,10 @@ public struct ServerArguments: Equatable, Sendable {
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let thinkingMode: ModelThinkingMode
+    /// Reasoning-effort override for effort-aware model families; nil keeps
+    /// the template default. Family support is validated at startup against
+    /// the installed manifest.
+    public let reasoningEffort: ModelReasoningEffort?
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use. Slots are derived from it and the
     /// model's own expert stride, so this is the knob and the slot count is the
@@ -76,6 +80,12 @@ public struct ServerArguments: Equatable, Sendable {
       --thinking <off|on>    Ornith/Qwen reasoning mode (default off, or
                              NVMAI_THINKING_MODE). The model does not expose
                              low/medium/high effort levels.
+      --reasoning-effort <low|medium|xhigh>
+                             Reasoning-effort level (default unset, or
+                             NVMAI_REASONING_EFFORT). Requires --thinking on
+                             and a model family whose chat template defines
+                             effort levels (Qwen3.8-Flash-Next); Ornith 1.5
+                             and Qwen 3.6 reject it.
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer: 8, 16, 24,
                              32, 64, 96, or 128 (default 64). Environment
@@ -123,6 +133,7 @@ public struct ServerArguments: Equatable, Sendable {
         var kvCachePrecision: KVCachePrecision = .int8
         var ropeScalingMode: RuntimeRoPEScalingMode = .none
         var thinkingMode = ModelThinkingMode.resolved(environment: environment)
+        var reasoningEffort = ModelReasoningEffort.resolved(environment: environment)
         var expertCacheSlots: Int?
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
@@ -233,6 +244,12 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--thinking must be off or on")
                 }
                 thinkingMode = parsed
+            case "--reasoning-effort":
+                guard let parsed = ModelReasoningEffort(rawValue: value) else {
+                    throw ServerArgumentError.invalid(
+                        "--reasoning-effort must be low, medium, or xhigh")
+                }
+                reasoningEffort = parsed
             case "--expert-cache-slots":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
@@ -274,6 +291,11 @@ public struct ServerArguments: Equatable, Sendable {
             throw ServerArgumentError.invalid(
                 "--mtp-model cannot be combined with --rope-scaling yarn")
         }
+        if let effort = reasoningEffort, !thinkingMode.isEnabled {
+            throw ServerArgumentError.invalid(
+                "--reasoning-effort \(effort.rawValue) requires --thinking on; "
+                + "the chat template ignores effort while thinking is off")
+        }
         return ServerArguments(model: model,
                                mtpModel: mtpModel,
                                mtpMemoryMiB: mtpMemoryMiB,
@@ -290,6 +312,7 @@ public struct ServerArguments: Equatable, Sendable {
                                kvCachePrecision: kvCachePrecision,
                                ropeScalingMode: ropeScalingMode,
                                thinkingMode: thinkingMode,
+                               reasoningEffort: reasoningEffort,
                                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,

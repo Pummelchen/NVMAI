@@ -42,6 +42,11 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
         public let parameters: JSONValue?
     }
 
+    /// The Responses API's nested reasoning options; only `effort` is read.
+    public struct Reasoning: Codable, Equatable, Sendable {
+        public let effort: String?
+    }
+
     public let model: String
     public let instructions: String?
     public let input: [Item]?
@@ -55,9 +60,10 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
     public let presencePenalty: Float?
     public let stream: Bool?
     public let store: Bool?
+    public let reasoning: Reasoning?
 
     enum CodingKeys: String, CodingKey {
-        case model, instructions, input, tools, stream, store, temperature
+        case model, instructions, input, tools, stream, store, temperature, reasoning
         case toolChoice = "tool_choice"
         case parallelToolCalls = "parallel_tool_calls"
         case maxOutputTokens = "max_output_tokens"
@@ -187,7 +193,8 @@ public enum ResponsesAPIMapper {
             logprobs: nil,
             presencePenalty: request.presencePenalty
                 ?? GenerationDefaults.presencePenalty,
-            frequencyPenalty: nil)
+            frequencyPenalty: nil,
+            reasoningEffort: request.reasoning?.effort)
     }
 }
 
@@ -205,7 +212,8 @@ public enum ResponsesAPIBuilder {
                                       output: [[String: Any]],
                                       usage: OpenAIUsage?,
                                       store: Bool = false,
-                                      temperature: Float? = nil) -> [String: Any] {
+                                      temperature: Float? = nil,
+                                      reasoningEffort: ModelReasoningEffort? = nil) -> [String: Any] {
         var object: [String: Any] = [
             "id": id,
             "object": "response",
@@ -219,7 +227,8 @@ public enum ResponsesAPIBuilder {
             "output": output,
             "parallel_tool_calls": true,
             "previous_response_id": NSNull(),
-            "reasoning": ["effort": NSNull(), "summary": NSNull()],
+            "reasoning": ["effort": reasoningEffort.map { $0.rawValue as Any } ?? NSNull(),
+                          "summary": NSNull()],
             "store": store,
             "temperature": temperature.map { $0 as Any } ?? NSNull(),
             "text": ["format": ["type": "text"]],

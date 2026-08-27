@@ -471,6 +471,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                             kvCachePrecision: KVCachePrecision = .int8,
                             ropeScalingMode: RuntimeRoPEScalingMode = .none,
                             thinkingMode: ModelThinkingMode = .off,
+                            reasoningEffort: ModelReasoningEffort? = nil,
                             expertCacheSlots requestedExpertCacheSlots: Int? = nil,
                             expertCacheBudgetBytes: Int? = nil,
                             mtpModelDirectory: URL? = nil,
@@ -484,9 +485,18 @@ public actor ServerModelSession: ServerInferenceBackend {
         guard FileManager.default.fileExists(atPath: templateURL.path) else {
             throw GFTokenizerError.missingToolTemplate
         }
+        // Reasoning effort is defined per family; reject it before the
+        // tokenizer bakes an unsupported control into its rendering. An
+        // unreadable manifest is left for Model.load, which reports it better.
+        if reasoningEffort != nil,
+           let family = try? ManifestReader.peekFamily(directoryURL: modelDirectory) {
+            try family.validateReasoning(thinkingMode: thinkingMode,
+                                         effort: reasoningEffort)
+        }
         let tokenizer = try await GFTokenizer.load(
             from: tokenizerFolder,
-            thinkingMode: thinkingMode)
+            thinkingMode: thinkingMode,
+            reasoningEffort: reasoningEffort)
         // A caller managing model residency supplies its own context so one
         // MTLCommandQueue and one compiled shader library survive across
         // unload/reload cycles (MetalContext.deinit documents that queue

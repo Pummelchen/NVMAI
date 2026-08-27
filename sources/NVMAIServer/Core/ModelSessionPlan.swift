@@ -61,6 +61,9 @@ public struct ModelSessionPlan: Sendable {
     public let kvCachePrecision: KVCachePrecision
     public let ropeScalingMode: RuntimeRoPEScalingMode
     public let thinkingMode: ModelThinkingMode
+    /// Reasoning-effort override for effort-aware families; nil keeps the
+    /// template default. Family support is validated on load and preview.
+    public let reasoningEffort: ModelReasoningEffort?
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use; slots are derived from it.
     public let expertCacheBudgetBytes: Int?
@@ -78,6 +81,7 @@ public struct ModelSessionPlan: Sendable {
                 kvCachePrecision: KVCachePrecision = .int8,
                 ropeScalingMode: RuntimeRoPEScalingMode = .none,
                 thinkingMode: ModelThinkingMode = .off,
+                reasoningEffort: ModelReasoningEffort? = nil,
                 expertCacheSlots: Int?,
                 expertCacheBudgetBytes: Int? = nil,
                 mtpModelDirectory: URL?,
@@ -93,6 +97,7 @@ public struct ModelSessionPlan: Sendable {
         self.kvCachePrecision = kvCachePrecision
         self.ropeScalingMode = ropeScalingMode
         self.thinkingMode = thinkingMode
+        self.reasoningEffort = reasoningEffort
         self.expertCacheSlots = expertCacheSlots
         self.expertCacheBudgetBytes = expertCacheBudgetBytes
         self.mtpModelDirectory = mtpModelDirectory
@@ -114,6 +119,7 @@ public struct ModelSessionPlan: Sendable {
             kvCachePrecision: kvCachePrecision,
             ropeScalingMode: ropeScalingMode,
             thinkingMode: thinkingMode,
+            reasoningEffort: reasoningEffort,
             expertCacheSlots: expertCacheSlots,
             expertCacheBudgetBytes: expertCacheBudgetBytes,
             mtpModelDirectory: mtpModelDirectory,
@@ -126,9 +132,22 @@ public struct ModelSessionPlan: Sendable {
     ///
     /// Throwing here also preserves the eager path's behaviour that a bad
     /// `--model` fails at launch rather than on the first request.
+    /// The per-family reasoning profile the HTTP layer validates requests
+    /// against. Reads `manifest.json` only.
+    public func reasoningProfile() throws -> ServerReasoningProfile {
+        let family = try ManifestReader.peekIdentity(directoryURL: modelDirectory).family
+        return ServerReasoningProfile(family: family,
+                                      thinkingMode: thinkingMode,
+                                      reasoningEffort: reasoningEffort)
+    }
+
     public func previewFacts(modelIDOverride: String? = nil) throws -> ModelSessionFacts {
         let identity = try ManifestReader.peekIdentity(directoryURL: modelDirectory)
         let family = identity.family
+        // Fail a lazy-load server at launch, not on the first request, when
+        // the installed family's template defines no effort levels.
+        try family.validateReasoning(thinkingMode: thinkingMode,
+                                     effort: reasoningEffort)
         let defaultModelID = ServerModelIdentity.apiModelID(
             manifestModelID: identity.modelID,
             family: family)

@@ -20,6 +20,7 @@ public struct Args: Equatable, Sendable {
     public var quiet: Bool
     public var concise: Bool
     public var thinkingMode: ModelThinkingMode
+    public var reasoningEffort: ModelReasoningEffort?
     public var expertCacheSlots: Int
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice?
@@ -40,6 +41,7 @@ public struct Args: Equatable, Sendable {
                 quiet: Bool = false,
                 concise: Bool = false,
                 thinkingMode: ModelThinkingMode = .off,
+                reasoningEffort: ModelReasoningEffort? = nil,
                 expertCacheSlots: Int = 64,
                 rdadvise: String = "default",
                 prefillChunk: PrefillChunkChoice? = nil,
@@ -64,6 +66,7 @@ public struct Args: Equatable, Sendable {
         self.quiet = quiet
         self.concise = concise
         self.thinkingMode = thinkingMode
+        self.reasoningEffort = reasoningEffort
     }
 }
 
@@ -127,6 +130,11 @@ extension Args {
                                 filler, or closing codas).
       --thinking <off|on>       Ornith/Qwen reasoning mode (default off).
                                 These models do not define effort levels.
+      --reasoning-effort <lvl>  Reasoning-effort level: low, medium, or
+                                xhigh. Requires --thinking on and a model
+                                family whose chat template defines effort
+                                levels (Qwen3.8-Flash-Next); Ornith 1.5 and
+                                Qwen 3.6 reject it.
       --quiet                   Suppress the timing footer.
       --help                    Show this message.
     """
@@ -149,6 +157,7 @@ extension Args {
         var quiet = false
         var concise = false
         var thinkingMode: ModelThinkingMode = .off
+        var reasoningEffort: ModelReasoningEffort?
         var expertCacheSlots = 64
         var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
@@ -173,6 +182,12 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 thinkingMode = parsed
+            case "--reasoning-effort":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let parsed = ModelReasoningEffort(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                reasoningEffort = parsed
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -287,6 +302,13 @@ extension Args {
         } else if maxContext > RuntimeConfiguration.nativeMaximumContextTokens {
             throw ArgsError.invalidValue(flag: "--max-context", value: String(maxContext))
         }
+        // Family support is checked in Run against the installed manifest;
+        // the effort/thinking combination is a pure argument error here.
+        if let effort = reasoningEffort, !thinkingMode.isEnabled {
+            throw ArgsError.invalidValue(
+                flag: "--reasoning-effort",
+                value: "\(effort.rawValue) requires --thinking on")
+        }
         return Args(model: model,
                     prompt: prompt,
                     messagesFile: messagesFile,
@@ -301,6 +323,7 @@ extension Args {
                     quiet: quiet,
                     concise: concise,
                     thinkingMode: thinkingMode,
+                    reasoningEffort: reasoningEffort,
                     expertCacheSlots: expertCacheSlots,
                     rdadvise: rdadvise,
                     prefillChunk: prefillChunk,

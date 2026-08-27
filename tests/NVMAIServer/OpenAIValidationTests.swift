@@ -427,4 +427,92 @@ struct ServerArgumentTests {
             ])
         }
     }
+
+    private static func effortRequest(_ effort: String) throws -> OpenAIChatRequest {
+        try JSONDecoder().decode(OpenAIChatRequest.self, from: Data("""
+        {"model":"m","messages":[{"role":"user","content":"x"}],\
+        "reasoning_effort":"\(effort)"}
+        """.utf8))
+    }
+
+    @Test func reasoningEffortIsRejectedForBinaryFamilies() throws {
+        let request = try Self.effortRequest("low")
+        // The default profile is the compatible Qwen3.5-MoE baseline, whose
+        // template defines no effort levels.
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(request, modelID: "m")
+        }
+    }
+
+    @Test func reasoningEffortMustMatchTheLoadTimeProfile() throws {
+        let profile = ServerReasoningProfile(family: .qwen38flash,
+                                             thinkingMode: .on,
+                                             reasoningEffort: nil)
+        // With no override the template default xhigh is the active level.
+        _ = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("xhigh"), modelID: "m",
+            reasoningProfile: profile)
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(
+                try Self.effortRequest("low"), modelID: "m",
+                reasoningProfile: profile)
+        }
+        let lowProfile = ServerReasoningProfile(family: .qwen38flash,
+                                                thinkingMode: .on,
+                                                reasoningEffort: .low)
+        _ = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("low"), modelID: "m",
+            reasoningProfile: lowProfile)
+    }
+
+    @Test func reasoningEffortRequiresThinkingOnAndAKnownLevel() throws {
+        let offProfile = ServerReasoningProfile(family: .qwen38flash,
+                                                thinkingMode: .off,
+                                                reasoningEffort: nil)
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(
+                try Self.effortRequest("low"), modelID: "m",
+                reasoningProfile: offProfile)
+        }
+        let onProfile = ServerReasoningProfile(family: .qwen38flash,
+                                               thinkingMode: .on,
+                                               reasoningEffort: nil)
+        // The template defines low, medium, and xhigh; "high" does not exist.
+        #expect(throws: ServerRequestError.self) {
+            try OpenAIRequestValidator.validate(
+                try Self.effortRequest("high"), modelID: "m",
+                reasoningProfile: onProfile)
+        }
+    }
+
+    @Test func responsesReasoningEffortMapsIntoTheChatRequest() throws {
+        let decoded = try JSONDecoder().decode(ResponsesAPIRequest.self, from: Data("""
+        {"model":"m","input":[{"type":"message","role":"user","content":"x"}],\
+        "reasoning":{"effort":"medium"}}
+        """.utf8))
+        let chatRequest = try ResponsesAPIMapper.chatRequest(decoded)
+        #expect(chatRequest.reasoningEffort == "medium")
+    }
+
+    @Test func serverArgumentsGateEffortOnThinking() throws {
+        let parsed = try ServerArguments.parse([
+            "--model", "model.gturbo",
+            "--thinking", "on",
+            "--reasoning-effort", "medium",
+        ])
+        #expect(parsed.reasoningEffort == .medium)
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo",
+                "--reasoning-effort", "medium",
+            ])
+        }
+        #expect(throws: ServerArgumentError.self) {
+            try ServerArguments.parse([
+                "--model", "model.gturbo",
+                "--thinking", "on",
+                "--reasoning-effort", "high",
+            ])
+        }
+    }
 }

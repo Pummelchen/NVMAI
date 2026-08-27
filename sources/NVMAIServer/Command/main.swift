@@ -30,6 +30,7 @@ do {
         kvCachePrecision: arguments.kvCachePrecision,
         ropeScalingMode: arguments.ropeScalingMode,
         thinkingMode: arguments.thinkingMode,
+        reasoningEffort: arguments.reasoningEffort,
         expertCacheSlots: arguments.expertCacheSlots,
         expertCacheBudgetBytes: arguments.expertCacheBudgetBytes,
         mtpModelDirectory: arguments.mtpModel.map {
@@ -65,7 +66,8 @@ do {
     let server = NVMAIHTTPServer(
         modelID: facts.modelID,
         queueLimit: arguments.queueLimit,
-        backend: backend)
+        backend: backend,
+        reasoningProfile: try plan.reasoningProfile())
     _ = try await server.start(port: arguments.port)
     let diskCache = facts.promptCacheMode == .off
         ? "off" : arguments.promptCacheDiskDirectory ?? "off"

@@ -154,6 +154,9 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
     public let logprobs: Bool?
     public let presencePenalty: Float?
     public let frequencyPenalty: Float?
+    /// Requested reasoning-effort level. Validated against the served model
+    /// family's chat template and the server's load-time profile.
+    public let reasoningEffort: String?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, stream, temperature, stop, seed, tools, n, logprobs
@@ -167,6 +170,37 @@ public struct OpenAIChatRequest: Codable, Equatable, Sendable {
         case repetitionPenalty = "repetition_penalty"
         case presencePenalty = "presence_penalty"
         case frequencyPenalty = "frequency_penalty"
+        case reasoningEffort = "reasoning_effort"
+    }
+}
+
+/// The load-time reasoning configuration the HTTP layer validates requests
+/// against: the served family's template capability plus the flags the model
+/// was loaded with. Effort is a load-time control because it changes the
+/// rendered prompt, so a request may only confirm the active level, never
+/// switch it.
+public struct ServerReasoningProfile: Sendable, Equatable {
+    public let family: ModelFamily
+    public let thinkingMode: ModelThinkingMode
+    public let reasoningEffort: ModelReasoningEffort?
+
+    public init(family: ModelFamily,
+                thinkingMode: ModelThinkingMode,
+                reasoningEffort: ModelReasoningEffort?) {
+        self.family = family
+        self.thinkingMode = thinkingMode
+        self.reasoningEffort = reasoningEffort
+    }
+
+    /// The compatible Qwen3.5-MoE baseline: binary thinking, off.
+    public static let `default` = ServerReasoningProfile(
+        family: .qwen36, thinkingMode: .off, reasoningEffort: nil)
+
+    /// The effort the template actually applies under this profile; nil for
+    /// binary families and while thinking is off.
+    public var effectiveEffort: ModelReasoningEffort? {
+        family.effectiveReasoningEffort(thinkingMode: thinkingMode,
+                                        effort: reasoningEffort)
     }
 }
 
@@ -309,7 +343,8 @@ public enum OpenAIRequestValidator {
     public static func validate(_ request: OpenAIChatRequest,
                                 modelID: String,
                                 maxContext: Int = RuntimeConfiguration
-                                    .supportedContextTokens.max() ?? 262_144) throws -> ValidatedChatRequest {
+                                    .supportedContextTokens.max() ?? 262_144,
+                                reasoningProfile: ServerReasoningProfile = .default) throws -> ValidatedChatRequest {
         // The "<model>-fast" alias selects the same weights as the base model
         // but enables the CLI-strip heuristic per request (chat-only speed),
         // so tool-using clients keep the base model and chat users opt in.
@@ -327,6 +362,33 @@ public enum OpenAIRequestValidator {
         }
         guard request.frequencyPenalty == nil || request.frequencyPenalty == 0 else {
             throw invalid("frequency_penalty must be zero", "frequency_penalty", "unsupported_value")
+        }
+        // Reasoning effort is defined per family and fixed at model load
+        // because it changes the rendered prompt. A request may restate the
+        // active level; anything else is rejected instead of silently faked.
+        if let effortRaw = request.reasoningEffort {
+            switch reasoningProfile.family.reasoningControl {
+            case .binaryThinking:
+                throw invalid("reasoning_effort is not supported: the served model's "
+                              + "chat template defines only the binary thinking switch",
+                              "reasoning_effort", "unsupported_value")
+            case .thinkingWithEffortLevels:
+                guard let requested = ModelReasoningEffort(rawValue: effortRaw) else {
+                    throw invalid("reasoning_effort must be low, medium, or xhigh",
+                                  "reasoning_effort", "invalid_value")
+                }
+                guard let active = reasoningProfile.effectiveEffort else {
+                    throw invalid("reasoning_effort requires the server's thinking mode "
+                                  + "on; restart with --thinking on",
+                                  "reasoning_effort", "unsupported_value")
+                }
+                guard requested == active else {
+                    throw invalid("reasoning effort is a load-time control; this server "
+                                  + "is running \(active.rawValue). Restart with "
+                                  + "--reasoning-effort \(requested.rawValue)",
+                                  "reasoning_effort", "unsupported_value")
+                }
+            }
         }
         guard request.parallelToolCalls != false else {
             throw invalid("parallel_tool_calls=false is not supported",
