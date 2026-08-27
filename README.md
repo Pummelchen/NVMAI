@@ -1,4 +1,5 @@
-<img width="2456" height="930" alt="image" src="https://github.com/user-attachments/assets/737b0ff8-1f55-4456-bc32-89a532cbd716" />
+<img width="2038" height="771" alt="image" src="https://github.com/user-attachments/assets/42b7c6be-6c46-4610-a77b-e3f4fbf5a70f" />
+
 
 > [!NOTE]
 > **Coming soon: Qwen3.8-Flash-Next (125B-A6B).** NVMAI will support Qwen's
