@@ -58,11 +58,17 @@ _PARAGRAPH = (
 )
 
 
+PARAGRAPHS = 119
+
+
 def build_prompt() -> str:
-    """~56,000 characters of stable English prose (about 6K tokens), matching
-    the scale of the original workload and independent of repository files."""
+    """Stable English prose, independent of repository files. The default 119
+    repetitions measure 10,141 prompt tokens. Length is a real variable here,
+    not a detail: the sidecar exposes history functions at 0/4096/8192/12288,
+    so a 6.1K-token prompt loads two of them while a 10.1K one loads three,
+    and each carries its own ANE arena. Compare only equal lengths."""
     return ("Summarize the following technical description in 40 words.\n\n"
-            + _PARAGRAPH * 119)
+            + _PARAGRAPH * PARAGRAPHS)
 
 
 def launch(quant: str, ane: bool, log_name: str) -> None:
@@ -140,9 +146,14 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=48,
                         help="generated tokens per run; raise it to measure "
                              "steady-state decode rather than the transient")
+    parser.add_argument("--paragraphs", type=int, default=119,
+                        help="prompt length in paragraph repetitions "
+                             "(119 = 10,141 tokens; 72 = about 6.1K, the "
+                             "length the v4.5 result was qualified at)")
     args = parser.parse_args()
-    global MAX_TOKENS
+    global MAX_TOKENS, PARAGRAPHS
     MAX_TOKENS = args.max_tokens
+    PARAGRAPHS = args.paragraphs
 
     signal.signal(signal.SIGINT, g0._on_signal)
     signal.signal(signal.SIGTERM, g0._on_signal)

@@ -279,13 +279,39 @@ final class ANEPrefillAttention: @unchecked Sendable {
         return try MLModel(contentsOf: compiled, configuration: configuration)
     }
 
-    /// Drops the loaded Core ML model and its ANE context. Called when
-    /// prefill hands over to decode so nothing ANE-side competes with the
-    /// expert cache for residency; cheap no-op when nothing is loaded.
+    /// Drops everything prefill allocated. Called when prefill hands over to
+    /// decode so nothing ANE-side competes with the expert cache for
+    /// residency; cheap no-op when nothing is loaded.
+    ///
+    /// The Core ML model is not the only thing that has to go. Decode runs
+    /// entirely on the GPU and never reads the shadow rows or the masks, but
+    /// they stay allocated for the life of this object unless dropped here:
+    /// ~33 MB of shadow per covered layer plus one mask per history window
+    /// (33 MB at h0, 100 MB at h8192) is roughly half a gigabyte taken from
+    /// the expert slot cache for the whole of decode. Releasing only the
+    /// model left that behind and cost measured decode throughput -- the
+    /// bounded cache is the entire reason a model larger than RAM runs at
+    /// all, so prefill scratch must not outlive prefill.
+    ///
+    /// Masks are rebuilt on the next prefill (a few tens of ms of fills
+    /// against a prefill measured in minutes); shadow rows are per-request by
+    /// construction, so `shadowTokens` resets with them and a later chunk
+    /// correctly falls back rather than attending to a freed history.
     func releaseModels() {
         residentModel = nil
         preloaded?.task.cancel()
         preloaded = nil
+        // Release the borrowing MLMultiArrays before the storage they point
+        // at: they are built with `deallocator: nil`, so this dictionary owns
+        // the memory.
+        masks.removeAll()
+        for pointer in maskStorage.values { pointer.deallocate() }
+        maskStorage.removeAll()
+        for pointer in shadowK.values { pointer.deallocate() }
+        for pointer in shadowV.values { pointer.deallocate() }
+        shadowK.removeAll()
+        shadowV.removeAll()
+        shadowTokens = 0
     }
 
     /// Starts loading `layer`'s model for `history` in the background, if it
