@@ -18,8 +18,15 @@ and 8-bit checkpoints are:
 | `Vontra/Qwen3.8-Flash-Next-MLX-4bit` @ `de597762aa61` | affine 4-bit, **group 32** | 111.6 GB | no MTP, vision tower present in bf16 |
 | `Vontra/Qwen3.8-Flash-Next-MLX-8bit-MTP` @ `545f9a172c6f` | affine 8-bit, **group 32** | 203.0 GB | MTP bundled |
 
-This is the same trust model as Ornith's community pins (repo + revision +
-source-index SHA), and it must be stated in user-facing docs. There is **no
+**Decision 2026-08-27: wait for an mlx-community release** rather than pin
+the Vontra checkpoints — the request was for official quantizations, and the
+community table above is recorded so the pins can be wired quickly if the
+decision changes. Re-check the group size when the mlx-community repos
+appear; mlx_lm's default is group 64, which would make the group-32
+parameterization below unnecessary.
+
+Were community pins ever adopted, the trust model would match Ornith's
+(repo + revision + source-index SHA) and must be stated in user-facing docs. There is **no
 group-64 8-bit anywhere**, so the port must parameterize NVMAI's group size
 (the manifest already records `groupSize` per slot; kernels and tools
 hardcode 64 today). Affine group 32 costs ~6% more bytes per weight than
