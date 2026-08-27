@@ -1,5 +1,15 @@
 <img width="2456" height="930" alt="image" src="https://github.com/user-attachments/assets/737b0ff8-1f55-4456-bc32-89a532cbd716" />
 
+> [!NOTE]
+> **Coming soon: Qwen3.8-Flash-Next (125B-A6B).** NVMAI will support Qwen's
+> new flagship sparse-MoE model — 125B parameters with only 6B active per
+> token, a natural fit for SSD-streamed inference on 16–32 GB Macs. The port
+> is in development on the
+> [`qwen38-flash-next` branch](https://github.com/Pummelchen/NVMAI/tree/qwen38-flash-next)
+> ([verified design record](https://github.com/Pummelchen/NVMAI/blob/qwen38-flash-next/docs/qwen38-flash-next-port.md));
+> installation will be enabled once an mlx-community quantized release is
+> available. Progress is tracked in
+> [issue #2](https://github.com/Pummelchen/NVMAI/issues/2).
 
 # NVMAI
 
