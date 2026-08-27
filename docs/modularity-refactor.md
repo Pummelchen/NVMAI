@@ -39,23 +39,30 @@ Bloat vectors:
 
 - **Step 0 — one codebase.** Merge the inert Qwen3.8 P0 foundation into
   main. DONE.
-- **Step 1 — split the runner by concern (pure code motion).**
+- **Step 1 — split the runner by concern (pure code motion).** DONE:
   `RealForwardRunner.swift` keeps state, init, and shared helpers; decode,
   prefill, MTP, ANE, and diagnostics move to extension files. No signature
   or behavior changes; `private` members used across the split become
   `internal` with the class treated as module-internal state. Creates the
   seams that later let a family plug in per-layer blocks instead of editing
   shared loops.
-- **Step 2 — family schemas.** New `Runtime/Family/` directory: a
+- **Step 2 — family schemas.** DONE: New `Runtime/Family/` directory: a
   `TensorSchema` maps logical roles to tensor names per family, and the
   runtime-schema validation bodies move out of `Model.swift` into one file
   per family. Adding a family means adding a file, not editing shared code.
-- **Step 3 — data-driven limits.** The MoE Swift plumbing takes its expert
+- **Step 3 — data-driven limits.** DONE: The MoE Swift plumbing takes its expert
   count from `ArchConfig.topKExperts` instead of a constant (still 8 for
   every shipped family — behavior identical); group size is recorded per
   architecture (`quantGroupSize`) for the loaders. Metal-side function
   constants for top-10 and group-32 stay on the port branch: they are new
   behavior, not housekeeping.
+
+All four steps landed 2026-08-28, each verified by warning-free build,
+lint, the full serial suite (791), and byte-identical 4-bit and 8-bit golden
+baselines. `RealForwardRunner.swift` is 922 lines of state and lifecycle;
+Decode/Prefill/MTP/ANE/Diagnostics live in their own files;
+`Runtime/Family/` owns tensor naming; the MoE wrapper takes its expert count
+from `ArchConfig`.
 
 Deliberately out of scope: protocol-witness dispatch inside the per-token hot
 loop (the control plane measured ~3% of a token; coarse per-layer seams are
