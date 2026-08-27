@@ -95,6 +95,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         switch family {
         case .qwen36: return .qwen36
         case .qwen36MTP: return nil
+        // The Mac app does not offer Qwen3.8-Flash-Next installs until the
+        // runtime lands (P1); the CLI installer gates it the same way.
+        case .qwen38flash: return nil
         }
     }
 

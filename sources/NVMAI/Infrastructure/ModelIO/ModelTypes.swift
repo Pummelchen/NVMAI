@@ -8,6 +8,97 @@ import Metal
 public enum ModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
     case qwen36MTP = "qwen36_mtp"
+    /// Qwen3.8-Flash-Next (`qwen4_exp` text config), 125B-A6B: 48 layers of
+    /// (3x gated-DeltaNet -> 1x sparse-indexed attention), 512 experts top-10,
+    /// hyper-connection residual streams, and hashed n-gram embeddings at
+    /// layer 1. Text-only; the checkpoint's vision tower is never repacked.
+    /// See docs/qwen38-flash-next-port.md for the verified design record.
+    case qwen38flash = "qwen38flash"
+}
+
+/// Hyper-connection residual configuration (Qwen3.8-Flash-Next). The residual
+/// stream is `count` parallel 2560-wide streams; each sublayer mixes them to
+/// one block input through a low-rank gate and injects its output back into
+/// every stream with learned per-stream weights. Zeroed for plain-residual
+/// architectures.
+public struct HyperConnectionConfig: Sendable, Equatable {
+    public let count: Int
+    public let lowRank: Int
+
+    public init(count: Int, lowRank: Int) {
+        self.count = count
+        self.lowRank = lowRank
+    }
+
+    public static let none = HyperConnectionConfig(count: 0, lowRank: 0)
+    public var enabled: Bool { count > 0 }
+}
+
+/// Qwen Sparse Attention indexer configuration. Each full-attention layer
+/// scores mean-pooled key blocks with a small MQA head set and keeps the
+/// `budget` highest-scoring visible tokens (plus the incomplete tail block).
+/// Dense attention is exact whenever a query sees at most `budget` keys plus
+/// the tail — the runtime's dense path is gated on that window. Zeroed for
+/// dense-attention architectures.
+public struct SparseIndexerConfig: Sendable, Equatable {
+    public let numHeads: Int
+    public let numKVHeads: Int
+    public let headDim: Int
+    public let budget: Int
+    public let compressRatio: Int
+
+    public init(numHeads: Int, numKVHeads: Int, headDim: Int,
+                budget: Int, compressRatio: Int) {
+        self.numHeads = numHeads
+        self.numKVHeads = numKVHeads
+        self.headDim = headDim
+        self.budget = budget
+        self.compressRatio = compressRatio
+    }
+
+    public static let none = SparseIndexerConfig(
+        numHeads: 0, numKVHeads: 0, headDim: 0, budget: 0, compressRatio: 0)
+    public var enabled: Bool { budget > 0 }
+}
+
+/// Hashed n-gram "per-layer embedding" configuration (Qwen3.8-Flash-Next).
+/// At each layer in `layerIndices` (0-based), every token gathers
+/// `(ngramSize - 1) * headsPerNgram` rows from a prime-partitioned hashed
+/// table and injects them into the hyper streams through key/value
+/// projections and a dilated depthwise conv. The multipliers, per-head vocab
+/// sizes, and offsets ship as checkpoint tensors and are read, not
+/// re-derived; `seed` is recorded for validation only. Zeroed when absent.
+public struct PLEConfig: Sendable, Equatable {
+    public let layerIndices: [Int]
+    public let embedDim: Int
+    public let convKernelSize: Int
+    public let ngramSize: Int
+    public let vocabSizeBase: Int
+    public let headsPerNgram: Int
+    public let vocabDivisor: Int
+    public let seed: Int
+
+    public init(layerIndices: [Int], embedDim: Int, convKernelSize: Int,
+                ngramSize: Int, vocabSizeBase: Int, headsPerNgram: Int,
+                vocabDivisor: Int, seed: Int) {
+        self.layerIndices = layerIndices
+        self.embedDim = embedDim
+        self.convKernelSize = convKernelSize
+        self.ngramSize = ngramSize
+        self.vocabSizeBase = vocabSizeBase
+        self.headsPerNgram = headsPerNgram
+        self.vocabDivisor = vocabDivisor
+        self.seed = seed
+    }
+
+    public static let none = PLEConfig(
+        layerIndices: [], embedDim: 0, convKernelSize: 0, ngramSize: 0,
+        vocabSizeBase: 0, headsPerNgram: 0, vocabDivisor: 0, seed: 0)
+    public var enabled: Bool { !layerIndices.isEmpty }
+    /// Lookups per token: (ngramSize - 1) n-gram orders x headsPerNgram.
+    public var ngramHeads: Int { (ngramSize - 1) * headsPerNgram }
+    /// Row width of the hashed table.
+    public var headDim: Int { ngramHeads > 0 ? embedDim / ngramHeads : 0 }
 }
 
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
@@ -94,6 +185,17 @@ public struct ArchConfig: Sendable, Equatable {
     public let ropeNeoxSubdim: Bool
     /// Gated-DeltaNet dimensions for layers with mask value 2.
     public let linearAttention: LinearAttentionConfig
+    public let hyperConnections: HyperConnectionConfig
+    public let sparseIndexer: SparseIndexerConfig
+    public let ple: PLEConfig
+    /// Softmax-then-top-k with renormalization of the kept probabilities
+    /// (`norm_topk_prob`). False for Qwen3.5-MoE; true for Qwen3.8-Flash-Next.
+    public let routerNormTopK: Bool
+    /// Affine quantization group size this architecture's checkpoints use.
+    /// 64 for every Qwen3.5-MoE-era install; 32 for the available
+    /// Qwen3.8-Flash-Next community quantizations. The manifest records the
+    /// per-slot value; this is the architecture-level default for planning.
+    public let quantGroupSize: Int
 
     public init(
         hiddenSize: Int,
@@ -125,7 +227,12 @@ public struct ArchConfig: Sendable, Equatable {
         ffnSandwichNorms: Bool = false,
         sharedExpertGated: Bool = true,
         ropeNeoxSubdim: Bool = true,
-        linearAttention: LinearAttentionConfig = .none
+        linearAttention: LinearAttentionConfig = .none,
+        hyperConnections: HyperConnectionConfig = .none,
+        sparseIndexer: SparseIndexerConfig = .none,
+        ple: PLEConfig = .none,
+        routerNormTopK: Bool = false,
+        quantGroupSize: Int = 64
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -157,6 +264,11 @@ public struct ArchConfig: Sendable, Equatable {
         self.sharedExpertGated = sharedExpertGated
         self.ropeNeoxSubdim = ropeNeoxSubdim
         self.linearAttention = linearAttention
+        self.hyperConnections = hyperConnections
+        self.sparseIndexer = sparseIndexer
+        self.ple = ple
+        self.routerNormTopK = routerNormTopK
+        self.quantGroupSize = quantGroupSize
     }
 
     /// Canonical Qwen3.6-35B-A3B baseline: a 40-layer hybrid of 30
@@ -247,10 +359,74 @@ public struct ArchConfig: Sendable, Equatable {
         return mask
     }
 
+    /// Qwen3.8-Flash-Next 125B-A6B (`qwen4_exp` text config), text-only.
+    /// Geometry read from the official checkpoint's config.json and the
+    /// transformers modeling source; see docs/qwen38-flash-next-port.md.
+    /// The full-attention slots describe the QSA layers (every 4th layer);
+    /// the sliding-window mirrors mask value 1 exactly as qwen36 does.
+    public static let qwen38FlashNext = ArchConfig(
+        hiddenSize: 2560,
+        intermediateSize: 640,
+        moeIntermediateSize: 640,
+        numHeads: 24,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 48,
+        numExperts: 512,
+        topKExperts: 10,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: Self.qwen38LayerMask(),
+        hiddenActivation: "silu",
+        family: .qwen38flash,
+        attnOutputGate: true,
+        attentionScale: 0.0625,   // 256^-0.5
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: true,
+        ropeNeoxSubdim: true,
+        linearAttention: LinearAttentionConfig(
+            numKHeads: 16, numVHeads: 48,
+            keyHeadDim: 128, valueHeadDim: 128,
+            convKernelSize: 4),
+        hyperConnections: HyperConnectionConfig(count: 4, lowRank: 320),
+        sparseIndexer: SparseIndexerConfig(
+            numHeads: 4, numKVHeads: 1, headDim: 128,
+            budget: 2048, compressRatio: 4),
+        ple: PLEConfig(
+            layerIndices: [1],          // config ple_layer_ids [2] is 1-based
+            embedDim: 2560,
+            convKernelSize: 4,
+            ngramSize: 3,
+            vocabSizeBase: 20_000_000,
+            headsPerNgram: 8,
+            vocabDivisor: 128,
+            seed: 1234),
+        routerNormTopK: true,
+        quantGroupSize: 32)
+
+    private static func qwen38LayerMask() -> [UInt8] {
+        // Same kinds as qwen36: 2 = gated-DeltaNet linear, 1 = full (QSA)
+        // attention on every 4th layer ((i + 1) % 4 == 0), 48 layers.
+        var mask = [UInt8](repeating: 2, count: 48)
+        for i in stride(from: 3, to: 48, by: 4) { mask[i] = 1 }
+        return mask
+    }
+
     /// Registry keyed by `manifest.arch.family` for auto-detection at load.
     public static let knownArchitectures: [ModelFamily: ArchConfig] = [
         .qwen36: .qwen36_35B_A3B,
         .qwen36MTP: .qwen36MTP,
+        .qwen38flash: .qwen38FlashNext,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for

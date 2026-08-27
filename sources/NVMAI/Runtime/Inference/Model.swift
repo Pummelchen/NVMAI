@@ -709,6 +709,14 @@ extension Model {
         let checks = RuntimeSchemaChecks(residentIndex: residentIndex, quant: quant)
 
         switch config.family {
+        case .qwen38flash:
+            // The Qwen3.8-Flash-Next runtime schema (resident hyper-connection,
+            // indexer, and PLE tensors plus the streamed n-gram table) is
+            // defined and validated in the P1 runtime work; loading fails
+            // closed until then. See docs/qwen38-flash-next-port.md.
+            throw ModelError.indexCorrupt(
+                detail: "qwen38flash runtime loading is not implemented yet; "
+                    + "the installer and format land first (P0)")
         case .qwen36:
             try checks.requireAffine(
                                      "language_model.model.embed_tokens.weight",
