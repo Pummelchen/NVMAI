@@ -865,7 +865,7 @@ extension RealForwardRunner {
 
         let routedOffsets = try model.routedExpertOffsets(layer: L)
         let topK = UInt32(cfg.topKExperts)
-        let canUsePlannedFetch = cfg.topKExperts <= MoE.maxStreamedExperts
+        let canUsePlannedFetch = cfg.topKExperts <= moe.maxStreamedExperts
         let residentBeforePlan = prefetchTraceFD >= 0
             ? try model.routedExpertResidentIDs(layer: L) : []
         let readyPrefetches = predictivePrefetch?.readyBuffers(layer: L, experts: experts) ?? [:]

@@ -29,7 +29,14 @@ public struct MoEExpertOffsets {
 }
 
 final class MoE {
-    static let maxStreamedExperts = 8
+    /// Experts one routed dispatch serves — the architecture's `topKExperts`,
+    /// supplied at init. It sizes the routed argument buffer and every
+    /// per-dispatch validation; nothing may assume the literal 8 (the
+    /// Qwen3.5-MoE value) because Qwen3.8-Flash-Next routes top-10. The Metal
+    /// side is currently compiled for k = 8 (`moe_phase2_reduce_k8` and the
+    /// argument-buffer encoder length); init refuses anything else so a new
+    /// k arrives as explicit kernel work, never as silent misexecution.
+    let maxStreamedExperts: Int
 
     private let realDecodeD: UInt32
     private let realDecodeF: UInt32
@@ -64,10 +71,14 @@ final class MoE {
          eventGatedIO: Bool = false,
          specializedD: UInt32 = 2816,
          specializedF: UInt32 = 704,
-         specializedNumExperts: UInt32 = 128) throws {
+         specializedNumExperts: UInt32 = 128,
+         topKExperts: Int = 8) throws {
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
+        precondition(topKExperts == 8,
+                     "the routed Metal kernels are compiled for top-8; top-\(topKExperts) needs the k-parameterized kernel variants (see docs/qwen38-flash-next-port.md)")
+        self.maxStreamedExperts = topKExperts
         precondition([4, 8].contains(routedWeightBits))
         precondition([4, 8].contains(routerWeightBits))
         let activationConstants: [MetalFunctionConstant] = siluActivation
@@ -162,7 +173,7 @@ final class MoE {
                                    topK: UInt32) throws {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
         precondition(numExperts <= 256)
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(topK == UInt32(maxStreamedExperts))
         // K16: `router_gemv_r4` multiplies every hidden element by
         // `effective_scale[idx]` and `router_topk_select_k8` multiplies every
         // weight by `per_expert_scale[expert]`. Qwen 3.6 has no router scale
@@ -240,7 +251,7 @@ final class MoE {
         topK: UInt32,
         numExperts: UInt32
     ) throws {
-        precondition(topK <= UInt32(Self.maxStreamedExperts))
+        precondition(topK <= UInt32(maxStreamedExperts))
         var topKValue = topK
         var expertCount = numExperts
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
@@ -440,7 +451,7 @@ final class MoE {
     }
 
     private func validate(routedBlobs: [MTLBuffer], topK: UInt32) {
-        precondition(topK == UInt32(Self.maxStreamedExperts))
+        precondition(topK == UInt32(maxStreamedExperts))
         precondition(routedBlobs.count == Int(topK))
     }
 

@@ -404,7 +404,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  eventGatedIO: expertIOSynchronization == .event,
                                  specializedD: UInt32(cfg.hiddenSize),
                                  specializedF: UInt32(cfg.moeIntermediateSize),
-                                 specializedNumExperts: UInt32(cfg.numExperts))
+                                 specializedNumExperts: UInt32(cfg.numExperts),
+                                 topKExperts: cfg.topKExperts)
         self.fusionHead = try LMHeadChainInt4(context: context,
                                               maxD: cfg.hiddenSize,
                                               maxVocab: cfg.vocabSize)

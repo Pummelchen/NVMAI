@@ -131,10 +131,16 @@ public struct Model {
     }
 
     // MARK: - Resident accessors
+    //
+    // Names resolve through the family's TensorSchema (Runtime/Family/): a
+    // family with different naming supplies a schema file; these accessors
+    // never change.
+
+    var schema: TensorSchema { TensorSchema.schema(for: config.family) }
 
     public func embedding() throws -> TensorView {
         if let sharedTargetWeights { return sharedTargetWeights.embedding }
-        return try resident(name: "language_model.model.embed_tokens.weight")
+        return try resident(name: schema.embedding)
     }
 
     /// Qwen 3.6 carries a separate `lm_head` tensor. The transpose for the
@@ -142,52 +148,46 @@ public struct Model {
     public func lmHead() throws -> TensorView {
         if let sharedTargetWeights { return sharedTargetWeights.lmHead }
         if config.tieWordEmbeddings { return try embedding() }
-        return try resident(name: "language_model.lm_head.weight")
+        return try resident(name: schema.lmHead)
     }
 
     public func qProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_proj.weight")
+        try resident(name: schema.qProj(L))
     }
     public func kProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_proj.weight")
+        try resident(name: schema.kProj(L))
     }
     public func vProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.v_proj.weight")
+        try resident(name: schema.vProj(L))
     }
     public func oProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.o_proj.weight")
+        try resident(name: schema.oProj(L))
     }
-    /// Qwen's router is the source-named `.mlp.gate.weight`.
     public func router(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).mlp.gate.weight")
+        try resident(name: schema.router(L))
     }
-    /// Qwen's shared-expert FFN keeps the source's
-    /// `.mlp.shared_expert.{gate,up,down}_proj.weight` names.
     public func sharedExpertGate(layer L: Int) throws -> TensorView {
-        try resident(name: sharedExpertName("gate_proj", layer: L))
+        try resident(name: schema.sharedExpertGate(L))
     }
     public func sharedExpertUp(layer L: Int) throws -> TensorView {
-        try resident(name: sharedExpertName("up_proj", layer: L))
+        try resident(name: schema.sharedExpertUp(L))
     }
     public func sharedExpertDown(layer L: Int) throws -> TensorView {
-        try resident(name: sharedExpertName("down_proj", layer: L))
-    }
-    private func sharedExpertName(_ proj: String, layer L: Int) -> String {
-        "language_model.model.layers.\(L).mlp.shared_expert.\(proj).weight"
+        try resident(name: schema.sharedExpertDown(L))
     }
     /// Qwen3.5-MoE scalar gate on the shared-expert branch: a `[1, hidden]`
     /// 8-bit projection whose sigmoid multiplies the shared FFN output.
     public func sharedExpertScalarGate(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).mlp.shared_expert_gate.weight")
+        try resident(name: schema.sharedExpertScalarGate(L))
     }
     public func inputNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).input_layernorm.weight")
+        try resident(name: schema.inputNorm(L))
     }
     public func postAttnNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).post_attention_layernorm.weight")
+        try resident(name: schema.postAttnNorm(L))
     }
     public func finalNorm() throws -> TensorView {
-        return try resident(name: "language_model.model.norm.weight")
+        try resident(name: schema.finalNorm)
     }
 
     /// MTP projection over the normalized next-token embedding followed by the
