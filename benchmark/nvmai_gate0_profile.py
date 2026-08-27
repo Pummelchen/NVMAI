@@ -204,10 +204,16 @@ def preflight(max_gpu_percent: int) -> None:
             problems.append(
                 f"only {load['free_percent']}% of memory is free; the expert "
                 "cache will not stay resident")
-        if load["swap_used_mb"] is not None and load["swap_used_mb"] > 3072:
-            problems.append(
-                f"{load['swap_used_mb']:.0f} MB of swap is in use; let the "
-                "machine settle before measuring")
+        # Swap VOLUME is reported, never refused on. It measures how much has
+        # ever been paged out, not whether memory is tight now: an 8-bit run
+        # maps a 36.9 GB model and leaves gigabytes of residual swap that
+        # macOS never reclaims while memory is free, so a volume ceiling
+        # refuses every subsequent run for a condition that has already
+        # passed. Residency is what actually matters, and `free_percent`
+        # above measures it directly.
+        if load["swap_used_mb"] is not None:
+            print(f"  note: {load['swap_used_mb']:.0f} MB of swap in use "
+                  f"({load['free_percent']}% memory free)")
         if problems:
             raise SystemExit(
                 "refusing to start: the machine is not idle.\n  - "
