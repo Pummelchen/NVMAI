@@ -163,3 +163,47 @@ thesis better than any model yet (only 6 B active, table lookups tiny).
   the disk decision is made; MTP sidecar last (MTP is measured-off anyway).
 
 Deferred by decision: vision, MTP, YaRN >262K (native first).
+
+## Cross-check against the official announcement (2026-08-27)
+
+The launch blog (https://qwen.ai/blog?id=qwen3.8-flash-next) confirms the
+verified geometry above and adds facts the config/source audit could not show:
+
+- **This is the Qwen4 preview architecture.** Qwen states it plays the role
+  Qwen3-Next played for Qwen3.5–3.8: the GDN+QSA / Gated-Residual / n-gram
+  design will carry the whole Qwen4 family. The family-schema and ArchConfig
+  work is therefore an investment in every upcoming Qwen model, not one port.
+- **The n-gram offload strategy is official.** Qwen ships the 51 B-parameter
+  table expecting it to live outside accelerator memory: "lookup locations
+  can be determined in advance, these parameters can be stored in Host Memory
+  and asynchronously prefetched in parallel with model computation." Our
+  planned row-addressable `ngram_table.bin` on SSD is the same idea one tier
+  down, with a stronger property than expert streaming: lookups depend only
+  on token ids, never on router output, so decode can prefetch the next
+  token's rows the moment it is sampled — the read is fully off the critical
+  path. Prefill can batch all rows for a chunk up front.
+- **"Gated Residual" is the official name** for what the config calls
+  hyper-connections: 4 residual branches with element-wise, data-dependent
+  read/write gates (the low-rank 320 projections). Qwen explicitly *removed*
+  Hyper-Connection's branch-mixing matrices as unnecessary — the simplified
+  form we mapped is the intended one. The residual state "supports FP8
+  storage"; we start fp16 in Metal and note fp8-as-bytes as a later
+  bandwidth lever (4 branches × 2560 quadruples residual traffic).
+- **QSA indexing is per-layer by design** (independent sequence compression
+  per layer, contrasted with cross-layer index reuse), so no shared index
+  cache is needed. Claimed kernel speedups are 7.6× prefill / 4.9× decode at
+  1M tokens — irrelevant below the 2048-token exactness gate, which supports
+  dense-first phasing.
+- **MTP is multi-step trained** for higher real acceptance, and its
+  full-attention layers use QSA too. Still last in phasing; the 35 B verify
+  economics don't transfer, so it would need fresh qualification.
+- **Reasoning effort may no longer be binary.** The QwenCloud API exposes
+  `reasoning_effort` levels `low|medium|xhigh` plus `enable_thinking`. If
+  the open-weights chat template defines these levels, the NVMAI thinking
+  switch (binary off/on for Ornith/Qwen 3.6) must grow a per-family effort
+  control for this model. **Verify against the HF chat template at release**
+  before wiring the server/CLI surface.
+- **Totals as marketed**: 125 B backbone + 51 B n-gram + 6 B active/token;
+  native 262,144 context, YaRN to 1M — matching the ArchConfig. Weights are
+  live on HF/ModelScope (bf16 official); still no official MLX artifact, so
+  the wait-for-mlx-community decision stands.
