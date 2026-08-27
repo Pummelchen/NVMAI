@@ -1,7 +1,5 @@
 <img width="1774" height="887" alt="image" src="https://github.com/user-attachments/assets/dc91bc31-0cd4-42e6-bc7a-67ffb277efe0" />
 
-
-
 > [!NOTE]
 > **Coming soon: Qwen3.8-Flash-Next (125B-A6B).** NVMAI will support Qwen's
 > new flagship sparse-MoE model — 125B parameters with only 6B active per
