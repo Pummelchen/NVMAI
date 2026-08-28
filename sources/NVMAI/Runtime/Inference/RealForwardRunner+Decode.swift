@@ -32,6 +32,11 @@ extension RealForwardRunner {
         // prompts that end exactly on a chunk boundary reach here with the
         // last model still resident. No-op when ANE prefill is off or empty.
         anePrefill?.releaseModels()
+        // Wire the slot cache now that prefill is done with the headroom.
+        // Unwired, unrelated memory churn can reclaim the whole budget and
+        // decode then re-reads routed experts from SSD for the rest of the
+        // request -- measured at 94% more expert I/O after ANE prefill.
+        model.setExpertCachePinned(true)
         try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(

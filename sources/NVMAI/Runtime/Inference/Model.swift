@@ -468,6 +468,23 @@ public struct Model {
         streamersQueue.sync { streamersBox.streamers.compactMap { $0 }.count }
     }
 
+    /// Wire the routed-expert slot cache for decode, or release it for
+    /// prefill.
+    ///
+    /// Decode is the phase where a reclaimed slot page costs an SSD read on
+    /// the critical path, so that is the phase worth wiring. Prefill streams
+    /// experts in bulk and instead needs the headroom -- holding the cache
+    /// wired throughout measurably slowed ANE prefill, which has to place
+    /// Core ML arenas alongside it. Called at the phase boundaries; cheap and
+    /// idempotent, since each streamer skips a state it is already in.
+    public func setExpertCachePinned(_ pinned: Bool) {
+        streamersQueue.sync {
+            for streamer in streamersBox.streamers {
+                streamer?.setSlotsPinned(pinned)
+            }
+        }
+    }
+
 }
 
 extension Model {

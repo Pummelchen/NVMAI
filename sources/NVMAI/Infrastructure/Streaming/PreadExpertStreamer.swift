@@ -215,28 +215,41 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }
 
-    /// Wire the routed-expert slot memory so the configured cache budget is
-    /// the working set in fact and not just on paper.
+    /// Slot allocations eligible for wiring: one region for the pooled
+    /// layout, one per slot otherwise. Recorded at construction; wiring
+    /// itself is deferred to `setSlotsPinned`.
+    private var wireRegions: [(pointer: UnsafeMutableRawPointer, bytes: Int)] = []
+    private var slotsPinned = false
+
+    /// Wire or release the slot memory. Decode wants it wired; prefill wants
+    /// it released.
     ///
-    /// These pages are filled by `F_NOCACHE` pread precisely so the OS page
-    /// cache cannot hold a second, unbounded copy -- which also means a page
-    /// the kernel reclaims is not cheap to get back: it costs another SSD
-    /// read of a routed expert on the decode critical path. Left unwired, the
-    /// whole cache can be reclaimed by unrelated memory churn elsewhere in
-    /// the process. Measured: ANE prefill's Core ML arena traffic dropped
-    /// server RSS from 10.5 GB to 3.2 GB across the handover -- the slot
-    /// cache evicted wholesale -- and decode then paid 94% more expert I/O
-    /// for the rest of the request while its GPU work actually got faster.
+    /// Residency only matters during decode, where a reclaimed page costs a
+    /// routed-expert SSD read on the critical path. Prefill streams experts
+    /// in bulk regardless and needs the headroom: with the cache wired for
+    /// the whole session, ANE prefill measured 244.52 s against 175.68 s
+    /// released (8-bit, same GPU arm), because Core ML could not place its
+    /// arenas. Wiring at the handover instead of at allocation gives decode
+    /// its protection without taxing prefill.
     ///
-    /// Best-effort by design: wiring is capped by `vm.user_wire_limit`, and a
-    /// refused pin must degrade to today's behaviour rather than fail a load
-    /// that would otherwise succeed. `NVMAI_NO_PIN=1` opts out.
-    static func pinSlotMemory(_ pointer: UnsafeMutableRawPointer,
-                              bytes: Int) -> Bool {
+    /// Best-effort in both directions: a refused `mlock` (the wire limit is
+    /// finite) must degrade to unpinned behaviour, never fail a request.
+    /// `NVMAI_NO_PIN=1` disables wiring entirely.
+    func setSlotsPinned(_ wanted: Bool) {
         guard ProcessInfo.processInfo.environment["NVMAI_NO_PIN"] == nil else {
-            return false
+            return
         }
-        return mlock(pointer, bytes) == 0
+        guard wanted != slotsPinned else { return }
+        var achieved = 0
+        for region in wireRegions {
+            let rc = wanted
+                ? mlock(region.pointer, region.bytes)
+                : munlock(region.pointer, region.bytes)
+            if rc == 0 { achieved += 1 }
+        }
+        // Treat a partial wire as unpinned so the next call retries rather
+        // than believing a half-applied state.
+        slotsPinned = wanted && achieved == wireRegions.count
     }
 
     public let layout: StreamLayout
@@ -385,7 +398,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
             close(openedFD)
         }
-        var pinnedBytes = 0
 
         if cacheLayout == .pool {
             let (poolBytes, overflow) = poolSlotStride.multipliedReportingOverflow(by: slotCount)
@@ -401,16 +413,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
             pointers.append(pointer)
             nonisolated(unsafe) let capturedPointer = pointer
-            let pooledPinned = Self.pinSlotMemory(pointer, bytes: poolBytes)
-            pinnedBytes += pooledPinned ? poolBytes : 0
+            wireRegions.append((pointer, poolBytes))
             guard let buffer = device.makeBuffer(
                 bytesNoCopy: pointer,
                 length: poolBytes,
                 options: .storageModeShared,
-                deallocator: { _, _ in
-                    if pooledPinned { munlock(capturedPointer, poolBytes) }
-                    free(capturedPointer)
-                })
+                deallocator: { _, _ in free(capturedPointer) })
             else {
                 unwind()
                 throw StreamerError.bufferWrapFailed
@@ -432,16 +440,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 }
                 pointers.append(pointer)
                 nonisolated(unsafe) let capturedPointer = pointer
-                let slotPinned = Self.pinSlotMemory(pointer, bytes: allocationSize)
-                pinnedBytes += slotPinned ? allocationSize : 0
+                wireRegions.append((pointer, allocationSize))
                 guard let buffer = device.makeBuffer(
                     bytesNoCopy: pointer,
                     length: allocationSize,
                     options: .storageModeShared,
-                    deallocator: { _, _ in
-                        if slotPinned { munlock(capturedPointer, allocationSize) }
-                        free(capturedPointer)
-                    })
+                    deallocator: { _, _ in free(capturedPointer) })
                 else {
                     unwind()
                     throw StreamerError.bufferWrapFailed
@@ -449,23 +453,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 buffers.append(buffer)
                 bufferOffsets.append(0)
             }
-        }
-
-        // A partial pin is not an error, but it must not be silent: it means
-        // the declared cache budget can be reclaimed under memory pressure,
-        // which presents as a decode regression with no code change behind
-        // it. Saying so here turns a mystery into a one-line explanation.
-        let requestedBytes = cacheLayout == .pool
-            ? poolSlotStride * slotCount
-            : allocationSize * slotCount
-        if pinnedBytes < requestedBytes,
-           ProcessInfo.processInfo.environment["NVMAI_NO_PIN"] == nil {
-            let pinnedMiB = pinnedBytes / 1_048_576
-            let requestedMiB = requestedBytes / 1_048_576
-            let message = "NVMAI expert cache pinned \(pinnedMiB) MiB of "
-                + "\(requestedMiB) MiB; the unpinned remainder can be "
-                + "evicted under memory pressure\n"
-            FileHandle.standardError.write(Data(message.utf8))
         }
 
         // Fail closed when bounded I/O was requested. Falling through to an

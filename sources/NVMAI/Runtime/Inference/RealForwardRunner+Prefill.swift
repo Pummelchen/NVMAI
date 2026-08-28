@@ -14,6 +14,12 @@ extension RealForwardRunner {
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        // Release the slot-cache wiring for the duration of prefill: it
+        // streams experts in bulk and needs the headroom, and the ANE path in
+        // particular has to place Core ML arenas alongside it. Decode wires
+        // it again at the handover, which is the phase that actually depends
+        // on residency.
+        model.setExpertCachePinned(false)
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
                 "prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
