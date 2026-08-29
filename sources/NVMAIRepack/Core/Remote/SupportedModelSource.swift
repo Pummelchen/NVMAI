@@ -102,11 +102,33 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 475_300_000,
         reserveBytes: 536_870_912)
 
+    /// Qwen3.8-Flash-Next, the Qwen4 preview architecture. Community-quantized
+    /// rather than mlx-community: no official or mlx-community MLX release
+    /// exists, and this artifact was verified against the official bf16
+    /// weights before being pinned -- every 4-bit tensor lands within 1.02x of
+    /// an ideal affine g64 round-trip, i.e. as accurate as the format allows
+    /// (`benchmark/nvmai_quant_fidelity.py`). Group size is 64, matching the
+    /// format NVMAI already uses.
+    ///
+    /// `approximateDownloadBytes` covers the backbone plus the 102.4 GB fp16
+    /// n-gram table; the MTP draft installs separately from its own shard.
+    public static let qwen38flash = SupportedModelSource(
+        name: "qwen38flash",
+        displayName: "Qwen3.8-Flash-Next 125B-A6B 4-bit",
+        repoID: "RockTalk/Qwen3.8-Flash-Next-MLX-4bit",
+        revision: "478474da92599ad0cf9f8bd447e658b29cb8480a",
+        sourceIndexSHA256:
+            "d7fe03ad2d1365e24ae2e305c829f600b80fac845d128383421a7be4adbdda1b",
+        modelID: "qwen3.8-flash-next-4bit",
+        approximateDownloadBytes: 173_825_909_304,
+        installedBytes: 174_228_562_488,
+        reserveBytes: 4 * 1_073_741_824)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = ornith15_8bit
 
     public static let all: [SupportedModelSource] = [
-        qwen36, qwen36_8bit, ornith15, ornith15_8bit, qwen36MTP,
+        qwen36, qwen36_8bit, ornith15, ornith15_8bit, qwen36MTP, qwen38flash,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

@@ -224,10 +224,38 @@ public final class RemoteStreamingRepacker {
                                                            metadataDirectory: paths.metadataDirectory,
                                                            audit: audit)
         try Task.checkCancellation()
+        // Files this family carries verbatim alongside the tensor payload.
+        // They are standalone files rather than index entries, so their sizes
+        // come from the remote before planning; the planner then treats them
+        // as ordinary resumable range copies.
+        var passthroughFiles: [PassthroughFile] = []
+        for requirement in RepackPlanner.passthroughRequirements(
+            family: snapshot.arch.family) {
+            let info: RemoteFileInfo
+            do {
+                info = try await remote.resolveFileInfo(filename: requirement.name,
+                                                        audit: audit)
+            } catch {
+                // An absent optional file leaves a runnable install; an absent
+                // required one does not, and must not be discovered later.
+                if requirement.required || !isRemoteNotFound(error) { throw error }
+                continue
+            }
+            guard info.size <= requirement.capBytes else {
+                throw RepackError.remoteFileTooLarge(path: requirement.name,
+                                                     size: info.size,
+                                                     cap: requirement.capBytes)
+            }
+            passthroughFiles.append(PassthroughFile(sourceName: requirement.name,
+                                                    destinationName: requirement.name,
+                                                    size: info.size,
+                                                    required: requirement.required))
+        }
         let plan = try RepackPlanner.plan(meta: snapshot.metadata,
                                           arch: snapshot.arch,
                                           shardHeaders: snapshot.shardHeaders,
-                                          outputDir: paths.partialDirectory)
+                                          outputDir: paths.partialDirectory,
+                                          passthroughFiles: passthroughFiles)
         let rangePlan = try RangeCopyPlanner.plan(repackPlan: plan,
                                                   rangeChunkBytes: options.rangeChunkBytes,
                                                   layoutMode: "identity",
