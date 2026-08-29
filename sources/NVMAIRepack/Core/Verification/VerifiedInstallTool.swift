@@ -23,7 +23,13 @@ public enum VerifiedInstallTool {
     // Hard ceiling for any single payload file named by the manifest. The
     // manifest size remains the exact per-file contract (verified below); this
     // cap only rejects absurd corrupted manifests before hashing.
-    public static let payloadMaxBytes: UInt64 = 64 * 1024 * 1024 * 1024
+    //
+    // 128 GiB, sized against the largest legitimate payload: Qwen3.8-Flash-Next's
+    // n-gram embedding table is 102,400,491,520 bytes (95.4 GiB) of fp16 rows.
+    // The previous 64 GiB predated any file that large and rejected a correct
+    // install. Kept finite, and well under any plausible disk, so a manifest
+    // claiming a terabyte is still refused before hashing begins.
+    public static let payloadMaxBytes: UInt64 = 128 * 1024 * 1024 * 1024
 
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
         let access = try GTurboDirectoryAccess(rootPath: options.inputGTurbo)
