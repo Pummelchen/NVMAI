@@ -421,6 +421,15 @@ public final class RemoteStreamingRepacker {
             let rel = "packed_experts/" + (layer.path as NSString).lastPathComponent
             try recordOutputFile(relativePath: rel, path: layer.path, progress: progress)
         }
+        // Recorded so the manifest carries their size and digest, which is
+        // what the install receipt attests over.
+        for file in plan.passthroughFiles {
+            try Task.checkCancellation()
+            let path = (paths.partialDirectory as NSString)
+                .appendingPathComponent(file.destinationName)
+            try recordOutputFile(relativePath: file.destinationName,
+                                 path: path, progress: progress)
+        }
 
         let layoutPath = ((paths.partialDirectory as NSString)
             .appendingPathComponent("packed_experts") as NSString)
@@ -524,6 +533,17 @@ public final class RemoteStreamingRepacker {
             defer { close(descriptor) }
             try Posix.ftruncate(descriptor, path: layer.path, size: layer.fileSize)
             try Posix.fsync(descriptor, path: layer.path)
+        }
+        // Passthrough destinations need the same preallocation: the transfer
+        // opens them for writing and does not create them.
+        for file in plan.passthroughFiles {
+            try Task.checkCancellation()
+            let path = (paths.partialDirectory as NSString)
+                .appendingPathComponent(file.destinationName)
+            let descriptor = try Posix.openCreateRW(path)
+            defer { close(descriptor) }
+            try Posix.ftruncate(descriptor, path: path, size: file.size)
+            try Posix.fsync(descriptor, path: path)
         }
         try Posix.fsyncDirectory(paths.partialDirectory)
     }

@@ -248,6 +248,12 @@ public enum RangeCopyPlanner {
                     relativePath: "packed_experts/" + ($0.path as NSString).lastPathComponent,
                     size: $0.fileSize)
             })
+        // Passthrough files are outputs like any other. Omitting them would
+        // let a resumed install accept a partial whose 102 GB table is missing
+        // or truncated, because that is exactly what this list is checked for.
+        outputs.append(contentsOf: plan.passthroughFiles.map {
+            RemoteExpectedOutput(relativePath: $0.destinationName, size: $0.size)
+        })
         return outputs.sorted { $0.relativePath < $1.relativePath }
     }
 

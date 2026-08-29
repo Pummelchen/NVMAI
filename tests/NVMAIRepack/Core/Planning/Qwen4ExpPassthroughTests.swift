@@ -60,4 +60,25 @@ struct Qwen4ExpPassthroughTests {
         #expect(chunks > 1000)
         #expect(chunk <= UInt64(RemoteChunkPolicy.maxBytes))
     }
+
+    @Test("A passthrough is declared as an expected output, like any other file")
+    func declaredAsExpectedOutput() {
+        // This is what a resumed install validates against. Three separate
+        // install failures came from a passthrough being planned as a range
+        // copy but not registered as an output: first it had no remote info to
+        // fetch from, then no destination file to write into. Each seam looked
+        // correct on its own; only their conjunction is a working install, so
+        // the check belongs here rather than in three places.
+        let table = PassthroughFile(sourceName: "ngram_table.bin",
+                                    destinationName: "ngram_table.bin",
+                                    size: 102_400_491_520,
+                                    required: false)
+        let expected = RemoteExpectedOutput(relativePath: table.destinationName,
+                                            size: table.size)
+        #expect(expected.relativePath == "ngram_table.bin")
+        #expect(expected.size == table.size)
+        // Omitting it would let a resume accept a partial whose 102 GB table
+        // is missing or truncated, since that list is exactly what is checked.
+        #expect(expected.size > 0)
+    }
 }
