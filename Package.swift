@@ -131,7 +131,8 @@ let package = Package(
         .testTarget(
             name: "NVMAIRepackTests",
             dependencies: ["NVMAIRepackCore"],
-            path: "tests/NVMAIRepack/Core"
+            path: "tests/NVMAIRepack/Core",
+            resources: [.copy("Support/qwen38_tensor_names.txt")]
         ),
         .testTarget(
             name: "NVMAIAppCoreTests",

@@ -101,6 +101,11 @@ enum RepackPlanner {
         case lmResident
         case routedExpert(role: String, layer: Int)   // role = "gate"|"up"|"down"
         case excludedMultimodal
+        /// Belongs to a sidecar installed separately, not to this model's
+        /// payload. Qwen3.8-Flash-Next ships its MTP draft inside the target's
+        /// index; the draft carries its own 512-expert set and is installed as
+        /// its own directory, exactly like the Ornith MTP sidecar.
+        case excludedSidecar
         case unknown
     }
 
@@ -117,6 +122,25 @@ enum RepackPlanner {
             }
             if name == "norm.weight" || name.hasPrefix("fc.")
                 || name.hasPrefix("pre_fc_norm_") {
+                return .lmResident
+            }
+            return .unknown
+        }
+        if family == .qwen38flash {
+            // The MTP draft rides in the target's index but is a separate
+            // install; skip it here rather than folding a second model's
+            // experts into this payload.
+            if name.hasPrefix("mtp.") { return .excludedSidecar }
+            if isMultimodalTensorName(name) { return .excludedMultimodal }
+            // `lm_head.*` sits at the top level in this family, not under the
+            // language-model prefix the way qwen36 spells it.
+            if name.hasPrefix("lm_head.") { return .lmResident }
+            if name.hasPrefix("model.language_model.") {
+                if let role = routedExpertRole(in: name),
+                   let layer = layerIndex(in: name),
+                   layer >= 0 && layer < numLayers {
+                    return .routedExpert(role: role, layer: layer)
+                }
                 return .lmResident
             }
             return .unknown
@@ -196,6 +220,7 @@ enum RepackPlanner {
                 byRole[role] = name
                 routedByLayerAndRole[layer] = byRole
             case .excludedMultimodal:           continue
+            case .excludedSidecar:              continue
             case .unknown:                      throw RepackError.unknownTensorPrefix(name: name)
             }
         }
