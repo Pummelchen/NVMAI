@@ -47,6 +47,8 @@ final class MoE {
     private let routerGemvSpecializedPSO: MTLComputePipelineState
     private let routerSelectK8PSO: MTLComputePipelineState
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
+    /// Used when top-k is not 8. The k8 kernel stays the golden path.
+    private let routerSelectKNPSO: MTLComputePipelineState
     private let residencyClassifyPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
@@ -76,8 +78,12 @@ final class MoE {
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
-        precondition(topKExperts == 8,
-                     "the routed Metal kernels are compiled for top-8; top-\(topKExperts) needs the k-parameterized kernel variants (see docs/qwen38-flash-next-port.md)")
+        // 16 is the argument buffer's blob-array extent (kMaxStreamedExperts
+        // in moe.metal); the phase-2 reduce is still k8-specialized, so only
+        // k == 8 currently reaches it. See docs/qwen38-flash-next-port.md.
+        precondition((1...16).contains(topKExperts),
+                     "top-\(topKExperts) exceeds the routed argument buffer's "
+                         + "expert slots (16)")
         self.maxStreamedExperts = topKExperts
         precondition([4, 8].contains(routedWeightBits))
         precondition([4, 8].contains(routerWeightBits))
@@ -115,6 +121,7 @@ final class MoE {
         self.routerSelectK8SpecializedPSO = try context.pipeline(
             "router_topk_select_k8",
             constants: routerConstants)
+        self.routerSelectKNPSO = try context.pipeline("router_topk_select_kn")
         self.residencyClassifyPSO = try context.pipeline("moe_classify_expert_residency")
         let phase1Name = routedWeightBits == 4
             ? "moe_phase1_gate_up_act_u16load" : "moe_affine_phase1_gate_up_act"
@@ -172,7 +179,11 @@ final class MoE {
                                    d: UInt32,
                                    topK: UInt32) throws {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
-        precondition(numExperts <= 256)
+        // 512 for Qwen3.8-Flash-Next. Expert ids are UInt32 end to end
+        // (ExpertResidencyTable) and the kernels read num_experts
+        // dynamically, so the old 256 was a conservative guard rather than a
+        // width limit -- confirmed by reading both, not assumed.
+        precondition(numExperts <= 512)
         precondition(topK == UInt32(maxStreamedExperts))
         // K16: `router_gemv_r4` multiplies every hidden element by
         // `effective_scale[idx]` and `router_topk_select_k8` multiplies every
@@ -211,12 +222,18 @@ final class MoE {
             throw MetalError.commandEncoderFailed
         }
         selector.setComputePipelineState(
-            useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
+            maxStreamedExperts == 8
+                ? (useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
+                : routerSelectKNPSO)
         selector.setBuffer(routerLogits, offset: 0, index: 0)
         selector.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
         selector.setBuffer(outIndices, offset: 0, index: 2)
         selector.setBuffer(outWeights, offset: 0, index: 3)
         selector.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
+        if maxStreamedExperts != 8 {
+            var k = UInt32(maxStreamedExperts)
+            selector.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 5)
+        }
         selector.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))

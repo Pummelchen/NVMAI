@@ -2,7 +2,13 @@
 using namespace metal;
 
 constant constexpr uint kMoEGroupSize = 64;
-constant constexpr uint kMaxStreamedExperts = 8;
+// Upper bound on routed experts per token, sizing the argument buffer's blob
+// pointer array. Metal array extents must be compile-time, so this cannot be a
+// function constant -- it is one bound for every family. 16 covers top-8
+// (Qwen 3.6, Ornith) and top-10 (Qwen3.8-Flash-Next) at a cost of eight unused
+// pointers, 64 bytes per argument buffer. Kernels read only [0, top_k), so a
+// family using fewer slots is unaffected byte-for-byte.
+constant constexpr uint kMaxStreamedExperts = 16;
 constant constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
 constant constexpr float kGeluCubicCoeff = 0.044715f;
 // Max hidden size for the phase-1 threadgroup-staged activation (covers
@@ -277,6 +283,67 @@ kernel void router_topk_select_k8(
         sum_exp += ex;
     }
     for (uint i = 0; i < 8; ++i) {
+        const uint expert_idx = top_idx[i];
+        const float weight = exps[i] / sum_exp;
+        out_indices[i] = expert_idx;
+        out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
+    }
+}
+
+// Top-k router select for k != 8. The k8 kernel above is left exactly as it
+// was: it is on the golden path for every shipping model, and a shared
+// implementation would put a k-dependent loop bound in front of output that is
+// pinned byte-for-byte. This variant is identical in method -- same insertion
+// sort, same lower-index tie-break, same softmax over the SELECTED scores
+// (which is what norm_topk_prob=true means: renormalizing over the top-k is
+// the same as softmax-over-all then renormalize).
+kernel void router_topk_select_kn(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    if (tid != 0) return;
+    const uint NE = router_fc_num_experts(num_experts);
+    const uint K = min(top_k, kMaxStreamedExperts);
+    uint top_idx[kMaxStreamedExperts];
+    float top_score[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
+        top_idx[i] = 0u;
+        top_score[i] = -INFINITY;
+    }
+
+    for (uint e = 0; e < NE; ++e) {
+        const float s = logits[e];
+        if (s < top_score[K - 1u]) continue;
+        uint pos = K;
+        for (uint i = 0; i < K; ++i) {
+            if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {
+                pos = i;
+                break;
+            }
+        }
+        if (pos >= K) continue;
+        for (uint i = K - 1u; i > pos; --i) {
+            top_idx[i] = top_idx[i - 1];
+            top_score[i] = top_score[i - 1];
+        }
+        top_idx[pos] = e;
+        top_score[pos] = s;
+    }
+
+    const float max_s = top_score[0];
+    float sum_exp = 0.0f;
+    float exps[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
+        const float ex = fast::exp(top_score[i] - max_s);
+        exps[i] = ex;
+        sum_exp += ex;
+    }
+    for (uint i = 0; i < K; ++i) {
         const uint expert_idx = top_idx[i];
         const float weight = exps[i] / sum_exp;
         out_indices[i] = expert_idx;

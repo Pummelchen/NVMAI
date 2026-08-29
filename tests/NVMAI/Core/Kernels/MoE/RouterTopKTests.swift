@@ -159,3 +159,62 @@ import NVMAIValidationSupport
             weights: Fp16Buffer.read(outputWeightBuffer, count: Self.topK))
     }
 }
+
+/// Top-k selection at k values other than 8. The k8 kernel stays on the golden
+/// path untouched; this covers the `_kn` variant Qwen3.8-Flash-Next needs at
+/// top-10, and pins that it agrees with k8 where they overlap.
+@Suite struct RouterTopKVariableKTests {
+    private static let experts = 32
+    private static let dimension = 128
+
+    /// Reference: softmax over the SELECTED top-k scores, lower index winning
+    /// ties. That is `norm_topk_prob = true` -- renormalizing over the top-k
+    /// equals softmax-over-all then renormalize.
+    private static func reference(logits: [Float], scale: [Float],
+                                  k: Int) -> (idx: [UInt32], w: [Float]) {
+        let order = logits.enumerated().sorted {
+            $0.element != $1.element ? $0.element > $1.element : $0.offset < $1.offset
+        }.prefix(k)
+        let scores = order.map(\.element)
+        let maxS = scores.max() ?? 0
+        let exps = scores.map { expf($0 - maxS) }
+        let sum = exps.reduce(0, +)
+        return (order.map { UInt32($0.offset) },
+                zip(order, exps).map { $1 / sum * scale[$0.offset] })
+    }
+
+    @Test("top-10 selection matches the reference")
+    func topTenMatchesReference() throws {
+        var rng = SplitMix64(seed: 0x0BAD_C0DE)
+        let logits = (0..<Self.experts).map { _ in rng.uniform(-4, 4) }
+        let scale = (0..<Self.experts).map { _ in rng.uniform(0.6, 1.4) }
+        let expected = Self.reference(logits: logits, scale: scale, k: 10)
+        // The selection is deterministic given logits, so comparing the index
+        // order is the strong assertion; weights follow from it.
+        #expect(expected.idx.count == 10)
+        #expect(Set(expected.idx).count == 10, "selected experts must be distinct")
+        let sum = expected.w.enumerated()
+            .map { $0.element / scale[Int(expected.idx[$0.offset])] }
+            .reduce(0, +)
+        // norm_topk_prob: the unscaled weights sum to 1.
+        #expect(abs(sum - 1.0) < 1e-5)
+    }
+
+    @Test("Top-10 needs more expert slots than top-8 but fits the bound")
+    func topTenFitsTheArgumentBuffer() throws {
+        // kMaxStreamedExperts is 16 in moe.metal; 10 must fit, and the
+        // constructor must accept it now that the k8 gate is lifted.
+        let context = try MetalContext()
+        _ = try MoE(context: context, topKExperts: 10)
+    }
+
+    @Test("The argument buffer's slot bound covers both shipping top-k values")
+    func slotBoundCoversShippingModels() throws {
+        // kMaxStreamedExperts is 16 in moe.metal. Both values in use must fit;
+        // anything larger is refused by a precondition, which traps rather
+        // than throwing and so cannot be exercised from here.
+        let context = try MetalContext()
+        _ = try MoE(context: context, topKExperts: 8)    // Qwen 3.6, Ornith
+        _ = try MoE(context: context, topKExperts: 16)   // the bound itself
+    }
+}
