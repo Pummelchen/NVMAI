@@ -957,3 +957,92 @@ kernel void moe_affine_phase2_down_reduce_k8(
         y[d] = half(acc);
     }
 }
+
+// Phase-2 reduce for k != 8. The k8 kernels stay untouched on the golden
+// path; here the partial array is sized to the argument buffer's bound and
+// simdgroups past k return early rather than reading an unset blob pointer.
+kernel void moe_phase2_down_reduce_kn(
+    device const RoutedBlobs& routed [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half* acts [[buffer(2)]],
+    device const half* routing_w [[buffer(3)]],
+    device const half* residual [[buffer(4)]],
+    device half* y [[buffer(5)]],
+    constant uint& D [[buffer(6)]],
+    constant uint& F [[buffer(7)]],
+    device const uint* io_status [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
+    uint d [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float partial[kMaxStreamedExperts];
+    const uint K = min(top_k, kMaxStreamedExperts);
+    const uint DD = moe_fc_d(D);
+    const uint FF = moe_fc_f(F);
+    if (d >= DD) return;
+    if (!moe_io_ready(io_status)) {
+        if (sg_idx == 0 && lane == 0) y[d] = residual[d];
+        return;
+    }
+
+    // No sg_idx >= K guard: the dispatch launches exactly K simdgroups, so
+    // every simdgroup owns a real slot. An early return here would skip the
+    // threadgroup_barrier below, which every thread in the group must reach.
+    device const uint8_t* base = routed.blob[sg_idx];
+    const ExpertOffsets re = routed_offsets;
+    device const uint8_t* dW = base + re.down_W_off;
+    device const bfloat* dS = (device const bfloat*)(base + re.down_s_off);
+    device const bfloat* dB = (device const bfloat*)(base + re.down_b_off);
+    device const half* act_slot = acts + sg_idx * FF;
+
+    const float value = moe_int4_gemv_row_simd_dev_vec(
+        dW, dS, dB, act_slot, d, FF, lane);
+    if (lane == 0) partial[sg_idx] = float(routing_w[sg_idx]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg_idx == 0 && lane == 0) {
+        float acc = float(residual[d]);
+        // Summed in slot order so the result is bit-identical to the k8
+        // kernel's unrolled chain when k == 8.
+        for (uint i = 0; i < K; ++i) acc += partial[i];
+        y[d] = half(acc);
+    }
+}
+
+// Phase-2 reduce for k != 8. The k8 kernels stay untouched on the golden
+// path; here the partial array is sized to the argument buffer's bound and
+// simdgroups past k return early rather than reading an unset blob pointer.
+kernel void moe_affine_phase2_down_reduce_kn(
+    device const RoutedBlobs& routed [[buffer(0)]],
+    constant ExpertOffsets& re [[buffer(1)]],
+    device const half* acts [[buffer(2)]], device const half* routing_w [[buffer(3)]],
+    device const half* residual [[buffer(4)]], device half* y [[buffer(5)]],
+    constant uint& D [[buffer(6)]], constant uint& F [[buffer(7)]],
+    device const uint* io_status [[buffer(8)]],
+    constant uint& top_k [[buffer(9)]],
+    uint d [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[kMaxStreamedExperts];
+    const uint K = min(top_k, kMaxStreamedExperts);
+    const uint DD = moe_fc_d(D), FF = moe_fc_f(F);
+    if (d >= DD) return;
+    if (!moe_io_ready(io_status)) {
+        if (sg == 0 && lane == 0) y[d] = residual[d];
+        return;
+    }
+    device const uint8_t* base = routed.blob[sg];
+    const float value = moe_affine_gemv_row_simd(
+        base + re.down_W_off, (device const bfloat*)(base + re.down_s_off),
+        (device const bfloat*)(base + re.down_b_off), acts + sg * FF,
+        d, FF, lane);
+    if (lane == 0) partial[sg] = float(routing_w[sg]) * value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane == 0) {
+        float acc = float(residual[d]);
+        // K, not 8: this variant exists precisely because k differs.
+        for (uint i = 0; i < K; ++i) acc += partial[i];
+        y[d] = half(acc);
+    }
+}

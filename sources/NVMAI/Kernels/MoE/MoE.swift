@@ -57,6 +57,8 @@ final class MoE {
     private let phase1SubsetU16SpecializedPSO: MTLComputePipelineState
     private let phase2ReduceK8PSO: MTLComputePipelineState
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
+    /// Used when top-k is not 8; the k8 kernels stay the golden path.
+    private let phase2ReduceKNPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
     private let reusableRoutedArgBuffer: MTLBuffer
     private let alwaysReadyIOStatus: MTLBuffer
@@ -79,8 +81,8 @@ final class MoE {
         self.realDecodeF = specializedF
         self.realDecodeNumExperts = specializedNumExperts
         // 16 is the argument buffer's blob-array extent (kMaxStreamedExperts
-        // in moe.metal); the phase-2 reduce is still k8-specialized, so only
-        // k == 8 currently reaches it. See docs/qwen38-flash-next-port.md.
+        // in moe.metal). Router select and phase-2 reduce both have k != 8
+        // variants; see docs/qwen38-flash-next-port.md.
         precondition((1...16).contains(topKExperts),
                      "top-\(topKExperts) exceeds the routed argument buffer's "
                          + "expert slots (16)")
@@ -141,6 +143,10 @@ final class MoE {
             constants: moeConstants)
         self.phase2ReduceK8PSO = try context.pipeline(
             phase2Name, constants: weightConstants + ioConstants)
+        let phase2KNName = routedWeightBits == 4
+            ? "moe_phase2_down_reduce_kn" : "moe_affine_phase2_down_reduce_kn"
+        self.phase2ReduceKNPSO = try context.pipeline(
+            phase2KNName, constants: weightConstants + ioConstants)
         self.phase2ReduceK8SpecializedPSO = try context.pipeline(
             phase2Name,
             constants: moeConstants)
@@ -445,9 +451,11 @@ final class MoE {
             throw MetalError.commandEncoderFailed
         }
         encoder.setComputePipelineState(
-            useRealDecodeConstants(d: d, f: f)
-                ? phase2ReduceK8SpecializedPSO
-                : phase2ReduceK8PSO)
+            maxStreamedExperts == 8
+                ? (useRealDecodeConstants(d: d, f: f)
+                    ? phase2ReduceK8SpecializedPSO
+                    : phase2ReduceK8PSO)
+                : phase2ReduceKNPSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
         for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
         var offsets = routedOffsets
@@ -461,9 +469,17 @@ final class MoE {
         encoder.setBuffer(ioStatus ?? alwaysReadyIOStatus,
                           offset: ioStatus == nil ? 0 : ioStatusOffset,
                           index: 8)
+        // One simdgroup per expert slot. The kn kernel has no sg >= k guard
+        // precisely because the launch width says k, so this must stay in
+        // step with it: 32 lanes x k.
+        if maxStreamedExperts != 8 {
+            var k = UInt32(maxStreamedExperts)
+            encoder.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 9)
+        }
         encoder.dispatchThreadgroups(
             MTLSize(width: Int(d), height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            threadsPerThreadgroup: MTLSize(width: 32 * maxStreamedExperts,
+                                           height: 1, depth: 1))
         encoder.endEncoding()
     }
 
