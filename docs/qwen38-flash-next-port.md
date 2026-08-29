@@ -379,42 +379,64 @@ None of that makes the model *execute* -- that is P1 (hyper-connection
 residual plumbing, QSA dense path with the <=2048 exactness gate, the PLE
 block, top-10 MoE) and is the larger half of the work.
 
-## P1 blockers, located precisely (2026-08-28)
+## P1 status (2026-08-29)
 
-The runtime schema landed (`9d8e798`), so `Model` can now name every tensor in
-this checkpoint. What still stops execution, each found by reading the code
-rather than inferred:
+The blockers listed here previously are cleared. What follows is what exists,
+what it was verified against, and what genuinely remains.
 
-### MoE: top-10 and 512 experts
+### Cleared
 
-| blocker | where | note |
+| piece | commit | verified against |
 | --- | --- | --- |
-| `kMaxStreamedExperts = 8` | `Metal/MoE/moe.metal:5` | `constexpr`, sizes the argument buffer's `blob[]` pointer array. Metal array sizes must be compile-time, so a function constant cannot express this: either raise it for everyone (+8 pointers = 64 bytes per argument buffer, negligible) or compile a second variant. Raising it changes the argument-buffer layout, so the Swift writer must move in lockstep and both goldens must stay byte-identical. |
-| `router_topk_select_k8` | same file | fixed `top_idx[8]` / `top_score[8]`. Safest change is a new `_kn` kernel used only when k != 8, leaving the qwen36 path untouched. |
-| `moe_phase2_down_reduce_k8` | same file | the second k-specialized kernel. |
-| `precondition(numExperts <= 256)` | `Kernels/MoE/MoE.swift:175` | qwen38 has 512. Expert ids are `UInt32` throughout (`ExpertResidencyTable`), and the kernels read `num_experts` dynamically, so this reads as a conservative guard rather than a real width limit -- but that must be confirmed, not assumed, before raising it. |
-| `precondition(topKExperts == 8)` | `MoE.swift:79` | the explicit gate; lifts once the above are done. |
+| top-10 routing, 512 experts | `f705873`, `836074f` | both goldens byte-identical at k=8 |
+| Gated Residual primitives | `94ef43f`, `80c37b0` | CPU references per kernel |
+| Gated Residual composition | `9081afd` | CPU reference of the whole formula |
+| PLE row hashing | `9c7d640` | golden vectors from the reference implementation |
+| n-gram table gather | `a7267f1` | synthetic table encoding its own row indices |
+| QSA dense-exactness window | `ba3e5f9` | derived, and equal to the card's 2,051 |
 
-### Router normalization: already correct, worth not "fixing"
+Notes worth keeping:
 
-`router_topk_select_k8` softmaxes over the **selected** top-k scores, so its
-weights sum to 1. That is exactly `norm_topk_prob: true`, which is what
-Qwen3.8-Flash-Next declares -- softmax-over-all then renormalize-over-top-k is
-mathematically the same thing. So the existing math is right for this family
-and needs no change. `ArchConfig.routerNormTopK` is declared but not yet read
-by anything; wiring it should preserve this behaviour rather than alter it.
+- **`kMaxStreamedExperts` is 16**, one bound for every family, because Metal
+  array extents must be compile-time. Kernels read only `[0, top_k)`, so the
+  eight unused pointers cost 64 bytes per argument buffer and nothing else.
+- **`_kn` kernel variants** exist for router select and both phase-2 reduces,
+  dispatched only when k != 8 so the shipping models stay on kernels whose
+  output is byte-pinned. The launch width is the contract: exactly k
+  simdgroups, so the kernels carry no `sg >= k` guard -- an early return there
+  would skip a `threadgroup_barrier` every thread must reach.
+- **The router already implements `norm_topk_prob=true`**: it softmaxes over
+  the selected top-k, which equals softmax-over-all then renormalize. Wiring
+  `ArchConfig.routerNormTopK` should preserve this, not change it.
+- **Grouped RMSNorm is not the per-head kernel.** That one shares a single
+  weight across groups; the hyper connection needs a distinct 2560 slice per
+  stream out of its [10240] weight.
+- **The write gate is `2 * sigmoid`.** Plain sigmoid caps every stream at 1.0
+  and makes the residual strictly contractive -- plausible, and wrong.
+- **PLE's context cut latches**, and a token that is itself EOS does not cut
+  its own context. One mixed value serves all 8 heads of an n-gram order.
 
-### Not yet started
+### What remains
 
-- **Hyper-connection residual.** The stream is 4 x 2560 = 10,240 wide for the
-  whole stack; every sublayer does a grouped RMS norm, a low-rank gated read
-  (10240 -> 320 -> 10240) and a per-stream write. New kernels plus a wider
-  residual buffer everywhere.
-- **QSA.** Dense path first behind the <=2048 exactness gate (where dense is
-  bit-exact), indexer second.
-- **PLE.** Integer hashing CPU-side, row gather off `ngram_table.bin`, dilated
-  depthwise conv. The gather is the part that suits NVMAI: lookups depend only
-  on token ids, never on router output, so the next token's rows can be
-  prefetched the moment it is sampled -- fully off the critical path, unlike
-  expert misses.
+1. **Layer-loop integration.** The structural change and where regression risk
+   concentrates: the residual becomes 4 x 2560 = 10,240 wide through the whole
+   stack, which touches buffer allocation, the prefill and decode paths, and
+   the KV/GDN state plumbing in `RealForwardRunner`. The primitives above are
+   built to make this two calls bracketing each block, but nothing calls them
+   yet. **The model cannot execute until this lands.**
+2. **PLE block body.** The gather exists; the value/key projections, the
+   signed-sqrt gate and the dilated depthwise conv (k=4, dilation=3, state 9)
+   do not.
+3. **QSA indexer**, for contexts past 2,051 keys. Below that the gate says
+   dense is exact; above it the indexer is mandatory for faithfulness.
+4. **MTP sidecar install**, which carries its own 512-expert set and wants its
+   own directory like the Ornith MTP path.
 
+### How to verify, when it runs
+
+Weight fidelity is settled (`benchmark/nvmai_quant_fidelity.py`); behaviour is
+not. The reference implementation is public
+(`Rocktalk-Holdings/mlx-qwen4exp`), so the honest check is a greedy logit
+comparison against it on a short prefix -- the analogue of the golden baseline
+the shipping models use. Nothing here should be called correct on the strength
+of unit tests alone.
