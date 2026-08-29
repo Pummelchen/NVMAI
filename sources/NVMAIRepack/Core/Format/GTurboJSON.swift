@@ -68,6 +68,29 @@ enum GTurboJSON {
         archDict["linearKeyHeadDim"] = arch.linearKeyHeadDim
         archDict["linearValueHeadDim"] = arch.linearValueHeadDim
         archDict["linearConvKernelSize"] = arch.linearConvKernelSize
+        // Extension geometry is written only for the families that have it, so
+        // manifests for the existing families stay byte-identical. The reader
+        // validates these whenever present, which is what stops a checkpoint
+        // with different hyper-connection / indexer / PLE geometry from being
+        // run silently against the runtime's hardcoded constants.
+        if arch.family == .qwen38flash {
+            archDict["hcCount"] = arch.hcCount
+            archDict["hcLowRank"] = arch.hcLowRank
+            archDict["indexerNumHeads"] = arch.indexerNumHeads
+            archDict["indexerNumKVHeads"] = arch.indexerNumKVHeads
+            archDict["indexerHeadDim"] = arch.indexerHeadDim
+            archDict["indexerBudget"] = arch.indexerBudget
+            archDict["indexerCompressRatio"] = arch.indexerCompressRatio
+            archDict["pleLayerIndices"] = arch.pleLayerIndices
+            archDict["pleEmbedDim"] = arch.pleEmbedDim
+            archDict["pleConvKernelSize"] = arch.pleConvKernelSize
+            archDict["pleNgramSize"] = arch.pleNgramSize
+            archDict["pleVocabSizeBase"] = arch.pleVocabSizeBase
+            archDict["pleHeadsPerNgram"] = arch.pleHeadsPerNgram
+            archDict["pleVocabDivisor"] = arch.pleVocabDivisor
+            archDict["routerNormTopK"] = arch.routerNormTopK
+            archDict["quantGroupSize"] = arch.quantGroupSize
+        }
         let quantBits = [
             "embedding": bitWidths.embedding,
             "attention": bitWidths.attention,

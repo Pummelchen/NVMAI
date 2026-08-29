@@ -28,6 +28,28 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let attentionKEqV: Bool
     public let hiddenActivation: String
     public let fullAttentionLayerMask: [Int]
+
+    // Family extension geometry. Optional because manifests written before
+    // these families existed do not carry them; when a manifest DOES declare
+    // them they are validated, so a checkpoint whose hyper-connection, QSA
+    // indexer or PLE geometry differs from the runtime's cannot be run
+    // silently against the wrong constants.
+    public let hcCount: Int?
+    public let hcLowRank: Int?
+    public let indexerNumHeads: Int?
+    public let indexerNumKVHeads: Int?
+    public let indexerHeadDim: Int?
+    public let indexerBudget: Int?
+    public let indexerCompressRatio: Int?
+    public let pleLayerIndices: [Int]?
+    public let pleEmbedDim: Int?
+    public let pleConvKernelSize: Int?
+    public let pleNgramSize: Int?
+    public let pleVocabSizeBase: Int?
+    public let pleHeadsPerNgram: Int?
+    public let pleVocabDivisor: Int?
+    public let routerNormTopK: Bool?
+    public let quantGroupSize: Int?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -267,6 +289,42 @@ public enum ManifestReader {
         try check("fullAttentionLayerMask",
                   actualMask.description,
                   e.fullAttentionLayerMask.description)
+
+        // Extension geometry is checked only when the manifest declares it.
+        // Absent means an older manifest, which the core fields above already
+        // pin; present and disagreeing means the payload is not the
+        // architecture this runtime would execute, which must not be silent.
+        func checkOptional<T: Equatable & CustomStringConvertible>(
+            _ field: String, _ actual: T?, _ expected: T) throws {
+            guard let actual else { return }
+            try check(field, actual, expected)
+        }
+        try checkOptional("hcCount", a.hcCount, e.hyperConnections.count)
+        try checkOptional("hcLowRank", a.hcLowRank, e.hyperConnections.lowRank)
+        try checkOptional("indexerNumHeads", a.indexerNumHeads,
+                          e.sparseIndexer.numHeads)
+        try checkOptional("indexerNumKVHeads", a.indexerNumKVHeads,
+                          e.sparseIndexer.numKVHeads)
+        try checkOptional("indexerHeadDim", a.indexerHeadDim,
+                          e.sparseIndexer.headDim)
+        try checkOptional("indexerBudget", a.indexerBudget,
+                          e.sparseIndexer.budget)
+        try checkOptional("indexerCompressRatio", a.indexerCompressRatio,
+                          e.sparseIndexer.compressRatio)
+        try checkOptional("pleLayerIndices", a.pleLayerIndices?.description,
+                          e.ple.layerIndices.description)
+        try checkOptional("pleEmbedDim", a.pleEmbedDim, e.ple.embedDim)
+        try checkOptional("pleConvKernelSize", a.pleConvKernelSize,
+                          e.ple.convKernelSize)
+        try checkOptional("pleNgramSize", a.pleNgramSize, e.ple.ngramSize)
+        try checkOptional("pleVocabSizeBase", a.pleVocabSizeBase,
+                          e.ple.vocabSizeBase)
+        try checkOptional("pleHeadsPerNgram", a.pleHeadsPerNgram,
+                          e.ple.headsPerNgram)
+        try checkOptional("pleVocabDivisor", a.pleVocabDivisor,
+                          e.ple.vocabDivisor)
+        try checkOptional("routerNormTopK", a.routerNormTopK, e.routerNormTopK)
+        try checkOptional("quantGroupSize", a.quantGroupSize, e.quantGroupSize)
     }
 }
 
@@ -298,7 +356,23 @@ private extension ManifestArch {
                   tieWordEmbeddings: wire.tieWordEmbeddings,
                   attentionKEqV: wire.attentionKEqV,
                   hiddenActivation: wire.hiddenActivation,
-                  fullAttentionLayerMask: wire.fullAttentionLayerMask)
+                  fullAttentionLayerMask: wire.fullAttentionLayerMask,
+                  hcCount: wire.hcCount,
+                  hcLowRank: wire.hcLowRank,
+                  indexerNumHeads: wire.indexerNumHeads,
+                  indexerNumKVHeads: wire.indexerNumKVHeads,
+                  indexerHeadDim: wire.indexerHeadDim,
+                  indexerBudget: wire.indexerBudget,
+                  indexerCompressRatio: wire.indexerCompressRatio,
+                  pleLayerIndices: wire.pleLayerIndices,
+                  pleEmbedDim: wire.pleEmbedDim,
+                  pleConvKernelSize: wire.pleConvKernelSize,
+                  pleNgramSize: wire.pleNgramSize,
+                  pleVocabSizeBase: wire.pleVocabSizeBase,
+                  pleHeadsPerNgram: wire.pleHeadsPerNgram,
+                  pleVocabDivisor: wire.pleVocabDivisor,
+                  routerNormTopK: wire.routerNormTopK,
+                  quantGroupSize: wire.quantGroupSize)
     }
 }
 

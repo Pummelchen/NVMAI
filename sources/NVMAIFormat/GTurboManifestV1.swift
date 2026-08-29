@@ -33,6 +33,25 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let hiddenActivation: String
     package let fullAttentionLayerMask: [Int]
 
+    // Family extension geometry; absent in manifests written before these
+    // families existed, validated by the reader whenever present.
+    package let hcCount: Int?
+    package let hcLowRank: Int?
+    package let indexerNumHeads: Int?
+    package let indexerNumKVHeads: Int?
+    package let indexerHeadDim: Int?
+    package let indexerBudget: Int?
+    package let indexerCompressRatio: Int?
+    package let pleLayerIndices: [Int]?
+    package let pleEmbedDim: Int?
+    package let pleConvKernelSize: Int?
+    package let pleNgramSize: Int?
+    package let pleVocabSizeBase: Int?
+    package let pleHeadsPerNgram: Int?
+    package let pleVocabDivisor: Int?
+    package let routerNormTopK: Bool?
+    package let quantGroupSize: Int?
+
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
                  headDim: Int, fullHeadDim: Int, vocabSize: Int,
@@ -40,7 +59,23 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  ropeTheta: Double, fullRopeTheta: Double,
                  partialRotaryFactor: Double, numLayers: Int, numExperts: Int,
                  topKExperts: Int, tieWordEmbeddings: Bool, attentionKEqV: Bool,
-                 hiddenActivation: String, fullAttentionLayerMask: [Int]) {
+                 hiddenActivation: String, fullAttentionLayerMask: [Int],
+                 hcCount: Int? = nil,
+                 hcLowRank: Int? = nil,
+                 indexerNumHeads: Int? = nil,
+                 indexerNumKVHeads: Int? = nil,
+                 indexerHeadDim: Int? = nil,
+                 indexerBudget: Int? = nil,
+                 indexerCompressRatio: Int? = nil,
+                 pleLayerIndices: [Int]? = nil,
+                 pleEmbedDim: Int? = nil,
+                 pleConvKernelSize: Int? = nil,
+                 pleNgramSize: Int? = nil,
+                 pleVocabSizeBase: Int? = nil,
+                 pleHeadsPerNgram: Int? = nil,
+                 pleVocabDivisor: Int? = nil,
+                 routerNormTopK: Bool? = nil,
+                 quantGroupSize: Int? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -62,6 +97,22 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.attentionKEqV = attentionKEqV
         self.hiddenActivation = hiddenActivation
         self.fullAttentionLayerMask = fullAttentionLayerMask
+        self.hcCount = hcCount
+        self.hcLowRank = hcLowRank
+        self.indexerNumHeads = indexerNumHeads
+        self.indexerNumKVHeads = indexerNumKVHeads
+        self.indexerHeadDim = indexerHeadDim
+        self.indexerBudget = indexerBudget
+        self.indexerCompressRatio = indexerCompressRatio
+        self.pleLayerIndices = pleLayerIndices
+        self.pleEmbedDim = pleEmbedDim
+        self.pleConvKernelSize = pleConvKernelSize
+        self.pleNgramSize = pleNgramSize
+        self.pleVocabSizeBase = pleVocabSizeBase
+        self.pleHeadsPerNgram = pleHeadsPerNgram
+        self.pleVocabDivisor = pleVocabDivisor
+        self.routerNormTopK = routerNormTopK
+        self.quantGroupSize = quantGroupSize
     }
 }
 

@@ -427,3 +427,104 @@ extension ArchConfig {
         )
     }
 }
+
+/// Validation of the family-extension geometry (hyper-connections, the QSA
+/// indexer, PLE). These fields are optional so older manifests still load, but
+/// when a manifest declares them they must match the architecture the runtime
+/// would actually execute -- otherwise a checkpoint with, say, a different
+/// hyper-connection rank runs silently against the wrong constants and
+/// produces plausible nonsense.
+@Suite("Manifest extension geometry")
+struct ManifestExtensionGeometryTests {
+    private static func toyWithExtensions() -> ArchConfig {
+        var base = ArchConfig.qwenToy()
+        base = ArchConfig(
+            hiddenSize: base.hiddenSize, intermediateSize: base.intermediateSize,
+            moeIntermediateSize: base.moeIntermediateSize, numHeads: base.numHeads,
+            numKVHeads: base.numKVHeads, numFullKVHeads: base.numFullKVHeads,
+            headDim: base.headDim, fullHeadDim: base.fullHeadDim,
+            vocabSize: base.vocabSize, slidingWindow: base.slidingWindow,
+            finalLogitSoftcap: base.finalLogitSoftcap, ropeTheta: base.ropeTheta,
+            fullRopeTheta: base.fullRopeTheta,
+            partialRotaryFactor: base.partialRotaryFactor,
+            numLayers: base.numLayers, numExperts: base.numExperts,
+            topKExperts: base.topKExperts,
+            tieWordEmbeddings: base.tieWordEmbeddings,
+            attentionKEqV: base.attentionKEqV,
+            fullAttentionLayerMask: base.fullAttentionLayerMask,
+            hiddenActivation: base.hiddenActivation, family: base.family,
+            attnOutputGate: base.attnOutputGate,
+            attentionScale: base.attentionScale,
+            embeddingScaledBySqrtHidden: base.embeddingScaledBySqrtHidden,
+            routerScaled: base.routerScaled,
+            ffnSandwichNorms: base.ffnSandwichNorms,
+            sharedExpertGated: base.sharedExpertGated,
+            ropeNeoxSubdim: base.ropeNeoxSubdim,
+            linearAttention: base.linearAttention,
+            hyperConnections: HyperConnectionConfig(count: 4, lowRank: 320),
+            sparseIndexer: SparseIndexerConfig(numHeads: 4, numKVHeads: 1,
+                                               headDim: 128, budget: 2048,
+                                               compressRatio: 4),
+            ple: PLEConfig(layerIndices: [1], embedDim: 2560,
+                           convKernelSize: 4, ngramSize: 3,
+                           vocabSizeBase: 20_000_000, headsPerNgram: 8,
+                           vocabDivisor: 128, seed: 1234),
+            routerNormTopK: true, quantGroupSize: 64)
+        return base
+    }
+
+    @Test("A manifest that omits the extension fields still validates")
+    func absentFieldsAreAccepted() throws {
+        let cfg = Self.toyWithExtensions()
+        let (dir, _) = try ManifestReaderTests.writeToyManifest(config: cfg)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try ManifestReader.load(directoryURL: dir, expecting: cfg)
+    }
+
+    @Test("Matching extension fields validate")
+    func matchingFieldsAccepted() throws {
+        let cfg = Self.toyWithExtensions()
+        let (dir, _) = try ManifestReaderTests.writeToyManifest(
+            archOverrides: ["hcCount": 4, "hcLowRank": 320,
+                            "indexerBudget": 2048, "quantGroupSize": 64,
+                            "pleLayerIndices": [1]],
+            config: cfg)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try ManifestReader.load(directoryURL: dir, expecting: cfg)
+    }
+
+    @Test("A disagreeing hyper-connection rank is rejected, not ignored")
+    func mismatchedRankRejected() throws {
+        let cfg = Self.toyWithExtensions()
+        let (dir, _) = try ManifestReaderTests.writeToyManifest(
+            archOverrides: ["hcLowRank": 256], config: cfg)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(throws: (any Error).self) {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: cfg)
+        }
+    }
+
+    @Test("A disagreeing quantization group size is rejected")
+    func mismatchedGroupSizeRejected() throws {
+        let cfg = Self.toyWithExtensions()
+        let (dir, _) = try ManifestReaderTests.writeToyManifest(
+            archOverrides: ["quantGroupSize": 32], config: cfg)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Repacking at the wrong group size would corrupt every weight, so
+        // this is the single most important field in this set.
+        #expect(throws: (any Error).self) {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: cfg)
+        }
+    }
+
+    @Test("A disagreeing PLE layer set is rejected")
+    func mismatchedPLERejected() throws {
+        let cfg = Self.toyWithExtensions()
+        let (dir, _) = try ManifestReaderTests.writeToyManifest(
+            archOverrides: ["pleLayerIndices": [2]], config: cfg)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(throws: (any Error).self) {
+            _ = try ManifestReader.load(directoryURL: dir, expecting: cfg)
+        }
+    }
+}
