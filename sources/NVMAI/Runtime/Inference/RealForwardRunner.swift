@@ -479,7 +479,15 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             b.label = label
             return b
         }
-        self.hidden        = try buf(D, label: "decode.hidden")
+        // The residual is the one scratch buffer whose width is not D. A
+        // hyper-connection family carries `hc_count` parallel streams of D and
+        // reads a single D-wide vector out of them per sublayer, so only this
+        // allocation widens -- every downstream buffer stays D. Families
+        // without them get exactly D, as before.
+        let residualElements = cfg.hyperConnections.enabled
+            ? D * cfg.hyperConnections.count
+            : D
+        self.hidden        = try buf(residualElements, label: "decode.hidden")
         self.normed        = try buf(D, label: "decode.normed")
         self.attnOut       = try buf(maxQ, label: "decode.attnOut")
         self.qScratch      = try buf(maxQ, label: "decode.qScratch")

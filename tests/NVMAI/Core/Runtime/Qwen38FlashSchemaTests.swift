@@ -141,3 +141,36 @@ struct Qwen38FlashSchemaTests {
         #expect(!Self.names.contains(qwen.qProj(3)))
     }
 }
+
+/// The residual's width, which is the one scratch buffer a hyper-connection
+/// family sizes differently. Every other buffer stays `D`, because the gated
+/// read collapses the streams before any block sees them.
+@Suite("Residual width")
+struct ResidualWidthTests {
+    @Test("Hyper-connection families carry hc_count streams")
+    func flashCarriesFourStreams() {
+        let cfg = ArchConfig.qwen38FlashNext
+        #expect(cfg.hyperConnections.enabled)
+        #expect(cfg.hyperConnections.count == 4)
+        #expect(cfg.hiddenSize * cfg.hyperConnections.count == 10_240)
+    }
+
+    @Test("Families without them are unchanged at D")
+    func qwen36IsUnchanged() {
+        let cfg = ArchConfig.qwen36_35B_A3B
+        #expect(!cfg.hyperConnections.enabled)
+        // The allocation keys off `enabled`, so this family must keep taking
+        // exactly D -- a widened residual here would change every downstream
+        // offset and break the goldens.
+        #expect(cfg.hyperConnections.count == 0)
+    }
+
+    @Test("Only the residual widens; block-facing buffers stay D")
+    func onlyResidualWidens() {
+        let cfg = ArchConfig.qwen38FlashNext
+        // The gated read produces one D-wide vector, so attention, the MoE and
+        // every scratch after them see 2560 regardless of stream count.
+        #expect(cfg.hiddenSize == 2560)
+        #expect(cfg.moeIntermediateSize == 640)
+    }
+}
