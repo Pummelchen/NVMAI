@@ -268,3 +268,110 @@ import NVMAIValidationSupport
         #expect(a == b, "batched per-head no-scale must match the per-head loop bytewise")
     }
 }
+
+/// Grouped RMSNorm: `numGroups` contiguous groups, each against its own weight
+/// slice. Qwen3.8-Flash-Next normalizes 4 residual streams of 2560 with one
+/// `[10240]` weight, so the distinction from the shared-weight per-head form
+/// is the whole point -- sharing would apply stream 0's scale to all four.
+@Suite struct RMSNormGroupedTests {
+    private static let eps: Float = 1e-6
+
+    private static func run(groupDim: Int, groups: Int, seed: UInt64) throws {
+        var rng = SeedTree(seed).key("rmsnorm-grouped-\(groupDim)x\(groups)")
+        let total = groupDim * groups
+        let xFp32 = (0..<total).map { _ in rng.uniform(-1.0, 1.0) }
+        // Distinct scale per group, so a shared-weight implementation cannot
+        // pass by coincidence.
+        let wFp32 = (0..<total).map { i in
+            rng.uniform(0.5, 1.5) * (1.0 + Float(i / groupDim))
+        }
+        let xFp16 = xFp32.map { Float16($0) }
+        let xRef = xFp16.map { Float($0) }
+        let wBits = wFp32.map { Quantization.bf16Bits($0) }
+        let wRef = wBits.map { Quantization.bf16ToFloat($0) }
+
+        let ctx = try MetalContext()
+        let kernel = try RMSNorm(context: ctx)
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: xFp16),
+              let yBuf = Fp16Buffer.make(ctx.device, count: total),
+              let wBuf = ctx.device.makeBuffer(length: wBits.count * 2,
+                                               options: .storageModeShared) else {
+            Issue.record("alloc failed"); return
+        }
+        let wPtr = wBuf.contents().bindMemory(to: UInt16.self, capacity: wBits.count)
+        for i in 0..<wBits.count { wPtr[i] = wBits[i] }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        try kernel.encodeBF16WGrouped(commandBuffer: cb, x: xBuf, weight: wBuf,
+                                      out: yBuf, groupDim: UInt32(groupDim),
+                                      numGroups: groups, eps: eps)
+        cb.commit(); cb.waitUntilCompleted()
+
+        // Reference: each group normalized independently against its own slice.
+        var ref: [Float] = []
+        for g in 0..<groups {
+            let lo = g * groupDim, hi = lo + groupDim
+            ref += RmsNormRef.apply(x: Array(xRef[lo..<hi]),
+                                    weight: Array(wRef[lo..<hi]), eps: eps)
+        }
+        let actual = Fp16Buffer.read(yBuf, count: total)
+        let relErr = RelError.compute(actual: actual, reference: ref)
+        #expect(relErr < Tolerance.fp16Reduction,
+                "grouped \(groupDim)x\(groups): relErr=\(relErr)")
+    }
+
+    @Test("The production shape: 4 streams of 2560")
+    func hyperConnectionShape() throws {
+        try Self.run(groupDim: 2560, groups: 4, seed: 0x11CE)
+    }
+
+    @Test("Smaller shapes")
+    func smallShapes() throws {
+        try Self.run(groupDim: 256, groups: 3, seed: 0x22DE)
+        try Self.run(groupDim: 512, groups: 2, seed: 0x33EF)
+    }
+
+    @Test("One group equals the plain kernel")
+    func singleGroupMatchesPlain() throws {
+        try Self.run(groupDim: 2048, groups: 1, seed: 0x44FA)
+    }
+
+    @Test("Groups really are independent, not sharing one weight slice")
+    func groupsUseTheirOwnWeights() throws {
+        // Identical data in both groups but different weights: a shared-weight
+        // implementation would produce identical halves, which this rejects.
+        let groupDim = 256, groups = 2
+        var rng = SeedTree(0x55AB).key("grouped-independence")
+        let half = (0..<groupDim).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let xFp16 = half + half
+        let wBits = (0..<groupDim).map { _ in Quantization.bf16Bits(1.0) }
+            + (0..<groupDim).map { _ in Quantization.bf16Bits(2.0) }
+
+        let ctx = try MetalContext()
+        let kernel = try RMSNorm(context: ctx)
+        guard let xBuf = Fp16Buffer.make(ctx.device, halves: xFp16),
+              let yBuf = Fp16Buffer.make(ctx.device, count: groupDim * groups),
+              let wBuf = ctx.device.makeBuffer(length: wBits.count * 2,
+                                               options: .storageModeShared) else {
+            Issue.record("alloc failed"); return
+        }
+        let wPtr = wBuf.contents().bindMemory(to: UInt16.self, capacity: wBits.count)
+        for i in 0..<wBits.count { wPtr[i] = wBits[i] }
+
+        let cb = ctx.queue.makeCommandBuffer()!
+        try kernel.encodeBF16WGrouped(commandBuffer: cb, x: xBuf, weight: wBuf,
+                                      out: yBuf, groupDim: UInt32(groupDim),
+                                      numGroups: groups, eps: Self.eps)
+        cb.commit(); cb.waitUntilCompleted()
+
+        let out = Fp16Buffer.read(yBuf, count: groupDim * groups)
+        // Group 1's weight is 2x group 0's, so its output must be 2x.
+        for i in 0..<groupDim {
+            let a = out[i], b = out[groupDim + i]
+            if abs(a) > 1e-3 {
+                #expect(abs(b / a - 2.0) < 0.05,
+                        "group weights not applied independently at \(i)")
+            }
+        }
+    }
+}

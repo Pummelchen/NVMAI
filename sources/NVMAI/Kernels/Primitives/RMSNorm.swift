@@ -15,6 +15,7 @@ final class RMSNorm {
     private let psoBF16: MTLComputePipelineState
     private let psoNoScale: MTLComputePipelineState
     private let psoBF16PerHead: MTLComputePipelineState
+    private let psoBF16Grouped: MTLComputePipelineState
     private let psoNoScalePerHead: MTLComputePipelineState
     private let psoBF16D2816: MTLComputePipelineState
     private let psoNoScaleD2816: MTLComputePipelineState
@@ -27,6 +28,7 @@ final class RMSNorm {
         self.psoBF16     = try context.pipeline("rmsnorm_bf16w")
         self.psoNoScale  = try context.pipeline("rmsnorm_no_scale")
         self.psoBF16PerHead    = try context.pipeline("rmsnorm_bf16w_perhead")
+        self.psoBF16Grouped    = try context.pipeline("rmsnorm_bf16w_grouped")
         self.psoNoScalePerHead = try context.pipeline("rmsnorm_no_scale_perhead")
         self.psoBF16D2816 = try Self.specializedPipeline(context,
                                                          "rmsnorm_bf16w",
@@ -111,6 +113,37 @@ final class RMSNorm {
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
         let w = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         enc.dispatchThreadgroups(MTLSize(width: numHeads, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// RMSNorm over `numGroups` contiguous groups of `groupDim`, each against
+    /// its own weight slice.
+    ///
+    /// Distinct from `encodeBF16WPerHead`, which shares one `[groupDim]`
+    /// weight across every group. Qwen3.8-Flash-Next's hyper connection
+    /// normalizes its 4 residual streams of 2560 against a single `[10240]`
+    /// weight -- four different slices -- so the shared-weight form would
+    /// silently apply stream 0's scale to all four.
+    func encodeBF16WGrouped(commandBuffer: MTLCommandBuffer,
+                            x: MTLBuffer, xOffset: Int = 0,
+                            weight: MTLBuffer, weightOffset: Int = 0,
+                            out: MTLBuffer, outOffset: Int = 0,
+                            groupDim: UInt32, numGroups: Int,
+                            eps: Float) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(psoBF16Grouped)
+        enc.setBuffer(x,      offset: xOffset,      index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out,    offset: outOffset,    index: 2)
+        var gd = groupDim
+        var epsVar = eps
+        enc.setBytes(&gd,     length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
+        let w = min(Int(psoBF16Grouped.maxTotalThreadsPerThreadgroup), 256)
+        enc.dispatchThreadgroups(MTLSize(width: numGroups, height: 1, depth: 1),
                                  threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         enc.endEncoding()
     }
