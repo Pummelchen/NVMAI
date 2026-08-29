@@ -237,14 +237,11 @@ extension RealForwardRunner {
             let qDim = cfg.numHeads * headDim
             let kvDim = numKVHeads * headDim
 
-            try prefillRMS.encodeBF16W(commandBuffer: cb,
-                                   x: scratch.hidden,
-                                   weight: views.inputNorm.buffer,
-                                   weightOffset: Int(views.inputNorm.offset),
-                                   out: scratch.normed,
-                                   t: UInt32(t),
-                                   d: UInt32(D),
-                                   eps: eps)
+            try encodeResidualEntryPrefill(commandBuffer: cb,
+                                           hidden: scratch.hidden,
+                                           norm: views.inputNorm,
+                                           out: scratch.normed,
+                                           tokens: t, eps: eps)
             if isLinear {
                 try encodeLinearAttentionPrefill(
                     cb: cb, layer: L, views: views, scratch: scratch,
@@ -267,10 +264,9 @@ extension RealForwardRunner {
             // Plain pre-norm residual block: hidden += attention branch,
             // then one post-attention norm feeds router, shared expert,
             // and routed phase 1 (routedX doubles as moeX).
-            try elementwise!.encodeResidualAdd(commandBuffer: cb,
-                                           hidden: scratch.hidden,
-                                           delta: scratch.h1,
-                                           count: t * D)
+            try encodeResidualExitPrefill(commandBuffer: cb,
+                                          hidden: scratch.hidden,
+                                          delta: scratch.h1, tokens: t)
             try prefillRMS.encodeBF16W(commandBuffer: cb,
                                    x: scratch.hidden,
                                    weight: views.postAttention.buffer,

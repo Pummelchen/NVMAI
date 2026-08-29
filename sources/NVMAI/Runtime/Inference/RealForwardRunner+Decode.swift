@@ -115,11 +115,9 @@ extension RealForwardRunner {
             guard let attnCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
-            try rms.encodeBF16W(commandBuffer: attnCB,
-                            x: hidden,
-                            weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
-                            out: normed,
-                            d: D, eps: eps)
+            try encodeResidualEntryDecode(commandBuffer: attnCB,
+                                          hidden: hidden, norm: inNorm,
+                                          out: normed, eps: eps)
             var softmaxCB: MTLCommandBuffer?
             guard let tailCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
@@ -129,16 +127,11 @@ extension RealForwardRunner {
                                       softmaxCB: &softmaxCB,
                                       layer: L, position: position,
                                       isLinear: isLinear, rmsEps: eps)
-            try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
-                                           hidden: hidden,
-                                           delta: oOut,
-                                           count: cfg.hiddenSize)
-            try rms.encodeBF16W(commandBuffer: tailCB,
-                            x: hidden,
-                            weight: postAttn.buffer,
-                            weightOffset: Int(postAttn.offset),
-                            out: routedX,
-                            d: D, eps: eps)
+            try encodeResidualExitDecode(commandBuffer: tailCB,
+                                         hidden: hidden, delta: oOut)
+            try encodeResidualEntryDecode(commandBuffer: tailCB,
+                                          hidden: hidden, norm: postAttn,
+                                          out: routedX, eps: eps)
 
             try moe.encodeRouter(commandBuffer: tailCB,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
