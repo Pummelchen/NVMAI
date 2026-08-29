@@ -379,3 +379,42 @@ None of that makes the model *execute* -- that is P1 (hyper-connection
 residual plumbing, QSA dense path with the <=2048 exactness gate, the PLE
 block, top-10 MoE) and is the larger half of the work.
 
+## P1 blockers, located precisely (2026-08-28)
+
+The runtime schema landed (`9d8e798`), so `Model` can now name every tensor in
+this checkpoint. What still stops execution, each found by reading the code
+rather than inferred:
+
+### MoE: top-10 and 512 experts
+
+| blocker | where | note |
+| --- | --- | --- |
+| `kMaxStreamedExperts = 8` | `Metal/MoE/moe.metal:5` | `constexpr`, sizes the argument buffer's `blob[]` pointer array. Metal array sizes must be compile-time, so a function constant cannot express this: either raise it for everyone (+8 pointers = 64 bytes per argument buffer, negligible) or compile a second variant. Raising it changes the argument-buffer layout, so the Swift writer must move in lockstep and both goldens must stay byte-identical. |
+| `router_topk_select_k8` | same file | fixed `top_idx[8]` / `top_score[8]`. Safest change is a new `_kn` kernel used only when k != 8, leaving the qwen36 path untouched. |
+| `moe_phase2_down_reduce_k8` | same file | the second k-specialized kernel. |
+| `precondition(numExperts <= 256)` | `Kernels/MoE/MoE.swift:175` | qwen38 has 512. Expert ids are `UInt32` throughout (`ExpertResidencyTable`), and the kernels read `num_experts` dynamically, so this reads as a conservative guard rather than a real width limit -- but that must be confirmed, not assumed, before raising it. |
+| `precondition(topKExperts == 8)` | `MoE.swift:79` | the explicit gate; lifts once the above are done. |
+
+### Router normalization: already correct, worth not "fixing"
+
+`router_topk_select_k8` softmaxes over the **selected** top-k scores, so its
+weights sum to 1. That is exactly `norm_topk_prob: true`, which is what
+Qwen3.8-Flash-Next declares -- softmax-over-all then renormalize-over-top-k is
+mathematically the same thing. So the existing math is right for this family
+and needs no change. `ArchConfig.routerNormTopK` is declared but not yet read
+by anything; wiring it should preserve this behaviour rather than alter it.
+
+### Not yet started
+
+- **Hyper-connection residual.** The stream is 4 x 2560 = 10,240 wide for the
+  whole stack; every sublayer does a grouped RMS norm, a low-rank gated read
+  (10240 -> 320 -> 10240) and a per-stream write. New kernels plus a wider
+  residual buffer everywhere.
+- **QSA.** Dense path first behind the <=2048 exactness gate (where dense is
+  bit-exact), indexer second.
+- **PLE.** Integer hashing CPU-side, row gather off `ngram_table.bin`, dilated
+  depthwise conv. The gather is the part that suits NVMAI: lookups depend only
+  on token ids, never on router output, so the next token's rows can be
+  prefetched the moment it is sampled -- fully off the critical path, unlike
+  expert misses.
+
