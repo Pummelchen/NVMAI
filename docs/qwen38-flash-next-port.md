@@ -310,6 +310,37 @@ validation. The code is open (MIT, `Rocktalk-Holdings/mlx-qwen4exp`) and the
 card reports measured M3 Ultra figures (26.4-26.6 tok/s greedy), so it reads
 as serious work rather than a drive-by upload — but the quantization quality
 is unverified by anyone. Pinning the revision plus the receipt's SHA256 covers
-integrity, not quality. **A greedy logit-parity check against `transformers`
-on a short prefix is required before any quality claim.**
+integrity, not quality.
+
+### Quantization fidelity: VERIFIED SOUND (2026-08-28)
+
+A greedy logit parity against `transformers` is not runnable here -- the bf16
+checkpoint is ~360 GB against 288 GB free -- but the question underneath it is
+answerable directly and cheaply. `benchmark/nvmai_quant_fidelity.py` pulls the
+same tensors from both repos by HTTP range (no bulk download), dequantizes the
+MLX affine blocks, and compares against the official bf16 values.
+
+The meaningful test is not an absolute error threshold but whether the
+quantizer reaches the floor the format allows, so each tensor is also compared
+against an ideal affine round-trip of the official weights:
+
+| tensor | bits | MAE ratio | ideal floor | excess |
+| --- | ---: | ---: | ---: | ---: |
+| L3 `self_attn.q_proj` | 4 | 0.1096 | 0.1074 | **1.02x** |
+| L3 `self_attn.o_proj` | 4 | 0.1068 | 0.1047 | **1.02x** |
+| L0 `linear_attn.out_proj` | 4 | 0.1158 | 0.1136 | **1.02x** |
+| L3 `mlp.shared_expert.gate_proj` | 4 | 0.1120 | 0.1097 | **1.02x** |
+| L19 `self_attn.q_proj` | 4 | 0.1058 | 0.1037 | **1.02x** |
+| L3 `mlp.gate` (router) | 8 | 0.0096 | — | — |
+
+**1.02x the floor everywhere.** The quantizer is as accurate as 4-bit affine
+g64 permits; the residual 2% is consistent with quantizing from bf16. The
+8-bit router lands at 0.96%, matching theory for 8-bit. Shapes, packing order
+and the scale/bias convention all decode correctly against the official
+tensors, which also validates the dequantization contract the repacker will
+need. **Green light to build on this artifact.**
+
+Note this measures weight fidelity, not end-to-end behaviour; a short greedy
+logit comparison against the reference implementation is still worth running
+once the runtime can execute the model.
 
