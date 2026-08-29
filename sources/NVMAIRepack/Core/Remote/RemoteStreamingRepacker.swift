@@ -229,6 +229,11 @@ public final class RemoteStreamingRepacker {
         // come from the remote before planning; the planner then treats them
         // as ordinary resumable range copies.
         var passthroughFiles: [PassthroughFile] = []
+        // The transfer layer resolves a copy's source through this map. These
+        // files are not safetensors shards, so the snapshot loader never put
+        // them there -- carrying the resolved info forward is what makes them
+        // fetchable rather than merely planned.
+        var passthroughRemoteInfo: [String: RemoteFileInfo] = [:]
         for requirement in RepackPlanner.passthroughRequirements(
             family: snapshot.arch.family) {
             let info: RemoteFileInfo
@@ -250,6 +255,7 @@ public final class RemoteStreamingRepacker {
                                                     destinationName: requirement.name,
                                                     size: info.size,
                                                     required: requirement.required))
+            passthroughRemoteInfo[requirement.name] = info
         }
         let plan = try RepackPlanner.plan(meta: snapshot.metadata,
                                           arch: snapshot.arch,
@@ -352,7 +358,8 @@ public final class RemoteStreamingRepacker {
         }
 
         let provider = HTTPRangeSourceByteProvider(remote: remote.pinned(commit: snapshot.resolvedCommit),
-                                                   files: snapshot.remoteFiles,
+                                                   files: snapshot.remoteFiles
+                                                       .merging(passthroughRemoteInfo) { shard, _ in shard },
                                                    writeTileBytes: options.writeTileBytes)
         let reusedBytes = checkpoint.completedRanges.reduce(UInt64(0)) {
             $0 + $1.sourceBytes
