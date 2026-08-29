@@ -38,7 +38,19 @@ extension TensorSchema {
         sharedExpertDown: { flashLayer($0, "mlp.shared_expert.down_proj.weight") },
         sharedExpertScalarGate: { flashLayer($0, "mlp.shared_expert_gate.weight") },
         inputNorm: { flashLayer($0, "attn_hyper_connection.hc_norm") },
-        postAttnNorm: { flashLayer($0, "mlp_hyper_connection.hc_norm") })
+        postAttnNorm: { flashLayer($0, "mlp_hyper_connection.hc_norm") },
+        // No `.weight` on the attention norms in this family, unlike qwen36.
+        qNorm: { flashLayer($0, "self_attn.q_norm") },
+        kNorm: { flashLayer($0, "self_attn.k_norm") },
+        gdnQKV: { flashLayer($0, "linear_attn.in_proj_qkv.weight") },
+        gdnZ: { flashLayer($0, "linear_attn.in_proj_z.weight") },
+        gdnA: { flashLayer($0, "linear_attn.in_proj_a.weight") },
+        gdnB: { flashLayer($0, "linear_attn.in_proj_b.weight") },
+        gdnOut: { flashLayer($0, "linear_attn.out_proj.weight") },
+        gdnConv: { flashLayer($0, "linear_attn.conv1d.weight") },
+        gdnALog: { flashLayer($0, "linear_attn.A_log") },
+        gdnDtBias: { flashLayer($0, "linear_attn.dt_bias") },
+        gdnNorm: { flashLayer($0, "linear_attn.norm.weight") })
 }
 
 /// Roles this family has and the Qwen3.5-MoE families do not. Kept separate

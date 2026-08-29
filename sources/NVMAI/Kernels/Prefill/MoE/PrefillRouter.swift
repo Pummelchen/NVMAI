@@ -61,7 +61,10 @@ final class PrefillRouter {
                                   topK: UInt32,
                                   hiddenStrideElements: UInt32) throws {
         precondition(queryCount > 0, "queryCount must be positive")
-        precondition(numExperts <= 256, "numExperts > 256 is not supported")
+        // Must track kPrefillRouterMaxExperts in prefill.metal: past it the
+        // kernel clamps rather than failing, which routes as if the surplus
+        // experts did not exist.
+        precondition(numExperts <= 512, "numExperts > 512 is not supported")
         precondition(topK > 0 && topK <= 64, "topK must be in 1...64")
         precondition(d % UInt32(Quantization.groupSize) == 0,
                      "D must be a multiple of \(Quantization.groupSize)")

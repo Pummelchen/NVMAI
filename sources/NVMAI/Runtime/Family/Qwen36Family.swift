@@ -22,7 +22,18 @@ extension TensorSchema {
         sharedExpertDown: { qwenLayer($0, "mlp.shared_expert.down_proj.weight") },
         sharedExpertScalarGate: { qwenLayer($0, "mlp.shared_expert_gate.weight") },
         inputNorm: { qwenLayer($0, "input_layernorm.weight") },
-        postAttnNorm: { qwenLayer($0, "post_attention_layernorm.weight") })
+        postAttnNorm: { qwenLayer($0, "post_attention_layernorm.weight") },
+        qNorm: { qwenLayer($0, "self_attn.q_norm.weight") },
+        kNorm: { qwenLayer($0, "self_attn.k_norm.weight") },
+        gdnQKV: { qwenLayer($0, "linear_attn.in_proj_qkv.weight") },
+        gdnZ: { qwenLayer($0, "linear_attn.in_proj_z.weight") },
+        gdnA: { qwenLayer($0, "linear_attn.in_proj_a.weight") },
+        gdnB: { qwenLayer($0, "linear_attn.in_proj_b.weight") },
+        gdnOut: { qwenLayer($0, "linear_attn.out_proj.weight") },
+        gdnConv: { qwenLayer($0, "linear_attn.conv1d.weight") },
+        gdnALog: { qwenLayer($0, "linear_attn.A_log") },
+        gdnDtBias: { qwenLayer($0, "linear_attn.dt_bias") },
+        gdnNorm: { qwenLayer($0, "linear_attn.norm.weight") })
 
     static let qwen36MTP = TensorSchema.qwen36
 }

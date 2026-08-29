@@ -8,7 +8,12 @@ using namespace mpp::tensor_ops;
 
 constant constexpr uint kPrefillGroupSize = 64;
 constant constexpr uint kPrefillRmsMaxSimdGroups = 8;
-constant constexpr uint kPrefillRouterMaxExperts = 256;
+// 512, for Qwen3.8-Flash-Next. This sizes a threadgroup score array AND
+// clamps the scored range (`NE = min(num_experts, ...)`), so a model with more
+// experts than this does not fail -- it silently scores only the first N and
+// routes as if the rest did not exist. 512 floats is 2 KiB of threadgroup
+// memory, well inside the limit.
+constant constexpr uint kPrefillRouterMaxExperts = 512;
 constant constexpr uint kPrefillRouterMaxTopK = 64;
 constant constexpr uint kPrefillAttentionMaxSimdGroups = 16;
 constant constexpr uint kPrefillMaxTileExperts = 16;

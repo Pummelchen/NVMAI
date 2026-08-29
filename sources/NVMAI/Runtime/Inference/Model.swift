@@ -262,10 +262,10 @@ public struct Model {
     // explicit no-scale variant rather than consuming a unit-weight buffer.
 
     public func qNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.q_norm.weight")
+        try resident(name: schema.qNorm(L))
     }
     public func kNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).self_attn.k_norm.weight")
+        try resident(name: schema.kNorm(L))
     }
 
     // MARK: - Gated-DeltaNet linear attention (Qwen 3.6)
@@ -275,35 +275,35 @@ public struct Model {
     // weight, A_log, dt_bias, and the gated output norm are BF16.
 
     public func linearInProjQKV(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_qkv.weight")
+        try resident(name: schema.gdnQKV(L))
     }
     public func linearInProjZ(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_z.weight")
+        try resident(name: schema.gdnZ(L))
     }
     public func linearInProjA(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_a.weight")
+        try resident(name: schema.gdnA(L))
     }
     public func linearInProjB(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.in_proj_b.weight")
+        try resident(name: schema.gdnB(L))
     }
     public func linearOutProj(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.out_proj.weight")
+        try resident(name: schema.gdnOut(L))
     }
     /// Depthwise causal conv weight, source shape `[convDim, kernel, 1]`, BF16.
     public func linearConv1d(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.conv1d.weight")
+        try resident(name: schema.gdnConv(L))
     }
     /// Per-value-head decay base, shape `[numVHeads]`, BF16.
     public func linearALog(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.A_log")
+        try resident(name: schema.gdnALog(L))
     }
     /// Per-value-head dt bias, shape `[numVHeads]`, BF16.
     public func linearDtBias(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.dt_bias")
+        try resident(name: schema.gdnDtBias(L))
     }
     /// Gated RMSNorm weight over the value head dim, shape `[valueHeadDim]`.
     public func linearNorm(layer L: Int) throws -> TensorView {
-        try resident(name: "language_model.model.layers.\(L).linear_attn.norm.weight")
+        try resident(name: schema.gdnNorm(L))
     }
 
     /// Resolve a tensor name to a `TensorView` against the resident buffer.
@@ -727,13 +727,47 @@ extension Model {
 
         switch config.family {
         case .qwen38flash:
-            // The Qwen3.8-Flash-Next runtime schema (resident hyper-connection,
-            // indexer, and PLE tensors plus the streamed n-gram table) is
-            // defined and validated in the P1 runtime work; loading fails
-            // closed until then. See docs/qwen38-flash-next-port.md.
-            throw ModelError.indexCorrupt(
-                detail: "qwen38flash runtime loading is not implemented yet; "
-                    + "the installer and format land first (P0)")
+            // Embedding and head are 8-bit in this checkpoint while the body
+            // is 4-bit, so both are validated against the embedding slot the
+            // manifest declares rather than an assumed width.
+            try checks.requireAffine("model.language_model.embed_tokens.weight",
+                                     rows: config.vocabSize,
+                                     columns: config.hiddenSize,
+                                     slot: quant.embedding)
+            // `lm_head` sits at the archive root in this family, not under the
+            // language-model prefix.
+            try checks.requireAffine("lm_head.weight",
+                                     rows: config.vocabSize,
+                                     columns: config.hiddenSize,
+                                     slot: quant.embedding)
+            // The hyper-connection residual is the family's defining feature
+            // and the one thing whose absence would let a mis-repacked payload
+            // load and then compute a plain-residual model. Check the
+            // model-level mixer and one layer's worth of both sublayer gates.
+            let hcDim = config.hiddenSize * config.hyperConnections.count
+            try checks.requireBF16(
+                "model.language_model.hyper_connection_mixer.hc_norm",
+                count: hcDim)
+            for layer in 0..<config.numLayers {
+                try checks.requireBF16(
+                    "model.language_model.layers.\(layer)."
+                        + "attn_hyper_connection.hc_norm", count: hcDim)
+                try checks.requireBF16(
+                    "model.language_model.layers.\(layer)."
+                        + "mlp_hyper_connection.hc_norm", count: hcDim)
+            }
+            // The PLE block exists on exactly the configured layers, and its
+            // constants and table are passthrough files rather than tensors --
+            // their presence is the manifest's business, checked below.
+            for layer in config.ple.layerIndices {
+                try checks.requireBF16(
+                    "model.language_model.layers.\(layer).ple.conv1d",
+                    count: hcDim * config.ple.convKernelSize)
+            }
+            guard manifest.files[Qwen38FlashTensors.pleConstantsFile] != nil else {
+                throw ModelError.missingFile(
+                    name: Qwen38FlashTensors.pleConstantsFile)
+            }
         case .qwen36:
             try checks.requireAffine(
                                      "language_model.model.embed_tokens.weight",
@@ -758,7 +792,15 @@ extension Model {
             try checks.requireBF16("pre_fc_norm_embedding.weight", count: config.hiddenSize)
             try checks.requireBF16("pre_fc_norm_hidden.weight", count: config.hiddenSize)
         }
-        try checks.requireBF16("language_model.model.norm.weight", count: config.hiddenSize)
+        // Resolved through the family's schema: this norm is not always
+        // `model.norm`, and not always `hiddenSize` wide. A hyper-connection
+        // family collapses its streams through a mixer whose norm spans the
+        // full residual.
+        try checks.requireBF16(
+            TensorSchema.schema(for: config.family).finalNorm,
+            count: config.hyperConnections.enabled
+                ? config.hiddenSize * config.hyperConnections.count
+                : config.hiddenSize)
 
         try validateLayerSchema(checks: checks, layout: layout,
                                 config: config, quant: quant)
@@ -789,27 +831,32 @@ extension Model {
         config: ArchConfig,
         quant: ManifestQuant
     ) throws {
+        // Names resolve through the family's schema; only shapes are spelled
+        // here. A family whose per-sublayer norm is the hyper-connection's
+        // spans the whole residual rather than one stream.
+        let schema = TensorSchema.schema(for: config.family)
+        let blockNormWidth = config.hyperConnections.enabled
+            ? config.hiddenSize * config.hyperConnections.count
+            : config.hiddenSize
         for layer in 0..<config.numLayers {
-            let prefix = "language_model.model.layers.\(layer)"
-            try checks.requireBF16("\(prefix).input_layernorm.weight", count: config.hiddenSize)
-            try checks.requireBF16("\(prefix).post_attention_layernorm.weight", count: config.hiddenSize)
-            try checks.requireAffine("\(prefix).mlp.gate.weight",
+            try checks.requireBF16(schema.inputNorm(layer), count: blockNormWidth)
+            try checks.requireBF16(schema.postAttnNorm(layer), count: blockNormWidth)
+            try checks.requireAffine(schema.router(layer),
                                      rows: config.numExperts, columns: config.hiddenSize,
                                      slot: quant.router)
             // The shared-expert scalar gate is quantized at the ROUTER's bit
             // width (8-bit on the target checkpoint, 4-bit on the MTP
             // sidecar), independent of the sharedExpert slot.
-            try checks.requireAffine("\(prefix).mlp.shared_expert_gate.weight",
+            try checks.requireAffine(schema.sharedExpertScalarGate(layer),
                                      rows: 1, columns: config.hiddenSize,
                                      slot: quant.router)
-            let shared = "\(prefix).mlp.shared_expert"
-            try checks.requireAffine("\(shared).gate_proj.weight",
+            try checks.requireAffine(schema.sharedExpertGate(layer),
                                      rows: config.intermediateSize, columns: config.hiddenSize,
                                      slot: quant.sharedExpert)
-            try checks.requireAffine("\(shared).up_proj.weight",
+            try checks.requireAffine(schema.sharedExpertUp(layer),
                                      rows: config.intermediateSize, columns: config.hiddenSize,
                                      slot: quant.sharedExpert)
-            try checks.requireAffine("\(shared).down_proj.weight",
+            try checks.requireAffine(schema.sharedExpertDown(layer),
                                      rows: config.hiddenSize, columns: config.intermediateSize,
                                      slot: quant.sharedExpert)
 
@@ -821,45 +868,45 @@ extension Model {
                 let kvDimension = try checks.checkedIntMultiply(
                     config.numFullKVHeads, config.fullHeadDim,
                     field: "layer \(layer) key/value")
-                try checks.requireBF16("\(prefix).self_attn.q_norm.weight",
+                try checks.requireBF16(schema.qNorm(layer),
                                        count: config.fullHeadDim)
-                try checks.requireBF16("\(prefix).self_attn.k_norm.weight",
+                try checks.requireBF16(schema.kNorm(layer),
                                        count: config.fullHeadDim)
-                try checks.requireAffine("\(prefix).self_attn.q_proj.weight",
+                try checks.requireAffine(schema.qProj(layer),
                                          rows: queryDimension, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine("\(prefix).self_attn.k_proj.weight",
+                try checks.requireAffine(schema.kProj(layer),
                                          rows: kvDimension, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine("\(prefix).self_attn.v_proj.weight",
+                try checks.requireAffine(schema.vProj(layer),
                                          rows: kvDimension, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine("\(prefix).self_attn.o_proj.weight",
+                try checks.requireAffine(schema.oProj(layer),
                                          rows: config.hiddenSize,
                                          columns: config.numHeads * config.fullHeadDim,
                                          slot: quant.attention)
             } else if config.layerIsLinear(layer) {
                 let la = config.linearAttention
-                try checks.requireAffine("\(prefix).linear_attn.in_proj_qkv.weight",
+                try checks.requireAffine(schema.gdnQKV(layer),
                                          rows: la.qkvDim, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine("\(prefix).linear_attn.in_proj_z.weight",
+                try checks.requireAffine(schema.gdnZ(layer),
                                          rows: la.valueDim, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine("\(prefix).linear_attn.in_proj_a.weight",
+                try checks.requireAffine(schema.gdnA(layer),
                                          rows: la.numVHeads, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine("\(prefix).linear_attn.in_proj_b.weight",
+                try checks.requireAffine(schema.gdnB(layer),
                                          rows: la.numVHeads, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine("\(prefix).linear_attn.out_proj.weight",
+                try checks.requireAffine(schema.gdnOut(layer),
                                          rows: config.hiddenSize, columns: la.valueDim,
                                          slot: quant.attention)
-                try checks.requireBF16("\(prefix).linear_attn.conv1d.weight",
+                try checks.requireBF16(schema.gdnConv(layer),
                                        count: la.qkvDim * la.convKernelSize)
-                try checks.requireBF16("\(prefix).linear_attn.A_log", count: la.numVHeads)
-                try checks.requireBF16("\(prefix).linear_attn.dt_bias", count: la.numVHeads)
-                try checks.requireBF16("\(prefix).linear_attn.norm.weight",
+                try checks.requireBF16(schema.gdnALog(layer), count: la.numVHeads)
+                try checks.requireBF16(schema.gdnDtBias(layer), count: la.numVHeads)
+                try checks.requireBF16(schema.gdnNorm(layer),
                                        count: la.valueHeadDim)
             }
         }

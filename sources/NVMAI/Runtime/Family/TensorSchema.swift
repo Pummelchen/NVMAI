@@ -27,6 +27,21 @@ public struct TensorSchema: Sendable {
     public let sharedExpertScalarGate: @Sendable (Int) -> String
     public let inputNorm: @Sendable (Int) -> String
     public let postAttnNorm: @Sendable (Int) -> String
+    // Per-head attention norms and the gated-DeltaNet bundle. The GDN
+    // suffixes happen to match across today's families, but the attention
+    // norms do not (`q_norm.weight` against `q_norm`), so all of them resolve
+    // per family rather than by prefixing a shared tail.
+    public let qNorm: @Sendable (Int) -> String
+    public let kNorm: @Sendable (Int) -> String
+    public let gdnQKV: @Sendable (Int) -> String
+    public let gdnZ: @Sendable (Int) -> String
+    public let gdnA: @Sendable (Int) -> String
+    public let gdnB: @Sendable (Int) -> String
+    public let gdnOut: @Sendable (Int) -> String
+    public let gdnConv: @Sendable (Int) -> String
+    public let gdnALog: @Sendable (Int) -> String
+    public let gdnDtBias: @Sendable (Int) -> String
+    public let gdnNorm: @Sendable (Int) -> String
 
     public init(embedding: String,
                 lmHead: String,
@@ -41,7 +56,18 @@ public struct TensorSchema: Sendable {
                 sharedExpertDown: @escaping @Sendable (Int) -> String,
                 sharedExpertScalarGate: @escaping @Sendable (Int) -> String,
                 inputNorm: @escaping @Sendable (Int) -> String,
-                postAttnNorm: @escaping @Sendable (Int) -> String) {
+                postAttnNorm: @escaping @Sendable (Int) -> String,
+                qNorm: @escaping @Sendable (Int) -> String,
+                kNorm: @escaping @Sendable (Int) -> String,
+                gdnQKV: @escaping @Sendable (Int) -> String,
+                gdnZ: @escaping @Sendable (Int) -> String,
+                gdnA: @escaping @Sendable (Int) -> String,
+                gdnB: @escaping @Sendable (Int) -> String,
+                gdnOut: @escaping @Sendable (Int) -> String,
+                gdnConv: @escaping @Sendable (Int) -> String,
+                gdnALog: @escaping @Sendable (Int) -> String,
+                gdnDtBias: @escaping @Sendable (Int) -> String,
+                gdnNorm: @escaping @Sendable (Int) -> String) {
         self.embedding = embedding
         self.lmHead = lmHead
         self.finalNorm = finalNorm
@@ -56,6 +82,17 @@ public struct TensorSchema: Sendable {
         self.sharedExpertScalarGate = sharedExpertScalarGate
         self.inputNorm = inputNorm
         self.postAttnNorm = postAttnNorm
+        self.qNorm = qNorm
+        self.kNorm = kNorm
+        self.gdnQKV = gdnQKV
+        self.gdnZ = gdnZ
+        self.gdnA = gdnA
+        self.gdnB = gdnB
+        self.gdnOut = gdnOut
+        self.gdnConv = gdnConv
+        self.gdnALog = gdnALog
+        self.gdnDtBias = gdnDtBias
+        self.gdnNorm = gdnNorm
     }
 
     public static func schema(for family: ModelFamily) -> TensorSchema {
