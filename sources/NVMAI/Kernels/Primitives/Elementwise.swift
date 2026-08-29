@@ -10,6 +10,11 @@ final class Elementwise {
     private let residualAddPSO: MTLComputePipelineState
     private let splitQGatePSO: MTLComputePipelineState
     private let concatRowsPSO: MTLComputePipelineState
+    // Hyper-connection (Gated Residual) stream plumbing.
+    private let hcMixReducePSO: MTLComputePipelineState
+    private let hcInjectPSO: MTLComputePipelineState
+    private let sigmoidPSO: MTLComputePipelineState
+    private let siluPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
@@ -17,6 +22,99 @@ final class Elementwise {
         self.residualAddPSO = try context.pipeline("residual_add_fp16")
         self.splitQGatePSO = try context.pipeline("split_q_gate_fp16")
         self.concatRowsPSO = try context.pipeline("concat_rows_fp16")
+        self.hcMixReducePSO = try context.pipeline("hc_stream_mix_reduce_fp16")
+        self.hcInjectPSO = try context.pipeline("hc_stream_inject_fp16")
+        self.sigmoidPSO = try context.pipeline("sigmoid_fp16")
+        self.siluPSO = try context.pipeline("silu_fp16")
+    }
+
+    private func encodeUnary(_ pso: MTLComputePipelineState,
+                             commandBuffer: MTLCommandBuffer,
+                             x: MTLBuffer, xOffset: Int,
+                             out: MTLBuffer, outOffset: Int,
+                             count: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(pso)
+        enc.setBuffer(x, offset: xOffset, index: 0)
+        enc.setBuffer(out, offset: outOffset, index: 1)
+        var n = UInt32(count)
+        enc.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 2)
+        let w = min(pso.maxTotalThreadsPerThreadgroup, 256)
+        enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// out = sigmoid(x). Standalone, unlike `sigmoid_gate_mul` which folds the
+    /// gate into an existing value.
+    func encodeSigmoid(commandBuffer: MTLCommandBuffer,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       out: MTLBuffer, outOffset: Int = 0,
+                       count: Int) throws {
+        try encodeUnary(sigmoidPSO, commandBuffer: commandBuffer,
+                        x: x, xOffset: xOffset, out: out, outOffset: outOffset,
+                        count: count)
+    }
+
+    /// out = silu(x) = x * sigmoid(x), where `silu_mul` fuses a second operand
+    /// the hyper-connection low-rank path does not have.
+    func encodeSilu(commandBuffer: MTLCommandBuffer,
+                    x: MTLBuffer, xOffset: Int = 0,
+                    out: MTLBuffer, outOffset: Int = 0,
+                    count: Int) throws {
+        try encodeUnary(siluPSO, commandBuffer: commandBuffer,
+                        x: x, xOffset: xOffset, out: out, outOffset: outOffset,
+                        count: count)
+    }
+
+    /// The hyper-connection gated read: out[d] = mean over streams of
+    /// mix[s,d] * normed[s,d]. Collapses the S-wide residual to the single
+    /// D-wide vector the block consumes.
+    func encodeHCMixReduce(commandBuffer: MTLCommandBuffer,
+                           mix: MTLBuffer, mixOffset: Int = 0,
+                           normed: MTLBuffer, normedOffset: Int = 0,
+                           out: MTLBuffer, outOffset: Int = 0,
+                           dim: Int, streams: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(hcMixReducePSO)
+        enc.setBuffer(mix, offset: mixOffset, index: 0)
+        enc.setBuffer(normed, offset: normedOffset, index: 1)
+        enc.setBuffer(out, offset: outOffset, index: 2)
+        var d = UInt32(dim), s = UInt32(streams)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
+        let w = min(hcMixReducePSO.maxTotalThreadsPerThreadgroup, 256)
+        enc.dispatchThreads(MTLSize(width: dim, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// The hyper-connection gated write: streams[s,d] += blockOut[d] *
+    /// inject[s], in place.
+    func encodeHCInject(commandBuffer: MTLCommandBuffer,
+                        streams: MTLBuffer, streamsOffset: Int = 0,
+                        blockOut: MTLBuffer, blockOutOffset: Int = 0,
+                        inject: MTLBuffer, injectOffset: Int = 0,
+                        dim: Int, streamCount: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(hcInjectPSO)
+        enc.setBuffer(streams, offset: streamsOffset, index: 0)
+        enc.setBuffer(blockOut, offset: blockOutOffset, index: 1)
+        enc.setBuffer(inject, offset: injectOffset, index: 2)
+        var d = UInt32(dim), s = UInt32(streamCount)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
+        let total = dim * streamCount
+        let w = min(hcInjectPSO.maxTotalThreadsPerThreadgroup, 256)
+        enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
     }
 
     /// packed [H, 2D] per-head [query ; gate] → q [H, D], gate [H, D].

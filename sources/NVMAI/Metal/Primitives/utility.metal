@@ -119,3 +119,84 @@ void concat_rows_fp16(
     out[row * 2u * dim + col] = lhs[tid];
     out[row * 2u * dim + dim + col] = rhs[tid];
 }
+
+// ============================================================================
+// Hyper-connection (Gated Residual) stream plumbing — Qwen3.8-Flash-Next.
+//
+// The residual is S parallel streams of D (4 x 2560). Everything else in the
+// block is per-D; only these two steps see the stream axis, so they are the
+// only new kernels the residual needs — the projections and gating reuse the
+// existing INT4 GEMV and elementwise primitives.
+// ============================================================================
+
+// out[d] = (1/S) * sum_s mix[s*D + d] * normed[s*D + d]
+//
+// The gated read: each stream's normalized value is scaled by its own mix
+// weight, then the streams are averaged into the single D-wide vector the
+// attention or MLP block consumes.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void hc_stream_mix_reduce_fp16(
+    device const half* mix     [[buffer(0)]],   // [S * D]
+    device const half* normed  [[buffer(1)]],   // [S * D]
+    device       half* out     [[buffer(2)]],   // [D]
+    constant     uint& D       [[buffer(3)]],
+    constant     uint& S       [[buffer(4)]],
+    uint               tid     [[thread_position_in_grid]]
+) {
+    if (tid >= D) return;
+    float acc = 0.0f;
+    for (uint s = 0; s < S; ++s) {
+        const uint i = s * D + tid;
+        acc += float(mix[i]) * float(normed[i]);
+    }
+    out[tid] = half(acc / float(S));
+}
+
+// streams[s*D + d] += block_out[d] * inject[s]
+//
+// The gated write: one block output is injected back into every stream, each
+// with its own learned weight. Accumulates in place, so the residual carries
+// forward exactly as a plain transformer's would -- the streams differ only in
+// how much of each block they take.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void hc_stream_inject_fp16(
+    device       half* streams   [[buffer(0)]],  // [S * D], updated in place
+    device const half* block_out [[buffer(1)]],  // [D]
+    device const half* inject    [[buffer(2)]],  // [S]
+    constant     uint& D         [[buffer(3)]],
+    constant     uint& S         [[buffer(4)]],
+    uint               tid       [[thread_position_in_grid]]
+) {
+    if (tid >= D * S) return;
+    const uint s = tid / D;
+    const uint d = tid - s * D;
+    streams[tid] = half(float(streams[tid])
+                        + float(block_out[d]) * float(inject[s]));
+}
+
+// out[i] = sigmoid(x[i]) — standalone gate, distinct from the fused
+// sigmoid_gate_mul which multiplies into an existing value.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void sigmoid_fp16(
+    device const half* x     [[buffer(0)]],
+    device       half* out   [[buffer(1)]],
+    constant     uint& count [[buffer(2)]],
+    uint               tid   [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    out[tid] = half(1.0f / (1.0f + exp(-float(x[tid]))));
+}
+
+// out[i] = silu(x[i]) = x * sigmoid(x) — standalone, where silu_mul_fp16
+// fuses a second operand this path does not have.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void silu_fp16(
+    device const half* x     [[buffer(0)]],
+    device       half* out   [[buffer(1)]],
+    constant     uint& count [[buffer(2)]],
+    uint               tid   [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    const float v = float(x[tid]);
+    out[tid] = half(v / (1.0f + exp(-v)));
+}
