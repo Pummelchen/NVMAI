@@ -55,12 +55,19 @@ public enum RangeCopyPlanner {
         // in a stable order. They use the same chunking, checkpointing and
         // destination digests as tensor ranges -- a 102 GB table must be
         // resumable, and reusing this machinery is what makes it so.
+        // Destinations must be absolute paths inside the partial output --
+        // the transfer layer refuses anything else, which is what caught a
+        // bare filename here. The resident file already lives at the output
+        // root, so its directory is that root.
+        let passthroughRoot = outputRoot(for: repackPlan)
         for file in repackPlan.passthroughFiles {
-            copies.append(RangeCopy(shardID: file.sourceName,
-                                    sourceOffset: 0,
-                                    size: file.size,
-                                    destinationPath: file.destinationName,
-                                    destinationOffset: 0))
+            copies.append(RangeCopy(
+                shardID: file.sourceName,
+                sourceOffset: 0,
+                size: file.size,
+                destinationPath: (passthroughRoot as NSString)
+                    .appendingPathComponent(file.destinationName),
+                destinationOffset: 0))
         }
 
         for entry in repackPlan.resident.entries {

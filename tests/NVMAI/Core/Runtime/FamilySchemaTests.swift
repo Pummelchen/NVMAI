@@ -21,13 +21,24 @@ import Testing
 
     @Test func familiesShareTheQwenNamingWhereVerified() {
         // The MTP sidecar reuses the layer naming, and Qwen3.8-Flash-Next's
-        // shared roles keep the Qwen3.5 names (verified against both
-        // checkpoint indexes; docs/qwen38-flash-next-port.md). Its additional
-        // roles arrive with the P1 runtime.
-        for family in [ModelFamily.qwen36MTP, .qwen38flash] {
-            let schema = TensorSchema.schema(for: family)
-            #expect(schema.qProj(3) == TensorSchema.schema(for: .qwen36).qProj(3))
-            #expect(schema.embedding == TensorSchema.schema(for: .qwen36).embedding)
-        }
+        // shared roles keep the Qwen3.5 names.
+        let mtp = TensorSchema.schema(for: .qwen36MTP)
+        #expect(mtp.qProj(3) == TensorSchema.schema(for: .qwen36).qProj(3))
+        #expect(mtp.embedding == TensorSchema.schema(for: .qwen36).embedding)
+    }
+
+    /// Qwen3.8-Flash-Next deliberately does NOT share the naming. It aliased
+    /// qwen36 while it was a placeholder; now that the real schema is in
+    /// place, asserting the alias would assert a bug. Its names are checked
+    /// against the real checkpoint index in Qwen38FlashSchemaTests.
+    @Test func qwen38FlashUsesItsOwnNaming() {
+        let flash = TensorSchema.schema(for: .qwen38flash)
+        let qwen = TensorSchema.schema(for: .qwen36)
+        // Mirror-image prefixes: model.language_model vs language_model.model.
+        #expect(flash.qProj(3) != qwen.qProj(3))
+        #expect(flash.embedding != qwen.embedding)
+        #expect(flash.lmHead != qwen.lmHead)
+        #expect(flash.embedding.hasPrefix("model.language_model."))
+        #expect(flash.lmHead == "lm_head.weight")
     }
 }
