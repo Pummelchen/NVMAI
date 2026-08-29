@@ -175,6 +175,16 @@ public enum ManifestReader {
             throw ModelError.unsupportedArchitecture(
                 detail: "hiddenActivation=\(wire.arch.hiddenActivation)")
         }
+        // Prefer what the manifest declares. Inferring family from layer shape
+        // only worked while the families differed in shape; it silently
+        // reports qwen36 for anything it does not recognise, which is how a
+        // Qwen3.8-Flash-Next payload gets loaded against the wrong
+        // architecture and fails on a hidden-size mismatch rather than being
+        // identified.
+        if let declared = wire.arch.family,
+           let family = ModelFamily(rawValue: declared) {
+            return ManifestIdentity(modelID: wire.modelID, family: family)
+        }
         let mtp = ArchConfig.qwen36MTP
         if wire.arch.numLayers == mtp.numLayers,
            wire.arch.slidingWindow == mtp.slidingWindow,

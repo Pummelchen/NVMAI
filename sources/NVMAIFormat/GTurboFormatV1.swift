@@ -8,6 +8,16 @@ package enum GTurboFormatV1 {
     package static let residentHeaderBytes = 24
     package static let residentEntryBytes = 72
     package static let residentIndexMaxBytes: UInt64 = 32 * 1024 * 1024
+    /// Ceiling for `packed_experts/layout.json`, which is a different artifact
+    /// from the resident index and scales with experts x layers rather than
+    /// with resident tensors.
+    ///
+    /// 128 MiB. Qwen 3.6 is ~22 MB (40 x 256 = 10,240 entries) and
+    /// Qwen3.8-Flash-Next is ~54 MB (48 x 512 = 24,576), so the old shared
+    /// 32 MiB bound rejected a correct install. Kept separate so raising it
+    /// does not also loosen the resident index, which stays small (a few
+    /// hundred KB) for every family.
+    package static let packedExpertsLayoutMaxBytes: UInt64 = 128 * 1024 * 1024
 
     package static let knownFlags: Set<String> = [
         "streamingPresent", "turboQuantKV", "aneSharedExpert",

@@ -135,9 +135,19 @@ public func run(args: Args,
             return errored(stderr, "no Metal device", 1)
         }
         let context = try MetalContext()
+        // Select the architecture the manifest declares rather than assuming
+        // the Qwen3.5-MoE baseline; otherwise a payload of any other family
+        // fails on a dimension mismatch instead of loading.
+        let family = try ManifestReader.peekFamily(directoryURL: modelURL)
+        guard let expectedArch = ArchConfig.knownArchitectures[family] else {
+            return errored(stderr,
+                           "model declares family \(family.rawValue), which this "
+                               + "runtime does not implement", 2)
+        }
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,
+            expecting: expectedArch,
             streamingMode: .pread(slotCount: loadRuntime.expertCacheSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .resolved(directoryURL: modelURL))

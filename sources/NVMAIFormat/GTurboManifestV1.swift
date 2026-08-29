@@ -33,6 +33,11 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let hiddenActivation: String
     package let fullAttentionLayerMask: [Int]
 
+    /// The family the payload was repacked for. Absent in the earliest
+    /// manifests, which predate more than one family; the reader falls back to
+    /// inferring from layer shape when it is missing.
+    package let family: String?
+
     // Family extension geometry; absent in manifests written before these
     // families existed, validated by the reader whenever present.
     package let hcCount: Int?
@@ -60,6 +65,7 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  partialRotaryFactor: Double, numLayers: Int, numExperts: Int,
                  topKExperts: Int, tieWordEmbeddings: Bool, attentionKEqV: Bool,
                  hiddenActivation: String, fullAttentionLayerMask: [Int],
+                 family: String? = nil,
                  hcCount: Int? = nil,
                  hcLowRank: Int? = nil,
                  indexerNumHeads: Int? = nil,
@@ -97,6 +103,7 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.attentionKEqV = attentionKEqV
         self.hiddenActivation = hiddenActivation
         self.fullAttentionLayerMask = fullAttentionLayerMask
+        self.family = family
         self.hcCount = hcCount
         self.hcLowRank = hcLowRank
         self.indexerNumHeads = indexerNumHeads
