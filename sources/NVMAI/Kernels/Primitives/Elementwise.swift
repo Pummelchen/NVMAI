@@ -15,6 +15,11 @@ final class Elementwise {
     private let hcInjectPSO: MTLComputePipelineState
     private let sigmoidPSO: MTLComputePipelineState
     private let siluPSO: MTLComputePipelineState
+    // PLE (n-gram) block.
+    private let pleScorePSO: MTLComputePipelineState
+    private let pleGatePSO: MTLComputePipelineState
+    private let pleBroadcastPSO: MTLComputePipelineState
+    private let pleConvPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
@@ -26,6 +31,10 @@ final class Elementwise {
         self.hcInjectPSO = try context.pipeline("hc_stream_inject_fp16")
         self.sigmoidPSO = try context.pipeline("sigmoid_fp16")
         self.siluPSO = try context.pipeline("silu_fp16")
+        self.pleScorePSO = try context.pipeline("ple_stream_score_fp16")
+        self.pleGatePSO = try context.pipeline("ple_signed_sqrt_gate_fp16")
+        self.pleBroadcastPSO = try context.pipeline("ple_broadcast_scale_fp16")
+        self.pleConvPSO = try context.pipeline("ple_dilated_depthwise_conv_fp16")
     }
 
     private func encodeUnary(_ pso: MTLComputePipelineState,
@@ -122,6 +131,103 @@ final class Elementwise {
         let w = min(hcInjectPSO.maxTotalThreadsPerThreadgroup, 256)
         enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Per-stream score: key . query / sqrt(D), one scalar per stream.
+    func encodePLEStreamScore(commandBuffer: MTLCommandBuffer,
+                              key: MTLBuffer, keyOffset: Int = 0,
+                              query: MTLBuffer, queryOffset: Int = 0,
+                              out: MTLBuffer, outOffset: Int = 0,
+                              dim: Int, streams: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(pleScorePSO)
+        enc.setBuffer(key, offset: keyOffset, index: 0)
+        enc.setBuffer(query, offset: queryOffset, index: 1)
+        enc.setBuffer(out, offset: outOffset, index: 2)
+        var d = UInt32(dim), s = UInt32(streams)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.dispatchThreads(MTLSize(width: streams, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(
+                                width: min(pleScorePSO.maxTotalThreadsPerThreadgroup, 32),
+                                height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// gate = sigmoid(signed sqrt of the score), with a magnitude floor.
+    func encodePLESignedSqrtGate(commandBuffer: MTLCommandBuffer,
+                                 x: MTLBuffer, xOffset: Int = 0,
+                                 out: MTLBuffer, outOffset: Int = 0,
+                                 count: Int, floor: Float = 1e-6) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(pleGatePSO)
+        enc.setBuffer(x, offset: xOffset, index: 0)
+        enc.setBuffer(out, offset: outOffset, index: 1)
+        var n = UInt32(count), f = floor
+        enc.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&f, length: MemoryLayout<Float>.size, index: 3)
+        enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(
+                                width: min(pleGatePSO.maxTotalThreadsPerThreadgroup, 32),
+                                height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// out[s,d] = value[d] * gate[s].
+    func encodePLEBroadcastScale(commandBuffer: MTLCommandBuffer,
+                                 value: MTLBuffer, valueOffset: Int = 0,
+                                 gate: MTLBuffer, gateOffset: Int = 0,
+                                 out: MTLBuffer, outOffset: Int = 0,
+                                 dim: Int, streams: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(pleBroadcastPSO)
+        enc.setBuffer(value, offset: valueOffset, index: 0)
+        enc.setBuffer(gate, offset: gateOffset, index: 1)
+        enc.setBuffer(out, offset: outOffset, index: 2)
+        var d = UInt32(dim), s = UInt32(streams)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
+        let total = dim * streams
+        enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(
+                                width: min(pleBroadcastPSO.maxTotalThreadsPerThreadgroup, 256),
+                                height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Dilated depthwise causal convolution with silu, over `history + T` rows
+    /// of carried state and chunk.
+    func encodePLEDilatedConv(commandBuffer: MTLCommandBuffer,
+                              xpad: MTLBuffer, xpadOffset: Int = 0,
+                              weight: MTLBuffer, weightOffset: Int = 0,
+                              out: MTLBuffer, outOffset: Int = 0,
+                              channels: Int, tokens: Int,
+                              kernelSize: Int, dilation: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(pleConvPSO)
+        enc.setBuffer(xpad, offset: xpadOffset, index: 0)
+        enc.setBuffer(weight, offset: weightOffset, index: 1)
+        enc.setBuffer(out, offset: outOffset, index: 2)
+        var c = UInt32(channels), t = UInt32(tokens)
+        var k = UInt32(kernelSize), dil = UInt32(dilation)
+        enc.setBytes(&c, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&k, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&dil, length: MemoryLayout<UInt32>.size, index: 6)
+        let total = channels * tokens
+        enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(
+                                width: min(pleConvPSO.maxTotalThreadsPerThreadgroup, 256),
+                                height: 1, depth: 1))
         enc.endEncoding()
     }
 

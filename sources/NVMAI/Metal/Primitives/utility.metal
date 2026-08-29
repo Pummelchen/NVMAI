@@ -211,3 +211,99 @@ void silu_fp16(
     const float v = float(x[tid]) * inScale;
     out[tid] = half(v / (1.0f + exp(-v)));
 }
+
+// ============================================================================
+// PLE (n-gram) block — Qwen3.8-Flash-Next. Shapes match mlx_qwen4exp/ple.py.
+// ============================================================================
+
+// s[stream] = sum over d of key[s,d] * query[s,d] / sqrt(D)
+//
+// One score per residual stream, from the normalized n-gram key against the
+// normalized residual. Distinct from the hyper-connection reduce, which
+// produces a D-wide vector; this collapses each stream to a scalar.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void ple_stream_score_fp16(
+    device const half* key    [[buffer(0)]],   // [S * D]
+    device const half* query  [[buffer(1)]],   // [S * D]
+    device       half* out    [[buffer(2)]],   // [S]
+    constant     uint& D      [[buffer(3)]],
+    constant     uint& S      [[buffer(4)]],
+    uint               s      [[thread_position_in_grid]]
+) {
+    if (s >= S) return;
+    float acc = 0.0f;
+    const uint base = s * D;
+    for (uint d = 0; d < D; ++d) {
+        acc += float(key[base + d]) * float(query[base + d]);
+    }
+    out[s] = half(acc / sqrt(float(D)));
+}
+
+// gate[s] = sigmoid(sign(x) * sqrt(max(|x|, floor)))
+//
+// A SIGNED square root before the sigmoid, with a floor on the magnitude. The
+// floor is not decoration: without it the derivative is unbounded as x -> 0,
+// and the reference carries 1e-6 there.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void ple_signed_sqrt_gate_fp16(
+    device const half* x      [[buffer(0)]],
+    device       half* out    [[buffer(1)]],
+    constant     uint& count  [[buffer(2)]],
+    constant    float& floorV [[buffer(3)]],
+    uint               tid    [[thread_position_in_grid]]
+) {
+    if (tid >= count) return;
+    const float v = float(x[tid]);
+    const float m = sqrt(max(fabs(v), floorV));
+    const float signed_root = v < 0.0f ? -m : m;
+    out[tid] = half(1.0f / (1.0f + exp(-signed_root)));
+}
+
+// out[s*D + d] = value[d] * gate[s]
+//
+// One D-wide value broadcast across streams, each scaled by its own gate.
+// Writes rather than accumulates -- the block adds this to the residual
+// separately, alongside the convolution branch.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void ple_broadcast_scale_fp16(
+    device const half* value [[buffer(0)]],  // [D]
+    device const half* gate  [[buffer(1)]],  // [S]
+    device       half* out   [[buffer(2)]],  // [S * D]
+    constant     uint& D     [[buffer(3)]],
+    constant     uint& S     [[buffer(4)]],
+    uint               tid   [[thread_position_in_grid]]
+) {
+    if (tid >= D * S) return;
+    const uint s = tid / D;
+    out[tid] = half(float(value[tid - s * D]) * float(gate[s]));
+}
+
+// Depthwise causal convolution over time, dilated:
+//   out[t,c] = sum over k of w[c,k] * xpad[t + k*dilation, c]
+//
+// `xpad` is the carried state followed by this chunk, so tap k reads
+// (K-1-k)*dilation positions back from t -- the newest tap is the last one,
+// not the first. Getting that backwards still produces smooth, plausible
+// output, which is why it is spelled out here and pinned in a test.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void ple_dilated_depthwise_conv_fp16(
+    device const half* xpad     [[buffer(0)]],  // [(history + T) * C]
+    device const half* weight   [[buffer(1)]],  // [C * K], channel-major
+    device       half* out      [[buffer(2)]],  // [T * C]
+    constant     uint& C        [[buffer(3)]],
+    constant     uint& T        [[buffer(4)]],
+    constant     uint& K        [[buffer(5)]],
+    constant     uint& dilation [[buffer(6)]],
+    uint               tid      [[thread_position_in_grid]]
+) {
+    if (tid >= T * C) return;
+    const uint t = tid / C;
+    const uint c = tid - t * C;
+    float acc = 0.0f;
+    for (uint k = 0; k < K; ++k) {
+        const uint row = t + k * dilation;
+        acc += float(weight[c * K + k]) * float(xpad[row * C + c]);
+    }
+    // silu, as the reference applies before the residual add.
+    out[tid] = half(acc / (1.0f + exp(-acc)));
+}
