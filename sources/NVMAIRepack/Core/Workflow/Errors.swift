@@ -26,6 +26,7 @@ public enum RepackError: Error, CustomStringConvertible {
     case configJsonInvalid(path: String, detail: String)
     case quantOverrideCountMismatch(expected: Int, actual: Int, sample: [String])
 
+    case snapshotFileMissing(path: String, detail: String)
     case missingTensor(name: String)
     case unknownTensorPrefix(name: String)
     case missingScalesCompanion(name: String)
@@ -51,6 +52,8 @@ public enum RepackError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
+        case .snapshotFileMissing(let p, let detail):
+            return "snapshot file missing at \(p): \(detail)"
         case .fileOpenFailed(let p, let e):     return "open(\(p)) failed: errno \(e)"
         case .fileStatFailed(let p, let e):     return "fstat(\(p)) failed: errno \(e)"
         case .ftruncateFailed(let p, let e):    return "ftruncate(\(p)) failed: errno \(e)"

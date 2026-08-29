@@ -871,11 +871,38 @@ public extension RemoteStreamingRepacker {
         progress: @escaping @Sendable (ModelInstallProgress) -> Void
     ) throws -> (RepackPlan, RangeCopyPlan, UInt64) {
         progress(.downloadingMetadata)
+        // The same non-tensor files the remote path carries. Omitting them
+        // here would silently produce an install missing its n-gram table and
+        // PLE constants -- an install that loads and is quietly degraded,
+        // which is worse than one that fails.
+        var passthroughFiles: [PassthroughFile] = []
+        for requirement in RepackPlanner.passthroughRequirements(
+            family: source.arch.family) {
+            let path = (local.inputSnapshotDir as NSString)
+                .appendingPathComponent(requirement.name)
+            guard let attrs = try? FileManager.default
+                .attributesOfItem(atPath: path),
+                  let size = (attrs[FileAttributeKey.size] as? NSNumber)?.uint64Value
+            else {
+                if requirement.required {
+                    throw RepackError.snapshotFileMissing(
+                        path: path,
+                        detail: "\(requirement.name) is required by this "
+                            + "architecture; the snapshot is incomplete")
+                }
+                continue
+            }
+            passthroughFiles.append(PassthroughFile(sourceName: requirement.name,
+                                                    destinationName: requirement.name,
+                                                    size: size,
+                                                    required: requirement.required))
+        }
         let plan = try RepackPlanner.plan(
             meta: source.metadata,
             arch: source.arch,
             shardHeaders: source.shardHeaders,
-            outputDir: paths.partialDirectory)
+            outputDir: paths.partialDirectory,
+            passthroughFiles: passthroughFiles)
         let rangePlan = try RangeCopyPlanner.plan(
             repackPlan: plan,
             rangeChunkBytes: local.rangeChunkBytes,
