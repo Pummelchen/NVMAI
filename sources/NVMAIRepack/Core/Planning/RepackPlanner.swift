@@ -81,6 +81,20 @@ struct LayerFilePlan: Sendable {
     }
 }
 
+/// A source file copied into the install verbatim, outside the tensor
+/// payload. Qwen3.8-Flash-Next's n-gram table is 102 GB of fp16 rows that the
+/// runtime gathers per token straight off storage: it is already
+/// row-addressable, so restructuring it would only cost a rewrite of the
+/// largest file in the install.
+struct PassthroughFile: Sendable, Equatable {
+    let sourceName: String
+    let destinationName: String
+    let size: UInt64
+    /// A missing optional file leaves the model runnable in a reduced mode
+    /// rather than failing the install.
+    let required: Bool
+}
+
 struct RepackPlan: Sendable {
     let arch: ArchInfo
     let baseMode: String                  // "affine"
@@ -90,6 +104,33 @@ struct RepackPlan: Sendable {
     let layers: [LayerFilePlan]
     let matchedModelID: String?
     let excludedMultimodalTensorNames: [String]
+    let passthroughFiles: [PassthroughFile]
+}
+
+extension RepackPlanner {
+    /// Non-tensor files this family needs copied into the install. Sizes are
+    /// resolved from the remote before planning, because they are standalone
+    /// files rather than entries in the safetensors index.
+    static func passthroughRequirements(
+        family: RepackModelFamily
+    ) -> [(name: String, required: Bool, capBytes: UInt64)] {
+        switch family {
+        case .qwen36, .qwen36MTP:
+            return []
+        case .qwen38flash:
+            return [
+                // The PLE hash constants: multipliers, per-head offsets and
+                // prime vocabulary sizes. Without them the n-gram ids cannot
+                // be computed at all, so this one is required.
+                ("ple_constants.json", true, 1 * 1024 * 1024),
+                // The table itself. Optional by design: the upstream runtime
+                // skips the PLE block and stays coherent without it, so a
+                // 102 GB download should not be forced on someone who wants
+                // the backbone first.
+                ("ngram_table.bin", false, 256 * 1024 * 1024 * 1024),
+            ]
+        }
+    }
 }
 
 // MARK: - Planner
@@ -182,7 +223,8 @@ enum RepackPlanner {
     static func plan(meta: IndexLoader.SourceMetadata,
                             arch: ArchInfo,
                             shardHeaders: [Safetensors.Header],
-                            outputDir: String) throws -> RepackPlan {
+                            outputDir: String,
+                            passthroughFiles: [PassthroughFile] = []) throws -> RepackPlan {
 
         // Companion tensors may live in different shards, so resolve them
         // through one global registry.
@@ -270,7 +312,8 @@ enum RepackPlanner {
                           resident: resident,
                           layers: layerPlans,
                           matchedModelID: matched,
-                          excludedMultimodalTensorNames: excludedMultimodalNames)
+                          excludedMultimodalTensorNames: excludedMultimodalNames,
+                          passthroughFiles: passthroughFiles)
     }
 
     private static func isMultimodalTensorName(_ name: String) -> Bool {

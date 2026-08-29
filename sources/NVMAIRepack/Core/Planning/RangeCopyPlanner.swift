@@ -51,6 +51,18 @@ public enum RangeCopyPlanner {
         var copies: [RangeCopy] = []
         copies.reserveCapacity(repackPlan.resident.entries.count * 3)
 
+        // Verbatim file copies come first so a resumed install re-checks them
+        // in a stable order. They use the same chunking, checkpointing and
+        // destination digests as tensor ranges -- a 102 GB table must be
+        // resumable, and reusing this machinery is what makes it so.
+        for file in repackPlan.passthroughFiles {
+            copies.append(RangeCopy(shardID: file.sourceName,
+                                    sourceOffset: 0,
+                                    size: file.size,
+                                    destinationPath: file.destinationName,
+                                    destinationOffset: 0))
+        }
+
         for entry in repackPlan.resident.entries {
             copies.append(RangeCopy(shardID: entry.sourceWeight.shardPath,
                                     sourceOffset: entry.sourceWeight.absoluteOffset,
