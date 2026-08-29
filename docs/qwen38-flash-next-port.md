@@ -344,3 +344,38 @@ Note this measures weight fidelity, not end-to-end behaviour; a short greedy
 logit comparison against the reference implementation is still worth running
 once the runtime can execute the model.
 
+## P0 implementation status (2026-08-28)
+
+Landed, each gated by lint + the full serial suite and, where the runtime was
+touched, both goldens byte-identical:
+
+| piece | commit | what it does |
+| --- | --- | --- |
+| ArchInfo loader | `f6cd041` | reads the whole `qwen4_exp` config: layer mask, GDN, hyper-connection, indexer and PLE geometry; converts `ple_layer_ids` from 1-based and rejects out-of-range; reads the source group size instead of defaulting; contract-checks the production shape |
+| tensor classification | `a11e17f` | the `model.language_model.*` prefix, top-level `lm_head.*`, and the MTP draft held out for its own sidecar; verified against all 3,164 real tensor names with zero unknowns |
+| manifest geometry | `969225b` | writes and validates the new geometry, so a checkpoint whose hyper-connection rank, indexer budget, PLE layer set or group size differs is refused instead of silently mis-run |
+| passthrough planning | `423c85d` | `ple_constants.json` (required) and `ngram_table.bin` (optional, 102 GB) as resumable chunked range copies |
+
+Also corrected along the way: `quantGroupSize` was 32 in the runtime
+`ArchConfig` from the Vontra-era assumption; the pinned artifact is 64.
+
+### Still needed before an install runs
+
+1. **Resolve passthrough sizes remotely and pass them to the planner.** The
+   plumbing exists; the remote repacker does not call it yet. These are
+   standalone files, not index entries, so their size comes from a
+   `resolveFileInfo` before planning.
+2. **`SupportedModelSource` pin.** Ready to write:
+   repo `RockTalk/Qwen3.8-Flash-Next-MLX-4bit`, revision
+   `478474da92599ad0cf9f8bd447e658b29cb8480a`, index sha256
+   `d7fe03ad2d1365e24ae2e305c829f600b80fac845d128383421a7be4adbdda1b`,
+   download 175,293,161,716 bytes.
+3. **MTP sidecar install.** Its 81 tensors sit in their own
+   `mtp-weights.safetensors`, so it wants a second install invocation
+   producing its own directory, like the Ornith MTP path. It carries its own
+   512-expert set, so those experts must be SSD-streamed too, not resident.
+
+None of that makes the model *execute* -- that is P1 (hyper-connection
+residual plumbing, QSA dense path with the <=2048 exactness gate, the PLE
+block, top-10 MoE) and is the larger half of the work.
+
