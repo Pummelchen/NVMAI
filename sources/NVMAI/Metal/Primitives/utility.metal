@@ -174,29 +174,40 @@ void hc_stream_inject_fp16(
                         + float(block_out[d]) * float(inject[s]));
 }
 
-// out[i] = sigmoid(x[i]) — standalone gate, distinct from the fused
-// sigmoid_gate_mul which multiplies into an existing value.
+// out[i] = outScale * sigmoid(inScale * x[i]) — standalone gate, distinct
+// from the fused sigmoid_gate_mul which multiplies into an existing value.
+//
+// The scales are not decoration: the Gated Residual computes its read gate as
+// sigmoid(W @ normed / S) and its write gate as 2 * sigmoid(W @ normed / S).
+// Folding them here keeps the chain to one kernel per step instead of adding
+// separate scale passes over a 10,240-wide vector.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void sigmoid_fp16(
-    device const half* x     [[buffer(0)]],
-    device       half* out   [[buffer(1)]],
-    constant     uint& count [[buffer(2)]],
-    uint               tid   [[thread_position_in_grid]]
+    device const half* x        [[buffer(0)]],
+    device       half* out      [[buffer(1)]],
+    constant     uint& count    [[buffer(2)]],
+    constant    float& inScale  [[buffer(3)]],
+    constant    float& outScale [[buffer(4)]],
+    uint               tid      [[thread_position_in_grid]]
 ) {
     if (tid >= count) return;
-    out[tid] = half(1.0f / (1.0f + exp(-float(x[tid]))));
+    const float v = float(x[tid]) * inScale;
+    out[tid] = half(outScale / (1.0f + exp(-v)));
 }
 
-// out[i] = silu(x[i]) = x * sigmoid(x) — standalone, where silu_mul_fp16
-// fuses a second operand this path does not have.
+// out[i] = silu(inScale * x[i]) — standalone, where silu_mul_fp16 fuses a
+// second operand this path does not have. The scale must be applied INSIDE
+// the nonlinearity: silu(x/S) is not silu(x)/S, so it cannot be folded away
+// afterwards.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void silu_fp16(
-    device const half* x     [[buffer(0)]],
-    device       half* out   [[buffer(1)]],
-    constant     uint& count [[buffer(2)]],
-    uint               tid   [[thread_position_in_grid]]
+    device const half* x       [[buffer(0)]],
+    device       half* out     [[buffer(1)]],
+    constant     uint& count   [[buffer(2)]],
+    constant    float& inScale [[buffer(3)]],
+    uint               tid     [[thread_position_in_grid]]
 ) {
     if (tid >= count) return;
-    const float v = float(x[tid]);
+    const float v = float(x[tid]) * inScale;
     out[tid] = half(v / (1.0f + exp(-v)));
 }

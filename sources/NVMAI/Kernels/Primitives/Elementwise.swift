@@ -32,7 +32,9 @@ final class Elementwise {
                              commandBuffer: MTLCommandBuffer,
                              x: MTLBuffer, xOffset: Int,
                              out: MTLBuffer, outOffset: Int,
-                             count: Int) throws {
+                             count: Int,
+                             inScale: Float,
+                             outScale: Float?) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -41,6 +43,11 @@ final class Elementwise {
         enc.setBuffer(out, offset: outOffset, index: 1)
         var n = UInt32(count)
         enc.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 2)
+        var inS = inScale
+        enc.setBytes(&inS, length: MemoryLayout<Float>.size, index: 3)
+        if var outS = outScale {
+            enc.setBytes(&outS, length: MemoryLayout<Float>.size, index: 4)
+        }
         let w = min(pso.maxTotalThreadsPerThreadgroup, 256)
         enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
@@ -52,10 +59,11 @@ final class Elementwise {
     func encodeSigmoid(commandBuffer: MTLCommandBuffer,
                        x: MTLBuffer, xOffset: Int = 0,
                        out: MTLBuffer, outOffset: Int = 0,
-                       count: Int) throws {
+                       count: Int,
+                       inScale: Float = 1, outScale: Float = 1) throws {
         try encodeUnary(sigmoidPSO, commandBuffer: commandBuffer,
                         x: x, xOffset: xOffset, out: out, outOffset: outOffset,
-                        count: count)
+                        count: count, inScale: inScale, outScale: outScale)
     }
 
     /// out = silu(x) = x * sigmoid(x), where `silu_mul` fuses a second operand
@@ -63,10 +71,10 @@ final class Elementwise {
     func encodeSilu(commandBuffer: MTLCommandBuffer,
                     x: MTLBuffer, xOffset: Int = 0,
                     out: MTLBuffer, outOffset: Int = 0,
-                    count: Int) throws {
+                    count: Int, inScale: Float = 1) throws {
         try encodeUnary(siluPSO, commandBuffer: commandBuffer,
                         x: x, xOffset: xOffset, out: out, outOffset: outOffset,
-                        count: count)
+                        count: count, inScale: inScale, outScale: nil)
     }
 
     /// The hyper-connection gated read: out[d] = mean over streams of
