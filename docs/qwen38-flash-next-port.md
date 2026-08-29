@@ -221,3 +221,95 @@ verified geometry above and adds facts the config/source audit could not show:
   native 262,144 context, YaRN to 1M — matching the ArchConfig. Weights are
   live on HF/ModelScope (bf16 official); still no official MLX artifact, so
   the wait-for-mlx-community decision stands.
+
+## Source found and verified against a real artifact (2026-08-28)
+
+`RockTalk/Qwen3.8-Flash-Next-MLX-4bit` at revision
+`478474da92599ad0cf9f8bd447e658b29cb8480a`
+(`model.safetensors.index.json` sha256
+`d7fe03ad2d1365e24ae2e305c829f600b80fac845d128383421a7be4adbdda1b`).
+Not an mlx-community release — the wait-for-mlx-community decision is
+superseded because this artifact answers every open question and mlx-community
+has not shipped.
+
+### The group-size question is answered: 64
+
+`quantization: {group_size: 64, bits: 4, mode: affine}` — the format NVMAI
+already uses. **The planned P1 group-32 kernel work is dropped.** Per-path
+overrides are 8-bit g64 on `embed_tokens`, `lm_head`, `mlp.gate` (router) and
+`shared_expert_gate`; everything else including all 512 routed experts is
+4-bit g64. `manifest.quant` already carries independent `weightBits` per slot,
+so this is expressible today.
+
+### The design record is confirmed, not merely plausible
+
+Every geometry figure matches: 48 layers, `full_attention_interval` 4 (36
+`linear_attn` + 12 `self_attn` tensor sets, exactly the 3-GDN-to-1-attention
+pattern), 512 experts top-10, ffn 640, hidden 2560, vocab 248,320, head_dim
+256 with 24 Q / 2 KV, GDN 16 K-heads / 48 V-heads at dim 128, `hc_count` 4,
+`hc_lowrank` 320, `ple_layer_ids` [2].
+
+`ple_constants.json` confirms the PLE reverse-engineering independently:
+`ple_n_heads` 16, `ple_head_dim` 160, 16 prime head vocabularies just above
+20M, `ngram_size` 3, `heads_per_ngram` 8, eos 248044, and three layer
+multipliers shipped as data (read them, as planned). Row count computes to
+320,001,446 x 160 x fp16 = 102,400,491,520 bytes, matching `ngram_table.bin`
+byte for byte.
+
+QSA indexer tensors are present and separate per layer
+(`self_attn.indexer.index_{q,k}_proj`, `{q,k}_layernorm`), and the upstream
+card independently reports the mask is O(n^2) above 2051 tokens — the same
+dense-exactness boundary the <=2048 gate was designed around.
+
+There are **no layer norms**: `hc_norm` inside each hyper-connection block
+replaces `input_layernorm` / `post_attention_layernorm` entirely.
+
+### Sizes and the disk constraint
+
+| part | bytes | |
+| --- | ---: | ---: |
+| backbone shards (49) | 71,425,417,784 | 71.4 GB |
+| `mtp-weights.safetensors` | 1,467,252,412 | 1.5 GB |
+| `ngram_table.bin` (fp16) | 102,400,491,520 | 102.4 GB |
+| **total** | **175,293,161,716** | **175.3 GB** |
+
+The n-gram table ships **fp16, not quantized** — 3.2x the ~32 GB the plan
+assumed at 4-bit. With 288 GB free the full install fits **only because the
+installer streams into `.gturbo` without staging a second checkpoint**:
+downloading the repo first and then repacking would need ~352 GB and fail.
+Quantizing the table during repack is possible but is a lossy change to a
+component whose quality contribution is unmeasured — do not do it silently.
+
+### What the repacker already handles, and what it does not
+
+Qwen 3.6 shares the GDN+MoE lineage, so `RepackPlanner` already maps
+`.mlp.switch_mlp.*` 3D fused experts, the whole `linear_attn` family
+(`in_proj_qkv/z/a/b`, `conv1d`, `A_log`, `dt_bias`, `norm`, `out_proj`),
+`shared_expert*` and `self_attn.{q,k,v,o}_proj`. New work:
+
+- **tensor prefix differs**: `model.language_model.layers.N.*` here against
+  qwen36's `language_model.model.layers.N.*`, and `lm_head.*` sits at the top
+  level rather than under `language_model.`;
+- **hyper-connections**: `attn_hyper_connection.*`, `mlp_hyper_connection.*`
+  (`block_inject_weight`, `input_mix_weight_{up,down}`, `hc_norm`) plus a
+  model-level `hyper_connection_mixer.*`;
+- **QSA indexer** tensors per full-attention layer;
+- **PLE**: `ple.conv1d` plus `ngram_table.bin` and `ple_constants.json` as
+  passthrough sidecars, not safetensors tensors;
+- **MTP**: `mtp.layers.0.*` is a complete layer with its own `self_attn`,
+  indexer and **its own 512-expert `switch_mlp`** (hence 1.5 GB) — it should
+  become an SSD-streamed sidecar like the existing Ornith/Qwen MTP path, not
+  resident weights;
+- **manifest v2**: ngram section, per-slot quant bits, indexer/PLE/hyper
+  geometry.
+
+### Trust
+
+Created 2026-08-28, **0 downloads, 0 likes**, unknown author, no community
+validation. The code is open (MIT, `Rocktalk-Holdings/mlx-qwen4exp`) and the
+card reports measured M3 Ultra figures (26.4-26.6 tok/s greedy), so it reads
+as serious work rather than a drive-by upload — but the quantization quality
+is unverified by anyone. Pinning the revision plus the receipt's SHA256 covers
+integrity, not quality. **A greedy logit-parity check against `transformers`
+on a short prefix is required before any quality claim.**
+
