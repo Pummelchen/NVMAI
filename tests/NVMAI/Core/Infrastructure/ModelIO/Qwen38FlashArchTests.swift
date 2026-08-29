@@ -16,7 +16,10 @@ import Testing
         #expect(arch.moeIntermediateSize == 640)
         #expect(arch.intermediateSize == 640)
         #expect(arch.routerNormTopK)
-        #expect(arch.quantGroupSize == 32)
+        // 64, not the 32 first assumed from the Vontra checkpoints: the
+        // pinned artifact declares group_size 64 and decodes correctly at 64
+        // (benchmark/nvmai_quant_fidelity.py, within 1.02x of the format floor).
+        #expect(arch.quantGroupSize == 64)
 
         // (3x linear -> 1x QSA) x 12: full attention on every 4th layer.
         let fullLayers = arch.fullAttentionLayerMask.enumerated()

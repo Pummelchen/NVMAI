@@ -412,7 +412,10 @@ public struct ArchConfig: Sendable, Equatable {
             vocabDivisor: 128,
             seed: 1234),
         routerNormTopK: true,
-        quantGroupSize: 32)
+        // Verified against the pinned artifact's `quantization.group_size`
+        // (benchmark/nvmai_quant_fidelity.py decodes it correctly at 64).
+        // The design record had assumed 32 from the Vontra checkpoints.
+        quantGroupSize: 64)
 
     private static func qwen38LayerMask() -> [UInt8] {
         // Same kinds as qwen36: 2 = gated-DeltaNet linear, 1 = full (QSA)
