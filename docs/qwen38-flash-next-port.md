@@ -440,3 +440,51 @@ not. The reference implementation is public
 comparison against it on a short prefix -- the analogue of the golden baseline
 the shipping models use. Nothing here should be called correct on the strength
 of unit tests alone.
+
+## PLE block: verified against the reference (2026-08-29)
+
+Read from `mlx_qwen4exp/ple.py`, not inferred. The design record above is
+wrong in two places, both of which would have produced plausible output with
+no error:
+
+1. **The block adds two terms, not one.** The result is
+   `hidden_wide + gated + conv_out`. The record described only the convolution
+   being added; dropping `gated` would silently remove the whole gated-value
+   contribution.
+2. **The gate's signed square root has a floor.**
+   `sigmoid(sign(s) * sqrt(max(|s|, 1e-6)))` -- the record omitted the 1e-6,
+   which matters exactly where `s` is near zero and the derivative blows up.
+
+Also corrected: the convolution's **dilation is `ngram_size` (3)**, not an
+independent constant, and its history is `(K-1) * dilation = 9`.
+
+The full block, with shapes at production geometry:
+
+```
+emb        = table[rows]                      # [T,16,160] -> flat [T,2560]
+                                              #   head axis is the slow one
+key        = key_proj(emb)                    # [T,10240]
+value      = value_proj(emb)                  # [T,2560]
+key_w      = groupedNorm(key,  norm_key,  hc=4)
+query      = groupedNorm(hidden_wide, norm_query, hc=4)
+s          = sum over D of key_w * query / sqrt(2560)      # [T,4] per stream
+gate       = sigmoid(sign(s) * sqrt(max(|s|, 1e-6)))       # [T,4]
+gated      = value broadcast over streams * gate           # [T,4,2560]
+normalized = groupedNorm(gated, norm_conv, hc=4)           # [T,10240]
+conv[t,c]  = sum over k of w[c,k] * xpad[t + k*3, c]       # K=4, dilation=3
+                                              #   tap k reads (K-1-k)*3 back
+conv_out   = silu(conv)
+result     = hidden_wide + gated + conv_out
+state      = last 9 rows of xpad
+```
+
+Three norm weights, all `[hc_dim]`: `norm_key`, `norm_query`, `norm_conv`.
+The two projections are ordinary INT4 GEMVs and the norms are the grouped
+RMSNorm already built, so the kernels still missing are the per-stream dot,
+the signed-sqrt gate, the broadcast scale, and the dilated depthwise causal
+convolution with carried state.
+
+The convolution's tap indexing is the part most worth pinning in a test: tap
+`k` reads `(K-1-k) * dilation` positions back, so an off-by-one in either
+direction still produces smooth, plausible output.
+
