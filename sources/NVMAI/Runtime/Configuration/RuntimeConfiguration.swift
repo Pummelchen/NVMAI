@@ -164,6 +164,73 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     /// the shipped `--max-context`, never a reduced one.
     public static let defaultExpertCacheBudgetBytes = 8 << 30
 
+    /// Decode defaults that are not one number across the catalogue.
+    ///
+    /// Both settings below are governed by the same quantity: how much of the
+    /// token is expert I/O. A speculative read is only ever a bet that the SSD
+    /// has service to spare, so it pays where I/O dominates and costs where it
+    /// does not.
+    public struct DecodeTuning: Sendable, Equatable {
+        /// Target bytes for the routed-expert slot cache.
+        public let expertCacheBudgetBytes: Int
+        /// Speculative expert reads allowed in flight; 0 disables prefetch.
+        public let prefetchDepth: Int
+
+        public init(expertCacheBudgetBytes: Int, prefetchDepth: Int) {
+            self.expertCacheBudgetBytes = expertCacheBudgetBytes
+            self.prefetchDepth = prefetchDepth
+        }
+    }
+
+    /// The measured optimum for a family at a given routed-expert width.
+    ///
+    /// Measured 2026-08-30, 512-token continuous prose, fresh process per run,
+    /// configs interleaved with the order reversed on alternate repetitions:
+    ///
+    ///     qwen38flash 4-bit   5.735 -> 6.957 tok/s  (+21.3%)  12 GiB + depth 1
+    ///     qwen36      8-bit  11.994 -> 12.659       ( +5.5%)   8 GiB + depth 1
+    ///     ornith      8-bit  11.173 -> 11.837       ( +5.9%)   8 GiB + depth 1
+    ///     qwen36/ornith 4-bit                        (regress)  8 GiB, no prefetch
+    ///
+    /// The 4-bit 35B pair is the instructive one. Expert I/O there is only
+    /// ~7 ms of a ~44 ms token, so there is almost nothing for a speculative
+    /// read to recover, and the read still costs SSD service and ring
+    /// bookkeeping -- it measured a regression at 7 runs per config. Ornith and
+    /// Qwen 3.6 share the `qwen36` family and measured the same, so keying on
+    /// family rather than model id is correct here rather than merely
+    /// convenient.
+    public static func decodeTuning(family: ModelFamily,
+                                    weightBits: Int) -> DecodeTuning {
+        switch (family, weightBits) {
+        case (.qwen38flash, _), (.qwen38flashMTP, _):
+            // 96 slots. The only family whose working set justifies the extra
+            // 4 GiB: 512 experts at top-10 spread far wider than 128 at top-8,
+            // so it is still climbing at 96 where the 35B families have
+            // flattened above 90% hit rate.
+            return DecodeTuning(expertCacheBudgetBytes: 12 << 30, prefetchDepth: 1)
+        case (.qwen36, 8), (.qwen36MTP, 8):
+            return DecodeTuning(expertCacheBudgetBytes: defaultExpertCacheBudgetBytes,
+                                prefetchDepth: 1)
+        default:
+            return DecodeTuning(expertCacheBudgetBytes: defaultExpertCacheBudgetBytes,
+                                prefetchDepth: 0)
+        }
+    }
+
+    /// A tuned budget the machine can actually hold.
+    ///
+    /// `decodeTuning` returns what measured fastest on a 24 GiB machine. Half
+    /// of physical memory is the ceiling because the slot cache is not the only
+    /// resident claim -- dense weights, the KV cache and the prompt cache all
+    /// have to fit beside it. Without this, a 12 GiB default aimed at
+    /// qwen38flash would be handed unchanged to a 16 GiB Mac.
+    public static func affordableExpertCacheBudget(
+        _ wanted: Int,
+        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
+        guard physicalMemory > 0 else { return wanted }
+        return min(wanted, Int(physicalMemory / 2))
+    }
+
     /// Parses a RAM budget such as `2G`, `512M`, `8GiB` or a plain byte count.
     ///
     /// Accepts the sizes users actually type. Returns nil for anything

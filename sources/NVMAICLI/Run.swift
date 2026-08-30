@@ -123,8 +123,36 @@ public func run(args: Args,
             seed: args.seed,
             stopStrings: args.stops,
             extraStopTokens: [])
+        // Select the architecture the manifest declares rather than assuming
+        // the Qwen3.5-MoE baseline; otherwise a payload of any other family
+        // fails on a dimension mismatch instead of loading.
+        let identity = try ManifestReader.peekIdentity(directoryURL: modelURL)
+        let family = identity.family
+        guard let expectedArch = ArchConfig.knownArchitectures[family] else {
+            return errored(stderr,
+                           "model declares family \(family.rawValue), which this "
+                               + "runtime does not implement", 2)
+        }
+        // Without an explicit --expert-cache-slots, take the same tuned budget
+        // the server uses, so the two front ends do not disagree about what
+        // this machine should run.
+        let resolvedSlots: Int
+        if let requested = args.expertCacheSlots {
+            resolvedSlots = requested
+        } else if let manifest = try? ManifestReader.load(directoryURL: modelURL,
+                                                          expecting: expectedArch) {
+            resolvedSlots = RuntimeConfiguration.expertCacheSlots(
+                expertStrideBytes: manifest.expertStride,
+                layers: manifest.arch.numLayers,
+                budgetBytes: RuntimeConfiguration.affordableExpertCacheBudget(
+                    RuntimeConfiguration.decodeTuning(
+                        family: identity.family,
+                        weightBits: identity.weightBits).expertCacheBudgetBytes))
+        } else {
+            resolvedSlots = 64
+        }
         let loadRuntime = try RuntimeConfiguration(
-            expertCacheSlots: args.expertCacheSlots,
+            expertCacheSlots: resolvedSlots,
             rdadvisePolicy: RDAdvicePolicyMode.parse(args.rdadvise),
             forceLogitsHead: !config.isPureGreedy,
             decodeExpertExecution: try RuntimeDecodeExpertExecution.environmentValue(),
@@ -135,15 +163,6 @@ public func run(args: Args,
             return errored(stderr, "no Metal device", 1)
         }
         let context = try MetalContext()
-        // Select the architecture the manifest declares rather than assuming
-        // the Qwen3.5-MoE baseline; otherwise a payload of any other family
-        // fails on a dimension mismatch instead of loading.
-        let family = try ManifestReader.peekFamily(directoryURL: modelURL)
-        guard let expectedArch = ArchConfig.knownArchitectures[family] else {
-            return errored(stderr,
-                           "model declares family \(family.rawValue), which this "
-                               + "runtime does not implement", 2)
-        }
         let model = try Model.load(
             directoryURL: modelURL,
             device: context.device,

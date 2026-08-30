@@ -361,8 +361,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
         self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
+        // The family's measured optimum is the default; an explicit
+        // NVMAI_PREDICTIVE_PREFETCH still wins either way, so a probe can turn
+        // it on where it ships off and off where it ships on.
+        let prefetchTuning = RuntimeConfiguration.decodeTuning(
+            family: cfg.family, weightBits: model.routedExpertWeightBits)
         let rawPrefetchEnabled = ProcessInfo.processInfo.environment[
-            "NVMAI_PREDICTIVE_PREFETCH"] == "1"
+            "NVMAI_PREDICTIVE_PREFETCH"].map { $0 == "1" }
+            ?? (prefetchTuning.prefetchDepth > 0)
         // One read deep, not four. The ring depth is a bandwidth decision, not
         // a coverage one: the SSD is saturated while it reads, so a speculative
         // read that misses its layer has stolen service from a demand read that
@@ -371,8 +377,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // arrive too late to be adopted, which shows up as a *lower* hit rate.
         // Measured on qwen38 4-bit, interleaved against prefetch off:
         // M=1 +12.2% (hit 78.7%), M=2 +6.0% (77.9%), M=4 -9.8% (77.1%).
-        let rawPrefetchTopM = Int(ProcessInfo.processInfo.environment[
-            "NVMAI_PREFETCH_TOP_M"] ?? "1") ?? 1
+        let rawPrefetchTopM = ProcessInfo.processInfo.environment[
+            "NVMAI_PREFETCH_TOP_M"].flatMap(Int.init)
+            ?? max(1, prefetchTuning.prefetchDepth)
         guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
             throw ModelError.internalInconsistency(
                 detail: "NVMAI_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")

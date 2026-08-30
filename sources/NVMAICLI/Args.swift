@@ -21,7 +21,11 @@ public struct Args: Equatable, Sendable {
     public var concise: Bool
     public var thinkingMode: ModelThinkingMode
     public var reasoningEffort: ModelReasoningEffort?
-    public var expertCacheSlots: Int
+    /// Routed-expert slots, or nil to derive from the family's measured
+    /// tuning and the payload's expert stride. A flat default cannot be
+    /// right for both families: 8 GiB is 128 slots at the 35B stride and 96
+    /// at Qwen3.8-Flash-Next's.
+    public var expertCacheSlots: Int?
     public var rdadvise: String
     public var prefillChunk: PrefillChunkChoice?
     public var kvCachePrecision: KVCachePrecision
@@ -42,7 +46,7 @@ public struct Args: Equatable, Sendable {
                 concise: Bool = false,
                 thinkingMode: ModelThinkingMode = .off,
                 reasoningEffort: ModelReasoningEffort? = nil,
-                expertCacheSlots: Int = 64,
+                expertCacheSlots: Int? = nil,
                 rdadvise: String = "default",
                 prefillChunk: PrefillChunkChoice? = nil,
                 kvCachePrecision: KVCachePrecision = .int8,
@@ -158,7 +162,7 @@ extension Args {
         var concise = false
         var thinkingMode: ModelThinkingMode = .off
         var reasoningEffort: ModelReasoningEffort?
-        var expertCacheSlots = 64
+        var expertCacheSlots: Int?
         var rdadvise = "default"
         var prefillChunk: PrefillChunkChoice?
         var kvCachePrecision: KVCachePrecision = .int8

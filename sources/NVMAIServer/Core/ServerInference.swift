@@ -549,13 +549,24 @@ public actor ServerModelSession: ServerInferenceBackend {
                     + "runtime does not implement")
         }
         let derivedSlots: Int
+        // An explicit --ram-budget always wins; this only supplies the default,
+        // and it is clamped so a family tuned on a 24 GiB machine cannot hand a
+        // smaller one a budget it has no room for.
+        let tunedBudget: Int
+        if let identity = try? ManifestReader.peekIdentity(directoryURL: modelDirectory) {
+            tunedBudget = RuntimeConfiguration.affordableExpertCacheBudget(
+                RuntimeConfiguration.decodeTuning(
+                    family: identity.family,
+                    weightBits: identity.weightBits).expertCacheBudgetBytes)
+        } else {
+            tunedBudget = RuntimeConfiguration.defaultExpertCacheBudgetBytes
+        }
         if let manifest = try? ManifestReader.load(directoryURL: modelDirectory,
                                                   expecting: expectedArch) {
             derivedSlots = RuntimeConfiguration.expertCacheSlots(
                 expertStrideBytes: manifest.expertStride,
                 layers: manifest.arch.numLayers,
-                budgetBytes: expertCacheBudgetBytes
-                    ?? RuntimeConfiguration.defaultExpertCacheBudgetBytes)
+                budgetBytes: expertCacheBudgetBytes ?? tunedBudget)
         } else {
             // Unreadable manifest means the load below will fail with a better
             // message than anything this could throw, so pick the safe small end.

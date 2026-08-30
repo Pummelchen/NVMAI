@@ -123,3 +123,71 @@ import Testing
         #expect(one < four && four < eight)
     }
 }
+
+/// The per-family decode tuning, and the clamp that keeps it honest on a
+/// machine smaller than the one it was measured on.
+///
+/// Measured 2026-08-30, 512-token prose, fresh process per run, interleaved:
+/// qwen38flash 4-bit 5.735 -> 6.957 tok/s with 12 GiB + depth 1; qwen36 8-bit
+/// 11.994 -> 12.659 with depth 1; qwen36 4-bit regressed 23.234 -> 22.248, so
+/// it ships without prefetch.
+@Suite struct DecodeTuningTests {
+    static let qwen38Stride = UInt64(2_768_896)
+    static let qwen38Layers = 48
+
+    @Test func qwen38FlashGetsTheWiderCacheAndPrefetch() {
+        let tuning = RuntimeConfiguration.decodeTuning(family: .qwen38flash,
+                                                       weightBits: 4)
+        #expect(tuning.expertCacheBudgetBytes == 12 << 30)
+        #expect(tuning.prefetchDepth == 1)
+        // 12 GiB has to actually land on 96 slots for this payload, which is
+        // the whole point of the entry.
+        #expect(RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: Self.qwen38Stride, layers: Self.qwen38Layers,
+            budgetBytes: tuning.expertCacheBudgetBytes) == 96)
+    }
+
+    @Test func prefetchShipsOnlyWhereItMeasuredFaster() {
+        // 8-bit streams twice the bytes, so expert I/O is a large enough share
+        // of the token for a speculative read to pay.
+        #expect(RuntimeConfiguration.decodeTuning(
+            family: .qwen36, weightBits: 8).prefetchDepth == 1)
+        #expect(RuntimeConfiguration.decodeTuning(
+            family: .qwen36MTP, weightBits: 8).prefetchDepth == 1)
+        // At 4-bit the same family spends ~7 ms of a ~44 ms token on expert
+        // I/O; prefetch measured -3.9% (Ornith) and -4.2% (Qwen 3.6).
+        #expect(RuntimeConfiguration.decodeTuning(
+            family: .qwen36, weightBits: 4).prefetchDepth == 0)
+        #expect(RuntimeConfiguration.decodeTuning(
+            family: .qwen36MTP, weightBits: 4).prefetchDepth == 0)
+    }
+
+    @Test func the35BFamiliesKeepTheirEstablishedBudget() {
+        for bits in [4, 8] {
+            #expect(RuntimeConfiguration.decodeTuning(
+                family: .qwen36, weightBits: bits).expertCacheBudgetBytes
+                == RuntimeConfiguration.defaultExpertCacheBudgetBytes)
+        }
+    }
+
+    @Test func budgetIsClampedToWhatTheMachineCanHold() {
+        let wanted = 12 << 30
+        // 24 GiB and up: the tuned budget survives intact.
+        #expect(RuntimeConfiguration.affordableExpertCacheBudget(
+            wanted, physicalMemory: 32 << 30) == wanted)
+        // 16 GiB: half is 8 GiB, so the 12 GiB aimed at qwen38flash is cut
+        // rather than handed to a machine with no room for it.
+        #expect(RuntimeConfiguration.affordableExpertCacheBudget(
+            wanted, physicalMemory: 16 << 30) == 8 << 30)
+        // And the clamp has to change the slot count, not just the number.
+        #expect(RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: Self.qwen38Stride, layers: Self.qwen38Layers,
+            budgetBytes: RuntimeConfiguration.affordableExpertCacheBudget(
+                wanted, physicalMemory: 16 << 30)) == 64)
+    }
+
+    @Test func clampNeverGrowsABudget() {
+        #expect(RuntimeConfiguration.affordableExpertCacheBudget(
+            8 << 30, physicalMemory: 128 << 30) == 8 << 30)
+    }
+}
