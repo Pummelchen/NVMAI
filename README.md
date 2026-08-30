@@ -1,14 +1,17 @@
 <img width="1774" height="887" alt="image" src="https://github.com/user-attachments/assets/dc91bc31-0cd4-42e6-bc7a-67ffb277efe0" />
 
+### The fastest SSD/NVMe streamer for LLMs on Mac — M1 through M6.
+
+Run models far larger than your RAM. A 125B-parameter model on a 24 GB
+MacBook, at reading speed.
+
 > [!NOTE]
-> **Coming soon: Qwen3.8-Flash-Next (125B-A6B).** NVMAI will support Qwen's
-> new flagship sparse-MoE model — 125B parameters with only 6B active per
-> token, a natural fit for SSD-streamed inference on 16–32 GB Macs. The port
-> is in development on `main`
-> ([verified design record](https://github.com/Pummelchen/NVMAI/blob/main/docs/qwen38-flash-next-port.md));
-> installation will be enabled once an mlx-community quantized release is
-> available. Progress is tracked in
-> [issue #2](https://github.com/Pummelchen/NVMAI/issues/2).
+> **Qwen3.8-Flash-Next (125B-A6B) is supported.** Qwen's flagship sparse-MoE
+> model — 125B parameters with only 6B active per token — runs in 4-bit at
+> **6.82 tok/s** on a base M3 with 24 GB, a machine that cannot hold a
+> twentieth of it in memory. See the
+> [verified design record](https://github.com/Pummelchen/NVMAI/blob/main/docs/qwen38-flash-next-port.md)
+> and [issue #2](https://github.com/Pummelchen/NVMAI/issues/2).
 
 # NVMAI
 

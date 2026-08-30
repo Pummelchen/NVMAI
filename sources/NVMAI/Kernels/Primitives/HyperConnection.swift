@@ -28,6 +28,26 @@ final class HyperConnection {
     let streams: Int
     let lowRank: Int
 
+    /// Diagnostic ablation. `NVMAI_ABLATE_HC` accepts a comma-separated list of
+    /// `norm`, `down`, `silu`, `up`, `mix`, `inject_gemv`, `inject`, or `all`,
+    /// and skips those dispatches. The output is wrong by construction -- this
+    /// exists to attribute time, because dispatch counts turned out to predict
+    /// cost badly here (folding two gates removed 192 dispatches per token and
+    /// recovered 0.59 ms, not the 3.8 ms the usual per-encoder figure implies).
+    static let ablate: Set<String> = {
+        guard let raw = ProcessInfo.processInfo.environment["NVMAI_ABLATE_HC"],
+              !raw.isEmpty else { return [] }
+        let parts = Set(raw.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces)
+        })
+        if parts.contains("all") {
+            return ["norm", "down", "silu", "up", "mix", "inject_gemv", "inject"]
+        }
+        return parts
+    }()
+
+    private func skip(_ step: String) -> Bool { Self.ablate.contains(step) }
+
     private let rms: RMSNorm
     private let gemv: DequantInt4GEMV
     private let elementwise: Elementwise
@@ -179,27 +199,36 @@ final class HyperConnection {
                     blockInput: MTLBuffer, blockInputOffset: Int = 0,
                     eps: Float) throws {
         let wide = dim * streams
+        if !skip("norm") {
         try rms.encodeBF16WGrouped(commandBuffer: commandBuffer,
                                    x: streamsBuffer, xOffset: streamsOffset,
                                    weight: hcNorm, weightOffset: hcNormOffset,
                                    out: normed,
                                    groupDim: UInt32(dim), numGroups: streams,
                                    eps: eps)
+        }
+        if !skip("down") {
         try gemv.encode(commandBuffer: commandBuffer,
                         weights: down.weights, weightsOffset: down.weightsOffset,
                         scales: down.scales, scalesOffset: down.scalesOffset,
                         biases: down.biases, biasesOffset: down.biasesOffset,
                         x: normed, y: lowRankScratch,
                         m: UInt32(lowRank), n: UInt32(wide))
+        }
+        if !skip("silu") {
         try elementwise.encodeSilu(commandBuffer: commandBuffer,
                                    x: lowRankScratch, out: lowRankScratch,
                                    count: lowRank, inScale: gateInputScale)
+        }
+        if !skip("up") {
         try gemv.encode(commandBuffer: commandBuffer,
                         weights: up.weights, weightsOffset: up.weightsOffset,
                         scales: up.scales, scalesOffset: up.scalesOffset,
                         biases: up.biases, biasesOffset: up.biasesOffset,
                         x: lowRankScratch, y: mixScratch,
                         m: UInt32(wide), n: UInt32(lowRank))
+        }
+        if skip("mix") { return }
         // The read gate is applied inside the reduce, which already reads
         // every element of the mix exactly once.
         try elementwise.encodeHCMixReduce(commandBuffer: commandBuffer,
@@ -216,12 +245,15 @@ final class HyperConnection {
                      streamsBuffer: MTLBuffer, streamsOffset: Int = 0,
                      inject: Weights,
                      blockOut: MTLBuffer, blockOutOffset: Int = 0) throws {
+        if !skip("inject_gemv") {
         try gemv.encode(commandBuffer: commandBuffer,
                         weights: inject.weights, weightsOffset: inject.weightsOffset,
                         scales: inject.scales, scalesOffset: inject.scalesOffset,
                         biases: inject.biases, biasesOffset: inject.biasesOffset,
                         x: normed, y: injectScratch,
                         m: UInt32(streams), n: UInt32(dim * streams))
+        }
+        if skip("inject") { return }
         // The write gate, 2 * sigmoid(...), opens to twice the read gate's
         // range so a stream can amplify a block rather than only attenuate it.
         // It is applied inside the inject rather than in its own dispatch.
