@@ -190,22 +190,29 @@ def rename(name: str) -> str:
     return name
 
 
-def quant_bits(name: str) -> int | None:
-    """Bits for a tensor, or None to copy it through unquantised."""
-    if ".mlp.switch_mlp." in name:
-        return BITS_4
-    if name.endswith("embed_tokens.weight") or name == "lm_head.weight":
-        return BITS_8
-    if name.endswith(".mlp.gate.weight") or name.endswith(".shared_expert_gate.weight"):
-        return BITS_8
+def quant_bits(name: str, width: int = BITS_4) -> int | None:
+    """Bits for a tensor, or None to copy it through unquantised.
+
+    `width` is the install's routed-expert width, which is what "a 4-bit model"
+    names. It follows the convention the shipped manifests use: an 8-bit
+    install is 8 bits throughout, while a 4-bit install keeps the router at 8
+    because it is small and its argmax decides which experts are read at all.
+    The embedding also stays at 8 in the 4-bit build, matching what this
+    family's own 4-bit install carried -- Ornith's 4-bit puts it at 4, so this
+    is a per-family choice and not a general rule.
+    """
     if name.endswith(".A_log") or name.endswith(".dt_bias"):
         return None
     if name.endswith("conv1d.weight"):
         return None
     if name.endswith(".hc_norm") or name.endswith("norm.weight"):
         return None
-    if name.endswith(".weight"):
-        return BITS_4
+    if name.endswith(".mlp.gate.weight") or name.endswith(".shared_expert_gate.weight"):
+        return BITS_8
+    if name.endswith("embed_tokens.weight") or name == "lm_head.weight":
+        return BITS_8
+    if ".mlp.switch_mlp." in name or name.endswith(".weight"):
+        return width
     return None
 
 
@@ -294,7 +301,8 @@ class OutputWriter:
             {"metadata": {"total_size": self.total}, "weight_map": final}, indent=1))
 
 
-def convert_shard(path: Path, writer: OutputWriter, ngram: "NgramTable") -> None:
+def convert_shard(path: Path, writer: OutputWriter, ngram: "NgramTable",
+                  width: int = BITS_4) -> None:
     with safe_open(path, framework="np") as src:
         for name in src.keys():
             if is_multimodal(name):
@@ -310,7 +318,7 @@ def convert_shard(path: Path, writer: OutputWriter, ngram: "NgramTable") -> None
                     piece = value[:, value.shape[1] // 2:, :]
                 else:
                     piece = value
-                bits = quant_bits(out_name)
+                bits = quant_bits(out_name, width)
                 if bits is None:
                     writer.add(out_name, np.ascontiguousarray(piece))
                     continue
@@ -372,7 +380,7 @@ class NgramTable:
 # --- driver ----------------------------------------------------------------
 
 
-def plan(index: dict) -> None:
+def plan(index: dict, width: int = BITS_4) -> None:
     wm = index["weight_map"]
     shards = sorted(set(wm.values()))
     text = {n: s for n, s in wm.items() if not is_multimodal(n)}
@@ -390,7 +398,7 @@ def plan(index: dict) -> None:
             if name == "__metadata__" or is_multimodal(name) or is_ngram(name):
                 continue
             for out_name, out_shape in outputs_for(name, meta["shape"]):
-                bits = quant_bits(out_name)
+                bits = quant_bits(out_name, width)
                 if bits and out_shape[-1] % GROUP_SIZE:
                     problems.append(f"{out_name} last dim {out_shape[-1]} unaligned")
                 print(f"  {name} {meta['shape']}\n     -> {out_name} {out_shape} "
@@ -402,6 +410,8 @@ def plan(index: dict) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", action="store_true")
+    ap.add_argument("--bits", type=int, choices=(4, 8), default=4,
+                    help="routed-expert width of the install being built")
     ap.add_argument("--output", type=Path)
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
     ap.add_argument("--index", type=Path)
@@ -417,7 +427,7 @@ def main() -> int:
 
     index = fetch_json(args.index, "model.safetensors.index.json")
     if args.plan or not args.output:
-        plan(index)
+        plan(index, args.bits)
         return 0
 
     config = fetch_json(args.config, "config.json")
@@ -460,7 +470,7 @@ def main() -> int:
             raise item
         done += 1
         print(f"[{done}/{len(shards)}] {item.name}", flush=True)
-        convert_shard(item, writer, ngram)
+        convert_shard(item, writer, ngram, args.bits)
         item.unlink()
 
     writer.finish()
