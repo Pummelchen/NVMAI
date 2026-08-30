@@ -581,8 +581,12 @@ the attention slot's width.
   was chosen for speed: prefill for this family is a sequential one-token
   loop, and the n-gram gather sits inline on the decode path where it could
   be issued a token ahead.
-- The **QSA indexer** is still unwritten, so contexts past 2,051 keys are not
-  faithful. The dense gate is exact below that.
+- The **QSA indexer** is still unwritten. `QSAExactness` was defined for this
+  and then never called, so any context past 2,051 keys ran dense with nothing
+  reporting it --- the exact failure mode the type was written to name. The
+  gate is now enforced in `produceToken` and the runtime *refuses* past the
+  window (`QSAIndexerRequired`) rather than attending to keys the model's
+  selection would have dropped. Implementing the indexer is what lifts it.
 - The **MTP sidecar** is not installed.
 - Long-context behaviour is unverified: parity has been run over a handful of
   positions, not over a long prompt.

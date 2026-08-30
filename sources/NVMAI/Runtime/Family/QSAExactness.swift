@@ -61,3 +61,30 @@ public struct QSAExactness: Sendable, Equatable {
     /// off by the tail block.
     public var indexerRequiredFromContext: Int { maximumExactVisibleKeys + 1 }
 }
+
+/// Raised when a context outgrows the window where dense attention is exact
+/// and no indexer is available to serve it.
+///
+/// This is deliberately an error and not a warning. Past the window, dense
+/// attention does not degrade -- it attends to keys the trained model's
+/// selection would have dropped, and produces fluent output that nothing
+/// downstream flags. Refusing is the only honest behaviour until the indexer
+/// exists.
+public struct QSAIndexerRequired: Error, CustomStringConvertible, Equatable {
+    public let visibleKeys: Int
+    public let exactWindow: Int
+
+    public init(visibleKeys: Int, exactWindow: Int) {
+        self.visibleKeys = visibleKeys
+        self.exactWindow = exactWindow
+    }
+
+    public var description: String {
+        "context reaches \(visibleKeys) tokens, past the \(exactWindow) where "
+            + "dense attention matches this model's sparse selection exactly. "
+            + "The QSA indexer is not implemented yet, and running dense here "
+            + "would attend to keys the model would have dropped -- silently, "
+            + "and with plausible output. Shorten the prompt or lower "
+            + "--max-new so prompt + generation stays within \(exactWindow)."
+    }
+}

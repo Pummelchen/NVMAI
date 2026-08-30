@@ -704,6 +704,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                      label: "per_expert_scale.ones")
     }
 
+    /// The window in which dense attention is exact for this model, or nil
+    /// for a family without sparse attention.
+    var qsaExactness: QSAExactness? {
+        cfg.sparseIndexer.enabled ? QSAExactness(cfg.sparseIndexer) : nil
+    }
+
+    /// Refuses a position the sparse-attention path cannot serve faithfully.
+    /// See `QSAIndexerRequired` for why this is an error rather than a note.
+    func requireQSAExact(visibleKeys: Int) throws {
+        guard let exactness = qsaExactness,
+              !exactness.isDenseExact(visibleKeys: visibleKeys) else { return }
+        throw QSAIndexerRequired(visibleKeys: visibleKeys,
+                                 exactWindow: exactness.maximumExactVisibleKeys)
+    }
+
     public func reset() {
         kv?.reset()
         gdnState?.reset()

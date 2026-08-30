@@ -42,6 +42,8 @@ extension RealForwardRunner {
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
+        // A decode step at `position` makes position + 1 keys visible.
+        try requireQSAExact(visibleKeys: position + 1)
         let D    = UInt32(cfg.hiddenSize)
         let eps: Float = 1e-6
         let embedOutScale = cfg.embeddingScaledBySqrtHidden

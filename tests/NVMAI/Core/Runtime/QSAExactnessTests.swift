@@ -54,6 +54,17 @@ struct QSAExactnessTests {
         #expect(q.isDenseExact(forContext: 0))
     }
 
+    @Test("Past the window the runtime refuses rather than attending densely")
+    func refusalCarriesTheNumbers() {
+        // The gate exists because dense attention past the window is not
+        // slow, it is wrong with nothing downstream reporting it. A caller
+        // that hits this needs both numbers to know what to shorten.
+        let error = QSAIndexerRequired(visibleKeys: 2052, exactWindow: 2051)
+        #expect(error.description.contains("2052"))
+        #expect(error.description.contains("2051"))
+        #expect(error.description.contains("--max-new"))
+    }
+
     @Test("The window tracks the geometry rather than being hardcoded")
     func otherGeometries() {
         // compress 1: every block is complete, so the window is the budget.
