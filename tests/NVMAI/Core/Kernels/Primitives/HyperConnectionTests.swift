@@ -11,6 +11,11 @@ import NVMAIValidationSupport
 /// can hide.
 @Suite("Hyper-connection streams")
 struct HyperConnectionTests {
+    /// The gates the kernels now apply internally, so a reference can
+    /// reproduce them. Rounding through Float16 matches what the kernel
+    /// stores before it multiplies.
+    static func sigmoid(_ x: Float) -> Float { 1 / (1 + expf(-x)) }
+
     /// Production geometry: 4 streams of 2560.
     private static let dim = 2560
     private static let streams = 4
@@ -32,7 +37,8 @@ struct HyperConnectionTests {
         let cb = ctx.queue.makeCommandBuffer()!
         try kernel.encodeHCMixReduce(commandBuffer: cb, mix: mixBuf,
                                      normed: normBuf, out: outBuf,
-                                     dim: Self.dim, streams: Self.streams)
+                                     dim: Self.dim, streams: Self.streams,
+                                     inScale: 1)
         cb.commit(); cb.waitUntilCompleted()
 
         var reference = [Float](repeating: 0, count: Self.dim)
@@ -40,7 +46,10 @@ struct HyperConnectionTests {
             var acc: Float = 0
             for s in 0..<Self.streams {
                 let i = s * Self.dim + d
-                acc += Float(mix[i]) * Float(normed[i])
+                // The read gate lives inside the reduce now, so the mix
+                // arrives raw and is sigmoided per element.
+                acc += Float(Float16(Self.sigmoid(Float(mix[i]))))
+                    * Float(normed[i])
             }
             reference[d] = acc / Float(Self.streams)
         }
@@ -69,15 +78,17 @@ struct HyperConnectionTests {
         let cb = ctx.queue.makeCommandBuffer()!
         try kernel.encodeHCInject(commandBuffer: cb, streams: streamBuf,
                                   blockOut: outBuf, inject: injBuf,
-                                  dim: Self.dim, streamCount: Self.streams)
+                                  dim: Self.dim, streamCount: Self.streams,
+                                  inScale: 1)
         cb.commit(); cb.waitUntilCompleted()
 
         var reference = [Float](repeating: 0, count: total)
         for s in 0..<Self.streams {
             for d in 0..<Self.dim {
                 let i = s * Self.dim + d
-                reference[i] = Float(initial[i])
-                    + Float(blockOut[d]) * Float(inject[s])
+                // 2 * sigmoid(inject[s]) is applied inside the kernel.
+                let g = Float(Float16(2 * Self.sigmoid(Float(inject[s]))))
+                reference[i] = Float(initial[i]) + Float(blockOut[d]) * g
             }
         }
         let actual = Fp16Buffer.read(streamBuf, count: total)
@@ -106,12 +117,17 @@ struct HyperConnectionTests {
             let cb = ctx.queue.makeCommandBuffer()!
             try kernel.encodeHCInject(commandBuffer: cb, streams: streamBuf,
                                       blockOut: outBuf, inject: injBuf,
-                                      dim: dim, streamCount: streams)
+                                      dim: dim, streamCount: streams,
+                                      inScale: 1)
             cb.commit(); cb.waitUntilCompleted()
         }
+        // Two injects of blockOut 1.0 through gate 2*sigmoid(w): the point is
+        // that the second adds the same amount again rather than replacing it.
+        let g0 = Float(Float16(2 * Self.sigmoid(1.0)))
+        let g1 = Float(Float16(2 * Self.sigmoid(2.0)))
         let actual = Fp16Buffer.read(streamBuf, count: total)
-        #expect(abs(actual[0] - 2.0) < 1e-2, "stream 0 after two injects")
-        #expect(abs(actual[dim] - 4.0) < 1e-2, "stream 1 after two injects")
+        #expect(abs(actual[0] - 2 * g0) < 1e-2, "stream 0 after two injects")
+        #expect(abs(actual[dim] - 2 * g1) < 1e-2, "stream 1 after two injects")
     }
 
     @Test("Batched rows agree with the same rows one at a time")
@@ -143,7 +159,7 @@ struct HyperConnectionTests {
             let cb = ctx.queue.makeCommandBuffer()!
             try kernel.encodeHCMixReduce(commandBuffer: cb, mix: m, normed: n,
                                          out: o, dim: dim, streams: streams,
-                                         tokens: tokens)
+                                         tokens: tokens, inScale: 1)
             cb.commit(); cb.waitUntilCompleted()
             return Fp16Buffer.read(o, count: dim * tokens).map { Float($0) }
         }
@@ -169,7 +185,7 @@ struct HyperConnectionTests {
             try kernel.encodeHCInject(commandBuffer: cb, streams: st,
                                       blockOut: bo, inject: inj,
                                       dim: dim, streamCount: streams,
-                                      tokens: tokens)
+                                      tokens: tokens, inScale: 1)
             cb.commit(); cb.waitUntilCompleted()
             return Fp16Buffer.read(st, count: wide * tokens).map { Float($0) }
         }
