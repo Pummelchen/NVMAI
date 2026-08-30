@@ -145,6 +145,7 @@ void hc_stream_mix_reduce_fp16(
     // [T, S, D], so a token's streams stay contiguous and the same index
     // arithmetic serves both.
     constant     uint& T       [[buffer(5)]],
+    constant    float& inScale [[buffer(6)]],
     uint               tid     [[thread_position_in_grid]]
 ) {
     if (tid >= D * T) return;
@@ -155,7 +156,14 @@ void hc_stream_mix_reduce_fp16(
     float acc = 0.0f;
     for (uint s = 0; s < S; ++s) {
         const uint i = s * D + d;
-        acc += float(mixRow[i]) * float(normRow[i]);
+        // The read gate used to be a separate sigmoid pass over the whole
+        // [S, D] mix before this reduce read it back. Folding it here removes
+        // one dispatch per sublayer -- 96 per token at 48 layers -- and costs
+        // nothing: this loop already touches each element exactly once, so the
+        // sigmoid count is unchanged. Rounding to half before use reproduces
+        // the separate pass bit for bit.
+        const half g = half(1.0f / (1.0f + exp(-float(mixRow[i]) * inScale)));
+        acc += float(g) * float(normRow[i]);
     }
     out[tid] = half(acc / float(S));
 }
@@ -170,10 +178,11 @@ void hc_stream_mix_reduce_fp16(
 void hc_stream_inject_fp16(
     device       half* streams   [[buffer(0)]],  // [S * D], updated in place
     device const half* block_out [[buffer(1)]],  // [D]
-    device const half* inject    [[buffer(2)]],  // [S]
+    device const half* inject    [[buffer(2)]],  // [S], pre-sigmoid
     constant     uint& D         [[buffer(3)]],
     constant     uint& S         [[buffer(4)]],
     constant     uint& T         [[buffer(5)]],
+    constant    float& inScale   [[buffer(6)]],
     uint               tid       [[thread_position_in_grid]]
 ) {
     if (tid >= D * S * T) return;
@@ -181,9 +190,13 @@ void hc_stream_inject_fp16(
     const uint rest = tid - t * D * S;
     const uint s = rest / D;
     const uint d = rest - s * D;
+    // Write gate folded in: this was a sigmoid pass over S values (four, on
+    // this family) in its own dispatch and its own command encoder. The
+    // recomputation per thread is free on a kernel this memory-bound, and
+    // rounding to half before use reproduces the separate pass exactly.
+    const half g = half(2.0f / (1.0f + exp(-float(inject[t * S + s]) * inScale)));
     streams[tid] = half(float(streams[tid])
-                        + float(block_out[t * D + d])
-                          * float(inject[t * S + s]));
+                        + float(block_out[t * D + d]) * float(g));
 }
 
 // out[i] = outScale * sigmoid(inScale * x[i]) — standalone gate, distinct

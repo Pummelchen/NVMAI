@@ -141,15 +141,12 @@ final class HyperConnection {
                                    inScale: gateInputScale)
         try project(commandBuffer, up, lowRankScratch, mixScratch,
                     wide, lowRank, tokens)
-        try elementwise.encodeSigmoid(commandBuffer: commandBuffer,
-                                      x: mixScratch, out: mixScratch,
-                                      count: wide * tokens)
         try elementwise.encodeHCMixReduce(commandBuffer: commandBuffer,
                                           mix: mixScratch, normed: normed,
                                           out: blockInput,
                                           outOffset: blockInputOffset,
                                           dim: dim, streams: streams,
-                                          tokens: tokens)
+                                          tokens: tokens, inScale: 1)
     }
 
     /// Block output -> residual for a whole prefill chunk. Consumes the
@@ -165,10 +162,6 @@ final class HyperConnection {
                      "HyperConnection scratch holds \(maxRows) rows, asked for \(tokens)")
         try project(commandBuffer, inject, normed, injectScratch,
                     streams, dim * streams, tokens)
-        try elementwise.encodeSigmoid(commandBuffer: commandBuffer,
-                                      x: injectScratch, out: injectScratch,
-                                      count: streams * tokens,
-                                      inScale: gateInputScale, outScale: 2)
         try elementwise.encodeHCInject(commandBuffer: commandBuffer,
                                        streams: streamsBuffer,
                                        streamsOffset: streamsOffset,
@@ -176,7 +169,7 @@ final class HyperConnection {
                                        blockOutOffset: blockOutOffset,
                                        inject: injectScratch,
                                        dim: dim, streamCount: streams,
-                                       tokens: tokens)
+                                       tokens: tokens, inScale: gateInputScale)
     }
 
     func encodeRead(commandBuffer: MTLCommandBuffer,
@@ -207,14 +200,14 @@ final class HyperConnection {
                         biases: up.biases, biasesOffset: up.biasesOffset,
                         x: lowRankScratch, y: mixScratch,
                         m: UInt32(wide), n: UInt32(lowRank))
-        try elementwise.encodeSigmoid(commandBuffer: commandBuffer,
-                                      x: mixScratch, out: mixScratch,
-                                      count: wide)
+        // The read gate is applied inside the reduce, which already reads
+        // every element of the mix exactly once.
         try elementwise.encodeHCMixReduce(commandBuffer: commandBuffer,
                                           mix: mixScratch, normed: normed,
                                           out: blockInput,
                                           outOffset: blockInputOffset,
-                                          dim: dim, streams: streams)
+                                          dim: dim, streams: streams,
+                                          inScale: 1)
     }
 
     /// Inject the block's output back into every stream. Consumes the `normed`
@@ -229,18 +222,16 @@ final class HyperConnection {
                         biases: inject.biases, biasesOffset: inject.biasesOffset,
                         x: normed, y: injectScratch,
                         m: UInt32(streams), n: UInt32(dim * streams))
-        // 2 * sigmoid(...): the write gate opens to twice the read gate's
-        // range, so a stream can amplify a block rather than only attenuate it.
-        try elementwise.encodeSigmoid(commandBuffer: commandBuffer,
-                                      x: injectScratch, out: injectScratch,
-                                      count: streams,
-                                      inScale: gateInputScale, outScale: 2)
+        // The write gate, 2 * sigmoid(...), opens to twice the read gate's
+        // range so a stream can amplify a block rather than only attenuate it.
+        // It is applied inside the inject rather than in its own dispatch.
         try elementwise.encodeHCInject(commandBuffer: commandBuffer,
                                        streams: streamsBuffer,
                                        streamsOffset: streamsOffset,
                                        blockOut: blockOut,
                                        blockOutOffset: blockOutOffset,
                                        inject: injectScratch,
-                                       dim: dim, streamCount: streams)
+                                       dim: dim, streamCount: streams,
+                                       inScale: gateInputScale)
     }
 }

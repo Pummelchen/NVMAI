@@ -99,7 +99,8 @@ final class Elementwise {
                            mix: MTLBuffer, mixOffset: Int = 0,
                            normed: MTLBuffer, normedOffset: Int = 0,
                            out: MTLBuffer, outOffset: Int = 0,
-                           dim: Int, streams: Int, tokens: Int = 1) throws {
+                           dim: Int, streams: Int, tokens: Int = 1,
+                           inScale: Float) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -111,6 +112,8 @@ final class Elementwise {
         enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
         enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 5)
+        var gs = inScale
+        enc.setBytes(&gs, length: MemoryLayout<Float>.size, index: 6)
         let w = min(hcMixReducePSO.maxTotalThreadsPerThreadgroup, 256)
         enc.dispatchThreads(MTLSize(width: dim * tokens, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
@@ -123,7 +126,8 @@ final class Elementwise {
                         streams: MTLBuffer, streamsOffset: Int = 0,
                         blockOut: MTLBuffer, blockOutOffset: Int = 0,
                         inject: MTLBuffer, injectOffset: Int = 0,
-                        dim: Int, streamCount: Int, tokens: Int = 1) throws {
+                        dim: Int, streamCount: Int, tokens: Int = 1,
+                        inScale: Float) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -135,6 +139,8 @@ final class Elementwise {
         enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
         enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 5)
+        var gs = inScale
+        enc.setBytes(&gs, length: MemoryLayout<Float>.size, index: 6)
         let total = dim * streamCount * tokens
         let w = min(hcInjectPSO.maxTotalThreadsPerThreadgroup, 256)
         enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
