@@ -207,7 +207,29 @@ def quant_bits(name: str, width: int = BITS_4) -> int | None:
         return None
     if name.endswith(".hc_norm") or name.endswith("norm.weight"):
         return None
+    # Tensors whose 4-bit error does not average away keep 8 bits even in a
+    # 4-bit install. The error itself is not special -- every tensor measures
+    # ~10% relative error at 4 bits and ~0.6% at 8, the bulk projections
+    # included -- so the criterion is what the error *does*.
+    #
+    # A ranking either matches or it does not. Measured on layer 3 against the
+    # bf16 original: the router picks the same 10 of 512 experts on 11.8% of
+    # inputs at 4 bits against 88.8% at 8, and the QSA indexer, which chooses
+    # which keys are attended to at all, is exactly right 0.0% of the time at 4
+    # bits against 49.5% at 8. A gate with a handful of outputs has nothing to
+    # average over either: block_inject is four values scaling a whole block
+    # into the residual, ninety-six times over, and in_proj_a/in_proj_b are the
+    # gating scalars whose A_log and dt_bias companions the checkpoint itself
+    # keeps unquantised.
+    #
+    # Together these are about 10 MB against a 157 GiB install.
     if name.endswith(".mlp.gate.weight") or name.endswith(".shared_expert_gate.weight"):
+        return BITS_8
+    if ".indexer." in name:
+        return BITS_8
+    if name.endswith("block_inject_weight.weight"):
+        return BITS_8
+    if name.endswith("in_proj_a.weight") or name.endswith("in_proj_b.weight"):
         return BITS_8
     if name.endswith("embed_tokens.weight") or name == "lm_head.weight":
         return BITS_8
