@@ -136,18 +136,26 @@ void concat_rows_fp16(
 // attention or MLP block consumes.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void hc_stream_mix_reduce_fp16(
-    device const half* mix     [[buffer(0)]],   // [S * D]
-    device const half* normed  [[buffer(1)]],   // [S * D]
-    device       half* out     [[buffer(2)]],   // [D]
+    device const half* mix     [[buffer(0)]],   // [T, S, D]
+    device const half* normed  [[buffer(1)]],   // [T, S, D]
+    device       half* out     [[buffer(2)]],   // [T, D]
     constant     uint& D       [[buffer(3)]],
     constant     uint& S       [[buffer(4)]],
+    // Rows: 1 for a decode step, the chunk length in prefill. The residual is
+    // [T, S, D], so a token's streams stay contiguous and the same index
+    // arithmetic serves both.
+    constant     uint& T       [[buffer(5)]],
     uint               tid     [[thread_position_in_grid]]
 ) {
-    if (tid >= D) return;
+    if (tid >= D * T) return;
+    const uint t = tid / D;
+    const uint d = tid - t * D;
+    device const half* mixRow = mix + t * S * D;
+    device const half* normRow = normed + t * S * D;
     float acc = 0.0f;
     for (uint s = 0; s < S; ++s) {
-        const uint i = s * D + tid;
-        acc += float(mix[i]) * float(normed[i]);
+        const uint i = s * D + d;
+        acc += float(mixRow[i]) * float(normRow[i]);
     }
     out[tid] = half(acc / float(S));
 }
@@ -165,13 +173,17 @@ void hc_stream_inject_fp16(
     device const half* inject    [[buffer(2)]],  // [S]
     constant     uint& D         [[buffer(3)]],
     constant     uint& S         [[buffer(4)]],
+    constant     uint& T         [[buffer(5)]],
     uint               tid       [[thread_position_in_grid]]
 ) {
-    if (tid >= D * S) return;
-    const uint s = tid / D;
-    const uint d = tid - s * D;
+    if (tid >= D * S * T) return;
+    const uint t = tid / (D * S);
+    const uint rest = tid - t * D * S;
+    const uint s = rest / D;
+    const uint d = rest - s * D;
     streams[tid] = half(float(streams[tid])
-                        + float(block_out[d]) * float(inject[s]));
+                        + float(block_out[t * D + d])
+                          * float(inject[t * S + s]));
 }
 
 // out[i] = outScale * sigmoid(inScale * x[i]) — standalone gate, distinct
@@ -223,20 +235,21 @@ void silu_fp16(
 // produces a D-wide vector; this collapses each stream to a scalar.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void ple_stream_score_fp16(
-    device const half* key    [[buffer(0)]],   // [S * D]
-    device const half* query  [[buffer(1)]],   // [S * D]
-    device       half* out    [[buffer(2)]],   // [S]
+    device const half* key    [[buffer(0)]],   // [T, S, D]
+    device const half* query  [[buffer(1)]],   // [T, S, D]
+    device       half* out    [[buffer(2)]],   // [T, S]
     constant     uint& D      [[buffer(3)]],
     constant     uint& S      [[buffer(4)]],
-    uint               s      [[thread_position_in_grid]]
+    constant     uint& T      [[buffer(5)]],
+    uint               tid    [[thread_position_in_grid]]
 ) {
-    if (s >= S) return;
+    if (tid >= S * T) return;
     float acc = 0.0f;
-    const uint base = s * D;
+    const uint base = tid * D;
     for (uint d = 0; d < D; ++d) {
         acc += float(key[base + d]) * float(query[base + d]);
     }
-    out[s] = half(acc / sqrt(float(D)));
+    out[tid] = half(acc / sqrt(float(D)));
 }
 
 // gate[s] = sigmoid(sign(x) * sqrt(max(|x|, floor)))
@@ -266,17 +279,22 @@ void ple_signed_sqrt_gate_fp16(
 // separately, alongside the convolution branch.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void ple_broadcast_scale_fp16(
-    device const half* value [[buffer(0)]],  // [D]
-    device const half* gate  [[buffer(1)]],  // [S]
-    device       half* out   [[buffer(2)]],  // [S * D]
+    device const half* value [[buffer(0)]],  // [T, D]
+    device const half* gate  [[buffer(1)]],  // [T, S]
+    device       half* out   [[buffer(2)]],  // [T, S, D]
     constant     uint& D     [[buffer(3)]],
     constant     uint& S     [[buffer(4)]],
+    constant     uint& T     [[buffer(5)]],
     uint               tid   [[thread_position_in_grid]]
 ) {
-    if (tid >= D * S) return;
-    const uint s = tid / D;
-    out[tid] = half(float(value[tid - s * D]) * float(gate[s]));
+    if (tid >= D * S * T) return;
+    const uint t = tid / (D * S);
+    const uint rest = tid - t * D * S;
+    const uint s = rest / D;
+    const uint d = rest - s * D;
+    out[tid] = half(float(value[t * D + d]) * float(gate[t * S + s]));
 }
+
 
 // Depthwise causal convolution over time, dilated:
 //   out[t,c] = sum over k of w[c,k] * xpad[t + k*dilation, c]
@@ -326,4 +344,27 @@ void hc_stream_broadcast_fp16(
     const uint total = D * S;
     if (tid < D || tid >= total) return;
     streams[tid] = streams[tid % D];
+}
+
+// dst[t, s, d] = src[t, d] -- widen a [T, D] block into the [T, S, D]
+// residual.
+//
+// Separate from the in-place broadcast above because the two layouts differ:
+// a prefill chunk's embeddings are [T, D] contiguous, and token t's row lands
+// at t * S * D in the residual, so expanding in place would overwrite rows
+// that have not been read yet.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void hc_stream_expand_fp16(
+    device const half* src     [[buffer(0)]],  // [T, D]
+    device       half* dst     [[buffer(1)]],  // [T, S, D]
+    constant     uint& D       [[buffer(2)]],
+    constant     uint& S       [[buffer(3)]],
+    constant     uint& T       [[buffer(4)]],
+    uint               tid     [[thread_position_in_grid]]
+) {
+    if (tid >= D * S * T) return;
+    const uint t = tid / (D * S);
+    const uint rest = tid - t * D * S;
+    const uint d = rest % D;
+    dst[tid] = src[t * D + d];
 }

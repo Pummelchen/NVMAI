@@ -481,11 +481,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
         self.activationDumpDirectory = ProcessInfo.processInfo
             .environment["NVMAI_ACT_DUMP"].map { URL(fileURLWithPath: $0) }
+        // Both gated blocks keep a whole prefill chunk resident: the write
+        // gate consumes what its matching read produced, and the block runs
+        // in between, so the rows cannot be streamed one at a time.
+        let gateRows = max(1, runtimeConfiguration.prefillChunkTokens)
         self.hyperConnection = cfg.hyperConnections.enabled
             ? try HyperConnection(context: context,
                                   dim: cfg.hiddenSize,
                                   streams: cfg.hyperConnections.count,
-                                  lowRank: cfg.hyperConnections.lowRank)
+                                  lowRank: cfg.hyperConnections.lowRank,
+                                  maxRows: gateRows)
             : nil
         if cfg.ple.enabled {
             let constants = try PLEConstants.load(
@@ -503,7 +508,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 embedDim: cfg.ple.embedDim,
                 kernelSize: cfg.ple.convKernelSize,
                 // The dilation is the n-gram size, not a constant of its own.
-                dilation: cfg.ple.ngramSize)
+                dilation: cfg.ple.ngramSize,
+                maxRows: gateRows)
         } else {
             self.pleHash = nil
             self.ngramTable = nil
@@ -718,6 +724,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         throw QSAIndexerRequired(visibleKeys: visibleKeys,
                                  exactWindow: exactness.maximumExactVisibleKeys)
     }
+
+    /// Forces the one-token-at-a-time prefill for hyper-connection families
+    /// (`NVMAI_SEQUENTIAL_HC_PREFILL=1`). It is the reference the batched
+    /// path is checked against, and far too slow to ship.
+    static let sequentialHyperConnectionPrefill =
+        ProcessInfo.processInfo.environment["NVMAI_SEQUENTIAL_HC_PREFILL"] == "1"
 
     public func reset() {
         kv?.reset()

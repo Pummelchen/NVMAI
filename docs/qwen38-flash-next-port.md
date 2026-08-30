@@ -561,6 +561,26 @@ The fused greedy head was also disabled for hyper-connection families: it
 folds a plain RMSNorm into the vocabulary GEMV, and this stack ends in the
 gated mixer that collapses the residual streams, not in an RMSNorm.
 
+### Prefill
+
+Prefill started as a one-token-at-a-time loop through the decode path,
+because the Gated Residual's chain is written per token and batching it means
+batched variants of all of it. That was correct and unusable: every token paid
+a full pass over the routed experts, so a 1,761-token prompt took nine
+minutes.
+
+It is batched now --- the grouped norm, the three gate projections, the stream
+reduce, the inject, and the whole PLE block all take a row count --- and the
+sequential path is kept behind `NVMAI_SEQUENTIAL_HC_PREFILL=1` as the oracle
+it is checked against. The two produce byte-identical output.
+
+What actually buys the time is chunk size, because routed experts are what
+prefill spends itself on and a longer chunk amortizes them. Measured on a
+1,761-token prompt, interleaved A/B/B/A: 129.9 s at the old 128-token default
+against 75.2 s at 2,048, with the repeats agreeing to 0.6%. Against the
+sequential path it is roughly 7x. The family's default is 2,048, which is also
+the largest chunk the sparse-attention gate can ever admit.
+
 ### What parity says now
 
 At position 0, every layer entry and the stack output match the reference to
@@ -577,10 +597,16 @@ the attention slot's width.
 
 ### Still open
 
-- **Throughput is 3-5 tok/s** and has had no attention at all. Nothing here
-  was chosen for speed: prefill for this family is a sequential one-token
-  loop, and the n-gram gather sits inline on the decode path where it could
-  be issued a token ahead.
+- **Decode is 3-5 tok/s**, and it is bound by expert I/O, not compute: a
+  token touches 10 experts across 48 layers, and a route trace simulated
+  against an LRU cache puts the hit rate at 65% for the default 64 slots and
+  78% at 128, where it saturates. That is the ceiling for any policy at this
+  geometry --- 512 experts at top-10 spread far wider than Qwen 3.6's 256 at
+  top-8, which reaches 93.6%. Raising the slot budget is the obvious lever
+  and it costs resident memory: 128 slots is 15.8 GiB here.
+- The n-gram gather still sits inline on the decode path, where it could be
+  issued a token ahead. It is 5 KiB a token against the experts' hundreds of
+  megabytes, so it is not where the time is.
 - The **QSA indexer** is still unwritten. `QSAExactness` was defined for this
   and then never called, so any context past 2,051 keys ran dense with nothing
   reporting it --- the exact failure mode the type was written to name. The

@@ -21,6 +21,7 @@ final class Elementwise {
     private let pleBroadcastPSO: MTLComputePipelineState
     private let pleConvPSO: MTLComputePipelineState
     private let hcBroadcastPSO: MTLComputePipelineState
+    private let hcExpandPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
@@ -37,6 +38,7 @@ final class Elementwise {
         self.pleBroadcastPSO = try context.pipeline("ple_broadcast_scale_fp16")
         self.pleConvPSO = try context.pipeline("ple_dilated_depthwise_conv_fp16")
         self.hcBroadcastPSO = try context.pipeline("hc_stream_broadcast_fp16")
+        self.hcExpandPSO = try context.pipeline("hc_stream_expand_fp16")
     }
 
     private func encodeUnary(_ pso: MTLComputePipelineState,
@@ -95,7 +97,7 @@ final class Elementwise {
                            mix: MTLBuffer, mixOffset: Int = 0,
                            normed: MTLBuffer, normedOffset: Int = 0,
                            out: MTLBuffer, outOffset: Int = 0,
-                           dim: Int, streams: Int) throws {
+                           dim: Int, streams: Int, tokens: Int = 1) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -103,11 +105,12 @@ final class Elementwise {
         enc.setBuffer(mix, offset: mixOffset, index: 0)
         enc.setBuffer(normed, offset: normedOffset, index: 1)
         enc.setBuffer(out, offset: outOffset, index: 2)
-        var d = UInt32(dim), s = UInt32(streams)
+        var d = UInt32(dim), s = UInt32(streams), t = UInt32(tokens)
         enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 5)
         let w = min(hcMixReducePSO.maxTotalThreadsPerThreadgroup, 256)
-        enc.dispatchThreads(MTLSize(width: dim, height: 1, depth: 1),
+        enc.dispatchThreads(MTLSize(width: dim * tokens, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         enc.endEncoding()
     }
@@ -118,7 +121,7 @@ final class Elementwise {
                         streams: MTLBuffer, streamsOffset: Int = 0,
                         blockOut: MTLBuffer, blockOutOffset: Int = 0,
                         inject: MTLBuffer, injectOffset: Int = 0,
-                        dim: Int, streamCount: Int) throws {
+                        dim: Int, streamCount: Int, tokens: Int = 1) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -126,10 +129,11 @@ final class Elementwise {
         enc.setBuffer(streams, offset: streamsOffset, index: 0)
         enc.setBuffer(blockOut, offset: blockOutOffset, index: 1)
         enc.setBuffer(inject, offset: injectOffset, index: 2)
-        var d = UInt32(dim), s = UInt32(streamCount)
+        var d = UInt32(dim), s = UInt32(streamCount), t = UInt32(tokens)
         enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
-        let total = dim * streamCount
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 5)
+        let total = dim * streamCount * tokens
         let w = min(hcInjectPSO.maxTotalThreadsPerThreadgroup, 256)
         enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
@@ -141,7 +145,7 @@ final class Elementwise {
                               key: MTLBuffer, keyOffset: Int = 0,
                               query: MTLBuffer, queryOffset: Int = 0,
                               out: MTLBuffer, outOffset: Int = 0,
-                              dim: Int, streams: Int) throws {
+                              dim: Int, streams: Int, tokens: Int = 1) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -149,10 +153,11 @@ final class Elementwise {
         enc.setBuffer(key, offset: keyOffset, index: 0)
         enc.setBuffer(query, offset: queryOffset, index: 1)
         enc.setBuffer(out, offset: outOffset, index: 2)
-        var d = UInt32(dim), s = UInt32(streams)
+        var d = UInt32(dim), s = UInt32(streams), t = UInt32(tokens)
         enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
-        enc.dispatchThreads(MTLSize(width: streams, height: 1, depth: 1),
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.dispatchThreads(MTLSize(width: streams * tokens, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(
                                 width: min(pleScorePSO.maxTotalThreadsPerThreadgroup, 32),
                                 height: 1, depth: 1))
@@ -185,7 +190,7 @@ final class Elementwise {
                                  value: MTLBuffer, valueOffset: Int = 0,
                                  gate: MTLBuffer, gateOffset: Int = 0,
                                  out: MTLBuffer, outOffset: Int = 0,
-                                 dim: Int, streams: Int) throws {
+                                 dim: Int, streams: Int, tokens: Int = 1) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -193,10 +198,11 @@ final class Elementwise {
         enc.setBuffer(value, offset: valueOffset, index: 0)
         enc.setBuffer(gate, offset: gateOffset, index: 1)
         enc.setBuffer(out, offset: outOffset, index: 2)
-        var d = UInt32(dim), s = UInt32(streams)
+        var d = UInt32(dim), s = UInt32(streams), t = UInt32(tokens)
         enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 4)
-        let total = dim * streams
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 5)
+        let total = dim * streams * tokens
         enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(
                                 width: min(pleBroadcastPSO.maxTotalThreadsPerThreadgroup, 256),
@@ -230,6 +236,31 @@ final class Elementwise {
                             threadsPerThreadgroup: MTLSize(
                                 width: min(pleConvPSO.maxTotalThreadsPerThreadgroup, 256),
                                 height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Widen a `[tokens, dim]` block into the `[tokens, streams, dim]`
+    /// residual. Distinct from the in-place broadcast: a chunk's embeddings
+    /// are contiguous rows, and expanding them in place would overwrite rows
+    /// that have not been read yet.
+    func encodeHCExpand(commandBuffer: MTLCommandBuffer,
+                        source: MTLBuffer, sourceOffset: Int = 0,
+                        destination: MTLBuffer, destinationOffset: Int = 0,
+                        dim: Int, streamCount: Int, tokens: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(hcExpandPSO)
+        enc.setBuffer(source, offset: sourceOffset, index: 0)
+        enc.setBuffer(destination, offset: destinationOffset, index: 1)
+        var d = UInt32(dim), s = UInt32(streamCount), t = UInt32(tokens)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 4)
+        let total = dim * streamCount * tokens
+        let w = min(hcExpandPSO.maxTotalThreadsPerThreadgroup, 256)
+        enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         enc.endEncoding()
     }
 

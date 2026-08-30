@@ -134,6 +134,10 @@ void rmsnorm_bf16w_grouped(
     device       half*   out        [[buffer(2)]],   // [numHeads * headDim] FP16
     constant     uint&   headDim    [[buffer(3)]],
     constant     float&  eps        [[buffer(4)]],
+    // Groups that share one pass of the weight. The dispatch is
+    // groupsPerRow x tokens, so the weight index wraps every row and the same
+    // kernel serves one decode token or a whole prefill chunk.
+    constant     uint&   groupsPerRow [[buffer(5)]],
     uint  group            [[threadgroup_position_in_grid]],
     uint  lid              [[thread_position_in_threadgroup]],
     uint  lsize            [[threads_per_threadgroup]],
@@ -149,7 +153,7 @@ void rmsnorm_bf16w_grouped(
     // weight slice rather than sharing one. Qwen3.8-Flash-Next's hyper
     // connection normalizes 4 residual streams of 2560 with a single [10240]
     // weight, which is 4 distinct slices, not one shared vector.
-    device const bfloat* wg = weight + group * HD;
+    device const bfloat* wg = weight + (group % groupsPerRow) * HD;
     const float inv = rms_block_inv(xh, HD, eps, lid, lsize,
                                     simd_lane_id, simd_group_id, simdgroups, partial);
     for (uint i = lid; i < HD; i += lsize) {

@@ -114,6 +114,106 @@ struct HyperConnectionTests {
         #expect(abs(actual[dim] - 4.0) < 1e-2, "stream 1 after two injects")
     }
 
+    @Test("Batched rows agree with the same rows one at a time")
+    func batchedRowsMatchSingleRows() throws {
+        // Prefill runs these kernels over a whole chunk and decode runs them
+        // over one token, and the two must agree exactly -- the batched
+        // prefill path is only correct because it reproduces what the
+        // per-token path produced. A row-indexing mistake here would show up
+        // as a prompt that reads fine and answers slightly wrong.
+        var rng = SeedTree(0x9A1).key("hc-batched-rows")
+        let rows = 5
+        let dim = 128, streams = Self.streams
+        let wide = dim * streams
+        let mix = (0..<wide * rows).map { _ in Float16(rng.uniform(0.0, 1.0)) }
+        let normed = (0..<wide * rows).map { _ in Float16(rng.uniform(-2.0, 2.0)) }
+        let block = (0..<dim * rows).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let inject = (0..<streams * rows).map { _ in Float16(rng.uniform(0.0, 2.0)) }
+        let residual = (0..<wide * rows).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+
+        let ctx = try MetalContext()
+        let kernel = try Elementwise(context: ctx)
+
+        func reduce(tokens: Int, mixSlice: [Float16], normSlice: [Float16]) throws -> [Float] {
+            guard let m = Fp16Buffer.make(ctx.device, halves: mixSlice),
+                  let n = Fp16Buffer.make(ctx.device, halves: normSlice),
+                  let o = Fp16Buffer.make(ctx.device, count: dim * tokens) else {
+                throw MetalError.bufferAllocationFailed("reduce")
+            }
+            let cb = ctx.queue.makeCommandBuffer()!
+            try kernel.encodeHCMixReduce(commandBuffer: cb, mix: m, normed: n,
+                                         out: o, dim: dim, streams: streams,
+                                         tokens: tokens)
+            cb.commit(); cb.waitUntilCompleted()
+            return Fp16Buffer.read(o, count: dim * tokens).map { Float($0) }
+        }
+
+        let batchedReduce = try reduce(tokens: rows, mixSlice: mix, normSlice: normed)
+        var perRowReduce = [Float]()
+        for r in 0..<rows {
+            perRowReduce += try reduce(
+                tokens: 1,
+                mixSlice: Array(mix[r * wide ..< (r + 1) * wide]),
+                normSlice: Array(normed[r * wide ..< (r + 1) * wide]))
+        }
+        #expect(batchedReduce == perRowReduce)
+
+        func write(tokens: Int, streamsSlice: [Float16], blockSlice: [Float16],
+                   injectSlice: [Float16]) throws -> [Float] {
+            guard let st = Fp16Buffer.make(ctx.device, halves: streamsSlice),
+                  let bo = Fp16Buffer.make(ctx.device, halves: blockSlice),
+                  let inj = Fp16Buffer.make(ctx.device, halves: injectSlice) else {
+                throw MetalError.bufferAllocationFailed("write")
+            }
+            let cb = ctx.queue.makeCommandBuffer()!
+            try kernel.encodeHCInject(commandBuffer: cb, streams: st,
+                                      blockOut: bo, inject: inj,
+                                      dim: dim, streamCount: streams,
+                                      tokens: tokens)
+            cb.commit(); cb.waitUntilCompleted()
+            return Fp16Buffer.read(st, count: wide * tokens).map { Float($0) }
+        }
+
+        let batchedWrite = try write(tokens: rows, streamsSlice: residual,
+                                     blockSlice: block, injectSlice: inject)
+        var perRowWrite = [Float]()
+        for r in 0..<rows {
+            perRowWrite += try write(
+                tokens: 1,
+                streamsSlice: Array(residual[r * wide ..< (r + 1) * wide]),
+                blockSlice: Array(block[r * dim ..< (r + 1) * dim]),
+                injectSlice: Array(inject[r * streams ..< (r + 1) * streams]))
+        }
+        #expect(batchedWrite == perRowWrite)
+    }
+
+    @Test("Expand widens each row into every stream")
+    func expandMatchesReference() throws {
+        var rng = SeedTree(0x9A2).key("hc-expand")
+        let rows = 3, dim = 64, streams = Self.streams
+        let source = (0..<dim * rows).map { _ in Float16(rng.uniform(-1.0, 1.0)) }
+        let ctx = try MetalContext()
+        let kernel = try Elementwise(context: ctx)
+        guard let src = Fp16Buffer.make(ctx.device, halves: source),
+              let dst = Fp16Buffer.make(ctx.device, count: dim * streams * rows) else {
+            Issue.record("alloc failed"); return
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        try kernel.encodeHCExpand(commandBuffer: cb, source: src, destination: dst,
+                                  dim: dim, streamCount: streams, tokens: rows)
+        cb.commit(); cb.waitUntilCompleted()
+        let got = Fp16Buffer.readHalf(dst, count: dim * streams * rows)
+        for r in 0..<rows {
+            let lower = r * dim
+            let expected: [Float16] = Array(source[lower ..< lower + dim])
+            for s in 0..<streams {
+                let base: Int = (r * streams + s) * dim
+                let slice: [Float16] = Array(got[base ..< base + dim])
+                #expect(slice == expected, "row \(r) stream \(s)")
+            }
+        }
+    }
+
     @Test("Standalone sigmoid and silu match their definitions")
     func unaryGates() throws {
         let values: [Float16] = [-4, -1, -0.5, 0, 0.5, 1, 4].map(Float16.init)

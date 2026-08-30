@@ -160,9 +160,21 @@ public func run(args: Args,
                 .first(where: { $0 >= promptIds.count })
                 ?? PrefillRuntimeConfig.maxChunkTokens
         case nil:
-            prefillChunkTokens = model.config.family == .qwen36
-                ? RuntimeConfiguration.qwenLongPrefillChunkTokens
-                : loadRuntime.prefillChunkTokens
+            switch model.config.family {
+            case .qwen36:
+                prefillChunkTokens = RuntimeConfiguration.qwenLongPrefillChunkTokens
+            case .qwen38flash:
+                // Measured on a 1,761-token prompt, interleaved A/B/B/A:
+                // 129.9 s at the 128 default against 75.2 s here, with the
+                // repeats agreeing to 0.6%. Routed experts are what prefill
+                // spends its time on, and a longer chunk is what amortizes
+                // them. 2,048 rather than 4,096 because the sparse-attention
+                // gate caps this model's context at 2,051 anyway, so a larger
+                // chunk would only cost scratch.
+                prefillChunkTokens = 2_048
+            default:
+                prefillChunkTokens = loadRuntime.prefillChunkTokens
+            }
         }
         let runtime = try RuntimeConfiguration(
             expertCacheSlots: loadRuntime.expertCacheSlots,

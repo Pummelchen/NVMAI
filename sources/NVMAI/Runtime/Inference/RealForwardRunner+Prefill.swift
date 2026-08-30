@@ -14,17 +14,18 @@ extension RealForwardRunner {
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
-        // A hyper-connection family prefills one token at a time through the
-        // decode path.
+        // The chunked path does not go through `produceToken`, so it needs
+        // the sparse-attention gate of its own. The chunk's last query sees
+        // the most keys and decides the whole chunk.
+        try requireQSAExact(visibleKeys: startPosition + tokens.count)
+        // The one-token-at-a-time prefill a hyper-connection family started
+        // on, kept as the oracle the batched path is checked against.
         //
-        // The chunked path batches `t` tokens through every stage, but the
-        // Gated Residual's chain -- grouped norm, two low-rank GEMVs, the
-        // stream reduce -- is written per token, and batching it means batched
-        // variants of all of it. Correct and slow beats fast and wrong: this
-        // produces exactly the KV state and logits the batched path would,
-        // at one dispatch set per token. It is the obvious thing to optimize
-        // once the family's output is verified against the reference.
-        if cfg.hyperConnections.enabled {
+        // It runs the verified decode path per token, so it produces the KV
+        // state and logits the batched path must reproduce. It is also
+        // unusably slow -- every token pays a full pass over the routed
+        // experts, where a chunk amortizes them -- so it is not the default.
+        if cfg.hyperConnections.enabled && Self.sequentialHyperConnectionPrefill {
             var position = startPosition
             for (offset, token) in tokens.enumerated() {
                 try Task.checkCancellation()
@@ -194,6 +195,9 @@ extension RealForwardRunner {
 
 
         prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
+        // The n-gram rows depend only on token ids, so the whole chunk's
+        // gather runs before any layer needs it.
+        try gatherPLERowsPrefill(tokens: tokens)
 
         guard var cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
@@ -209,6 +213,11 @@ extension RealForwardRunner {
                       size: t * D * MemoryLayout<Float16>.stride)
             blit.endEncoding()
         } else {
+            // A hyper-connection stack starts every stream from the token
+            // embedding, so the lookup lands in a one-stream staging buffer
+            // and is widened from there. `normed` is free until the first
+            // layer's read gate writes it.
+            let embedTarget = hyperConnection == nil ? scratch.hidden : scratch.normed
             try prefillEmbed.encode(commandBuffer: cb,
                                 table: emb.buffer,
                                 tableOffset: Int(emb.offset),
@@ -217,11 +226,17 @@ extension RealForwardRunner {
                                 biases: emb.buffer,
                                 biasesOffset: Int(emb.biasOffset),
                                 tokens: tokenBuffer,
-                                out: scratch.hidden,
+                                out: embedTarget,
                                 t: UInt32(t),
                                 d: UInt32(D),
                                 outScale: embedOutScale,
                                 vocab: UInt32(cfg.vocabSize))
+            if hyperConnection != nil {
+                try elementwise!.encodeHCExpand(
+                    commandBuffer: cb,
+                    source: scratch.normed, destination: scratch.hidden,
+                    dim: D, streamCount: residualStreamCount, tokens: t)
+            }
         }
 
         // Track A: whether this chunk's full-attention layers run on the ANE.
@@ -261,10 +276,16 @@ extension RealForwardRunner {
             let qDim = cfg.numHeads * headDim
             let kvDim = numKVHeads * headDim
 
+            if cfg.ple.layerIndices.contains(L) {
+                try encodePLEPrefill(commandBuffer: cb,
+                                     hidden: scratch.hidden,
+                                     layer: L, tokens: t, eps: eps)
+            }
             try encodeResidualEntryPrefill(commandBuffer: cb,
                                            hidden: scratch.hidden,
                                            norm: views.inputNorm,
                                            out: scratch.normed,
+                                           sublayer: .attention, layer: L,
                                            tokens: t, eps: eps)
             if isLinear {
                 try encodeLinearAttentionPrefill(
@@ -290,15 +311,15 @@ extension RealForwardRunner {
             // and routed phase 1 (routedX doubles as moeX).
             try encodeResidualExitPrefill(commandBuffer: cb,
                                           hidden: scratch.hidden,
-                                          delta: scratch.h1, tokens: t)
-            try prefillRMS.encodeBF16W(commandBuffer: cb,
-                                   x: scratch.hidden,
-                                   weight: views.postAttention.buffer,
-                                   weightOffset: Int(views.postAttention.offset),
-                                   out: scratch.routedX,
-                                   t: UInt32(t),
-                                   d: UInt32(D),
-                                   eps: eps)
+                                          delta: scratch.h1,
+                                          sublayer: .attention, layer: L,
+                                          tokens: t)
+            try encodeResidualEntryPrefill(commandBuffer: cb,
+                                           hidden: scratch.hidden,
+                                           norm: views.postAttention,
+                                           out: scratch.routedX,
+                                           sublayer: .mlp, layer: L,
+                                           tokens: t, eps: eps)
             if pairRoutedMoE, t == 2 {
                 try await encodeRoutedMoEVerifyPair(
                     cb: &cb, layer: L, views: views, scratch: scratch,
@@ -954,6 +975,31 @@ extension RealForwardRunner {
         guard let finalCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
+        if let hc = hyperConnection {
+            // The stack ends by collapsing the streams through the
+            // model-level mixer, and only the last row feeds the head, so the
+            // one-row decode gate serves here. `normed` is free once the last
+            // layer has run.
+            let rowBytes = D * residualStreamCount * MemoryLayout<Float16>.stride
+            try hc.encodeRead(commandBuffer: finalCB,
+                              streamsBuffer: scratch.hidden,
+                              streamsOffset: (t - 1) * rowBytes,
+                              hcNorm: finalNorm.buffer,
+                              hcNormOffset: Int(finalNorm.offset),
+                              down: gateWeightsPublic(try model.hcMixerDown()),
+                              up: gateWeightsPublic(try model.hcMixerUp()),
+                              blockInput: scratch.normed, eps: eps)
+            try encodeHeadGEMV(commandBuffer: finalCB,
+                               weights: lm.buffer, weightsOffset: Int(lm.offset),
+                               scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                               biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                               x: scratch.normed, y: logits,
+                               m: UInt32(cfg.vocabSize), n: UInt32(D))
+            finalCB.commit()
+            try waitForCompletion(finalCB)
+            recordKernelGPU(role: "prefill_head", finalCB)
+            return
+        }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             try fusionHead.encodeGreedyDecode(
                 commandBuffer: finalCB,
@@ -1319,16 +1365,32 @@ extension RealForwardRunner {
                                                   queryCount: UInt32(t),
                                                   topK: UInt32(cfg.topKExperts),
                                                   d: UInt32(D))
-                // Plain pre-norm tail: hidden += gated shared branch
-                // + routed branch.
-                try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
-                                               hidden: scratch.hidden,
-                                               delta: scratch.h1,
-                                               count: t * D)
-                try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
-                                               hidden: scratch.hidden,
-                                               delta: scratch.h2,
-                                               count: t * D)
+                if hyperConnection != nil {
+                    // The gated write injects one block output per stream, so
+                    // the two MLP branches are summed first and written once.
+                    // Adding them separately would apply the inject gate
+                    // twice.
+                    try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                                   hidden: scratch.h2,
+                                                   delta: scratch.h1,
+                                                   count: t * D)
+                    try encodeResidualExitPrefill(commandBuffer: tailCB,
+                                                  hidden: scratch.hidden,
+                                                  delta: scratch.h2,
+                                                  sublayer: .mlp, layer: L,
+                                                  tokens: t)
+                } else {
+                    // Plain pre-norm tail: hidden += gated shared branch
+                    // + routed branch.
+                    try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                                   hidden: scratch.hidden,
+                                                   delta: scratch.h1,
+                                                   count: t * D)
+                    try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                                   hidden: scratch.hidden,
+                                                   delta: scratch.h2,
+                                                   count: t * D)
+                }
                 tailCB.commit()
                 withExtendedLifetime(metadata) {
                     do {

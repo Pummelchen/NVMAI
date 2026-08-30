@@ -46,24 +46,31 @@ final class HyperConnection {
     /// out afterwards: silu(x/S) != silu(x)/S.
     private var gateInputScale: Float { 1.0 / Float(streams) }
 
-    init(context: MetalContext, dim: Int, streams: Int, lowRank: Int) throws {
-        precondition(dim > 0 && streams > 0 && lowRank > 0)
+    /// Rows the scratch is sized for. One for decode; a prefill chunk needs
+    /// the whole chunk resident, because the write gate consumes the
+    /// `normed` its matching read produced and the block runs in between.
+    let maxRows: Int
+
+    init(context: MetalContext, dim: Int, streams: Int, lowRank: Int,
+         maxRows: Int = 1) throws {
+        precondition(dim > 0 && streams > 0 && lowRank > 0 && maxRows > 0)
+        self.maxRows = maxRows
         self.dim = dim
         self.streams = streams
         self.lowRank = lowRank
         self.rms = try RMSNorm(context: context)
         self.gemv = try DequantInt4GEMV(context: context)
         self.elementwise = try Elementwise(context: context)
-        let wide = dim * streams * MemoryLayout<Float16>.stride
+        let wide = dim * streams * maxRows * MemoryLayout<Float16>.stride
         guard let normed = context.device.makeBuffer(
                   length: wide, options: .storageModeShared),
               let mix = context.device.makeBuffer(
                   length: wide, options: .storageModeShared),
               let low = context.device.makeBuffer(
-                  length: lowRank * MemoryLayout<Float16>.stride,
+                  length: lowRank * maxRows * MemoryLayout<Float16>.stride,
                   options: .storageModeShared),
               let inject = context.device.makeBuffer(
-                  length: max(streams, 8) * MemoryLayout<Float16>.stride,
+                  length: max(streams * maxRows, 8) * MemoryLayout<Float16>.stride,
                   options: .storageModeShared) else {
             throw MetalError.bufferAllocationFailed("HyperConnection scratch")
         }
@@ -97,6 +104,81 @@ final class HyperConnection {
 
     /// Normalize the residual and gate it down to the block's input vector.
     /// Leaves `normed` populated for the matching `encodeWrite`.
+    /// A batched GEMM the caller supplies, so this type stays free of the
+    /// runner's projection-dispatch policy: `(commandBuffer, weights, x, y,
+    /// rows, columns, tokens)`.
+    typealias BatchedProjection = (MTLCommandBuffer, Weights, MTLBuffer,
+                                   MTLBuffer, Int, Int, Int) throws -> Void
+
+    /// Residual -> block input for a whole prefill chunk.
+    ///
+    /// Identical arithmetic to `encodeRead`, with every stage taking `tokens`
+    /// rows and the three projections going through `project` rather than a
+    /// per-row GEMV. The residual is `[tokens, streams, dim]`, so a token's
+    /// streams stay contiguous and the grouped norm indexes the same way it
+    /// does for one token.
+    func encodeReadRows(commandBuffer: MTLCommandBuffer,
+                        streamsBuffer: MTLBuffer, streamsOffset: Int = 0,
+                        hcNorm: MTLBuffer, hcNormOffset: Int = 0,
+                        down: Weights, up: Weights,
+                        blockInput: MTLBuffer, blockInputOffset: Int = 0,
+                        tokens: Int, eps: Float,
+                        project: BatchedProjection) throws {
+        precondition(tokens <= maxRows,
+                     "HyperConnection scratch holds \(maxRows) rows, asked for \(tokens)")
+        let wide = dim * streams
+        try rms.encodeBF16WGrouped(commandBuffer: commandBuffer,
+                                   x: streamsBuffer, xOffset: streamsOffset,
+                                   weight: hcNorm, weightOffset: hcNormOffset,
+                                   out: normed,
+                                   groupDim: UInt32(dim), numGroups: streams,
+                                   eps: eps, tokens: tokens)
+        try project(commandBuffer, down, normed, lowRankScratch,
+                    lowRank, wide, tokens)
+        try elementwise.encodeSilu(commandBuffer: commandBuffer,
+                                   x: lowRankScratch, out: lowRankScratch,
+                                   count: lowRank * tokens,
+                                   inScale: gateInputScale)
+        try project(commandBuffer, up, lowRankScratch, mixScratch,
+                    wide, lowRank, tokens)
+        try elementwise.encodeSigmoid(commandBuffer: commandBuffer,
+                                      x: mixScratch, out: mixScratch,
+                                      count: wide * tokens)
+        try elementwise.encodeHCMixReduce(commandBuffer: commandBuffer,
+                                          mix: mixScratch, normed: normed,
+                                          out: blockInput,
+                                          outOffset: blockInputOffset,
+                                          dim: dim, streams: streams,
+                                          tokens: tokens)
+    }
+
+    /// Block output -> residual for a whole prefill chunk. Consumes the
+    /// `normed` the matching `encodeReadRows` left behind, so the two must
+    /// bracket exactly one block over the same rows.
+    func encodeWriteRows(commandBuffer: MTLCommandBuffer,
+                         streamsBuffer: MTLBuffer, streamsOffset: Int = 0,
+                         inject: Weights,
+                         blockOut: MTLBuffer, blockOutOffset: Int = 0,
+                         tokens: Int,
+                         project: BatchedProjection) throws {
+        precondition(tokens <= maxRows,
+                     "HyperConnection scratch holds \(maxRows) rows, asked for \(tokens)")
+        try project(commandBuffer, inject, normed, injectScratch,
+                    streams, dim * streams, tokens)
+        try elementwise.encodeSigmoid(commandBuffer: commandBuffer,
+                                      x: injectScratch, out: injectScratch,
+                                      count: streams * tokens,
+                                      inScale: gateInputScale, outScale: 2)
+        try elementwise.encodeHCInject(commandBuffer: commandBuffer,
+                                       streams: streamsBuffer,
+                                       streamsOffset: streamsOffset,
+                                       blockOut: blockOut,
+                                       blockOutOffset: blockOutOffset,
+                                       inject: injectScratch,
+                                       dim: dim, streamCount: streams,
+                                       tokens: tokens)
+    }
+
     func encodeRead(commandBuffer: MTLCommandBuffer,
                     streamsBuffer: MTLBuffer, streamsOffset: Int = 0,
                     hcNorm: MTLBuffer, hcNormOffset: Int = 0,

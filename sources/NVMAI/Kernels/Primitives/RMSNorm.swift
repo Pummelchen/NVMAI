@@ -130,7 +130,8 @@ final class RMSNorm {
                             weight: MTLBuffer, weightOffset: Int = 0,
                             out: MTLBuffer, outOffset: Int = 0,
                             groupDim: UInt32, numGroups: Int,
-                            eps: Float) throws {
+                            eps: Float,
+                            tokens: Int = 1) throws {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
@@ -140,11 +141,14 @@ final class RMSNorm {
         enc.setBuffer(out,    offset: outOffset,    index: 2)
         var gd = groupDim
         var epsVar = eps
+        var perRow = UInt32(numGroups)
         enc.setBytes(&gd,     length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
+        enc.setBytes(&perRow, length: MemoryLayout<UInt32>.size, index: 5)
         let w = min(Int(psoBF16Grouped.maxTotalThreadsPerThreadgroup), 256)
-        enc.dispatchThreadgroups(MTLSize(width: numGroups, height: 1, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.dispatchThreadgroups(
+            MTLSize(width: numGroups * tokens, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         enc.endEncoding()
     }
 

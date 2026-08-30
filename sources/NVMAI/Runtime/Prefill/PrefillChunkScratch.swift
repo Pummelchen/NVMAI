@@ -22,6 +22,10 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     let gdnVHeads: Int
     /// Non-zero when the shared expert output is scalar-gated (Qwen).
     let sharedScalarGateElements: Int
+    /// Parallel residual streams the architecture carries: 1 for pre-norm
+    /// families, `hc_count` for the hyper-connection ones. Only the residual
+    /// buffer widens; every block input and output stays `hiddenSize`.
+    let residualStreams: Int
 
     init(config: ArchConfig,
                 chunkTokens: Int,
@@ -44,6 +48,8 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
         self.gdnValueDim = hasLinear ? config.linearAttention.valueDim : 0
         self.gdnVHeads = hasLinear ? config.linearAttention.numVHeads : 0
         self.sharedScalarGateElements = config.sharedExpertGated ? 1 : 0
+        self.residualStreams = config.hyperConnections.enabled
+            ? config.hyperConnections.count : 1
     }
 
     init(config: ArchConfig, runtime: PrefillRuntimeConfig) {
@@ -51,8 +57,11 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
                   chunkTokens: runtime.chunkTokens)
     }
 
-    var hiddenElements: Int { chunkTokens * hiddenSize }
-    var normedElements: Int { hiddenElements }
+    /// The residual itself, which is the one buffer that widens.
+    var hiddenElements: Int { chunkTokens * hiddenSize * residualStreams }
+    /// Block inputs and outputs are always one stream wide.
+    var blockElements: Int { chunkTokens * hiddenSize }
+    var normedElements: Int { blockElements }
     var qElements: Int { chunkTokens * qProjElementsPerToken }
     var attnElements: Int { chunkTokens * maxQElementsPerToken }
     var attnQElements: Int { chunkTokens * attnGateElementsPerToken }
@@ -66,11 +75,11 @@ struct PrefillChunkScratchLayout: Sendable, Equatable {
     var kStageElements: Int { chunkTokens * maxKVElementsPerToken }
     var vStageElements: Int { kStageElements }
     var attentionOutputElements: Int { attnElements }
-    var denseXElements: Int { hiddenElements }
-    var routedXElements: Int { hiddenElements }
-    var routerXElements: Int { hiddenElements }
-    var h1Elements: Int { hiddenElements }
-    var h2Elements: Int { hiddenElements }
+    var denseXElements: Int { blockElements }
+    var routedXElements: Int { blockElements }
+    var routerXElements: Int { blockElements }
+    var h1Elements: Int { blockElements }
+    var h2Elements: Int { blockElements }
     var routePartialElements: Int { chunkTokens * topK * hiddenSize }
     var routeIDElements: Int { chunkTokens * topK }
     var routeWeightElements: Int { routeIDElements }
