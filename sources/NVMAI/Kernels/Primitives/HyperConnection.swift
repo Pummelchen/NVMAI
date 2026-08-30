@@ -48,6 +48,31 @@ final class HyperConnection {
 
     private func skip(_ step: String) -> Bool { Self.ablate.contains(step) }
 
+    /// Diagnostic: repeat the idempotent dispatches `NVMAI_HC_REPEAT` times.
+    ///
+    /// Attribution by *removal* does not work here. Skipping a dispatch
+    /// corrupts the residual, the router then selects different experts, and
+    /// expert I/O -- the largest single term in the token -- moves underneath
+    /// the measurement. Skipping strictly more work measured *slower* than
+    /// skipping less, which is how that experiment announced itself as
+    /// invalid.
+    ///
+    /// Repetition has none of that. Every step repeated below writes a pure
+    /// function of its inputs to the same destination, so running it twice
+    /// leaves the identical bytes behind: routing, cache state and I/O are
+    /// bit-for-bit unchanged and only GPU work is added. The slope of token
+    /// time against the repeat count is the dispatch's true cost. The silu and
+    /// the inject are excluded because they are not idempotent -- the silu is
+    /// in place and the inject accumulates -- and both are small.
+    ///
+    /// A correctness check falls out of the design: generation must produce
+    /// the same digest at repeat 2 as at repeat 1.
+    static let repeatCount: Int = {
+        guard let raw = ProcessInfo.processInfo.environment["NVMAI_HC_REPEAT"],
+              let n = Int(raw), n >= 1 else { return 1 }
+        return n
+    }()
+
     private let rms: RMSNorm
     private let gemv: DequantInt4GEMV
     private let elementwise: Elementwise
@@ -246,12 +271,14 @@ final class HyperConnection {
                      inject: Weights,
                      blockOut: MTLBuffer, blockOutOffset: Int = 0) throws {
         if !skip("inject_gemv") {
+        for _ in 0..<Self.repeatCount {
         try gemv.encode(commandBuffer: commandBuffer,
                         weights: inject.weights, weightsOffset: inject.weightsOffset,
                         scales: inject.scales, scalesOffset: inject.scalesOffset,
                         biases: inject.biases, biasesOffset: inject.biasesOffset,
                         x: normed, y: injectScratch,
                         m: UInt32(streams), n: UInt32(dim * streams))
+        }
         }
         if skip("inject") { return }
         // The write gate, 2 * sigmoid(...), opens to twice the read gate's
