@@ -161,10 +161,34 @@ extension RealForwardRunner {
             // read gate sees it, so it is encoded ahead of the entry.
             try encodePLEDecode(commandBuffer: attnCB, layer: L,
                                 position: position, eps: eps)
-            try encodeResidualEntryDecode(commandBuffer: attnCB,
-                                          hidden: hidden, norm: inNorm,
-                                          out: normed, sublayer: .attention,
-                                          layer: L, eps: eps)
+            // Full-attention layers of a sparse-attention family run their
+            // entry ahead of the rest, because the indexer's key cache and
+            // its selection both hang off the block input.
+            //
+            // That entry can run on its own command buffer, committed before
+            // this one, so a PLE block encoded here would rewrite the
+            // residual *after* the entry had already read it. The two never
+            // coincide in this architecture -- the n-gram layer is a linear
+            // one -- and the guard is here so that stays a fact rather than
+            // an assumption.
+            precondition(!(qsaIndexer != nil
+                           && cfg.fullAttentionLayerMask[L] == 1
+                           && cfg.ple.layerIndices.contains(L)),
+                         "layer \(L) is both a PLE layer and a sparse-attention "
+                             + "layer; the residual entry would be reordered "
+                             + "around the n-gram block")
+            var keepMask: MTLBuffer?
+            if qsaIndexer != nil, cfg.fullAttentionLayerMask[L] == 1 {
+                keepMask = try encodeQSAEntryAndSelect(
+                    passthrough: attnCB,
+                    hidden: hidden, norm: inNorm, out: normed,
+                    layer: L, position: position, eps: eps)
+            } else {
+                try encodeResidualEntryDecode(commandBuffer: attnCB,
+                                              hidden: hidden, norm: inNorm,
+                                              out: normed, sublayer: .attention,
+                                              layer: L, eps: eps)
+            }
             var softmaxCB: MTLCommandBuffer?
             guard let tailCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
@@ -173,7 +197,8 @@ extension RealForwardRunner {
             try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
                                       softmaxCB: &softmaxCB,
                                       layer: L, position: position,
-                                      isLinear: isLinear, rmsEps: eps)
+                                      isLinear: isLinear, rmsEps: eps,
+                                      keepMask: keepMask)
             try encodeResidualExitDecode(commandBuffer: tailCB,
                                          hidden: hidden, delta: oOut,
                                          sublayer: .attention, layer: L)
@@ -510,7 +535,8 @@ extension RealForwardRunner {
     func encodeGatedFullAttentionDecode(_ cb: MTLCommandBuffer,
                                                 layer L: Int,
                                                 position: Int,
-                                                seqLen: UInt32) throws {
+                                                seqLen: UInt32,
+                                                keepMask: MTLBuffer? = nil) throws {
         guard let elementwise, let rope, let qPackedScratch, let attnGateScratch else {
             throw ModelError.internalInconsistency(
                 detail: "attn_output_gate layer \(L) without gate kernels (arch mask misconfiguration)")
@@ -593,7 +619,8 @@ extension RealForwardRunner {
                              numKVHeads: UInt32(numKV),
                              seqLen: seqLen,
                              scale: Float(cfg.attentionScale),
-                             kvFormat: keyView)
+                             kvFormat: keyView,
+                             keepMask: keepMask)
         try elementwise.encodeSigmoidGateMul(commandBuffer: cb,
                                          out: attnOut,
                                          gate: attnGateScratch,
@@ -693,7 +720,8 @@ extension RealForwardRunner {
         layer L: Int,
         position: Int,
         isLinear: Bool,
-        rmsEps eps: Float
+        rmsEps eps: Float,
+        keepMask: MTLBuffer? = nil
     ) throws {
         let D = UInt32(cfg.hiddenSize)
         let isFull = cfg.fullAttentionLayerMask[L] == 1
@@ -711,7 +739,8 @@ extension RealForwardRunner {
             // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.
             try encodeGatedFullAttentionDecode(attnCB, layer: L,
                                                position: position,
-                                               seqLen: seqLen)
+                                               seqLen: seqLen,
+                                               keepMask: keepMask)
         } else {
             let kSlot = kv?.kSlot(layer: L, position: position) ?? (buffer: kStage, offset: 0)
             let vSlot = kv?.vSlot(layer: L, position: position) ?? (buffer: vStage, offset: 0)

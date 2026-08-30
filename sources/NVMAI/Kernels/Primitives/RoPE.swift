@@ -5,6 +5,7 @@ final class RoPE {
     private let defaultNeox: MTLComputePipelineState
     private let proportionalNeox: MTLComputePipelineState
     private let neoxSubdim: MTLComputePipelineState
+    private let stridedNeoxSubdim: MTLComputePipelineState
     private let defaultNeoxSWAQ: MTLComputePipelineState
     private let defaultNeoxSWAK: MTLComputePipelineState
     private let proportionalNeoxFullQ: MTLComputePipelineState
@@ -17,6 +18,7 @@ final class RoPE {
         self.defaultNeox = try context.pipeline("rope_default_neox")
         self.proportionalNeox = try context.pipeline("rope_proportional_neox")
         self.neoxSubdim = try context.pipeline("rope_neox_subdim")
+        self.stridedNeoxSubdim = try context.pipeline("rope_neox_subdim_strided")
         self.defaultNeoxSWAQ = try Self.specializedPipeline(
             context, "rope_default_neox", headDim: 256, numHeads: 16)
         self.defaultNeoxSWAK = try Self.specializedPipeline(
@@ -45,6 +47,45 @@ final class RoPE {
 
     /// Qwen-style partial RoPE: rotation confined to the first `rotaryDim`
     /// elements of each head, frequency divisor = rotaryDim.
+    /// NeoX sub-dim rope where row `i` sits at `position + i * stride`.
+    /// Used for the indexer's pooled blocks, which advance by the compression
+    /// ratio rather than by one token.
+    func encodeNeoxSubdimStrided(commandBuffer: MTLCommandBuffer,
+                                 data: MTLBuffer,
+                                 dataOffset: Int = 0,
+                                 position: UInt32,
+                                 headDim: UInt32,
+                                 numHeads: UInt32,
+                                 rotaryDim: UInt32,
+                                 numTokens: UInt32,
+                                 stride: UInt32,
+                                 theta: Float) throws {
+        precondition(rotaryDim.isMultiple(of: 2), "rotary_dim must be even")
+        precondition(rotaryDim <= headDim, "rotary_dim must not exceed head_dim")
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(stridedNeoxSubdim)
+        enc.setBuffer(data, offset: dataOffset, index: 0)
+        var positionValue = position, headDimValue = headDim
+        var numHeadsValue = numHeads, thetaValue = theta
+        var rotaryValue = rotaryDim, strideValue = stride
+        enc.setBytes(&positionValue, length: MemoryLayout<UInt32>.size, index: 1)
+        enc.setBytes(&headDimValue, length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&numHeadsValue, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&thetaValue, length: MemoryLayout<Float>.size, index: 4)
+        enc.setBytes(&rotaryValue, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&strideValue, length: MemoryLayout<UInt32>.size, index: 6)
+        enc.dispatchThreads(
+            MTLSize(width: Int(rotaryDim / 2), height: Int(numHeads),
+                    depth: Int(numTokens)),
+            threadsPerThreadgroup: MTLSize(
+                width: min(Int(rotaryDim / 2),
+                           stridedNeoxSubdim.maxTotalThreadsPerThreadgroup),
+                height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
     func encodeNeoxSubdim(commandBuffer: MTLCommandBuffer,
                           data: MTLBuffer,
                           dataOffset: Int = 0,

@@ -172,6 +172,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     let hyperConnection: HyperConnection?
     /// The n-gram (PLE) block, its row addressing, and the table it reads.
     /// All three or none: a family without PLE layers leaves them nil.
+    /// The sparse-attention indexer, for families that have one. Nil leaves
+    /// the runtime on dense attention, which is exact only inside
+    /// `QSAExactness`'s window.
+    let qsaIndexer: QSAIndexer?
     let pleBlock: PLEBlock?
     let pleHash: PLEHash?
     let ngramTable: NgramTableReader?
@@ -492,6 +496,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   lowRank: cfg.hyperConnections.lowRank,
                                   maxRows: gateRows)
             : nil
+        self.qsaIndexer = cfg.sparseIndexer.enabled
+            ? try QSAIndexer(context: context,
+                             config: cfg.sparseIndexer,
+                             budget: Self.qsaBudget(cfg.sparseIndexer),
+                             ropeTheta: Float(cfg.fullRopeTheta),
+                             capacity: maxContext)
+            : nil
         if cfg.ple.enabled {
             let constants = try PLEConstants.load(
                 directoryURL: model.directoryURL)
@@ -713,12 +724,40 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// The window in which dense attention is exact for this model, or nil
     /// for a family without sparse attention.
     var qsaExactness: QSAExactness? {
-        cfg.sparseIndexer.enabled ? QSAExactness(cfg.sparseIndexer) : nil
+        guard cfg.sparseIndexer.enabled else { return nil }
+        return QSAExactness(budget: Self.qsaBudget(cfg.sparseIndexer),
+                            compressRatio: cfg.sparseIndexer.compressRatio)
+    }
+
+    /// The indexer's key budget, with `NVMAI_QSA_BUDGET` able to lower it.
+    ///
+    /// Verification knob, not a tuning one. At the shipped budget the sparse
+    /// path only engages past 2,051 tokens, which makes every check of it a
+    /// multi-thousand-token run; lowering the budget moves the boundary down
+    /// so the same code runs against a reference at a length that can be
+    /// diffed in seconds. It only ever lowers.
+    static func qsaBudget(_ config: SparseIndexerConfig) -> Int {
+        guard let raw = ProcessInfo.processInfo.environment["NVMAI_QSA_BUDGET"],
+              let value = Int(raw), value > 0 else { return config.budget }
+        return min(value, config.budget)
     }
 
     /// Refuses a position the sparse-attention path cannot serve faithfully.
     /// See `QSAIndexerRequired` for why this is an error rather than a note.
     func requireQSAExact(visibleKeys: Int) throws {
+        guard qsaIndexer == nil, let exactness = qsaExactness,
+              !exactness.isDenseExact(visibleKeys: visibleKeys) else { return }
+        throw QSAIndexerRequired(visibleKeys: visibleKeys,
+                                 exactWindow: exactness.maximumExactVisibleKeys)
+    }
+
+    /// The same gate for prefill, which the indexer does not lift.
+    ///
+    /// Decode selects keys per query and can run past the window; a prefill
+    /// chunk still attends densely, because masking the chunked attention is
+    /// a separate kernel from the decode one. So a long *prompt* is still
+    /// refused while a long *generation* from a short prompt is not.
+    func requireQSADensePrefill(visibleKeys: Int) throws {
         guard let exactness = qsaExactness,
               !exactness.isDenseExact(visibleKeys: visibleKeys) else { return }
         throw QSAIndexerRequired(visibleKeys: visibleKeys,
@@ -735,6 +774,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         kv?.reset()
         gdnState?.reset()
         resetPLEState()
+        qsaIndexer?.reset()
         resetTransientState()
     }
 

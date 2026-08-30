@@ -179,6 +179,13 @@ void attention_decode_partial(
     constant     uint&  kv_stride     [[buffer(15)]],
     constant     uint&  kv_value_bytes [[buffer(16)]],
     constant     uint&  kv_group_size [[buffer(17)]],
+    // Sparse-attention selection: keep[p] == 0 drops key p entirely. Bound
+    // always (a one-byte dummy when unused) because Metal requires it; the
+    // branch is uniform across the threadgroup, so the cost when off is a
+    // predicted branch and the saving when on is the whole dot product for a
+    // dropped key, not just its softmax term.
+    device const uchar* keep          [[buffer(18)]],
+    constant     uint&  use_keep      [[buffer(19)]],
     uint tg_id           [[threadgroup_position_in_grid]],
     uint lid             [[thread_position_in_threadgroup]],
     uint lsize           [[threads_per_threadgroup]],
@@ -219,6 +226,7 @@ void attention_decode_partial(
     // chunks are empty); the loop simply does not execute and the partial is
     // (-inf, 0, 0), which the combine weights to zero via e^{-inf}.
     for (uint p = p_start; p < p_end; ++p) {
+        if (use_keep != 0u && keep[p] == 0u) { continue; }
         const uint phys_p = attn_ring_slot(p);
         float partial = 0.0f;
         for (uint i = lid; i < HD; i += lsize) {

@@ -519,6 +519,11 @@ The harness is in `tools/`:
 The runtime side is `NVMAI_ACT_DUMP=<dir>`, with `NVMAI_ACT_DUMP_POSITIONS`
 for how many positions to capture. It is off unless the variable is set.
 
+The dumps hang off the decode path, so checking a *prompt's* positions needs
+`NVMAI_SEQUENTIAL_HC_PREFILL=1` as well --- batched prefill never calls
+`produceToken`, and without the oracle the reference's caches start at the
+first generated token and every comparison after it is shifted.
+
 Position 0 is the workhorse: every carried state is empty there, so the whole
 stack reduces to closed-form algebra and a divergence is unambiguously one
 layer's math. Once position 0 was exact end-to-end, running further positions
@@ -581,6 +586,34 @@ against 75.2 s at 2,048, with the repeats agreeing to 0.6%. Against the
 sequential path it is roughly 7x. The family's default is 2,048, which is also
 the largest chunk the sparse-attention gate can ever admit.
 
+### The sparse-attention indexer
+
+`QSAExactness` was written to name the boundary past which dense attention
+stops matching this model's sparse selection, and then never called --- so
+every long context ran dense with nothing reporting it, which is the exact
+failure the type exists to describe. It is enforced now, and past the window
+the decode path runs the real indexer instead of refusing.
+
+The indexer keeps two caches per full-attention layer: the **raw** keys,
+cached before their norm and rope because a block's pooled vector is the mean
+of raw members, and the **pooled** block vectors, post-norm and post-rope at
+the block's own position (`blockIndex * compressRatio`, not the query's). A
+decode step repools one block; a prefill chunk repools the range it touched.
+
+Selection happens on the host. The ordering is score-descending,
+index-ascending over *cells*, every cell in a block carries its block's score,
+and the cell budget can cut a block in half --- clear in twenty lines of Swift
+and fiddly on the GPU. It costs one barrier on the twelve full-attention
+layers of a decode step that is bound by expert I/O. Moving it to the GPU is
+the optimization, and this is the reference to make it against.
+
+Verified against the reference the same way everything else was, with
+`NVMAI_QSA_BUDGET` lowering the budget so the sparse path engages after 67
+tokens instead of 2,051: across 80 positions of a real generation, layer 3's
+attention output matches to cosine 0.99997 or better on both sides of the
+boundary. Without that knob every check of this code would be a
+multi-thousand-token run.
+
 ### What parity says now
 
 At position 0, every layer entry and the stack output match the reference to
@@ -607,12 +640,12 @@ the attention slot's width.
 - The n-gram gather still sits inline on the decode path, where it could be
   issued a token ahead. It is 5 KiB a token against the experts' hundreds of
   megabytes, so it is not where the time is.
-- The **QSA indexer** is still unwritten. `QSAExactness` was defined for this
-  and then never called, so any context past 2,051 keys ran dense with nothing
-  reporting it --- the exact failure mode the type was written to name. The
-  gate is now enforced in `produceToken` and the runtime *refuses* past the
-  window (`QSAIndexerRequired`) rather than attending to keys the model's
-  selection would have dropped. Implementing the indexer is what lifts it.
+- The **QSA indexer** now runs on the decode path, so generation past 2,051
+  tokens is faithful rather than refused. A long **prompt** is still refused:
+  prefill attends densely, and masking the chunked prefill attention is a
+  different kernel from the decode one. That is the remaining piece.
 - The **MTP sidecar** is not installed.
-- Long-context behaviour is unverified: parity has been run over a handful of
-  positions, not over a long prompt.
+- Long-context behaviour is verified only at a lowered budget, where the
+  sparse path engages after 67 tokens. The arithmetic is the same at 2,051,
+  but nothing has been diffed against a reference at that length --- the
+  reference cannot hold this model.

@@ -101,6 +101,38 @@ kernel void rope_neox_subdim(
                     float(position), theta);
 }
 
+// NeoX sub-dim rope where each row along the token axis carries its own
+// position: `position + token_index * stride`.
+//
+// The scalar-position kernel above covers a decode step and a contiguous
+// prefill chunk read at one offset. The pooled indexer blocks are neither:
+// block b sits at position b * compress_ratio, so their positions advance by
+// the ratio, not by one.
+kernel void rope_neox_subdim_strided(
+    device half* data [[buffer(0)]],
+    constant uint& position [[buffer(1)]],
+    constant uint& head_dim [[buffer(2)]],
+    constant uint& num_heads [[buffer(3)]],
+    constant float& theta [[buffer(4)]],
+    constant uint& rotary_dim [[buffer(5)]],
+    constant uint& stride [[buffer(6)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    const uint pair = gid.x;
+    const uint head_index = gid.y;
+    const uint token_index = gid.z;
+    const uint dimension = rope_head_dim(head_dim);
+    const uint heads = rope_num_heads(num_heads);
+    const uint half_rotary = rotary_dim / 2u;
+    if (pair >= half_rotary || head_index >= heads) return;
+
+    device half* head = data
+        + token_index * heads * dimension
+        + head_index * dimension;
+    apply_neox_pair(head, pair, half_rotary, rotary_dim,
+                    float(position + token_index * stride), theta);
+}
+
 kernel void rope_yarn_neox_subdim(
     device half* data [[buffer(0)]],
     device const float* inverse_frequencies [[buffer(1)]],

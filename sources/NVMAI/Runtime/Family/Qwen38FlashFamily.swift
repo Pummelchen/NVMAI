@@ -98,6 +98,9 @@ public enum Qwen38FlashTensors {
     public static func indexerKProj(_ l: Int) -> String {
         layer(l, "self_attn.indexer.index_k_proj.weight")
     }
+    /// The reference's loader adds 1.0 to a zero-centred gamma; the MLX
+    /// checkpoint this family installs from has already done so, so these are
+    /// used as stored. (Checked: they centre on 0.96, not on 0.)
     public static func indexerQNorm(_ l: Int) -> String {
         layer(l, "self_attn.indexer.q_layernorm")
     }

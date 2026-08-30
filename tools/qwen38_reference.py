@@ -25,6 +25,8 @@ HK, HV, DK, DV, GDN_K = 16, 48, 128, 128, 4
 N_HEADS, N_KV_HEADS, HEAD_DIM, N_ROT = 24, 2, 256, 64
 ROPE_THETA = 10_000_000.0
 TOP_K, PLE_K, PLE_DILATION = 10, 4, 3
+INDEXER_HEADS, INDEXER_DIM = 4, 128
+INDEXER_RATIO, INDEXER_BUDGET = 4, 2048
 P = "model.language_model."
 
 
@@ -48,6 +50,19 @@ def grouped_rms_norm(x_flat, gamma):
 
 def rms_norm(x, gamma):
     return x / np.sqrt((x ** 2).mean(axis=-1, keepdims=True) + EPS) * gamma
+
+
+def rope_full(vec, position):
+    """NeoX rotation over the whole vector (the indexer ropes all 128 dims)."""
+    half = vec.shape[-1] // 2
+    inv = ROPE_THETA ** (-np.arange(half, dtype=np.float64) / half)
+    angle = position * inv
+    cos, sin = np.cos(angle), np.sin(angle)
+    out = vec.copy()
+    a, b = vec[:half], vec[half:]
+    out[:half] = a * cos - b * sin
+    out[half:] = a * sin + b * cos
+    return out
 
 
 def ngram_rows(context, multipliers, offsets, vocab_sizes,
@@ -77,7 +92,8 @@ def ngram_rows(context, multipliers, offsets, vocab_sizes,
 
 
 class Reference:
-    def __init__(self, model_dir):
+    def __init__(self, model_dir, budget=INDEXER_BUDGET):
+        self.budget = budget
         self.dir = Path(model_dir)
         self.w = GTurboWeights(model_dir)
         self.experts = PackedExperts(model_dir)
@@ -93,6 +109,7 @@ class Reference:
         self.gdn_state = {}    # layer -> [HV, DV, DK]
         self.kv = {}           # layer -> (keys [n,KV,HD], values)
         self.ple_conv = np.zeros(((PLE_K - 1) * PLE_DILATION, HC_DIM), np.float32)
+        self.indexer_raw = {}
 
     # ---------------------------------------------------------------- blocks
     def hc_read(self, prefix, wide):
@@ -166,6 +183,56 @@ class Reference:
         out[..., half:N_ROT] = a * sin + b * cos
         return out
 
+    def indexer_keys(self, layer, x):
+        """Raw indexer key for this token, cached before norm and rope."""
+        prefix = f"{P}layers.{layer}.self_attn.indexer."
+        return self.w.get(prefix + "index_k_proj.weight") @ x
+
+    def qsa_keep(self, layer, x, n_kv, budget):
+        """The cells this query keeps, as a boolean [n_kv].
+
+        Mirrors the reference: pool raw keys into blocks of `r`, norm, rope at
+        the block's own position, score with the indexer heads (relu per head,
+        then sum), force the query's ragged tail in, and keep the top
+        `budget + r - 1` cells by (score descending, index ascending).
+        """
+        prefix = f"{P}layers.{layer}.self_attn.indexer."
+        g = self.w.get
+        r = INDEXER_RATIO
+        width = budget + r - 1
+        if n_kv <= width:
+            return np.ones(n_kv, dtype=bool)
+
+        raw = np.stack(self.indexer_raw[layer][:n_kv])          # [n_kv, D]
+        n_blocks = (n_kv + r - 1) // r
+        pooled = np.empty((n_blocks, INDEXER_DIM), np.float32)
+        for b in range(n_blocks):
+            first = b * r
+            members = raw[first:min(first + r, n_kv)]
+            pooled[b] = members.mean(axis=0)
+        pooled = rms_norm(pooled, g(prefix + "k_layernorm"))
+        for b in range(n_blocks):
+            pooled[b] = rope_full(pooled[b], b * r)
+
+        q = (g(prefix + "index_q_proj.weight") @ x).reshape(
+            INDEXER_HEADS, INDEXER_DIM)
+        q = rms_norm(q, g(prefix + "q_layernorm"))
+        q = np.stack([rope_full(q[h], self.position) for h in range(INDEXER_HEADS)])
+        scores = np.maximum(q @ pooled.T, 0.0).sum(axis=0)      # [n_blocks]
+
+        keep = np.zeros(n_kv, dtype=bool)
+        complete = (n_kv // r) * r
+        keep[complete:] = True                                  # the tail
+        remaining = width - (n_kv - complete)
+        order = sorted(range(complete // r), key=lambda b: (-scores[b], b))
+        for b in order:
+            if remaining <= 0:
+                break
+            take = min(r, remaining)
+            keep[b * r: b * r + take] = True
+            remaining -= take
+        return keep
+
     def qsa(self, layer, x):
         prefix = f"{P}layers.{layer}.self_attn."
         g = self.w.get
@@ -179,20 +246,23 @@ class Reference:
         q = self.rope(q, self.position)
         k = self.rope(k, self.position)
 
+        self.indexer_raw.setdefault(layer, []).append(self.indexer_keys(layer, x))
         keys, values = self.kv.get(layer, (None, None))
         keys = k[None] if keys is None else np.concatenate([keys, k[None]], 0)
         values = v[None] if values is None else np.concatenate([values, v[None]], 0)
         self.kv[layer] = (keys, values)
 
+        n_kv = keys.shape[0]
+        keep = self.qsa_keep(layer, x, n_kv, self.budget)
         group = N_HEADS // N_KV_HEADS
         out = np.empty((N_HEADS, HEAD_DIM), np.float32)
         scale = 1.0 / np.sqrt(HEAD_DIM)
         for h in range(N_HEADS):
-            kk = keys[:, h // group, :]
+            kk = keys[keep, h // group, :]
             scores = (kk @ q[h]) * scale
             weights = np.exp(scores - scores.max())
             weights /= weights.sum()
-            out[h] = weights @ values[:, h // group, :]
+            out[h] = weights @ values[keep, h // group, :]
         out = out * sigmoid(gate)
         return g(prefix + "o_proj.weight") @ out.reshape(-1)
 

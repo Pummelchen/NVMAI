@@ -181,6 +181,21 @@ public struct Model {
     public func hcMlpMixDown(layer L: Int) throws -> TensorView {
         try resident(name: Qwen38FlashTensors.mlpMixDown(L))
     }
+    // MARK: QSA indexer
+
+    public func indexerQProj(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.indexerQProj(L))
+    }
+    public func indexerKProj(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.indexerKProj(L))
+    }
+    public func indexerQNorm(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.indexerQNorm(L))
+    }
+    public func indexerKNorm(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.indexerKNorm(L))
+    }
+
     // MARK: PLE n-gram block
 
     public func pleKeyProj(layer L: Int) throws -> TensorView {

@@ -183,6 +183,113 @@ extension RealForwardRunner {
     }
 }
 
+// MARK: - QSA sparse attention
+
+extension RealForwardRunner {
+    /// The indexer's weights for one full-attention layer.
+    func indexerWeights(layer: Int) throws -> QSAIndexer.Weights {
+        QSAIndexer.Weights(
+            queryProjection: try model.indexerQProj(layer: layer),
+            keyProjection: try model.indexerKProj(layer: layer),
+            queryNorm: try model.indexerQNorm(layer: layer),
+            keyNorm: try model.indexerKNorm(layer: layer))
+    }
+
+    /// Whether this layer needs the indexer to choose keys for this query.
+    /// Below the dense-exact window every visible key is kept anyway, so the
+    /// selection is skipped rather than computed and thrown away.
+    func qsaSelectionNeeded(layer: Int, position: Int) -> Bool {
+        guard qsaIndexer != nil, cfg.fullAttentionLayerMask[layer] == 1,
+              let exactness = qsaExactness else { return false }
+        return !exactness.isDenseExact(visibleKeys: position + 1)
+    }
+
+    /// Runs the residual entry and the indexer for one full-attention layer,
+    /// returning the selection the attention should honour.
+    ///
+    /// This is synchronous, and deliberately so: turning block scores into a
+    /// per-key selection reproduces an ordering (score descending, index
+    /// ascending, with the cell budget able to cut a block in half) that is
+    /// clear on the host and fiddly on the GPU. The sync costs one barrier on
+    /// the twelve full-attention layers, against a decode step that is bound
+    /// by expert I/O; doing the selection on the GPU is the optimization, and
+    /// it should be made against this as the reference.
+    func encodeQSAEntryAndSelect(passthrough: MTLCommandBuffer,
+                                 hidden: MTLBuffer,
+                                 norm: TensorView,
+                                 out: MTLBuffer,
+                                 layer: Int,
+                                 position: Int,
+                                 eps: Float) throws -> MTLBuffer? {
+        guard let indexer = qsaIndexer else { return nil }
+        let weights = try indexerWeights(layer: layer)
+        let selecting = qsaSelectionNeeded(layer: layer, position: position)
+        guard selecting else {
+            // Inside the window nothing is selected, so there is nothing to
+            // read back and no reason to break the pipeline: the entry and
+            // the key append ride the layer's own command buffer.
+            try encodeResidualEntryDecode(commandBuffer: passthrough,
+                                          hidden: hidden, norm: norm, out: out,
+                                          sublayer: .attention, layer: layer,
+                                          eps: eps)
+            try indexer.encodeAppendKey(commandBuffer: passthrough, hidden: out,
+                                        weights: weights, layer: layer,
+                                        position: position, eps: eps)
+            return nil
+        }
+        guard try runSync({ cb in
+            try encodeResidualEntryDecode(commandBuffer: cb, hidden: hidden,
+                                          norm: norm, out: out,
+                                          sublayer: .attention, layer: layer,
+                                          eps: eps)
+            // The key is cached at every position, in or out of the window:
+            // crossing the boundary later must not find holes behind it.
+            try indexer.encodeAppendKey(commandBuffer: cb, hidden: out,
+                                        weights: weights, layer: layer,
+                                        position: position, eps: eps)
+            try indexer.encodeScores(commandBuffer: cb, hidden: out,
+                                     weights: weights, layer: layer,
+                                     position: position, eps: eps)
+        }) != nil else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        return indexer.selectKeys(visibleKeys: position + 1)
+    }
+}
+
+/// Fills the indexer's caches for a prefill chunk, so decode can cross the
+/// dense-exact boundary later without finding holes behind it.
+extension RealForwardRunner {
+    func encodeQSAPrefill(commandBuffer: MTLCommandBuffer,
+                          blockInput: MTLBuffer,
+                          layer: Int, startPosition: Int, tokens: Int,
+                          eps: Float) throws {
+        guard let indexer = qsaIndexer,
+              cfg.fullAttentionLayerMask[layer] == 1 else { return }
+        let weights = try indexerWeights(layer: layer)
+        let destination = try indexer.rawKeyDestination(
+            layer: layer, startPosition: startPosition)
+        let key = weights.keyProjection
+        try prefillQMM.encode(commandBuffer: commandBuffer,
+                              weights: key.buffer,
+                              weightsOffset: Int(key.offset),
+                              scales: key.buffer,
+                              scalesOffset: Int(key.scaleOffset),
+                              biases: key.buffer,
+                              biasesOffset: Int(key.biasOffset),
+                              x: blockInput,
+                              y: destination.buffer,
+                              yOffset: destination.offset,
+                              t: tokens,
+                              n: indexer.headDim,
+                              k: Int(key.shape.1))
+        try indexer.encodePoolPrefill(commandBuffer: commandBuffer,
+                                      weights: weights, layer: layer,
+                                      startPosition: startPosition,
+                                      tokens: tokens, eps: eps)
+    }
+}
+
 // MARK: - PLE n-gram block
 
 extension RealForwardRunner {

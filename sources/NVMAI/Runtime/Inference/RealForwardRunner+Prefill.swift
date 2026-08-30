@@ -17,7 +17,7 @@ extension RealForwardRunner {
         // The chunked path does not go through `produceToken`, so it needs
         // the sparse-attention gate of its own. The chunk's last query sees
         // the most keys and decides the whole chunk.
-        try requireQSAExact(visibleKeys: startPosition + tokens.count)
+        try requireQSADensePrefill(visibleKeys: startPosition + tokens.count)
         // The one-token-at-a-time prefill a hyper-connection family started
         // on, kept as the oracle the batched path is checked against.
         //
@@ -287,6 +287,12 @@ extension RealForwardRunner {
                                            out: scratch.normed,
                                            sublayer: .attention, layer: L,
                                            tokens: t, eps: eps)
+            // The indexer caches a key for every prefilled token, in or out
+            // of the dense-exact window: decode crossing the boundary later
+            // must not find holes behind it.
+            try encodeQSAPrefill(commandBuffer: cb, blockInput: scratch.normed,
+                                 layer: L, startPosition: startPosition,
+                                 tokens: t, eps: eps)
             if isLinear {
                 try encodeLinearAttentionPrefill(
                     cb: cb, layer: L, views: views, scratch: scratch,

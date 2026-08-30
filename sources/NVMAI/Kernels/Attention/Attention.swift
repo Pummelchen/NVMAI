@@ -129,6 +129,12 @@ final class Attention {
         }
         self.mPartial = m; self.dPartial = d; self.oPartial = o
         self.splitStateLock = NSLock()
+        guard let empty = context.device.makeBuffer(
+                  length: 1, options: .storageModeShared) else {
+            throw MetalError.bufferAllocationFailed("attention keep-mask placeholder")
+        }
+        empty.label = "attention.keepMask.unused"
+        self.emptyKeepMask = empty
         self.splitInFlight = false
     }
 
@@ -139,6 +145,9 @@ final class Attention {
     // runtime: a reentrant encodeSplit would corrupt pass-1 state and is a
     // programming error, so it throws loudly instead of silently corrupting.
     private let splitStateLock: NSLock
+    /// One byte, bound whenever no selection is in play: Metal requires the
+    /// argument, and `use_keep` is what actually turns the mask off.
+    private let emptyKeepMask: MTLBuffer
     private var splitInFlight: Bool
 
     /// Number of K/V chunks for a range of `effLen` positions — the split
@@ -218,7 +227,8 @@ final class Attention {
                            numKVHeads: UInt32,
                            seqLen: UInt32,
                            scale: Float? = nil,
-                           kvFormat: KVView? = nil) throws {
+                           kvFormat: KVView? = nil,
+                           keepMask: MTLBuffer? = nil) throws {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -233,7 +243,8 @@ final class Attention {
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
                     preferGQASWA: false,
-                    kvFormat: kvFormat)
+                    kvFormat: kvFormat,
+                    keepMask: keepMask)
     }
 
 
@@ -251,13 +262,19 @@ final class Attention {
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
                              ringCapacity: UInt32 = 0,
-                             kvFormat: KVView? = nil) throws {
+                             kvFormat: KVView? = nil,
+                             keepMask: MTLBuffer? = nil) throws {
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
         precondition(Int(headDim) <= Self.maxHeadDim,
                      "head_dim \(headDim) exceeds split-KV scratch (max \(Self.maxHeadDim))")
         precondition(ringCapacity == 0 || preferGQASWA,
                      "KV ring is only valid for SWA attention")
+        // Only the full-attention kernel reads the selection. Binding it for
+        // the GQA/SWA path would be silently ignored, which is the wrong kind
+        // of quiet for a mask whose whole job is to change what is attended.
+        precondition(keepMask == nil || !preferGQASWA,
+                     "sparse key selection is not implemented for the GQA/SWA path")
         splitStateLock.lock()
         let reentered = splitInFlight
         splitInFlight = true
@@ -315,6 +332,9 @@ final class Attention {
         p1.setBytes(&kvStride, length: MemoryLayout<UInt32>.size, index: 15)
         p1.setBytes(&kvValueBytes, length: MemoryLayout<UInt32>.size, index: 16)
         p1.setBytes(&kvGroupSize, length: MemoryLayout<UInt32>.size, index: 17)
+        var useKeep = UInt32(keepMask == nil ? 0 : 1)
+        p1.setBuffer(keepMask ?? emptyKeepMask, offset: 0, index: 18)
+        p1.setBytes(&useKeep, length: MemoryLayout<UInt32>.size, index: 19)
         let partialGroups = geometry.partialThreadgroups
         p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
