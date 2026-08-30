@@ -54,7 +54,13 @@ extension RealForwardRunner {
         // Kept because it is correct for any future path that does wire
         // earlier, and because removing it would silently change that path's
         // behaviour. It is not load-bearing today.
-        model.setExpertCachePinned(false)
+        //
+        // Skipped entirely under NVMAI_KEEP_WIRED: pinning at allocation and
+        // then releasing here is self-defeating, and cost me one wrong
+        // conclusion already.
+        if !Self.keepExpertCacheWired {
+            model.setExpertCachePinned(false)
+        }
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(
                 "prefillChunked requires PrefillRuntimeConfig.mode == .chunked")

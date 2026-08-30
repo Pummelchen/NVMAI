@@ -15,10 +15,24 @@ public enum RuntimePrefillANE: String, Codable, Sendable {
     case off
     case on
 
+    /// Whether the caller named the setting, as opposed to taking the
+    /// default.
+    ///
+    /// The two want different failure behaviour. Someone who wrote
+    /// `NVMAI_PREFILL_ANE=on` and has no sidecar should be told so, with the
+    /// export command; a default-on runtime meeting a model that has no
+    /// sidecar should quietly use the GPU, because most models do not have
+    /// one and failing to load would be absurd.
+    public static func wasRequestedExplicitly(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment["NVMAI_PREFILL_ANE"] != nil
+    }
+
     public static func environmentValue(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> RuntimePrefillANE {
-        guard let raw = environment["NVMAI_PREFILL_ANE"] else { return .off }
+        guard let raw = environment["NVMAI_PREFILL_ANE"] else { return .on }
         guard let value = RuntimePrefillANE(rawValue: raw) else {
             throw PrefillError.chunkedUnsupported(
                 "unsupported NVMAI_PREFILL_ANE '\(raw)'; allowed: off, on")
@@ -144,9 +158,12 @@ final class ANEPrefillAttention: @unchecked Sendable {
                     + "\(weightsSha256.prefix(12))...); re-export it for this model")
             }
         } else {
-            print("NVMAI ane-prefill: sidecar/weights binding unverified "
-                  + "(no receipt digest available); a stale sidecar would not "
-                  + "be detected")
+            // stderr for the same reason as the fallback notice below:
+            // stdout is the generated text.
+            FileHandle.standardError.write(Data(
+                ("NVMAI ane-prefill: sidecar/weights binding unverified "
+                 + "(no receipt digest available); a stale sidecar would not "
+                 + "be detected\n").utf8))
         }
         self.chunkTokens = meta.chunkTokens
         self.histories = Set(meta.histories)
@@ -200,10 +217,16 @@ final class ANEPrefillAttention: @unchecked Sendable {
               histories.contains(startPosition) else {
             if !loggedFallback {
                 loggedFallback = true
-                print("NVMAI ane-prefill fallback: chunk at \(startPosition) "
-                      + "(+\(tokenCount)) outside sidecar coverage "
-                      + "(chunk \(chunkTokens), max prompt \(maxPromptTokens)); "
-                      + "using the GPU path")
+                // stderr, not stdout: stdout carries generated tokens, and a
+                // diagnostic written there lands in the middle of the model's
+                // output. Harmless while ANE prefill was opt-in and this
+                // never fired; corrupting once it became the default, which
+                // is how the golden baselines caught it.
+                FileHandle.standardError.write(Data(
+                    ("NVMAI ane-prefill fallback: chunk at \(startPosition) "
+                     + "(+\(tokenCount)) outside sidecar coverage "
+                     + "(chunk \(chunkTokens), max prompt \(maxPromptTokens)); "
+                     + "using the GPU path\n").utf8))
             }
             return false
         }

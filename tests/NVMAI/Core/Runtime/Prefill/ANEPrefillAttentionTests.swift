@@ -4,8 +4,15 @@ import Testing
 @testable import NVMAI
 
 @Suite struct ANEPrefillAttentionTests {
-    @Test func environmentSwitchDefaultsOffAndFailsClosed() throws {
-        #expect(try RuntimePrefillANE.environmentValue([:]) == .off)
+    @Test func environmentSwitchDefaultsOnAndFailsClosed() throws {
+        // Default-on since the deferred-pin A/Bs qualified it on an idle
+        // machine: 3.14x end to end at 4-bit, 1.91x at 8-bit. A model with no
+        // sidecar still loads -- the runner degrades to the GPU unless the
+        // setting was named explicitly.
+        #expect(try RuntimePrefillANE.environmentValue([:]) == .on)
+        #expect(!RuntimePrefillANE.wasRequestedExplicitly([:]))
+        #expect(RuntimePrefillANE.wasRequestedExplicitly(
+            ["NVMAI_PREFILL_ANE": "off"]))
         #expect(try RuntimePrefillANE.environmentValue(
             ["NVMAI_PREFILL_ANE": "off"]) == .off)
         #expect(try RuntimePrefillANE.environmentValue(

@@ -381,15 +381,38 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // family qualifies (the one-layer MTP draft has no exported sidecar
         // and must stay silently on the GPU); with the switch on and the
         // sidecar missing, construction fails closed with the export command.
-        self.anePrefill = try RuntimePrefillANE.environmentValue() == .on
-                && model.config.family == .qwen36
-            ? try ANEPrefillAttention(
-                modelDirectory: model.directoryURL,
-                device: context.device,
-                hiddenSize: model.config.hiddenSize,
-                kvDim: model.config.numFullKVHeads * model.config.fullHeadDim,
-                weightsSha256: model.weightsDigestFromManifest)
-            : nil
+        // Track A: ANE prefill, on by default for the one family that has an
+        // exported sidecar. Measured end to end on an idle machine with a
+        // 9,316-token prompt: 313.6 s against 99.9 s at 4-bit, a 3.14x
+        // request, and 1.91x at 8-bit. It costs about 0.023 s per generated
+        // token in decode, so it does not break even against the ~215 s
+        // prefill saving until roughly 9,200 generated tokens.
+        //
+        // It is not bit-identical to the GPU path: the ANE reduces attention
+        // in fp16 in a different order, so a prompt long enough to reach the
+        // sidecar (>= one full 4,096-token chunk) can decode to different --
+        // equally valid -- greedy text. Shorter prompts never reach it and
+        // are unaffected, which is why the golden baselines still hold.
+        let wantsANE = try RuntimePrefillANE.environmentValue() == .on
+            && model.config.family == .qwen36
+        if wantsANE {
+            do {
+                self.anePrefill = try ANEPrefillAttention(
+                    modelDirectory: model.directoryURL,
+                    device: context.device,
+                    hiddenSize: model.config.hiddenSize,
+                    kvDim: model.config.numFullKVHeads * model.config.fullHeadDim,
+                    weightsSha256: model.weightsDigestFromManifest)
+            } catch {
+                // An explicit request must fail loudly with the export
+                // command; the default must degrade to the GPU, because a
+                // model without a sidecar is the normal case.
+                guard !RuntimePrefillANE.wasRequestedExplicitly() else { throw error }
+                self.anePrefill = nil
+            }
+        } else {
+            self.anePrefill = nil
+        }
         let useFP16Ring = runtimeConfiguration.fp16RingEnabled
         self.rdadvisePolicyMode = runtimeConfiguration.rdadvisePolicy
         self.rdadviseAdaptiveState = RDAdviceAdaptivePolicyState(
@@ -731,6 +754,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                  count: cfg.numLayers)
         self.onesPerExpertScale = try bf16OnesBuffer(count: cfg.numExperts,
                                                      label: "per_expert_scale.ones")
+        if Self.keepExpertCacheWired { model.setExpertCachePinned(true) }
     }
 
     /// The window in which dense attention is exact for this model, or nil
@@ -788,6 +812,34 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? config.hiddenSize * config.hyperConnections.count
             : config.hiddenSize
     }
+
+    /// Expert-cache statistics as of the prefill/decode handover, so the
+    /// decode phase's own I/O can be reported (`NVMAI_DECODE_IO_TRACE=1`).
+    static let decodeIOTraceEnabled =
+        ProcessInfo.processInfo.environment["NVMAI_DECODE_IO_TRACE"] == "1"
+    var decodeIOBaseline: ExpertStreamingStatistics?
+
+    /// Expert I/O attributable to decode alone: totals now, minus the
+    /// handover snapshot.
+    public func decodeExpertIO() -> (hits: UInt64, misses: UInt64, bytes: UInt64)? {
+        guard let baseline = decodeIOBaseline else { return nil }
+        let now = model.routedExpertStatistics()
+        return (now.hits &- baseline.hits,
+                now.misses &- baseline.misses,
+                now.bytesRead &- baseline.bytesRead)
+    }
+
+    /// Keep the routed-expert slot cache wired across prefill as well as
+    /// decode (`NVMAI_KEEP_WIRED=1`).
+    ///
+    /// Decode reads the same expert bytes either way -- measured identical,
+    /// 9.18 against 9.16 GiB at the same 70.5% hit rate -- but with ANE
+    /// prefill it waits 3.6x longer on them (3129 ms against 859 ms). Same
+    /// reads, far longer awaits, which points at the read *destinations*
+    /// faulting rather than at the reads themselves. Holding the cache wired
+    /// through prefill is the direct test of that.
+    static let keepExpertCacheWired =
+        ProcessInfo.processInfo.environment["NVMAI_KEEP_WIRED"] == "1"
 
     public func reset() {
         kv?.reset()

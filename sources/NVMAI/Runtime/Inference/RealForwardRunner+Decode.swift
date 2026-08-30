@@ -42,6 +42,15 @@ extension RealForwardRunner {
                     "[wire] releaseModels \(String(format: "%.1f", ms)) ms\n".utf8))
             }
         }
+        // Snapshot expert I/O at the handover so decode's share can be
+        // separated from prefill's. The two phases stream through the same
+        // cache, so a whole-request total cannot answer whether ANE prefill
+        // leaves decode re-reading experts -- which is the standing claim
+        // ("94% more expert I/O after ANE prefill") that has never been
+        // tested directly.
+        if Self.decodeIOTraceEnabled, decodeIOBaseline == nil {
+            decodeIOBaseline = model.routedExpertStatistics()
+        }
         // Wire the slot cache for decode. Unwired, unrelated memory churn can
         // reclaim the budget and decode then re-reads routed experts from SSD
         // for the rest of the request -- measured at 94% more expert I/O after

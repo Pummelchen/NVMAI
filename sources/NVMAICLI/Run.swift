@@ -248,6 +248,19 @@ public func run(args: Args,
             lines += String(format: "%.1f", total - accounted) + " ms\n"
             stderr.write(Data(lines.utf8))
         }
+        if let io = runner.decodeExpertIO() {
+            let total = io.hits + io.misses
+            let rate = total > 0 ? 100.0 * Double(io.hits) / Double(total) : 0
+            var line = "\n[decode expert io] hits \(io.hits) misses \(io.misses)"
+            line += String(format: " (%.1f%% hit)", rate)
+            line += String(format: " %.2f GiB",
+                           Double(io.bytes) / 1_073_741_824)
+            if stats.newTokens > 0 {
+                line += String(format: " = %.1f MiB/token",
+                               Double(io.bytes) / 1_048_576 / Double(stats.newTokens))
+            }
+            stderr.write(Data((line + "\n").utf8))
+        }
         if !args.quiet {
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds
