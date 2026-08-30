@@ -99,6 +99,27 @@ its size must equal the computed `padded_rows * ple_head_dim * 2`.
    the table is genuinely interchangeable, and parity is what proves it rather
    than assumes it.
 
+## Both widths come from the bf16 original
+
+Neither install is derived from the other, and neither is derived from a
+quantized release. `prepare_qwen38.py --bits {4,8}` re-runs the whole
+conversion against Qwen's bf16 checkpoint; the width only changes
+`levels = (1 << bits) - 1` inside `quantize_affine`. That is why the 8-bit
+build costs a second 360 GB fetch rather than being a cheap local transform --
+if it could be derived from the 4-bit it would take minutes and be worthless.
+
+Only `ngram_table.bin` is shared, and it is never quantized in either width:
+the format stores it as fp16 (`rowDim * MemoryLayout<Float16>.stride`), so the
+two installs' tables are the same bytes by construction rather than merely
+close enough to reuse.
+
+Qwen's FP8 release is not a shortcut worth taking. Its config excludes 943
+modules, leaving everything except the routed experts in bf16 -- so the only
+tensors it quantizes are the ones NVMAI streams -- and its [128, 128] blocks do
+not map onto affine group-64. Building from it would store 8 bits per weight
+carrying E4M3's 3-bit mantissa: the full bandwidth cost of 8-bit on an
+I/O-bound decode, without the quality that is the only reason to pay it.
+
 ## Is the 8-bit install worth building at all
 
 Worth deciding before spending the disk. Decode on this machine is expert-I/O

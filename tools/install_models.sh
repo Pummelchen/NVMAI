@@ -44,10 +44,19 @@ Sources
 
   convert    tools/prepare_qwen38.py, which quantizes Qwen's own bf16 release
              into an affine snapshot that NVMAIRepack then imports. Slower and
-             far larger to fetch -- 360 GB against 63 GB -- but it quantizes
-             once from the original weights instead of inheriting a third
-             party's quantization, and no 8-bit release of this model exists
-             that is worth depending on. See docs/qwen38-flash-next-port.md.
+             far larger to fetch -- 360 GB against 63 GB -- but both widths are
+             quantized once from the original weights.
+
+             Quantized releases of this model do exist and are deliberately not
+             used. Qwen ships an FP8 build at 186 GB, but its config excludes
+             943 modules from conversion: everything except the routed experts
+             stays bf16, so the only tensors it quantizes are exactly the ones
+             NVMAI streams. Its [128, 128] blocks do not correspond to affine
+             group-64 either, so sourcing from it means dequantize then
+             requantize, and the result is 8 bits wide carrying E4M3's 3-bit
+             mantissa -- full bandwidth cost on an I/O-bound decode for less
+             than 8-bit quality. Third-party MLX 8-bit repacks have the same
+             problem with less provenance.
 
 Disk
 
