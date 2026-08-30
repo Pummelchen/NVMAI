@@ -216,6 +216,24 @@ public func run(args: Args,
                 }
             }
 
+        if ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
+            // Per-role GPU milliseconds, plus the occupancy that says whether
+            // the gaps are the problem or the kernels are. The runner has
+            // collected both all along and nothing printed them.
+            let summary = runner.kernelGPUTimingSummary()
+            let occupancy = runner.kernelGPUOccupancy()
+            var lines = "\n[gpu by role over \(stats.newTokens) tokens]\n"
+            for entry in summary.prefix(14) {
+                lines += String(format: "  %-24s %8.1f ms  x%d\n",
+                                (entry.role as NSString).utf8String!,
+                                entry.millis, entry.count)
+            }
+            lines += String(format: "  busy %.0f ms of %.0f ms span (%.0f%% occupied)\n",
+                            occupancy.busyMillis, occupancy.spanMillis,
+                            occupancy.spanMillis > 0
+                                ? 100 * occupancy.busyMillis / occupancy.spanMillis : 0)
+            stderr.write(Data(lines.utf8))
+        }
         if ProcessInfo.processInfo.environment["TURBO_FIELDFARE_PHASES"] == "1" {
             let ms = { (n: UInt64) in String(format: "%.1f", Double(n) / 1e6) }
             let total = stats.decodeSeconds * 1000

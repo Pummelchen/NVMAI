@@ -677,19 +677,24 @@ repository (`NVMAIRepack --model qwen38flash-mtp`) and runs through the
 existing speculative loop (`NVMAIServer --mtp-model`). It is **off unless
 asked for**, and should stay that way.
 
-**Measured, 150 tokens, same prompt, interleaved:**
+**Measured, 150 tokens, same prompt:**
 
-| | |
-|---|---|
-| Acceptance | 71.3% (62 of 87 passes) |
-| Emitted per pass | 1.72 |
-| Width-2 verify pass | **2.75x a scalar token** |
-| Ceiling at 100% acceptance | 2.00x |
-| End to end | **0.71x** scalar (2.45 vs 3.43 tok/s) |
+| | | |
+|---|---|---|
+| Acceptance | 71.3% (62 of 87 passes) | count, sound |
+| Emitted per pass | 1.72 | count, sound |
+| Width-2 union | 1.65x weight reads | geometry, sound |
+| Ceiling at 100% acceptance | 2.00x | geometry, sound |
+| Width-2 verify pass | ~2.75x a scalar token | **timing, contended** |
+| End to end | ~0.71x scalar | **timing, contended** |
 
-The within-run accounting is the part that does not depend on cross-run
-noise: a pass costing 2.75x that delivers 1.72 tokens loses, and would still
-lose at perfect acceptance. 71.3% acceptance is *good* and changes nothing.
+**The two timings were taken on a contended machine** and should be re-run
+before being quoted: a VM at 299% CPU and 77% GPU utilization from another
+process, which showed up afterwards as a 44% spread within a single config.
+The counts and the geometry are unaffected, and they are what closes this:
+1.72 tokens per pass against a 2.00x ceiling cannot win once a pass costs more
+than 1.72x, and the union says it costs 1.65x in weight reads alone before any
+per-pass overhead. 71.3% acceptance is *good* and changes nothing.
 This reproduces the Qwen 3.6 verdict (`3abd32b`) on a different model with
 different geometry -- and the geometry predicted it: adjacent tokens share
 3.49 of 10 experts here against 3.3 of 8 there, so the width-2 union is 1.65x
