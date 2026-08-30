@@ -1,6 +1,10 @@
 <img width="1774" height="887" alt="image" src="https://github.com/user-attachments/assets/dc91bc31-0cd4-42e6-bc7a-67ffb277efe0" />
 
-### The fastest SSD/NVMe streamer for LLMs on Mac — M1 through M6.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/slogan-dark.svg">
+  <img alt="NVMAI is the fastest SSD/NVMe streamer for LLMs on Mac — M1 through M6."
+       src="assets/slogan-light.svg" width="660">
+</picture>
 
 Run models far larger than your RAM. A 125B-parameter model on a 24 GB
 MacBook, at reading speed.

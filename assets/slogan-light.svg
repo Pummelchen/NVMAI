@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="78" viewBox="0 0 660 78" role="img" aria-label="NVMAI is the fastest SSD/NVMe streamer for LLMs on Mac, M1 through M6">
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="27" font-weight="700">
+    <text x="0" y="28">
+      <tspan fill="#0FB5CE">NVM</tspan><tspan fill="#E8820C">AI</tspan><tspan fill="#1F2328"> is the fastest SSD/NVMe streamer</tspan>
+    </text>
+    <text x="0" y="62" fill="#1F2328">for LLMs on Mac &#8212; M1 through M6.</text>
+  </g>
+</svg>
