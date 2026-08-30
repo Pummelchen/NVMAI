@@ -751,18 +751,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                  exactWindow: exactness.maximumExactVisibleKeys)
     }
 
-    /// The same gate for prefill, which the indexer does not lift.
+    /// The same gate for prefill.
     ///
-    /// Decode selects keys per query and can run past the window; a prefill
-    /// chunk still attends densely, because masking the chunked attention is
-    /// a separate kernel from the decode one. So a long *prompt* is still
-    /// refused while a long *generation* from a short prompt is not.
+    /// Both paths select now, so this only fires for a family that declares a
+    /// sparse indexer without one being built -- which nothing does today,
+    /// and which would otherwise attend densely and say nothing about it.
     func requireQSADensePrefill(visibleKeys: Int) throws {
-        guard let exactness = qsaExactness,
-              !exactness.isDenseExact(visibleKeys: visibleKeys) else { return }
-        throw QSAIndexerRequired(visibleKeys: visibleKeys,
-                                 exactWindow: exactness.maximumExactVisibleKeys)
+        try requireQSAExact(visibleKeys: visibleKeys)
     }
+
+    /// The full-attention layer whose indexer state the dumps capture: the
+    /// first one, where the decode and prefill paths still share an input.
+    static let qsaSnapshotLayer = 3
 
     /// Forces the one-token-at-a-time prefill for hyper-connection families
     /// (`NVMAI_SEQUENTIAL_HC_PREFILL=1`). It is the reference the batched

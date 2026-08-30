@@ -70,6 +70,9 @@ enum PrefillAttentionError: Error, CustomStringConvertible {
 final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
+    /// One byte, bound whenever no selection is in play; `useKeep` is what
+    /// actually turns the mask off.
+    private let emptyKeepMask: MTLBuffer
     private let psoFullTensorOps2DValidityV2: MTLComputePipelineState?
     /// K7: recorded once at init so an explicit TensorOps path request can
     /// throw the real reason instead of a bare `preconditionFailure`.
@@ -78,6 +81,12 @@ final class PrefillAttention {
     init(context: MetalContext) throws {
         self.context = context
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
+        guard let empty = context.device.makeBuffer(
+                  length: 1, options: .storageModeShared) else {
+            throw PrefillAttentionError.commandEncoderFailed
+        }
+        empty.label = "prefillAttention.keepMask.unused"
+        self.emptyKeepMask = empty
         if context.device.supportsFamily(.apple10) {
             do {
                 self.psoFullTensorOps2DValidityV2 = try context.pipeline(
@@ -101,6 +110,8 @@ final class PrefillAttention {
                              out: MTLBuffer, outOffset: Int = 0,
                              params: PrefillAttentionParams,
                              kvRingCapacity: UInt32 = 0,
+                             keepMask: MTLBuffer? = nil,
+                             keepStride: Int = 0,
                              path: RuntimePrefillAttentionPath = .causalTiled) throws {
         validate(params)
 
@@ -152,6 +163,16 @@ final class PrefillAttention {
         enc.setBuffer(out, offset: outOffset, index: 3)
         var p = params
         enc.setBytes(&p, length: MemoryLayout<PrefillAttentionParams>.stride, index: 4)
+        // Only the tiled kernel reads the selection; the TensorOps path would
+        // ignore it, which is the wrong kind of quiet for a mask.
+        precondition(keepMask == nil || !useTensorOps,
+                     "sparse key selection is not implemented for the "
+                         + "TensorOps prefill path")
+        var useKeep = UInt32(keepMask == nil ? 0 : 1)
+        var stride = UInt32(keepStride)
+        enc.setBuffer(keepMask ?? emptyKeepMask, offset: 0, index: 5)
+        enc.setBytes(&useKeep, length: MemoryLayout<UInt32>.size, index: 6)
+        enc.setBytes(&stride, length: MemoryLayout<UInt32>.size, index: 7)
         let groups = useTensorOps
             ? MTLSize(width: Int(params.queryCount),
                       height: Int(params.numQHeads) / 8,

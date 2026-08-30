@@ -290,9 +290,10 @@ extension RealForwardRunner {
             // The indexer caches a key for every prefilled token, in or out
             // of the dense-exact window: decode crossing the boundary later
             // must not find holes behind it.
-            try encodeQSAPrefill(commandBuffer: cb, blockInput: scratch.normed,
-                                 layer: L, startPosition: startPosition,
-                                 tokens: t, eps: eps)
+            let qsaSelection = try encodeQSAPrefill(
+                cb: &cb, blockInput: scratch.normed,
+                layer: L, startPosition: startPosition,
+                tokens: t, eps: eps)
             if isLinear {
                 try encodeLinearAttentionPrefill(
                     cb: cb, layer: L, views: views, scratch: scratch,
@@ -310,7 +311,8 @@ extension RealForwardRunner {
                     tokenCount: t, hiddenSize: D, startPosition: startPosition,
                     isFull: isFull, headDim: headDim, numKVHeads: numKVHeads,
                     qDim: qDim, kvDim: kvDim, rmsEps: eps,
-                    useTwoRowProjection: useTwoRowProjection)
+                    useTwoRowProjection: useTwoRowProjection,
+                    keepMask: qsaSelection)
             }
             // Plain pre-norm residual block: hidden += attention branch,
             // then one post-attention norm feeds router, shared expert,
@@ -772,7 +774,8 @@ extension RealForwardRunner {
         tokenCount t: Int, hiddenSize D: Int, startPosition: Int,
         isFull: Bool, headDim: Int, numKVHeads: Int,
         qDim: Int, kvDim: Int, rmsEps eps: Float,
-        useTwoRowProjection: Bool
+        useTwoRowProjection: Bool,
+        keepMask: (buffer: MTLBuffer, stride: Int)? = nil
     ) throws {
         let qProjRows = cfg.attnOutputGate ? 2 * qDim : qDim
         try encodeAffineProjection(commandBuffer: cb,
@@ -912,7 +915,13 @@ extension RealForwardRunner {
                                               out: scratch.attentionOutput,
                                               params: params,
                                               kvRingCapacity: activeRingCapacity,
-                                              path: prefillAttentionPath)
+                                              keepMask: keepMask?.buffer,
+                                              keepStride: keepMask?.stride ?? 0,
+                                              path: keepMask == nil
+                                                  ? prefillAttentionPath
+                                                  // Only the tiled kernel
+                                                  // honours a selection.
+                                                  : .causalTiled)
         } else {
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill attention requires a KV cache")
@@ -1004,6 +1013,10 @@ extension RealForwardRunner {
             finalCB.commit()
             try waitForCompletion(finalCB)
             recordKernelGPU(role: "prefill_head", finalCB)
+            if activationDumpDirectory != nil {
+                dumpActivation("prefill_logits", logits, count: cfg.vocabSize,
+                               position: 0)
+            }
             return
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {

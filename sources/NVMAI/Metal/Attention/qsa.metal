@@ -94,3 +94,37 @@ void qsa_block_scores(
     }
     scores[b] = total;
 }
+
+// Block scores for a whole prefill chunk: one score per (query, block).
+//
+// The decode kernel scores one query against every block; a chunk needs the
+// cross product. Splitting it by thread rather than by dispatch keeps this to
+// one encode per layer instead of one per query, which at a 2,048-token chunk
+// is the difference between a kernel launch and two thousand of them.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void qsa_block_scores_rows(
+    device const half*  query   [[buffer(0)]],  // [T, H, D], normed and roped
+    device const half*  pooled  [[buffer(1)]],  // [n_blocks, D]
+    device       float* scores  [[buffer(2)]],  // [T, n_blocks]
+    constant     uint&  D       [[buffer(3)]],
+    constant     uint&  H       [[buffer(4)]],
+    constant     uint&  blocks  [[buffer(5)]],
+    constant     uint&  T       [[buffer(6)]],
+    uint                tid     [[thread_position_in_grid]]
+) {
+    if (tid >= blocks * T) return;
+    const uint t = tid / blocks;
+    const uint b = tid - t * blocks;
+    device const half* row = pooled + b * D;
+    device const half* q0 = query + t * H * D;
+    float total = 0.0f;
+    for (uint h = 0; h < H; ++h) {
+        device const half* q = q0 + h * D;
+        float dot = 0.0f;
+        for (uint d = 0; d < D; ++d) {
+            dot = fma(float(q[d]), float(row[d]), dot);
+        }
+        total += max(dot, 0.0f);
+    }
+    scores[tid] = total;
+}

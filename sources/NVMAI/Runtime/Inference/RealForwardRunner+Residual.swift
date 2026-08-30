@@ -253,19 +253,89 @@ extension RealForwardRunner {
         }) != nil else {
             throw ModelError.residentBufferWrapFailed
         }
-        return indexer.selectKeys(visibleKeys: position + 1)
+        let mask = indexer.selectKeys(visibleKeys: position + 1)
+        if layer == Self.qsaSnapshotLayer {
+            dumpQSASnapshot(layer: layer, visibleKeys: position + 1)
+        }
+        return mask
+    }
+
+    /// The same snapshot from the chunked path, taken from its last row.
+    func dumpQSAChunkSnapshot(selection: (buffer: MTLBuffer, stride: Int),
+                              lastVisible: Int, rows: Int) {
+        guard let directory = activationDumpDirectory,
+              let indexer = qsaIndexer else { return }
+        let base = (rows - 1) * selection.stride
+        let keep = selection.buffer.contents()
+            .bindMemory(to: UInt8.self, capacity: base + lastVisible)
+        let bytes = (0..<lastVisible).map { keep[base + $0] }
+        try? Data(bytes).write(
+            to: directory.appendingPathComponent("qsa_keep.bin"))
+        let blocks = (lastVisible - 1) / indexer.compressRatio + 1
+        let scores = indexer.debugSnapshot(
+            cells: 1, blocks: indexer.scoredBlocksPerRow * rows).scores
+        let row = Array(scores[(rows - 1) * indexer.scoredBlocksPerRow ..<
+                               (rows - 1) * indexer.scoredBlocksPerRow + blocks])
+        row.withUnsafeBufferPointer {
+            try? Data(buffer: $0).write(
+                to: directory.appendingPathComponent("qsa_scores.f32"))
+        }
+        writeQSACaches(directory: directory, indexer: indexer,
+                       visibleKeys: lastVisible, blocks: blocks)
+    }
+
+    /// Writes the indexer's scores and selection for the newest query, so the
+    /// decode and prefill paths can be compared as numbers.
+    ///
+    /// Only the first full-attention layer is snapshotted, and that is the
+    /// point: later layers see inputs that have already drifted, so a
+    /// disagreement there says nothing about whether the two paths select the
+    /// same way. At the first one they have the same input, and any
+    /// difference is the selection's own.
+    func dumpQSASnapshot(layer: Int, visibleKeys: Int) {
+        guard let directory = activationDumpDirectory,
+              let indexer = qsaIndexer else { return }
+        let blocks = (visibleKeys - 1) / indexer.compressRatio + 1
+        let snapshot = indexer.debugSnapshot(cells: visibleKeys, blocks: blocks)
+        try? Data(snapshot.keep).write(
+            to: directory.appendingPathComponent("qsa_keep.bin"))
+        snapshot.scores.withUnsafeBufferPointer {
+            try? Data(buffer: $0).write(
+                to: directory.appendingPathComponent("qsa_scores.f32"))
+        }
+        writeQSACaches(directory: directory, indexer: indexer,
+                       visibleKeys: visibleKeys, blocks: blocks)
+    }
+
+    private func writeQSACaches(directory: URL, indexer: QSAIndexer,
+                                visibleKeys: Int, blocks: Int) {
+        if let pooled = indexer.debugPooled(layer: Self.qsaSnapshotLayer,
+                                            blocks: blocks) {
+            pooled.withUnsafeBufferPointer {
+                try? Data(buffer: $0).write(
+                    to: directory.appendingPathComponent("qsa_pooled.f32"))
+            }
+        }
+        if let raw = indexer.debugRawKeys(layer: Self.qsaSnapshotLayer,
+                                          count: visibleKeys) {
+            raw.withUnsafeBufferPointer {
+                try? Data(buffer: $0).write(
+                    to: directory.appendingPathComponent("qsa_raw.f32"))
+            }
+        }
     }
 }
 
 /// Fills the indexer's caches for a prefill chunk, so decode can cross the
 /// dense-exact boundary later without finding holes behind it.
 extension RealForwardRunner {
-    func encodeQSAPrefill(commandBuffer: MTLCommandBuffer,
+    func encodeQSAPrefill(cb: inout MTLCommandBuffer,
                           blockInput: MTLBuffer,
                           layer: Int, startPosition: Int, tokens: Int,
-                          eps: Float) throws {
+                          eps: Float) throws -> (buffer: MTLBuffer, stride: Int)? {
         guard let indexer = qsaIndexer,
-              cfg.fullAttentionLayerMask[layer] == 1 else { return }
+              cfg.fullAttentionLayerMask[layer] == 1 else { return nil }
+        let commandBuffer = cb
         let weights = try indexerWeights(layer: layer)
         let destination = try indexer.rawKeyDestination(
             layer: layer, startPosition: startPosition)
@@ -287,6 +357,49 @@ extension RealForwardRunner {
                                       weights: weights, layer: layer,
                                       startPosition: startPosition,
                                       tokens: tokens, eps: eps)
+
+        // Nothing to choose while the chunk's longest query still sees
+        // everything, so no scoring pass and no barrier.
+        guard let exactness = qsaExactness,
+              !exactness.isDenseExact(visibleKeys: startPosition + tokens)
+        else { return nil }
+
+        try indexer.encodeScoresPrefill(
+            commandBuffer: commandBuffer, blockInput: blockInput,
+            weights: weights, layer: layer,
+            startPosition: startPosition, tokens: tokens, eps: eps,
+            project: { cb, view, x, y, rows, columns, count in
+                try self.prefillQMM.encode(commandBuffer: cb,
+                                           weights: view.buffer,
+                                           weightsOffset: Int(view.offset),
+                                           scales: view.buffer,
+                                           scalesOffset: Int(view.scaleOffset),
+                                           biases: view.buffer,
+                                           biasesOffset: Int(view.biasOffset),
+                                           x: x, y: y,
+                                           t: count, n: rows, k: columns)
+            })
+        // The selection is a host computation over the scores, so the chunk's
+        // command buffer has to land first. The same barrier the routed MoE
+        // already takes for its route readback, one layer earlier.
+        commandBuffer.commit()
+        try waitForCompletion(commandBuffer)
+        recordKernelGPU(role: "prefill_qsa_index", commandBuffer)
+        guard let next = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        cb = next
+        let selection = indexer.selectKeysPrefill(startPosition: startPosition,
+                                                  tokens: tokens)
+        // The chunk's last row is the one a sequential run's final decode
+        // step also produces, so it is the comparable one.
+        if activationDumpDirectory != nil, layer == Self.qsaSnapshotLayer,
+           let selection {
+            dumpQSAChunkSnapshot(selection: selection,
+                                 lastVisible: startPosition + tokens,
+                                 rows: tokens)
+        }
+        return selection
     }
 }
 

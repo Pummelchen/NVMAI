@@ -607,12 +607,31 @@ and fiddly on the GPU. It costs one barrier on the twelve full-attention
 layers of a decode step that is bound by expert I/O. Moving it to the GPU is
 the optimization, and this is the reference to make it against.
 
+Prefill selects too, per query, so a long prompt is no longer refused. The
+chunk's block scores are one kernel over (query, block); the selection is the
+same host computation, one row per query, and costs about a second on a
+2,048-token chunk against the ~75 s that chunk already takes.
+
 Verified against the reference the same way everything else was, with
 `NVMAI_QSA_BUDGET` lowering the budget so the sparse path engages after 67
 tokens instead of 2,051: across 80 positions of a real generation, layer 3's
 attention output matches to cosine 0.99997 or better on both sides of the
 boundary. Without that knob every check of this code would be a
 multi-thousand-token run.
+
+The batched prefill selection is checked against the decode one, which is
+what was checked against the reference. At the **first** full-attention layer,
+where both paths still see the same input, their block scores agree to cosine
+1.0 and their selections are byte-identical.
+
+That comparison has to be made at the first layer, and the reason is worth
+recording: at a deliberately punishing budget (67 of 290 keys, a quarter of
+the context) the two paths' *final* logits diverge to cosine 0.994. Top-k over
+scores is chaotic --- 0.2% of fp16 drift moves one block across the cut, and a
+different block out of sixteen changes the answer. At a production-like ratio
+(74% kept) the same A/B produces identical text. So the divergence measures
+the budget, not the code, and only the first layer isolates the question being
+asked.
 
 ### What parity says now
 
@@ -640,10 +659,10 @@ the attention slot's width.
 - The n-gram gather still sits inline on the decode path, where it could be
   issued a token ahead. It is 5 KiB a token against the experts' hundreds of
   megabytes, so it is not where the time is.
-- The **QSA indexer** now runs on the decode path, so generation past 2,051
-  tokens is faithful rather than refused. A long **prompt** is still refused:
-  prefill attends densely, and masking the chunked prefill attention is a
-  different kernel from the decode one. That is the remaining piece.
+- The **QSA indexer** runs on both paths now, so neither long prompts nor
+  long generations are refused. What remains is that both selections are host
+  computations behind a barrier; moving them to the GPU is the optimization,
+  and the current code is the reference to make it against.
 - The **MTP sidecar** is not installed.
 - Long-context behaviour is verified only at a lowered budget, where the
   sparse path engages after 67 tokens. The arithmetic is the same at 2,051,

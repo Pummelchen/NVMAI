@@ -39,6 +39,7 @@ final class QSAIndexer {
     private let poolPSO: MTLComputePipelineState
     private let poolRangePSO: MTLComputePipelineState
     private let scorePSO: MTLComputePipelineState
+    private let scoreRowsPSO: MTLComputePipelineState
     private let rms: RMSNorm
     private let rope: RoPE
     private let gemv: DequantInt4GEMV
@@ -55,6 +56,12 @@ final class QSAIndexer {
     private var scoresBuf: MTLBuffer
     private var keepBuf: MTLBuffer
     private(set) var capacity: Int
+    /// Chunk-sized scratch, grown on demand: a prefill chunk needs a query
+    /// row and a selection row per token, which decode does not.
+    private var queryRowsBuf: MTLBuffer?
+    private var lastScoredBlocks = 0
+    /// Blocks scored per query row by the most recent chunk pass.
+    var scoredBlocksPerRow: Int { lastScoredBlocks }
 
     /// Cells a query keeps: the budget plus the tail block's extra members.
     var selectionWidth: Int { budget + compressRatio - 1 }
@@ -74,6 +81,7 @@ final class QSAIndexer {
         self.poolPSO = try context.pipeline("qsa_pool_block")
         self.poolRangePSO = try context.pipeline("qsa_pool_blocks")
         self.scorePSO = try context.pipeline("qsa_block_scores")
+        self.scoreRowsPSO = try context.pipeline("qsa_block_scores_rows")
         self.rms = try RMSNorm(context: context)
         self.rope = try RoPE(context: context)
         self.gemv = try DequantInt4GEMV(context: context)
@@ -94,6 +102,30 @@ final class QSAIndexer {
         self.keyBuf = key
         self.scoresBuf = scores
         self.keepBuf = keep
+    }
+
+    /// The most recent selection and the scores behind it, for A/B-ing two
+    /// paths that should agree.
+    /// The pooled block cache for one layer, post-norm and post-rope.
+    func debugPooled(layer: Int, blocks: Int) -> [Float]? {
+        guard let pool = pooled[layer] else { return nil }
+        let ptr = pool.contents().bindMemory(to: Float16.self,
+                                             capacity: blocks * headDim)
+        return (0..<blocks * headDim).map { Float(ptr[$0]) }
+    }
+
+    /// The raw indexer keys for one layer, before norm and rope.
+    func debugRawKeys(layer: Int, count: Int) -> [Float]? {
+        guard let raw = rawKeys[layer] else { return nil }
+        let ptr = raw.contents().bindMemory(to: Float16.self,
+                                            capacity: count * headDim)
+        return (0..<count * headDim).map { Float(ptr[$0]) }
+    }
+
+    func debugSnapshot(cells: Int, blocks: Int) -> (keep: [UInt8], scores: [Float]) {
+        let k = keepBuf.contents().bindMemory(to: UInt8.self, capacity: cells)
+        let sc = scoresBuf.contents().bindMemory(to: Float.self, capacity: blocks)
+        return ((0..<cells).map { k[$0] }, (0..<blocks).map { sc[$0] })
     }
 
     /// The block-score scratch, so a test can drive the selection with known
@@ -319,6 +351,136 @@ final class QSAIndexer {
         enc.dispatchThreads(MTLSize(width: blocks, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         enc.endEncoding()
+    }
+
+    /// Scores every block against every query in a prefill chunk.
+    ///
+    /// `blockInput` is the chunk's `[tokens, hidden]` block input; the query
+    /// projection, its norm and its rope all run over the whole chunk, with
+    /// the rope advancing one position per row.
+    func encodeScoresPrefill(commandBuffer: MTLCommandBuffer,
+                             blockInput: MTLBuffer,
+                             weights: Weights, layer: Int,
+                             startPosition: Int, tokens: Int,
+                             eps: Float,
+                             project: (MTLCommandBuffer, TensorView, MTLBuffer,
+                                       MTLBuffer, Int, Int, Int) throws -> Void) throws {
+        let buffers = try layerBuffers(layer)
+        let query = weights.queryProjection
+        try growQueryScratch(rows: tokens)
+        try project(commandBuffer, query, blockInput, queryRowsBuf!,
+                    heads * headDim, hiddenColumns(query), tokens)
+        try rms.encodeBF16WPerHead(commandBuffer: commandBuffer,
+                                   x: queryRowsBuf!,
+                                   weight: weights.queryNorm.buffer,
+                                   weightOffset: Int(weights.queryNorm.offset),
+                                   out: queryRowsBuf!,
+                                   headDim: UInt32(headDim),
+                                   numHeads: heads * tokens, eps: eps)
+        try rope.encodeNeoxSubdimStrided(
+            commandBuffer: commandBuffer, data: queryRowsBuf!,
+            position: UInt32(startPosition),
+            headDim: UInt32(headDim), numHeads: UInt32(heads),
+            rotaryDim: UInt32(headDim), numTokens: UInt32(tokens),
+            stride: 1, theta: ropeTheta)
+
+        let blocks = (startPosition + tokens - 1) / compressRatio + 1
+        try growScoreScratch(count: blocks * tokens)
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(scoreRowsPSO)
+        enc.setBuffer(queryRowsBuf!, offset: 0, index: 0)
+        enc.setBuffer(buffers.pooled, offset: 0, index: 1)
+        enc.setBuffer(scoresBuf, offset: 0, index: 2)
+        var d = UInt32(headDim), h = UInt32(heads)
+        var b = UInt32(blocks), t = UInt32(tokens)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&h, length: MemoryLayout<UInt32>.size, index: 4)
+        enc.setBytes(&b, length: MemoryLayout<UInt32>.size, index: 5)
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 6)
+        let w = min(scoreRowsPSO.maxTotalThreadsPerThreadgroup, 256)
+        enc.dispatchThreads(MTLSize(width: blocks * tokens, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+        enc.endEncoding()
+        lastScoredBlocks = blocks
+    }
+
+    /// The chunk's selection, one row of `keepStride` bytes per query, or nil
+    /// when every query in the chunk is inside the dense-exact window.
+    ///
+    /// Every query gets the same treatment the decode path gives one: its own
+    /// ragged tail forced in, then complete blocks by score until the cell
+    /// budget runs out. A query inside the window keeps everything it can see.
+    func selectKeysPrefill(startPosition: Int, tokens: Int)
+        -> (buffer: MTLBuffer, stride: Int)? {
+        let lastVisible = startPosition + tokens
+        guard lastVisible > selectionWidth else { return nil }
+        let stride = lastVisible
+        guard (try? growKeepScratch(count: stride * tokens)) != nil else { return nil }
+        let keep = keepBuf.contents().bindMemory(to: UInt8.self,
+                                                 capacity: stride * tokens)
+        let scores = scoresBuf.contents().bindMemory(
+            to: Float.self, capacity: lastScoredBlocks * tokens)
+        for row in 0..<tokens {
+            let visible = startPosition + row + 1
+            let base = row * stride
+            memset(keep + base, 0, stride)
+            if visible <= selectionWidth {
+                memset(keep + base, 1, visible)
+                continue
+            }
+            let completeCells = (visible / compressRatio) * compressRatio
+            for cell in completeCells..<visible { keep[base + cell] = 1 }
+            var remaining = selectionWidth - (visible - completeCells)
+            guard remaining > 0 else { continue }
+            let blocks = completeCells / compressRatio
+            let rowScores = scores + row * lastScoredBlocks
+            let ranked = (0..<blocks).sorted {
+                rowScores[$0] == rowScores[$1]
+                    ? $0 < $1 : rowScores[$0] > rowScores[$1]
+            }
+            for block in ranked {
+                if remaining <= 0 { break }
+                let take = min(compressRatio, remaining)
+                let cellBase = base + block * compressRatio
+                for offset in 0..<take { keep[cellBase + offset] = 1 }
+                remaining -= take
+            }
+        }
+        return (keepBuf, stride)
+    }
+
+    private func growQueryScratch(rows: Int) throws {
+        let needed = rows * heads * headDim * MemoryLayout<Float16>.stride
+        if let existing = queryRowsBuf, existing.length >= needed { return }
+        guard let made = ctx.device.makeBuffer(length: needed,
+                                               options: .storageModeShared) else {
+            throw MetalError.bufferAllocationFailed("QSA indexer chunk queries")
+        }
+        made.label = "qsa.chunkQueries"
+        queryRowsBuf = made
+    }
+
+    private func growScoreScratch(count: Int) throws {
+        let needed = count * MemoryLayout<Float>.stride
+        if scoresBuf.length >= needed { return }
+        guard let made = ctx.device.makeBuffer(length: needed,
+                                               options: .storageModeShared) else {
+            throw MetalError.bufferAllocationFailed("QSA indexer chunk scores")
+        }
+        made.label = "qsa.scores"
+        scoresBuf = made
+    }
+
+    private func growKeepScratch(count: Int) throws {
+        if keepBuf.length >= count { return }
+        guard let made = ctx.device.makeBuffer(length: count,
+                                               options: .storageModeShared) else {
+            throw MetalError.bufferAllocationFailed("QSA indexer chunk selection")
+        }
+        made.label = "qsa.keep"
+        keepBuf = made
     }
 
     /// Turns the scored blocks into the per-key selection the attention reads.

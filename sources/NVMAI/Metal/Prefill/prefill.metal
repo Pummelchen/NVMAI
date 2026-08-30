@@ -776,6 +776,12 @@ kernel void attention_prefill_causal_tiled(
     device const uchar* V [[buffer(2)]],
     device half* O [[buffer(3)]],
     constant PrefillAttentionParams& p [[buffer(4)]],
+    // Sparse-attention selection, one row of `keepStride` bytes per query.
+    // Unlike decode's single query, a chunk's rows each pick their own keys,
+    // so this is a matrix and not a vector.
+    device const uchar* keep [[buffer(5)]],
+    constant uint& useKeep [[buffer(6)]],
+    constant uint& keepStride [[buffer(7)]],
     uint3 tg [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
@@ -805,6 +811,10 @@ kernel void attention_prefill_causal_tiled(
     float acc = 0.0f;
 
     for (uint key = first; key < last_exclusive; ++key) {
+        // Uniform across the threadgroup -- `t` and `key` are the same for
+        // every thread in it -- so skipping here cannot strand anyone at the
+        // threadgroup reduction below.
+        if (useKeep != 0u && keep[t * keepStride + key] == 0u) { continue; }
         const uint phys_key = prefill_kv_slot(key);
         const float qv = owns ? float(q_row[d]) : 0.0f;
         const uint flat = kvh * p.headDim + d;

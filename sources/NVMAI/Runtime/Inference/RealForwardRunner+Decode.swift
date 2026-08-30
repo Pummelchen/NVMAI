@@ -401,6 +401,13 @@ extension RealForwardRunner {
                     dumpActivation("logits", logits, count: cfg.vocabSize,
                                    position: position)
                 }
+                // The last prompt position's logits, however prefill produced
+                // them: the one place a batched path and the sequential
+                // oracle can be compared as numbers rather than as text.
+                if activationDumpDirectory != nil, emitHead {
+                    dumpActivation("prefill_logits", logits,
+                                   count: cfg.vocabSize, position: 0)
+                }
                 totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
             }
         }
