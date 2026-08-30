@@ -263,10 +263,12 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
                 maxContext: Int,
                 memoryBudgetMiB: Int = StreamingMTPMemoryPlan.defaultBudgetMiB,
                 runtimeConfiguration: RuntimeConfiguration = .production) throws {
-        guard targetModel.config.family == .qwen36 else {
+        guard targetModel.config.family == .qwen36
+                || targetModel.config.family == .qwen38flash else {
             throw StreamingMTPError.targetMustBeQwen36
         }
-        guard mtpSidecar.config.family == .qwen36MTP else {
+        guard mtpSidecar.config.family == .qwen36MTP
+                || mtpSidecar.config.family == .qwen38flashMTP else {
             throw StreamingMTPError.sidecarMustBeQwen36MTP
         }
         guard runtimeConfiguration.ropeScalingMode == .none else {
@@ -275,9 +277,21 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
         // Validate MTP tensors exist before attempting weight sharing. The
         // errors (missing tensor, wrong layout) propagate as-is (R19) — a
         // broken sidecar must fail loudly at session construction.
-        _ = try mtpSidecar.mtpProjection()
-        _ = try mtpSidecar.mtpEmbeddingNorm()
-        _ = try mtpSidecar.mtpHiddenNorm()
+        //
+        // The two families fuse differently -- one projection over a
+        // concatenation against two projections that are summed -- so each
+        // checks for its own tensors. Asking for the other's would fail here
+        // on a sidecar that is perfectly sound.
+        if mtpSidecar.config.family == .qwen38flashMTP {
+            _ = try mtpSidecar.mtpWideNorm()
+            _ = try mtpSidecar.mtpTokenNorm()
+            _ = try mtpSidecar.mtpHiddenProjection()
+            _ = try mtpSidecar.mtpEmbeddingProjection()
+        } else {
+            _ = try mtpSidecar.mtpProjection()
+            _ = try mtpSidecar.mtpEmbeddingNorm()
+            _ = try mtpSidecar.mtpHiddenNorm()
+        }
         let boundDraft = try mtpSidecar.sharingTargetWeights(from: targetModel)
         let targetRunner = try RealForwardRunner(model: targetModel,
                                                  context: context,
@@ -299,11 +313,12 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
                                                 context: context,
                                                 maxContext: draftContext,
                                                 runtimeConfiguration: draftRuntime)
+        let draftConfig = boundDraft.config
         let scratch = PrefillChunkScratchLayout(
-            config: ArchConfig.qwen36MTP,
+            config: draftConfig,
             chunkTokens: 32).totalPersistentBytes
-            + 2 * ArchConfig.qwen36MTP.vocabSize * MemoryLayout<Float16>.stride
-            + 32 * ArchConfig.qwen36MTP.hiddenSize * 7 * MemoryLayout<Float16>.stride
+            + 2 * draftConfig.vocabSize * MemoryLayout<Float16>.stride
+            + 32 * draftConfig.hiddenSize * 7 * MemoryLayout<Float16>.stride
         self.memoryPlan = try StreamingMTPMemoryPlan(
             budgetMiB: memoryBudgetMiB,
             residentTensorBytes: mtpSidecar.mtpResidentTensorBytes,
@@ -318,6 +333,21 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
         self.draftMaxContext = draftContext
         self.targetConfig = targetModel.config
     }
+
+    /// The residual width the target carries, which is what the draft is
+    /// handed: `hc_count * hidden` for a hyper-connection family.
+    private var targetResidualWidth: Int {
+        targetConfig.hyperConnections.enabled
+            ? targetConfig.hiddenSize * targetConfig.hyperConnections.count
+            : targetConfig.hiddenSize
+    }
+
+    /// Per-step draft/verify decisions on stderr (`NVMAI_MTP_TRACE=1`).
+    /// Speculative decoding is supposed to be exact, so when its output
+    /// differs from the scalar path the question is always which of these
+    /// four numbers is wrong, and the text cannot answer that.
+    static let traceEnabled =
+        ProcessInfo.processInfo.environment["NVMAI_MTP_TRACE"] == "1"
 
     public func reset() {
         target.reset()
@@ -365,7 +395,7 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
     func advance(boundaryToken: Int32) async throws -> MTPDecodeBatch {
         guard let boundaryHidden else { throw StreamingMTPError.draftNotReady }
         let tProposal = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let draftToken = try await draft.advanceMTP(
+        let draftToken = try await draft.advanceMTPForFamily(
             tokens: [boundaryToken][...],
             targetHiddenRows: boundaryHidden,
             startPosition: draft.continuationPosition,
@@ -386,12 +416,20 @@ public final class StreamingMTPDecoder: LogitProducer, ContextWindowReporting,
             [boundaryToken, draftToken],
             startPosition: checkpoint.position)
         let tAfterVerify = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-        let rowBytes = targetConfig.hiddenSize * MemoryLayout<Float16>.stride
+        let rowBytes = targetResidualWidth * MemoryLayout<Float16>.stride
         let hiddenAfterBoundary = verification.hiddenRows.subdata(in: 0..<rowBytes)
         let accepted = verification.predictionAfterFirst == draftToken
+        if Self.traceEnabled {
+            let line = "[mtp] pos=\(draft.continuationPosition)"
+                + " boundary=\(boundaryToken) draft=\(draftToken)"
+                + " afterFirst=\(verification.predictionAfterFirst)"
+                + " afterSecond=\(verification.predictionAfterSecond)"
+                + " accepted=\(accepted)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
         if accepted {
             let tCommit = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            _ = try await draft.advanceMTP(
+            _ = try await draft.advanceMTPForFamily(
                 tokens: [draftToken][...],
                 targetHiddenRows: hiddenAfterBoundary,
                 startPosition: draft.continuationPosition,

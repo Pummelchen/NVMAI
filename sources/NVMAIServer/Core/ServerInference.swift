@@ -2,6 +2,28 @@ import CryptoKit
 import Foundation
 import NVMAI
 
+/// A model the server was asked to load but this build cannot run.
+enum ServerInferenceError: Error, CustomStringConvertible {
+    case unsupportedModel(String)
+
+    var description: String {
+        switch self {
+        case .unsupportedModel(let detail): return detail
+        }
+    }
+}
+
+/// Prefill chunk size when the caller has not asked for one. Both families
+/// with a long-chunk default want it for the same reason -- routed experts are
+/// what prefill spends itself on, and a longer chunk amortizes them.
+func defaultPrefillChunkTokens(family: ModelFamily, fallback: Int) -> Int {
+    switch family {
+    case .qwen36: return RuntimeConfiguration.qwenLongPrefillChunkTokens
+    case .qwen38flash: return 2_048
+    default: return fallback
+    }
+}
+
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
     case toolCall(ParsedToolCall)
@@ -517,9 +539,18 @@ public actor ServerModelSession: ServerInferenceBackend {
         // measured optima for each. The previous fixed default of 64 was slower
         // *and* larger than either -- benchmarked at the shipped 262144 context,
         // 4-bit managed 9.85 tok/s at 64 slots against 13.61 at 16.
+        // The architecture comes from the manifest rather than being assumed,
+        // exactly as the CLI resolves it: a payload of any other family should
+        // load, not fail on a dimension mismatch.
+        let modelFamily = try ManifestReader.peekFamily(directoryURL: modelDirectory)
+        guard let expectedArch = ArchConfig.knownArchitectures[modelFamily] else {
+            throw ServerInferenceError.unsupportedModel(
+                "model declares family \(modelFamily.rawValue), which this "
+                    + "runtime does not implement")
+        }
         let derivedSlots: Int
         if let manifest = try? ManifestReader.load(directoryURL: modelDirectory,
-                                                  expecting: .qwen36_35B_A3B) {
+                                                  expecting: expectedArch) {
             derivedSlots = RuntimeConfiguration.expertCacheSlots(
                 expertStrideBytes: manifest.expertStride,
                 layers: manifest.arch.numLayers,
@@ -534,7 +565,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let model = try Model.load(
             directoryURL: modelDirectory,
             device: context.device,
-            expecting: .qwen36_35B_A3B,
+            expecting: expectedArch,
             streamingMode: .pread(slotCount: loadSlots),
             expertCachePolicy: loadRuntime.modelExpertCachePolicy,
             integrityPolicy: .resolved(directoryURL: modelDirectory))
@@ -545,9 +576,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 .map(RDAdvicePolicyMode.parse)
                 ?? loadRuntime.rdadvisePolicy,
             prefillChunkTokens: requestedPrefillChunkTokens
-                ?? (model.config.family == .qwen36
-                    ? RuntimeConfiguration.qwenLongPrefillChunkTokens
-                    : loadRuntime.prefillChunkTokens),
+                ?? defaultPrefillChunkTokens(family: model.config.family,
+                                             fallback: loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
             forceLogitsHead: true,
             decodeExpertExecution: loadRuntime.decodeExpertExecution,
@@ -560,10 +590,17 @@ public actor ServerModelSession: ServerInferenceBackend {
         let mtpDecoder: StreamingMTPDecoder?
         let runner: RealForwardRunner
         if let mtpModelDirectory {
+            let sidecarFamily = try ManifestReader.peekFamily(
+                directoryURL: mtpModelDirectory)
+            guard let sidecarArch = ArchConfig.knownArchitectures[sidecarFamily] else {
+                throw ServerInferenceError.unsupportedModel(
+                    "MTP sidecar declares family \(sidecarFamily.rawValue), "
+                        + "which this runtime does not implement")
+            }
             let sidecar = try Model.load(
                 directoryURL: mtpModelDirectory,
                 device: context.device,
-                expecting: .qwen36MTP,
+                expecting: sidecarArch,
                 streamingMode: .pread(slotCount: StreamingMTPMemoryPlan.expertSlots),
                 expertCachePolicy: runtime.modelExpertCachePolicy,
                 integrityPolicy: .resolved(directoryURL: mtpModelDirectory))

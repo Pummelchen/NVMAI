@@ -271,12 +271,79 @@ public struct Model {
         return try resident(name: "pre_fc_norm_hidden.weight")
     }
 
+    // MARK: Qwen3.8-Flash-Next draft head
+    //
+    // This family fuses with two projections rather than one over a
+    // concatenation: `fc_hidden` takes the target's wide residual and
+    // `fc_embedding` takes the next token's embedding, and their outputs are
+    // summed. Two [2560, 2560] matrices, not one [2560, 5120] -- the shapes
+    // are what say so, and getting it wrong would show up only as a draft
+    // that is never accepted.
+
+    /// `[hidden, hc_dim]`: the target's wide residual down to one stream.
+    public func mtpHiddenProjection() throws -> TensorView {
+        try resident(name: "fc_hidden.weight")
+    }
+    /// `[hidden, hidden]`: the next token's embedding.
+    public func mtpEmbeddingProjection() throws -> TensorView {
+        try resident(name: "fc_embedding.weight")
+    }
+    /// Grouped over the hyper-connection streams, unlike the embedding norm.
+    /// Stored already folded (+1) by the MLX conversion, like every other
+    /// gamma in this checkpoint; used as-is.
+    public func mtpWideNorm() throws -> TensorView {
+        try resident(name: "pre_fc_norm_hidden")
+    }
+    public func mtpTokenNorm() throws -> TensorView {
+        try resident(name: "pre_fc_norm_embedding")
+    }
+
+    /// The Qwen3.8-Flash-Next draft head's own tensors.
+    ///
+    /// It has no embedding, no head and no n-gram block: it borrows the first
+    /// two from the target it drafts for and does not have the third. What is
+    /// its own is the single decoder layer and the fusion pair, so that is
+    /// what gets checked.
+    private static func validateQwen38DraftSchema(
+        checks: RuntimeSchemaChecks,
+        quant: ManifestQuant,
+        config: ArchConfig
+    ) throws {
+        let hcDim = config.hiddenSize * config.hyperConnections.count
+        try checks.requireBF16(
+            "model.language_model.hyper_connection_mixer.hc_norm", count: hcDim)
+        try checks.requireBF16(
+            "model.language_model.layers.0.attn_hyper_connection.hc_norm",
+            count: hcDim)
+        try checks.requireBF16(
+            "model.language_model.layers.0.mlp_hyper_connection.hc_norm",
+            count: hcDim)
+        // Without both projections this is not a draft head, it is a
+        // detached layer.
+        try checks.requireBF16("pre_fc_norm_hidden", count: hcDim)
+        try checks.requireBF16("pre_fc_norm_embedding", count: config.hiddenSize)
+        // [D, D], not [D, hc_dim]: the wide residual is mean-collapsed to one
+        // stream before this projection sees it. The reference's prose says
+        // otherwise and its own code works out that the prose cannot be right;
+        // the tensor shape settles it.
+        try checks.requireAffine("fc_hidden.weight",
+                                 rows: config.hiddenSize,
+                                 columns: config.hiddenSize,
+                                 slot: quant.attention)
+        try checks.requireAffine("fc_embedding.weight",
+                                 rows: config.hiddenSize,
+                                 columns: config.hiddenSize,
+                                 slot: quant.attention)
+    }
+
     /// Attach a native MTP sidecar to a target without copying either large
     /// tensor. The returned model retains the target's Metal buffers and uses
     /// its actual 4/6/8-bit head kernels.
     public func sharingTargetWeights(from target: Model) throws -> Model {
-        guard config.family == .qwen36MTP,
-              target.config.family == .qwen36,
+        let pairing = (config.family, target.config.family)
+        let familiesMatch = pairing == (.qwen36MTP, .qwen36)
+            || pairing == (.qwen38flashMTP, .qwen38flash)
+        guard familiesMatch,
               config.hiddenSize == target.config.hiddenSize,
               config.vocabSize == target.config.vocabSize,
               Self.mtpLineagesAreCompatible(sidecarID: modelID,
@@ -311,6 +378,9 @@ public struct Model {
         func lineage(_ modelID: String) -> String? {
             let normalized = modelID.lowercased()
             if normalized.contains("ornith-1.5") { return "ornith-1.5" }
+            // Checked before the generic qwen3.6 prefix so the flash lineage
+            // is not swallowed by it.
+            if normalized.contains("qwen3.8-flash-next") { return "qwen3.8-flash-next" }
             if normalized.contains("qwen3.6") || normalized.hasPrefix("qwen-") {
                 return "qwen3.6"
             }
@@ -837,6 +907,9 @@ extension Model {
                 throw ModelError.missingFile(
                     name: Qwen38FlashTensors.pleConstantsFile)
             }
+        case .qwen38flashMTP:
+            try Self.validateQwen38DraftSchema(checks: checks, quant: quant,
+                                               config: config)
         case .qwen36:
             try checks.requireAffine(
                                      "language_model.model.embed_tokens.weight",

@@ -115,7 +115,9 @@ extension RepackPlanner {
         family: RepackModelFamily
     ) -> [(name: String, required: Bool, capBytes: UInt64)] {
         switch family {
-        case .qwen36, .qwen36MTP:
+        case .qwen36, .qwen36MTP, .qwen38flashMTP:
+            // The draft needs no sidecar files of its own: it has no n-gram
+            // block, and its embedding and head are the target's.
             return []
         case .qwen38flash:
             return [
@@ -166,6 +168,20 @@ enum RepackPlanner {
                 return .lmResident
             }
             return .unknown
+        }
+        if family == .qwen38flashMTP {
+            // Mirror image of the target's rule: this install is only the
+            // `mtp.*` namespace, and everything else belongs to the model it
+            // drafts for. The prefix is stripped so the sidecar reads as the
+            // one-layer model it is.
+            guard name.hasPrefix("mtp.") else { return .excludedSidecar }
+            let stripped = String(name.dropFirst("mtp.".count))
+            if let role = routedExpertRole(in: stripped),
+               let layer = layerIndex(in: stripped),
+               layer >= 0 && layer < numLayers {
+                return .routedExpert(role: role, layer: layer)
+            }
+            return .lmResident
         }
         if family == .qwen38flash {
             // The MTP draft rides in the target's index but is a separate
@@ -606,6 +622,21 @@ enum RepackPlanner {
     /// contract. MTP-only adapter tensors retain their upstream names.
     private static func residentDestinationName(_ source: String,
                                                 family: RepackModelFamily) -> String {
+        if family == .qwen38flashMTP {
+            // Strip `mtp.` and put the decoder layer under the target's own
+            // prefix, so the draft's layer body reuses the family schema
+            // verbatim. The fusion projections and their norms stay at the
+            // root: they exist only in the draft.
+            let stripped = source.hasPrefix("mtp.")
+                ? String(source.dropFirst("mtp.".count)) : source
+            if stripped.hasPrefix("layers.") {
+                return "model.language_model." + stripped
+            }
+            if stripped.hasPrefix("hyper_connection_mixer.") {
+                return "model.language_model." + stripped
+            }
+            return stripped
+        }
         guard family == .qwen36MTP else { return source }
         if source.hasPrefix("layers.") {
             return "language_model.model." + source

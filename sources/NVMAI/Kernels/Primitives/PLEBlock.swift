@@ -132,6 +132,31 @@ final class PLEBlock {
         resetState()
     }
 
+    /// Rewinds the convolution window to `acceptedRows` of the pass that just
+    /// ran `passRows`.
+    ///
+    /// Speculative decoding runs the target over rows it may discard, and this
+    /// window is the one piece of the target's state that neither self-heals
+    /// nor is covered by the KV rewind: the KV row is overwritten by its
+    /// replacement and the pooled indexer blocks are recomputed from raw keys,
+    /// but a rolling convolution advanced two rows for one accepted token
+    /// stays desynchronized for the rest of the generation, silently.
+    ///
+    /// The rewind is exact and costs one blit, because the buffer the pass
+    /// read from is still intact: the pair ping-pongs, so advancing by a
+    /// different amount is just a different source offset into it.
+    func rewindWindow(acceptedRows: Int, passRows: Int) {
+        precondition(acceptedRows >= 0 && acceptedRows <= passRows,
+                     "cannot accept \(acceptedRows) of \(passRows) rows")
+        guard acceptedRows != passRows else { return }
+        let rowBytes = hcDim * MemoryLayout<Float16>.stride
+        let source = xpad[1 - xpadIndex]
+        let destination = xpad[xpadIndex]
+        memcpy(destination.contents(),
+               source.contents().advanced(by: acceptedRows * rowBytes),
+               history * rowBytes)
+    }
+
     /// Clears the carried convolution history. Call between completions: a
     /// state left over from a previous prompt would leak that prompt's
     /// n-grams into the first tokens of the next one.

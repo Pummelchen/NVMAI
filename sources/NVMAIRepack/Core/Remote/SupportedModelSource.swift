@@ -29,7 +29,16 @@ public struct SupportedModelSource: Sendable, Equatable {
             requireKnownSource: true,
             minFreeReserveBytes: reserveBytes,
             overwrite: overwrite,
-            resume: resume)
+            resume: resume,
+            installDraftHead: installsDraftHead)
+    }
+
+    /// Whether this source claims a repository's `mtp.*` namespace rather
+    /// than the model itself. Only Qwen3.8-Flash-Next ships the two together;
+    /// every other draft has a repository of its own, where the config
+    /// already says what it is.
+    public var installsDraftHead: Bool {
+        repoID == Self.qwen38flash.repoID && name.hasSuffix("-mtp")
     }
 
     /// Download estimate covers the `language_model.*` tensors plus tokenizer
@@ -124,11 +133,31 @@ public struct SupportedModelSource: Sendable, Equatable {
         installedBytes: 174_228_562_488,
         reserveBytes: 4 * 1_073_741_824)
 
+    /// The Qwen3.8-Flash-Next MTP draft head.
+    ///
+    /// Same repository and revision as the target, because the draft ships
+    /// inside it -- but in its own `mtp-weights.safetensors` shard, so the
+    /// install fetches 1.37 GB rather than re-reading the backbone. It has no
+    /// embedding or head of its own; both are shared from the target it
+    /// drafts for.
+    public static let qwen38flashMTP = SupportedModelSource(
+        name: "qwen38flash-mtp",
+        displayName: "Qwen3.8-Flash-Next 125B-A6B native MTP draft 4-bit",
+        repoID: "RockTalk/Qwen3.8-Flash-Next-MLX-4bit",
+        revision: "478474da92599ad0cf9f8bd447e658b29cb8480a",
+        sourceIndexSHA256:
+            "d7fe03ad2d1365e24ae2e305c829f600b80fac845d128383421a7be4adbdda1b",
+        modelID: "qwen3.8-flash-next-mtp-4bit",
+        approximateDownloadBytes: 1_471_026_000,
+        installedBytes: 1_480_000_000,
+        reserveBytes: 2 * 1_073_741_824)
+
     /// Default source when no `--model` selector is given.
     public static let `default` = ornith15_8bit
 
     public static let all: [SupportedModelSource] = [
         qwen36, qwen36_8bit, ornith15, ornith15_8bit, qwen36MTP, qwen38flash,
+        qwen38flashMTP,
     ]
 
     public static func named(_ name: String) -> SupportedModelSource? {

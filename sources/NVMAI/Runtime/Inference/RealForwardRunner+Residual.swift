@@ -422,6 +422,17 @@ extension RealForwardRunner {
         try table.gather(rows: rows, into: ple.embedding.contents())
     }
 
+    /// Rewinds the n-gram block's carried state after a speculative pass whose
+    /// rows were not all accepted.
+    func rewindPLE(acceptedRows: Int, passRows: Int) {
+        guard pleBlock != nil, acceptedRows < passRows else { return }
+        pleBlock?.rewindWindow(acceptedRows: acceptedRows, passRows: passRows)
+        // The hashed context must drop the same rows, or every later token's
+        // n-gram ids are computed one position out.
+        let discard = min(passRows - acceptedRows, pleContext.count)
+        pleContext.removeFirst(discard)
+    }
+
     /// Clears the state that spans a completion: the convolution history and
     /// the token context it hashes. Leaving either in place would let one
     /// prompt's trailing n-grams open the next one.

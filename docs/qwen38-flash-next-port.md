@@ -663,8 +663,91 @@ the attention slot's width.
   long generations are refused. What remains is that both selections are host
   computations behind a barrier; moving them to the GPU is the optimization,
   and the current code is the reference to make it against.
-- The **MTP sidecar** is not installed.
+- The **MTP draft head** is installed and works, and is a measured loss. See
+  below.
 - Long-context behaviour is verified only at a lowered budget, where the
   sparse path engages after 67 tokens. The arithmetic is the same at 2,051,
   but nothing has been diffed against a reference at that length --- the
   reference cannot hold this model.
+
+## MTP: measured, and closed (2026-08-30)
+
+The draft head installs from its own 1.37 GB shard inside the target's
+repository (`NVMAIRepack --model qwen38flash-mtp`) and runs through the
+existing speculative loop (`NVMAIServer --mtp-model`). It is **off unless
+asked for**, and should stay that way.
+
+**Measured, 150 tokens, same prompt, interleaved:**
+
+| | |
+|---|---|
+| Acceptance | 71.3% (62 of 87 passes) |
+| Emitted per pass | 1.72 |
+| Width-2 verify pass | **2.75x a scalar token** |
+| Ceiling at 100% acceptance | 2.00x |
+| End to end | **0.71x** scalar (2.45 vs 3.43 tok/s) |
+
+The within-run accounting is the part that does not depend on cross-run
+noise: a pass costing 2.75x that delivers 1.72 tokens loses, and would still
+lose at perfect acceptance. 71.3% acceptance is *good* and changes nothing.
+This reproduces the Qwen 3.6 verdict (`3abd32b`) on a different model with
+different geometry -- and the geometry predicted it: adjacent tokens share
+3.49 of 10 experts here against 3.3 of 8 there, so the width-2 union is 1.65x
+against 1.59x.
+
+### The fusion is inferred, not verified
+
+Every other part of this port was checked against a reference. This one could
+not be. Upstream `transformers` drops the `mtp.*` namespace outright
+(`_keys_to_ignore_on_load_unexpected`), and the MLX port infers the fusion
+from tensor shapes, says so in its own comments, and applies the gamma twice
+while doing it.
+
+What the shapes fix: `pre_fc_norm_hidden` is `[hc_dim]` while `fc_hidden` is
+`[D, D]`, so the wide residual is normed and then collapsed before the
+projection sees it, and a plain mean is the collapse that inverts `hc_init`.
+Two `[D, D]` matrices rather than one `[D, 2D]` is what says the branches are
+summed rather than concatenated.
+
+Being uncertain here is safe in a way it was not elsewhere: speculative
+decoding emits the target's own argmax, so a wrong fusion costs throughput and
+never output. 71.3% acceptance says the reading is at least close to right.
+
+One check the reference's prose would have got wrong: it states the two
+`pre_fc_norm_*` gammas are stored zero-centred and need `+1` folded in. They
+are not, in this checkpoint -- `pre_fc_norm_embedding` has mean +0.236, which
+is exactly the reference's *post*-fold value. The MLX conversion already
+applied it, as it did for every other gamma here. Folding again would have
+produced a draft that was simply never accepted, with nothing to say why.
+
+### Not byte-exact against the scalar path
+
+Qwen 3.6's MTP is byte-identical to scalar decoding because its verify path
+was deliberately built to reproduce the decode numerics row by row. This one
+uses the generic batched prefill, so row 0's reassociation differs and the two
+diverge at near-ties: on the measured prompt they agree for 205 characters and
+then split between two equally correct continuations. Both are valid greedy
+decodes of the same model. Given the throughput verdict this was not worth
+tuning, but it means MTP here can change output where the Qwen 3.6 path
+cannot.
+
+### Three bugs it took to get there
+
+All three were silent, and one was the third instance of a single mistake.
+
+1. The width-2 verify's **own MoE tail** did a plain residual add into the
+   wide residual, bypassing the hyper-connection write gate. It is a separate
+   code path from the batched prefill's tail, so fixing one did not fix it.
+2. The **fused pair head** applied a plain RMSNorm instead of the mixer
+   collapse. That is the same defect as the decode head's, in a third place:
+   *any* fused head that folds in an RMSNorm is wrong for this family.
+3. The **PLE convolution window** advanced two rows per verify and never
+   rolled back on rejection. The KV row and the pooled indexer blocks are both
+   recomputed by whatever replaces the rejected row, so they self-heal; a
+   rolling window does not, and stays desynchronized for the rest of the
+   generation.
+
+`NVMAI_MTP_TRACE=1` prints the four numbers per step (boundary, draft,
+prediction after each row, accepted). Speculative decoding is meant to be
+exact, so when its output differs from scalar the question is always which of
+those is wrong, and the text cannot answer it.

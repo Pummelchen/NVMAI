@@ -368,3 +368,28 @@ void hc_stream_expand_fp16(
     const uint d = rest % D;
     dst[tid] = src[t * D + d];
 }
+
+// out[t, d] = mean over streams of streams[t, s, d].
+//
+// The unweighted collapse of the wide residual. Distinct from
+// hc_stream_mix_reduce, which weights each stream by a learned gate first:
+// the MTP draft's fusion takes a plain mean, because the gate that would
+// weight it belongs to a mixer that runs after the draft's own layer, not
+// before it.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void hc_stream_mean_fp16(
+    device const half* streams [[buffer(0)]],  // [T, S, D]
+    device       half* out     [[buffer(1)]],  // [T, D]
+    constant     uint& D       [[buffer(2)]],
+    constant     uint& S       [[buffer(3)]],
+    constant     uint& T       [[buffer(4)]],
+    uint               tid     [[thread_position_in_grid]]
+) {
+    if (tid >= D * T) return;
+    const uint t = tid / D;
+    const uint d = tid - t * D;
+    device const half* row = streams + t * S * D;
+    float acc = 0.0f;
+    for (uint s = 0; s < S; ++s) { acc += float(row[s * D + d]); }
+    out[tid] = half(acc / float(S));
+}

@@ -203,15 +203,26 @@ extension RealForwardRunner {
             throw ModelError.residentBufferWrapFailed
         }
         if let preparedHidden {
+            // The caller hands over `[t, D]` rows -- an MTP draft's fused
+            // hidden. A hyper-connection stack starts every stream from that
+            // same vector, so it lands in the narrow staging buffer and is
+            // widened exactly the way an embedding would be.
+            let target = hyperConnection == nil ? scratch.hidden : scratch.normed
             guard let blit = cb.makeBlitCommandEncoder() else {
                 throw ModelError.residentBufferWrapFailed
             }
             blit.copy(from: preparedHidden,
                       sourceOffset: 0,
-                      to: scratch.hidden,
+                      to: target,
                       destinationOffset: 0,
                       size: t * D * MemoryLayout<Float16>.stride)
             blit.endEncoding()
+            if hyperConnection != nil {
+                try elementwise!.encodeHCExpand(
+                    commandBuffer: cb,
+                    source: scratch.normed, destination: scratch.hidden,
+                    dim: D, streamCount: residualStreamCount, tokens: t)
+            }
         } else {
             // A hyper-connection stack starts every stream from the token
             // embedding, so the lookup lands in a one-stream staging buffer

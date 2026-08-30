@@ -16,6 +16,14 @@ public struct RemoteStreamingRepackOptions: Sendable {
     public let baseURL: URL
     public let rangeRetryAttempts: Int
     public let retryBaseDelayNs: UInt64
+    /// Install the repository's MTP draft rather than the model itself.
+    ///
+    /// Qwen3.8-Flash-Next ships its draft head inside the target's repository,
+    /// in its own shard, so the two installs differ by which namespace they
+    /// claim rather than by where they come from. Nothing in `config.json`
+    /// distinguishes them, which is why this is a choice the caller makes and
+    /// not something the loader can infer.
+    public let installDraftHead: Bool
 
     public init(repoID: String,
                 revision: String,
@@ -32,10 +40,12 @@ public struct RemoteStreamingRepackOptions: Sendable {
                 downloadSession: RemoteDownloadSession = RemoteDownloadSession(),
                 baseURL: URL = RemoteBaseURL.huggingFace,
                 rangeRetryAttempts: Int = 4,
-                retryBaseDelayNs: UInt64 = 1_000_000_000) {
+                retryBaseDelayNs: UInt64 = 1_000_000_000,
+                installDraftHead: Bool = false) {
         self.repoID = repoID
         self.revision = revision
         self.outputDir = outputDir
+        self.installDraftHead = installDraftHead
         self.token = token
         self.requireKnownSource = requireKnownSource
         self.copyAuditPath = copyAuditPath
@@ -222,6 +232,7 @@ public final class RemoteStreamingRepacker {
         let snapshot = try await RemoteSnapshotLoader.load(remote: remote,
                                                            requireKnownSource: options.requireKnownSource,
                                                            metadataDirectory: paths.metadataDirectory,
+                                                           installDraftHead: options.installDraftHead,
                                                            audit: audit)
         try Task.checkCancellation()
         // Files this family carries verbatim alongside the tensor payload.
@@ -447,7 +458,7 @@ public final class RemoteStreamingRepacker {
         // draft layer. It shares tokenization, embedding and lm_head with the
         // target bundle, so copying tokenizer/config sidecars would be both
         // redundant and a misleading standalone-model contract.
-        if plan.arch.family != .qwen36MTP {
+        if plan.arch.family != .qwen36MTP && plan.arch.family != .qwen38flashMTP {
             try await copyRemoteMetadataSidecars(snapshot: snapshot,
                                                  remote: remote,
                                                  partialDir: paths.partialDirectory,

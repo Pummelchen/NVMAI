@@ -141,8 +141,39 @@ struct QwenRepackPlannerTests {
             == "ornith-ai/Ornith-1.5-35B-A3B-MLX-8bit")
         #expect(Set(SupportedModelSource.all.map(\.name)).count
             == SupportedModelSource.all.count)
-        #expect(Set(SupportedModelSource.all.map(\.sourceIndexSHA256)).count
+        #expect(Set(SupportedModelSource.all.map(\.modelID)).count
             == SupportedModelSource.all.count)
+        // Two sources may share an index digest: Qwen3.8-Flash-Next ships its
+        // MTP draft inside the target's own repository, so the pair differ by
+        // which namespace they claim rather than by where they come from.
+        // What must stay unique is the pairing of digest and namespace, which
+        // is what decides what an install actually contains.
+        let pins = SupportedModelSource.all.map {
+            "\($0.sourceIndexSHA256)|\($0.installsDraftHead)"
+        }
+        #expect(Set(pins).count == SupportedModelSource.all.count)
+        #expect(SupportedModelSource.qwen38flashMTP.repoID
+            == SupportedModelSource.qwen38flash.repoID)
+        #expect(SupportedModelSource.qwen38flashMTP.installsDraftHead)
+        #expect(!SupportedModelSource.qwen38flash.installsDraftHead)
+    }
+
+    @Test func qwen38DraftClassificationClaimsOnlyTheMTPNamespace() {
+        let family = RepackModelFamily.qwen38flashMTP
+        // Only `mtp.*` belongs to this install; the target's own namespace is
+        // a different install from the same repository.
+        #expect(RepackPlanner.classify("model.language_model.layers.0.mlp.gate.weight",
+                                       numLayers: 1, family: family)
+                == .excludedSidecar)
+        #expect(RepackPlanner.classify("mtp.fc_hidden.weight",
+                                       numLayers: 1, family: family) == .lmResident)
+        #expect(RepackPlanner.classify("mtp.pre_fc_norm_hidden",
+                                       numLayers: 1, family: family) == .lmResident)
+        // The draft's own 512 experts are streamed like any other layer's.
+        #expect(RepackPlanner.classify(
+            "mtp.layers.0.mlp.switch_mlp.gate_proj.weight",
+            numLayers: 1, family: family)
+            == .routedExpert(role: "gate", layer: 0))
     }
 
     @Test func mtpClassificationKeepsOnlyAdapterAndOneDecoderLayer() {

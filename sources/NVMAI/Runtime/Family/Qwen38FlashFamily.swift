@@ -18,6 +18,13 @@ import Foundation
 ///    hyper-connection tensors -- they are the same thing by another name, not
 ///    a substitution.
 extension TensorSchema {
+    /// The draft head's layer body is the target's, verbatim: the repack
+    /// rewrites `mtp.layers.0.*` to the same prefix the target uses, so one
+    /// schema serves both and the two cannot drift. Only the fusion
+    /// projections and their norms are the draft's own, and those sit at the
+    /// archive root rather than in the schema.
+    static var qwen38flashMTP: TensorSchema { .qwen38flash }
+
     private static func flashLayer(_ layer: Int, _ suffix: String) -> String {
         "model.language_model.layers.\(layer).\(suffix)"
     }

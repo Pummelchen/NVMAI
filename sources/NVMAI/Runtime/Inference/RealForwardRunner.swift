@@ -619,7 +619,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         tok.label = "decode.greedyToken"
         self.greedyTokenBuf = tok
-        self.verificationHidden = try buf(2 * D, label: "decode.verificationHidden")
+        // Two rows of the residual as this family carries it: wide for a
+        // hyper-connection model, because the draft's fusion reads all four
+        // streams rather than a collapsed one.
+        self.verificationHidden = try buf(2 * Self.residualWidthFor(cfg),
+                                          label: "decode.verificationHidden")
         self.verificationLogits = try buf(2 * cfg.vocabSize, label: "decode.verificationLogits")
 
         // Qwen 3.6 decode scratch — allocated once here, never in the hot path.
@@ -649,7 +653,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.gdnOut = nil
         }
         self.sharedScalarGateBuf = cfg.sharedExpertGated ? try buf(1, label: "decode.sharedScalarGate") : nil
-        if cfg.family == .qwen36MTP {
+        if cfg.family == .qwen36MTP || cfg.family == .qwen38flashMTP {
             guard let tokenBlock = ctx.device.makeBuffer(
                 length: Self.mtpChunkCapacity * MemoryLayout<UInt32>.stride,
                 options: .storageModeShared) else {
@@ -659,9 +663,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             self.mtpEmbeddingBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.embedding")
             self.mtpNormalizedEmbeddingBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.normalizedEmbedding")
             self.mtpNormalizedHiddenBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.normalizedHidden")
-            self.mtpConcatBlock = try buf(Self.mtpChunkCapacity * 2 * D, label: "mtp.concat")
+            // Qwen 3.6 concatenates the two normalized branches and runs one
+            // projection; Qwen3.8-Flash-Next projects each separately and adds.
+            // The wider block covers the concatenation the first needs and the
+            // wide residual the second reads.
+            let fuseWidth = max(2 * D, Self.residualWidthFor(cfg))
+            self.mtpConcatBlock = try buf(Self.mtpChunkCapacity * fuseWidth,
+                                          label: "mtp.concat")
             self.mtpProjectedBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.projected")
-            self.mtpTargetHiddenBlock = try buf(Self.mtpChunkCapacity * D, label: "mtp.targetHidden")
+            self.mtpTargetHiddenBlock = try buf(
+                Self.mtpChunkCapacity * Self.residualWidthFor(cfg),
+                label: "mtp.targetHidden")
         } else {
             self.mtpTokenBlock = nil
             self.mtpEmbeddingBlock = nil
@@ -769,6 +781,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// path is checked against, and far too slow to ship.
     static let sequentialHyperConnectionPrefill =
         ProcessInfo.processInfo.environment["NVMAI_SEQUENTIAL_HC_PREFILL"] == "1"
+
+    /// Residual width for a config, before `self` is fully initialized.
+    private static func residualWidthFor(_ config: ArchConfig) -> Int {
+        config.hyperConnections.enabled
+            ? config.hiddenSize * config.hyperConnections.count
+            : config.hiddenSize
+    }
 
     public func reset() {
         kv?.reset()

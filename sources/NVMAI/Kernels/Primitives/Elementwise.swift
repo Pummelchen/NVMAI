@@ -22,6 +22,7 @@ final class Elementwise {
     private let pleConvPSO: MTLComputePipelineState
     private let hcBroadcastPSO: MTLComputePipelineState
     private let hcExpandPSO: MTLComputePipelineState
+    private let hcMeanPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
@@ -39,6 +40,7 @@ final class Elementwise {
         self.pleConvPSO = try context.pipeline("ple_dilated_depthwise_conv_fp16")
         self.hcBroadcastPSO = try context.pipeline("hc_stream_broadcast_fp16")
         self.hcExpandPSO = try context.pipeline("hc_stream_expand_fp16")
+        hcMeanPSO = try context.pipeline("hc_stream_mean_fp16")
     }
 
     private func encodeUnary(_ pso: MTLComputePipelineState,
@@ -236,6 +238,27 @@ final class Elementwise {
                             threadsPerThreadgroup: MTLSize(
                                 width: min(pleConvPSO.maxTotalThreadsPerThreadgroup, 256),
                                 height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Collapse `[tokens, streams, dim]` to `[tokens, dim]` by a plain mean.
+    func encodeHCMean(commandBuffer: MTLCommandBuffer,
+                      streams: MTLBuffer, streamsOffset: Int = 0,
+                      out: MTLBuffer, outOffset: Int = 0,
+                      dim: Int, streamCount: Int, tokens: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(hcMeanPSO)
+        enc.setBuffer(streams, offset: streamsOffset, index: 0)
+        enc.setBuffer(out, offset: outOffset, index: 1)
+        var d = UInt32(dim), s = UInt32(streamCount), t = UInt32(tokens)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 2)
+        enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 3)
+        enc.setBytes(&t, length: MemoryLayout<UInt32>.size, index: 4)
+        let w = min(hcMeanPSO.maxTotalThreadsPerThreadgroup, 256)
+        enc.dispatchThreads(MTLSize(width: dim * tokens, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
         enc.endEncoding()
     }
 

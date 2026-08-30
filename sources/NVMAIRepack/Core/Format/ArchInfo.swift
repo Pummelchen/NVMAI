@@ -6,6 +6,7 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case qwen36 = "qwen36"
     case qwen36MTP = "qwen36_mtp"
     case qwen38flash = "qwen38flash"
+    case qwen38flashMTP = "qwen38flash_mtp"
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
@@ -435,6 +436,77 @@ struct ArchInfo: Sendable, Equatable {
             routerNormTopK: (tc["norm_topk_prob"] as? Bool) ?? true,
             quantGroupSize: group)
         try crossCheckQwen38FlashNext(arch, configPath: configPath)
+        return arch
+    }
+
+    /// The Qwen3.8-Flash-Next MTP draft, derived from the target's own config.
+    ///
+    /// The draft is a single full-attention layer with its own 512-expert set,
+    /// its own hyper-connection gates and its own indexer, plus the two fusion
+    /// projections that combine the target's wide residual with the next
+    /// token's embedding. It has no linear-attention layers and no n-gram
+    /// block, and it reports no embedding or head of its own -- both are the
+    /// target's, shared rather than copied.
+    static func qwen38FlashNextMTP(from base: ArchInfo,
+                                   configPath: String) throws -> ArchInfo {
+        guard base.family == .qwen38flash else {
+            throw RepackError.configJsonInvalid(
+                path: configPath,
+                detail: "MTP draft requires a Qwen3.8-Flash-Next target")
+        }
+        var arch = base
+        arch = ArchInfo(
+            hiddenSize: base.hiddenSize,
+            intermediateSize: base.intermediateSize,
+            moeIntermediateSize: base.moeIntermediateSize,
+            numHeads: base.numHeads,
+            numKVHeads: base.numKVHeads,
+            numFullKVHeads: base.numFullKVHeads,
+            headDim: base.headDim,
+            fullHeadDim: base.fullHeadDim,
+            vocabSize: base.vocabSize,
+            slidingWindow: base.slidingWindow,
+            finalLogitSoftcap: base.finalLogitSoftcap,
+            ropeTheta: base.ropeTheta,
+            fullRopeTheta: base.fullRopeTheta,
+            partialRotaryFactor: base.partialRotaryFactor,
+            numLayers: 1,
+            numExperts: base.numExperts,
+            topKExperts: base.topKExperts,
+            tieWordEmbeddings: false,
+            attentionKEqV: false,
+            fullAttentionLayerMask: [1],
+            hiddenActivation: base.hiddenActivation,
+            family: .qwen38flashMTP,
+            attnOutputGate: base.attnOutputGate,
+            attentionScale: base.attentionScale,
+            embeddingScaledBySqrtHidden: false,
+            routerScaled: false,
+            ffnSandwichNorms: false,
+            sharedExpertGated: true,
+            ropeNeoxSubdim: true,
+            // No DeltaNet bundle and no n-gram block in the draft.
+            linearNumKHeads: 0,
+            linearNumVHeads: 0,
+            linearKeyHeadDim: 0,
+            linearValueHeadDim: 0,
+            linearConvKernelSize: 0,
+            hcCount: base.hcCount,
+            hcLowRank: base.hcLowRank,
+            indexerNumHeads: base.indexerNumHeads,
+            indexerNumKVHeads: base.indexerNumKVHeads,
+            indexerHeadDim: base.indexerHeadDim,
+            indexerBudget: base.indexerBudget,
+            indexerCompressRatio: base.indexerCompressRatio,
+            pleLayerIndices: [],
+            pleEmbedDim: base.pleEmbedDim,
+            pleConvKernelSize: base.pleConvKernelSize,
+            pleNgramSize: base.pleNgramSize,
+            pleVocabSizeBase: base.pleVocabSizeBase,
+            pleHeadsPerNgram: base.pleHeadsPerNgram,
+            pleVocabDivisor: base.pleVocabDivisor,
+            routerNormTopK: base.routerNormTopK,
+            quantGroupSize: base.quantGroupSize)
         return arch
     }
 

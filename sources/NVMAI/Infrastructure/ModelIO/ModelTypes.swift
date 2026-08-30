@@ -14,6 +14,11 @@ public enum ModelFamily: String, Sendable, Equatable {
     /// layer 1. Text-only; the checkpoint's vision tower is never repacked.
     /// See docs/qwen38-flash-next-port.md for the verified design record.
     case qwen38flash = "qwen38flash"
+    /// The Qwen3.8-Flash-Next draft head: one full-attention layer with its
+    /// own 512 experts, hyper-connection gates and indexer, plus two fusion
+    /// projections that combine the target's wide residual with the next
+    /// token's embedding. Shares the target's embedding and head.
+    case qwen38flashMTP = "qwen38flash_mtp"
 }
 
 /// Hyper-connection residual configuration (Qwen3.8-Flash-Next). The residual
@@ -432,6 +437,48 @@ public struct ArchConfig: Sendable, Equatable {
         // The design record had assumed 32 from the Vontra checkpoints.
         quantGroupSize: 64)
 
+    /// The Qwen3.8-Flash-Next MTP draft. One full-attention layer, no
+    /// DeltaNet, no n-gram block; everything else is the target's geometry
+    /// because the draft has to speak the same residual.
+    public static let qwen38FlashNextMTP = ArchConfig(
+        hiddenSize: 2560,
+        intermediateSize: 640,
+        moeIntermediateSize: 640,
+        numHeads: 24,
+        numKVHeads: 2,
+        numFullKVHeads: 2,
+        headDim: 256,
+        fullHeadDim: 256,
+        vocabSize: 248_320,
+        slidingWindow: 0,
+        finalLogitSoftcap: 0.0,
+        ropeTheta: 10_000_000.0,
+        fullRopeTheta: 10_000_000.0,
+        partialRotaryFactor: 0.25,
+        numLayers: 1,
+        numExperts: 512,
+        topKExperts: 10,
+        tieWordEmbeddings: false,
+        attentionKEqV: false,
+        fullAttentionLayerMask: [1],
+        hiddenActivation: "silu",
+        family: .qwen38flashMTP,
+        attnOutputGate: true,
+        attentionScale: 0.0625,
+        embeddingScaledBySqrtHidden: false,
+        routerScaled: false,
+        ffnSandwichNorms: false,
+        sharedExpertGated: true,
+        ropeNeoxSubdim: true,
+        linearAttention: .none,
+        hyperConnections: HyperConnectionConfig(count: 4, lowRank: 320),
+        sparseIndexer: SparseIndexerConfig(
+            numHeads: 4, numKVHeads: 1, headDim: 128,
+            budget: 2048, compressRatio: 4),
+        ple: .none,
+        routerNormTopK: true,
+        quantGroupSize: 64)
+
     private static func qwen38LayerMask() -> [UInt8] {
         // Same kinds as qwen36: 2 = gated-DeltaNet linear, 1 = full (QSA)
         // attention on every 4th layer ((i + 1) % 4 == 0), 48 layers.
@@ -445,6 +492,7 @@ public struct ArchConfig: Sendable, Equatable {
         .qwen36: .qwen36_35B_A3B,
         .qwen36MTP: .qwen36MTP,
         .qwen38flash: .qwen38FlashNext,
+        .qwen38flashMTP: .qwen38FlashNextMTP,
     ]
 
     /// Resident INT4 GEMV shapes this architecture issues during decode, for

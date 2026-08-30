@@ -34,7 +34,7 @@ extension ModelFamily {
         switch self {
         case .qwen36, .qwen36MTP:
             return .binaryThinking
-        case .qwen38flash:
+        case .qwen38flash, .qwen38flashMTP:
             return .thinkingWithEffortLevels(defaultEffort: .xhigh)
         }
     }

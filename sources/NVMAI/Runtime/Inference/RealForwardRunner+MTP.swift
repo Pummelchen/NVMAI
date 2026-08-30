@@ -31,6 +31,11 @@ extension RealForwardRunner {
         }
         // Row zero was confirmed and is present in the on-GPU checkpoint.
         try kv.rewind(to: checkpoint.position + 1)
+        // The verify pass ran two rows; one was accepted. The KV row and the
+        // indexer's pooled blocks are recomputed by whatever replaces the
+        // rejected row, but the n-gram convolution window is a rolling one and
+        // has to be walked back explicitly.
+        rewindPLE(acceptedRows: 1, passRows: 2)
         resetTransientState()
     }
 
@@ -38,7 +43,8 @@ extension RealForwardRunner {
     /// trimmable full-attention KV, so its logical cursor can move back without
     /// copying payload bytes; the next draft pass overwrites the stale row.
     func rewindMTP(to position: Int) throws {
-        guard cfg.family == .qwen36MTP, let kv else {
+        guard cfg.family == .qwen36MTP || cfg.family == .qwen38flashMTP,
+              let kv else {
             throw InferenceStateSnapshotError.invalidLayout
         }
         try kv.rewind(to: position)
@@ -118,8 +124,46 @@ extension RealForwardRunner {
                   sourceOffset: 0,
                   to: verificationHidden,
                   destinationOffset: 0,
-                  size: 2 * cfg.hiddenSize * MemoryLayout<Float16>.stride)
+                  size: 2 * residualWidth * MemoryLayout<Float16>.stride)
         blit.endEncoding()
+        if let hc = hyperConnection {
+            // This stack does not end in an RMSNorm: it ends in the gated
+            // mixer that collapses the residual streams. The fused pair head
+            // folds a plain RMSNorm into the vocabulary GEMV, which on a wide
+            // residual reads stream 0 as if it were the whole hidden state --
+            // and since the verify pass produces every emitted token, that is
+            // the whole output, not a rounding difference.
+            let rowBytes = residualWidth * MemoryLayout<Float16>.stride
+            for row in 0..<2 {
+                try hc.encodeRead(commandBuffer: cb,
+                                  streamsBuffer: scratch.hidden,
+                                  streamsOffset: row * rowBytes,
+                                  hcNorm: finalNorm.buffer,
+                                  hcNormOffset: Int(finalNorm.offset),
+                                  down: gateWeightsPublic(try model.hcMixerDown()),
+                                  up: gateWeightsPublic(try model.hcMixerUp()),
+                                  blockInput: scratch.normed,
+                                  blockInputOffset: row * cfg.hiddenSize
+                                      * MemoryLayout<Float16>.stride,
+                                  eps: 1e-6)
+            }
+            for row in 0..<2 {
+                try encodeHeadGEMV(
+                    commandBuffer: cb,
+                    weights: lm.buffer, weightsOffset: Int(lm.offset),
+                    scales: lm.buffer, scalesOffset: Int(lm.scaleOffset),
+                    biases: lm.buffer, biasesOffset: Int(lm.biasOffset),
+                    x: scratch.normed,
+                    xOffset: row * cfg.hiddenSize * MemoryLayout<Float16>.stride,
+                    y: verificationLogits,
+                    yOffset: row * cfg.vocabSize * MemoryLayout<Float16>.stride,
+                    m: UInt32(cfg.vocabSize), n: UInt32(cfg.hiddenSize))
+            }
+            cb.commit()
+            try waitForCompletion(cb)
+            recordKernelGPU(role: "verify_head", cb)
+            return try finishVerifyPair(tBackbone: tBackbone, tHead: tHead)
+        }
         // One lm_head weight read for both rows. The former per-row loop
         // read the model's largest tensor twice per verify pass.
         try prefillFinalRowHead.encodeLogitsPair(
@@ -141,8 +185,15 @@ extension RealForwardRunner {
         cb.commit()
         try waitForCompletion(cb)
         recordKernelGPU(role: "verify_head", cb)
-        let tArgmax = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        return try finishVerifyPair(tBackbone: tBackbone, tHead: tHead)
+    }
 
+    /// Argmax both verify rows and package the result. Shared by the two
+    /// head paths so a family difference in the head cannot become a
+    /// difference in what the verify pass reports.
+    private func finishVerifyPair(tBackbone: UInt64,
+                                  tHead: UInt64) throws -> TargetPairVerification {
+        let tArgmax = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let logits = verificationLogits.contents()
             .assumingMemoryBound(to: Float16.self)
         func argmax(row: Int) -> Int32 {
@@ -165,7 +216,7 @@ extension RealForwardRunner {
             predictionAfterFirst: first,
             predictionAfterSecond: second,
             hiddenRows: Data(bytes: verificationHidden.contents(),
-                             count: 2 * cfg.hiddenSize * MemoryLayout<Float16>.stride),
+                             count: 2 * residualWidth * MemoryLayout<Float16>.stride),
             backboneNanos: tHead &- tBackbone,
             headNanos: tArgmax &- tHead,
             argmaxNanos: tDone &- tArgmax)
@@ -293,7 +344,7 @@ extension RealForwardRunner {
     }
 
     func ensureMTPPrefillReadback(rows: Int) throws -> MTLBuffer {
-        let bytes = rows * cfg.hiddenSize * MemoryLayout<Float16>.stride
+        let bytes = rows * residualWidth * MemoryLayout<Float16>.stride
         if let existing = mtpPrefillReadback, existing.length >= bytes {
             return existing
         }
@@ -314,10 +365,11 @@ extension RealForwardRunner {
                                into logits: MTLBuffer,
                                mtp: RealForwardRunner,
                                onProgress: (Int) -> Void) async throws -> MTPPrefillResult {
-        guard cfg.family == .qwen36 else {
+        guard cfg.family == .qwen36 || cfg.family == .qwen38flash else {
             throw StreamingMTPError.targetMustBeQwen36
         }
-        guard mtp.cfg.family == .qwen36MTP else {
+        guard mtp.cfg.family == .qwen36MTP
+                || mtp.cfg.family == .qwen38flashMTP else {
             throw StreamingMTPError.sidecarMustBeQwen36MTP
         }
         guard !tokens.isEmpty, tokens.count <= mtp.maxContext else {
@@ -350,7 +402,10 @@ extension RealForwardRunner {
                       let blit = cb.makeBlitCommandEncoder() else {
                     throw ModelError.residentBufferWrapFailed
                 }
-                let rowBytes = cfg.hiddenSize * MemoryLayout<Float16>.stride
+                // The draft is handed the residual as the target carries it,
+                // which for a hyper-connection family is the wide form: its
+                // fusion reads all four streams, not a collapsed one.
+                let rowBytes = residualWidth * MemoryLayout<Float16>.stride
                 blit.copy(from: scratch.hidden, sourceOffset: 0,
                           to: readback, destinationOffset: 0,
                           size: span.tokenCount * rowBytes)
@@ -379,7 +434,7 @@ extension RealForwardRunner {
                     let count = min(Self.mtpChunkCapacity, pairTokens.count - pairOffset)
                     let hiddenStart = pairOffset * rowBytes
                     let hiddenEnd = hiddenStart + count * rowBytes
-                    _ = try await mtp.advanceMTP(
+                    _ = try await mtp.advanceMTPForFamily(
                         tokens: pairTokens[pairOffset..<(pairOffset + count)],
                         targetHiddenRows: pairHidden.subdata(in: hiddenStart..<hiddenEnd),
                         startPosition: mtp.continuationPosition,
@@ -619,14 +674,39 @@ extension RealForwardRunner {
                 topK: topK)
         }
         // Phase 2 already folded the shared branch (h1 rows as residual), so
-        // the tail is one residual add per row — the writes into `hidden`
-        // serialize on each other, but they are elementwise and tiny.
-        for row in 0..<t {
-            try elementwise!.encodeResidualAdd(commandBuffer: routedCB,
-                                           hidden: scratch.hidden,
-                                           hiddenOffset: row * D * halfBytes,
-                                           delta: verifyPairY[row],
-                                           count: D)
+        // the tail is the family's residual exit per row. A pre-norm family
+        // adds; a hyper-connection family injects through its write gate, and
+        // adding there would bypass the gate entirely -- which reads as a
+        // model that answers in scrambled fragments, because the verify pass
+        // is what produces every emitted token.
+        //
+        // The gate is chunk-shaped, not row-shaped: it reads the `normed` its
+        // matching entry left for all rows and injects with a per-row weight.
+        // So the per-row outputs are gathered into one contiguous block first
+        // and written once, rather than looped over.
+        if hyperConnection != nil {
+            guard let blit = routedCB.makeBlitCommandEncoder() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            for row in 0..<t {
+                blit.copy(from: verifyPairY[row], sourceOffset: 0,
+                          to: scratch.h2, destinationOffset: row * D * halfBytes,
+                          size: D * halfBytes)
+            }
+            blit.endEncoding()
+            try encodeResidualExitPrefill(commandBuffer: routedCB,
+                                          hidden: scratch.hidden,
+                                          delta: scratch.h2,
+                                          sublayer: .mlp, layer: L,
+                                          tokens: t)
+        } else {
+            for row in 0..<t {
+                try elementwise!.encodeResidualAdd(commandBuffer: routedCB,
+                                               hidden: scratch.hidden,
+                                               hiddenOffset: row * D * halfBytes,
+                                               delta: verifyPairY[row],
+                                               count: D)
+            }
         }
         routedCB.commit()
         try waitForCompletion(routedCB)

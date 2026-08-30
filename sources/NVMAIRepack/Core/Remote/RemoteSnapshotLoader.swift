@@ -13,6 +13,7 @@ enum RemoteSnapshotLoader {
     static func load(remote: HuggingFaceRemoteSource,
                      requireKnownSource: Bool,
                      metadataDirectory: String,
+                     installDraftHead: Bool = false,
                      audit: RepackAudit? = nil) async throws -> RemoteSnapshot {
         try Posix.mkdirP(metadataDirectory)
 
@@ -43,7 +44,11 @@ enum RemoteSnapshotLoader {
             throw RepackError.sourceFingerprintRejected(path: metadata.indexPath,
                                                         sha256: metadata.indexSha256Hex)
         }
-        let arch = try ArchInfo.load(configPath: metadata.configPath)
+        var arch = try ArchInfo.load(configPath: metadata.configPath)
+        if installDraftHead {
+            arch = try ArchInfo.qwen38FlashNextMTP(from: arch,
+                                                   configPath: metadata.configPath)
+        }
 
         var files: [String: RemoteFileInfo] = [
             indexInfo.filename: indexInfo,
