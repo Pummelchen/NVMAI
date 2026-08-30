@@ -19,7 +19,12 @@ DEFAULT_API_MODEL = "ornith-1.5-35b-a3b"
 DEFAULT_CONTEXT_TOKENS = 262_144
 DEFAULT_PROMPT_CACHE_MODE = "multi-prefix"
 DEFAULT_PROMPT_CACHE_MEMORY_MIB = 256
-DEFAULT_EXPERT_CACHE_BUDGET = "8G"
+# None means "do not pin a budget", so the runtime picks the family's measured
+# default (RuntimeConfiguration.decodeTuning). Pinning 8G here would override the
+# 12 GiB that Qwen3.8-Flash-Next now ships with, and the published protocol would
+# stop measuring what a user actually gets. Pass ram_budget= explicitly to probe
+# a specific size.
+DEFAULT_EXPERT_CACHE_BUDGET = None
 DEFAULT_KV_BITS = 8
 DEFAULT_CONCISE = False
 DEFAULT_FAST_ALIAS = False
@@ -63,6 +68,7 @@ def server_command(
     model: str | os.PathLike[str] = DEFAULT_MODEL_PATH,
     cache_mode: str = DEFAULT_PROMPT_CACHE_MODE,
     thinking_mode: str = DEFAULT_THINKING_MODE,
+    ram_budget: str | None = DEFAULT_EXPERT_CACHE_BUDGET,
 ) -> list[str]:
     """Build the standard native-context, cache-on, non-MTP command."""
     prompt_cache_memory_mib = (
@@ -70,7 +76,7 @@ def server_command(
     )
     if thinking_mode not in SUPPORTED_THINKING_MODES:
         raise ValueError("thinking_mode must be off or on")
-    return [
+    command = [
         str(binary),
         "--port", str(port),
         "--model", str(model),
@@ -78,10 +84,12 @@ def server_command(
         "--rope-scaling", "none",
         "--prompt-cache-mode", cache_mode,
         "--prompt-cache-memory-mib", str(prompt_cache_memory_mib),
-        "--ram-budget", DEFAULT_EXPERT_CACHE_BUDGET,
         "--kv-bits", str(DEFAULT_KV_BITS),
         "--thinking", thinking_mode,
     ]
+    if ram_budget is not None:
+        command += ["--ram-budget", str(ram_budget)]
+    return command
 
 
 def server_environment(

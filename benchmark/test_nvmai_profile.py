@@ -34,7 +34,7 @@ class BenchmarkProfileTests(unittest.TestCase):
             str(DEFAULT_PROMPT_CACHE_MEMORY_MIB),
         )
         self.assertEqual(
-            command[command.index("--ram-budget") + 1], DEFAULT_EXPERT_CACHE_BUDGET
+            "--ram-budget" in command, DEFAULT_EXPERT_CACHE_BUDGET is not None
         )
         self.assertEqual(command[command.index("--kv-bits") + 1], str(DEFAULT_KV_BITS))
         self.assertEqual(command[command.index("--rope-scaling") + 1], "none")
@@ -52,7 +52,13 @@ class BenchmarkProfileTests(unittest.TestCase):
         self.assertIn(
             f"--prompt-cache-memory-mib {DEFAULT_PROMPT_CACHE_MEMORY_MIB}", launcher
         )
-        self.assertIn(f"--ram-budget {DEFAULT_EXPERT_CACHE_BUDGET}", launcher)
+        # The expert-cache budget is per-family now (decodeTuning), so neither
+        # the launcher nor the benchmark protocol pins one size: both measure
+        # and ship whatever the runtime picks for the model being loaded.
+        if DEFAULT_EXPERT_CACHE_BUDGET is None:
+            self.assertNotIn("--ram-budget", launcher)
+        else:
+            self.assertIn(f"--ram-budget {DEFAULT_EXPERT_CACHE_BUDGET}", launcher)
         self.assertIn('${NVMAI_THINKING_MODE:-off}', launcher)
         self.assertIn('--thinking "$thinking_mode"', launcher)
         self.assertIn('1) quant=8bit', launcher)

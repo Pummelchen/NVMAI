@@ -13,8 +13,9 @@
 # thinking off/on. Every choice has a default (codex / full / 8-bit /
 # standard / thinking off), so pressing Enter through the prompts launches
 # that configuration. The server runtime is pinned to native 262,144-token
-# context, a 256 MiB multi-prefix prompt cache, an 8 GiB routed-expert
-# cache, 8-bit KV, and MTP off. Stops any stale
+# context, a 256 MiB multi-prefix prompt cache, 8-bit KV, and MTP off.
+# The routed-expert cache is left to the runtime, which sizes it from the
+# model's family and expert stride and clamps it to the machine's RAM. Stops any stale
 # NVMAIServer on the port and starts a
 # fresh one in the foreground (Ctrl-C to stop). Once the server is up it
 # prints the OpenAI API setup (base URL, API key, the chosen model ID) so
@@ -203,7 +204,6 @@ echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
   --rope-scaling none \
   --prompt-cache-mode multi-prefix \
   --prompt-cache-memory-mib 256 \
-  --ram-budget 8G \
   --kv-bits 8 \
   --thinking "$thinking_mode" &
 server_pid=$!

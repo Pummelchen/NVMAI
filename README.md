@@ -22,17 +22,29 @@
 
 ### Supported LLMs
 
-- **Verified models:** NVMAI supports text-only Ornith 1.5 35B-A3B and Qwen
-  3.6 35B-A3B in 4-bit and 8-bit quantization.
+- **Qwen3.8-Flash-Next 125B-A6B** — 4-bit. 48 layers of gated DeltaNet with
+  sparse-indexed attention, 512 experts at top-10, hyper-connection residual
+  streams and hashed n-gram embeddings. Text-only; the checkpoint's vision
+  tower is not repacked. Served as `qwen3.8-flash-next_4-Bit`.
+- **Ornith 1.5 35B-A3B** — 4-bit and 8-bit. Served as
+  `ornith-1.5-35b-a3b_4-Bit` / `_8-Bit`, each with a `-fast` chat-only alias.
+- **Qwen 3.6 35B-A3B** — 4-bit and 8-bit. Served as `qwen3.6-35b-a3b_4-Bit` /
+  `_8-Bit`, each with a `-fast` chat-only alias.
 - **Adaptable runtime:** The shared Qwen3.5-MoE parser, repacker, and inference
   path make other tensor-compatible Qwen-based MoE models straightforward to
   add after validation.
 
+Every model id ends in the routed-expert width, read from the manifest rather
+than parsed from the name, so two quantizations of the same weights stay
+distinguishable. Ask `/v1/models` rather than assuming an id.
+
 ### Special Features
 
-- **Bounded expert RAM:** The server accepts common 1, 2, 4, 8, or 16 GiB RAM
-  budgets to limit the resident expert cache, while model state, KV cache, and
-  runtime scratch use additional memory.
+- **Bounded expert RAM:** The resident expert cache is sized per family from
+  the model's own expert stride and clamped to half of physical memory, so a
+  smaller Mac is not handed a budget tuned on a larger one. `--ram-budget`
+  overrides it with any size. Model state, KV cache, and runtime scratch use
+  additional memory.
 - **Long context:** Native RoPE supports up to 262K tokens, while optional YaRN
   extends the context to 512K or 1M tokens.
 - **Compressed KV cache:** Live attention state can use 16-bit, 8-bit, or 4-bit
