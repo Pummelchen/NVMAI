@@ -107,37 +107,51 @@ and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
 ## Benchmarks
 
 Peak decode on a base 8-core M3 MacBook Pro with 24 GB, generating 512 tokens
-of continuous English prose. Each row is the median of three fresh-process
-runs after one discarded warmup, on an idle machine.
+of continuous English prose. Each row is the median of fresh-process runs after
+one discarded warmup, on an idle machine, at the shipped defaults for that
+model -- nothing is pinned for the benchmark that a user would not get.
 
 **Qwen3.8-Flash-Next 125B-A6B**
 
 | Quantization | Peak decode |
 | --- | ---: |
-| 4-bit | **5.03 tok/s** |
+| 4-bit | **6.82 tok/s** |
 | 8-bit | not released |
 
 **Ornith 1.5 35B-A3B**
 
 | Quantization | Peak decode |
 | --- | ---: |
-| 4-bit | **22.53 tok/s** |
-| 8-bit | **10.17 tok/s** |
+| 4-bit | **22.65 tok/s** |
+| 8-bit | **11.89 tok/s** |
 
 **Qwen 3.6 35B-A3B**
 
 | Quantization | Peak decode |
 | --- | ---: |
-| 4-bit | **23.23 tok/s** |
-| 8-bit | **11.12 tok/s** |
+| 4-bit | **23.28 tok/s** |
+| 8-bit | **12.72 tok/s** |
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
-native 262K context, prompt cache on, 8-bit KV, and MTP off.
+native 262K context, prompt cache on, 8-bit KV, and MTP off. Measured
+2026-08-30; the 4-bit 35B rows are medians of seven runs and the rest of three.
 
 Qwen3.8-Flash-Next is a 125B model with 6B active parameters, against 35B/3B
-for the other two, and its runtime has had no throughput work yet -- it is
-here as a reference point, not a tuned result. Decode is bound by streaming
-routed experts from SSD, so the 4-bit rows run roughly twice the 8-bit ones.
+for the other two. Decode is bound by streaming routed experts from SSD, so the
+4-bit rows run roughly twice the 8-bit ones, and the 125B model is slower again
+because 512 experts at top-10 spread across a far wider working set.
+
+Against the previous publication, Qwen3.8-Flash-Next gained **+35.7%** (5.03),
+Ornith 8-bit **+16.9%** (10.17) and Qwen 3.6 8-bit **+14.3%** (11.12), from the
+per-family expert-cache sizing and speculative prefetch. The two 4-bit 35B
+configurations did not change and reproduce their published numbers to within
+0.5%, which is what makes the other three readable as gains rather than drift.
+
+These are larger than the same changes measured in an interleaved A/B (+21.3%,
++5.9%, +5.5%). Interleaving keeps every configuration page-cache-warm, which
+flatters the baseline far more than the tuned configuration, because the tuned
+one barely reaches the disk. Measured cold, the way a server actually starts,
+the gains are two to three times what the interleaved test credited.
 
 ANE prefill is on by default for Ornith and Qwen 3.6. On a 9,316-token prompt
 it measured **3.14x** faster end to end at 4-bit (313.6 s -> 99.9 s) and
