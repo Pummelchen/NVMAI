@@ -39,7 +39,10 @@ MacBook, at reading speed.
   `_8-Bit`, each with a `-fast` chat-only alias.
 - **Adaptable runtime:** The shared Qwen3.5-MoE parser, repacker, and inference
   path make other tensor-compatible Qwen-based MoE models straightforward to
-  add after validation.
+  add after validation. NVMAI has no MLX dependency — it needs an affine
+  group-64 quantization layout, which it can produce itself from an ordinary
+  bf16 safetensors checkpoint, so it does not wait on anyone's quantized
+  release.
 
 Every model id ends in the routed-expert width, read from the manifest rather
 than parsed from the name, so two quantizations of the same weights stay
