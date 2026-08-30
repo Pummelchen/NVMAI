@@ -14,6 +14,30 @@ extension RealForwardRunner {
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        // A hyper-connection family prefills one token at a time through the
+        // decode path.
+        //
+        // The chunked path batches `t` tokens through every stage, but the
+        // Gated Residual's chain -- grouped norm, two low-rank GEMVs, the
+        // stream reduce -- is written per token, and batching it means batched
+        // variants of all of it. Correct and slow beats fast and wrong: this
+        // produces exactly the KV state and logits the batched path would,
+        // at one dispatch set per token. It is the obvious thing to optimize
+        // once the family's output is verified against the reference.
+        if cfg.hyperConnections.enabled {
+            var position = startPosition
+            for (offset, token) in tokens.enumerated() {
+                try Task.checkCancellation()
+                try await produceToken(token: token,
+                                       position: position,
+                                       into: logits,
+                                       emitHead: offset == tokens.count - 1,
+                                       outputMode: outputMode)
+                position += 1
+                onProgress(offset + 1)
+            }
+            return PrefillResult(newPosition: position, seed: .logitsWritten)
+        }
         // Release the slot-cache wiring for the duration of prefill: it
         // streams experts in bulk and needs the headroom, and the ANE path in
         // particular has to place Core ML arenas alongside it. Decode wires

@@ -17,6 +17,13 @@ import Metal
 /// These four call sites are the entire coupling. Keeping them in one file
 /// means adding the new family's behaviour touches this file and not the
 /// decode or prefill bodies, matching how `TensorSchema` isolates naming.
+/// Which sublayer a residual entry/exit pair brackets. A hyper-connection
+/// family has separate gate weights for each; a pre-norm family ignores it.
+enum ResidualSublayer {
+    case attention
+    case mlp
+}
+
 extension RealForwardRunner {
     /// Residual streams this model carries. One for pre-norm families; the
     /// hyper-connection families carry `hc_count`.
@@ -27,14 +34,42 @@ extension RealForwardRunner {
     /// Width of the residual buffer in elements.
     var residualWidth: Int { cfg.hiddenSize * residualStreamCount }
 
+    func gateWeightsPublic(_ view: TensorView) -> HyperConnection.Weights {
+        gateWeights(view)
+    }
+
+    private func gateWeights(_ view: TensorView) -> HyperConnection.Weights {
+        HyperConnection.Weights(weights: view.buffer,
+                                weightsOffset: Int(view.offset),
+                                scales: view.buffer,
+                                scalesOffset: Int(view.scaleOffset),
+                                biases: view.buffer,
+                                biasesOffset: Int(view.biasOffset))
+    }
+
     /// Residual -> block input, for one decode token.
     func encodeResidualEntryDecode(commandBuffer: MTLCommandBuffer,
                                    hidden: MTLBuffer,
                                    norm: TensorView,
                                    out: MTLBuffer,
+                                   sublayer: ResidualSublayer,
+                                   layer: Int,
                                    eps: Float) throws {
-        // Pre-norm. The hyper-connection read gate lands here, keyed off
-        // `cfg.hyperConnections.enabled`, once its layer weights are wired.
+        if let hc = hyperConnection {
+            let down = sublayer == .attention
+                ? try model.hcAttnMixDown(layer: layer)
+                : try model.hcMlpMixDown(layer: layer)
+            let up = sublayer == .attention
+                ? try model.hcAttnMixUp(layer: layer)
+                : try model.hcMlpMixUp(layer: layer)
+            try hc.encodeRead(commandBuffer: commandBuffer,
+                              streamsBuffer: hidden,
+                              hcNorm: norm.buffer,
+                              hcNormOffset: Int(norm.offset),
+                              down: gateWeights(down), up: gateWeights(up),
+                              blockInput: out, eps: eps)
+            return
+        }
         try rms.encodeBF16W(commandBuffer: commandBuffer,
                             x: hidden,
                             weight: norm.buffer, weightOffset: Int(norm.offset),
@@ -43,10 +78,25 @@ extension RealForwardRunner {
     }
 
     /// Block output -> residual, for one decode token.
+    ///
+    /// Consumes the `normed` the matching entry left inside the
+    /// `HyperConnection`, so the two must bracket exactly one block on the
+    /// same command buffer.
     func encodeResidualExitDecode(commandBuffer: MTLCommandBuffer,
                                   hidden: MTLBuffer,
-                                  delta: MTLBuffer) throws {
-        // Plain add. The hyper-connection write gate lands here.
+                                  delta: MTLBuffer,
+                                  sublayer: ResidualSublayer,
+                                  layer: Int) throws {
+        if let hc = hyperConnection {
+            let inject = sublayer == .attention
+                ? try model.hcAttnInject(layer: layer)
+                : try model.hcMlpInject(layer: layer)
+            try hc.encodeWrite(commandBuffer: commandBuffer,
+                               streamsBuffer: hidden,
+                               inject: gateWeights(inject),
+                               blockOut: delta)
+            return
+        }
         try elementwise!.encodeResidualAdd(commandBuffer: commandBuffer,
                                            hidden: hidden,
                                            delta: delta,
@@ -79,5 +129,66 @@ extension RealForwardRunner {
                                            hidden: hidden,
                                            delta: delta,
                                            count: tokens * cfg.hiddenSize)
+    }
+}
+
+// MARK: - PLE n-gram block
+
+extension RealForwardRunner {
+    /// Reads this token's n-gram rows off storage into the block's input.
+    ///
+    /// A no-op for families without PLE. The gather is 16 rows of 320 bytes —
+    /// 5 KiB — which is three orders of magnitude under one token's routed
+    /// expert traffic, so it is done inline rather than scheduled.
+    func gatherPLERows(token: Int32) throws {
+        guard let ple = pleBlock, let hash = pleHash, let table = ngramTable
+        else { return }
+        pleContext.insert(token, at: 0)
+        if pleContext.count > hash.ngramSize {
+            pleContext.removeLast(pleContext.count - hash.ngramSize)
+        }
+        let rows = hash.rows(context: pleContext)
+        try table.gather(rows: rows, into: ple.embedding.contents())
+    }
+
+    /// Clears the state that spans a completion: the convolution history and
+    /// the token context it hashes. Leaving either in place would let one
+    /// prompt's trailing n-grams open the next one.
+    func resetPLEState() {
+        pleContext.removeAll(keepingCapacity: true)
+        pleBlock?.resetState()
+    }
+
+    /// Encodes the n-gram block on the layers that carry one.
+    func encodePLEDecode(commandBuffer: MTLCommandBuffer,
+                         layer: Int, position: Int, eps: Float) throws {
+        guard let ple = pleBlock,
+              cfg.ple.layerIndices.contains(layer) else { return }
+        if activationDumpActive(position: position) {
+            dumpActivation("L\(layer)_ple_pre", hidden, count: residualWidth, position: position)
+        }
+        let weights = PLEBlock.Weights(
+            keyProj: projection(try model.pleKeyProj(layer: layer)),
+            valueProj: projection(try model.pleValueProj(layer: layer)),
+            normKey: vector(try model.pleNormKey(layer: layer)),
+            normQuery: vector(try model.pleNormQuery(layer: layer)),
+            normConv: vector(try model.pleNormConv(layer: layer)),
+            conv1d: vector(try model.pleConv(layer: layer)))
+        try ple.encodeDecode(commandBuffer: commandBuffer,
+                             streamsBuffer: hidden,
+                             weights: weights, eps: eps)
+    }
+
+    private func projection(_ view: TensorView) -> PLEBlock.Projection {
+        PLEBlock.Projection(weights: view.buffer,
+                            weightsOffset: Int(view.offset),
+                            scales: view.buffer,
+                            scalesOffset: Int(view.scaleOffset),
+                            biases: view.buffer,
+                            biasesOffset: Int(view.biasOffset))
+    }
+
+    private func vector(_ view: TensorView) -> PLEBlock.Vector {
+        PLEBlock.Vector(buffer: view.buffer, offset: Int(view.offset))
     }
 }

@@ -40,7 +40,13 @@ final class MoE {
 
     private let realDecodeD: UInt32
     private let realDecodeF: UInt32
-    private static let realDecodeTopK: UInt32 = 8
+    /// The k baked into the specialized pipelines. This was a constant 8 --
+    /// the value every shipping model used -- which made the specialization
+    /// silently wrong for a family that shares those hidden dimensions but
+    /// routes to a different number of experts: phase 1 simply never wrote
+    /// the slots past 8, and the reduce summed zeros for them. It is the
+    /// model's own top-k now, and `useRealDecodeConstants` checks it.
+    private let realDecodeTopK: UInt32
     private let realDecodeNumExperts: UInt32
 
     private let routerGemvPSO: MTLComputePipelineState
@@ -79,6 +85,7 @@ final class MoE {
          topKExperts: Int = 8) throws {
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
+        self.realDecodeTopK = UInt32(topKExperts)
         self.realDecodeNumExperts = specializedNumExperts
         // 16 is the argument buffer's blob-array extent (kMaxStreamedExperts
         // in moe.metal). Router select and phase-2 reduce both have k != 8
@@ -99,13 +106,13 @@ final class MoE {
         let moeConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 0, value: .uint32(specializedD)),
             MetalFunctionConstant(index: 1, value: .uint32(specializedF)),
-            MetalFunctionConstant(index: 2, value: .uint32(Self.realDecodeTopK)),
+            MetalFunctionConstant(index: 2, value: .uint32(realDecodeTopK)),
             MetalFunctionConstant(index: 3, value: .bool(true)),
         ] + activationConstants + weightConstants + ioConstants
         let routerConstants: [MetalFunctionConstant] = [
             MetalFunctionConstant(index: 40, value: .uint32(specializedNumExperts)),
             MetalFunctionConstant(index: 41, value: .uint32(specializedD)),
-            MetalFunctionConstant(index: 42, value: .uint32(Self.realDecodeTopK)),
+            MetalFunctionConstant(index: 42, value: .uint32(realDecodeTopK)),
             MetalFunctionConstant(index: 43, value: .bool(true)),
             MetalFunctionConstant(index: 44, value: .uint32(UInt32(routerWeightBits))),
         ]

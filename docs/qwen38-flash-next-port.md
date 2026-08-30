@@ -488,3 +488,101 @@ The convolution's tap indexing is the part most worth pinning in a test: tap
 `k` reads `(K-1-k) * dilation` positions back, so an off-by-one in either
 direction still produces smooth, plausible output.
 
+## It answers (2026-08-30)
+
+```
+$ NVMAICLI --model qwen3.8-flash-next_125B_A6B_4Bit \
+    --prompt "The capital of France is" --max-new 20 --temperature 0
+ Paris. The capital of Germany is Berlin. The capital of Italy is Rome. The capital of Spain
+```
+
+### How it was found
+
+Five defects stood between "runs" and "answers". Not one of them threw, and
+not one was visible in the output as anything but fluent nonsense --- every
+single one produced a smooth, confident, wrong distribution. They were found
+by numerical parity against the reference implementation, stage by stage, and
+they would not have been found any other way.
+
+The harness is in `tools/`:
+
+- `gturbo_reader.py` reads tensors straight out of the installed
+  `model_weights.bin` and `packed_experts/`, dequantizing INT4 and INT8 affine
+  groups. Both sides therefore run on the *same* weights, so quantization is
+  common-mode and any disagreement is in the forward pass.
+- `qwen38_reference.py` is the model in numpy, one token at a time, carrying
+  all four states: the KV cache, the delta-rule state, the Gated DeltaNet
+  convolution tail and the PLE convolution history.
+- `qwen38_parity.py`, `qwen38_full_forward.py` and
+  `qwen38_sequence_parity.py` compare it against a run's activation dumps.
+
+The runtime side is `NVMAI_ACT_DUMP=<dir>`, with `NVMAI_ACT_DUMP_POSITIONS`
+for how many positions to capture. It is off unless the variable is set.
+
+Position 0 is the workhorse: every carried state is empty there, so the whole
+stack reduces to closed-form algebra and a divergence is unambiguously one
+layer's math. Once position 0 was exact end-to-end, running further positions
+separated "wrong block" from "wrong hand-off between tokens".
+
+### The five defects
+
+1. **Attention split-KV scratch was sized for 16 query heads**; this model has
+   24. The only one of the five that failed loudly (a precondition trap).
+   `Attention.maxQHeads`.
+
+2. **The Gated DeltaNet output gate was silu, and this family uses sigmoid**
+   (`output_gate_type` in its config). Inherited from Qwen 3.6, where silu is
+   right. Both are smooth and positive-ish, so the model kept generating.
+   Fixed with a function constant (`FC_GDN_SIGMOID_GATE`) selected from
+   `LinearAttentionConfig.outputGate`, so the choice is declared per family
+   rather than defaulted from the other one.
+
+3. **The PLE convolution applied silu twice** --- once in the kernel, once in
+   the composing Swift --- and **read its BF16 tap weights as FP16**. The
+   dtype error is the instructive one: reinterpreting BF16 bytes as FP16
+   yields plausible small numbers, never a NaN or a crash.
+
+4. **The MoE computed 8 of 10 experts.** The specialized decode pipelines bake
+   D, F and k in as function constants; D and F came from the model but k was
+   a hardcoded 8. This family shares Qwen 3.6's hidden dimensions and routes
+   to ten experts, so it took the specialized path and phase 1 simply never
+   wrote the last two activation slots, which the reduce then summed as zeros.
+   The residual was the two lowest-weighted experts --- about 1% of the MLP
+   output, which reads exactly like quantization noise. Pinned by
+   `MoEFusedFFNTests.specializedPipelineComputesEveryExpertSlot`.
+
+5. **The vocabulary head used the attention slot's bit width.** It is 8-bit
+   here while attention is 4-bit --- a combination no earlier family had --- so
+   the head read a packed-INT8 tensor as INT4. This one was total: the logit
+   vector had cosine -0.18 against the reference while every one of the 48
+   layers beneath it was exact. `RealForwardRunner.affineHead`.
+
+The fused greedy head was also disabled for hyper-connection families: it
+folds a plain RMSNorm into the vocabulary GEMV, and this stack ends in the
+gated mixer that collapses the residual streams, not in an RMSNorm.
+
+### What parity says now
+
+At position 0, every layer entry and the stack output match the reference to
+cosine 1.00000. Across a prompt the residual drifts to about 0.99 by position
+five --- FP16 activations through 48 layers, entering the carried state and
+compounding --- and the argmax tracks the reference through the tokens
+checked. The per-block checks (`GDN`, `QSA`, `MoE`, `PLE`) hold at 1.00000 at
+every position, which is what says the drift is precision rather than a bug.
+
+Both shipping goldens (`tools/golden-baseline.sh --check 4|8`) are
+byte-identical after all of this. The families differ from this one in every
+place that was touched: silu output gate, top-k of 8, and a head that shares
+the attention slot's width.
+
+### Still open
+
+- **Throughput is 3-5 tok/s** and has had no attention at all. Nothing here
+  was chosen for speed: prefill for this family is a sequential one-token
+  loop, and the n-gram gather sits inline on the decode path where it could
+  be issued a token ahead.
+- The **QSA indexer** is still unwritten, so contexts past 2,051 keys are not
+  faithful. The dense gate is exact below that.
+- The **MTP sidecar** is not installed.
+- Long-context behaviour is unverified: parity has been run over a handful of
+  positions, not over a long prompt.

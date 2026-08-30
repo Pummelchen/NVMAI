@@ -288,7 +288,10 @@ void ple_broadcast_scale_fp16(
 [[kernel, max_total_threads_per_threadgroup(256)]]
 void ple_dilated_depthwise_conv_fp16(
     device const half* xpad     [[buffer(0)]],  // [(history + T) * C]
-    device const half* weight   [[buffer(1)]],  // [C * K], channel-major
+    // bfloat, not half: `ple.conv1d` is a bf16 checkpoint tensor like the
+    // norms. Reading its bytes as fp16 yields plausible small numbers rather
+    // than an error, which is exactly how this stays hidden.
+    device const bfloat* weight [[buffer(1)]],  // [C * K], channel-major
     device       half* out      [[buffer(2)]],  // [T * C]
     constant     uint& C        [[buffer(3)]],
     constant     uint& T        [[buffer(4)]],
@@ -306,4 +309,21 @@ void ple_dilated_depthwise_conv_fp16(
     }
     // silu, as the reference applies before the residual add.
     out[tid] = half(acc / (1.0f + exp(-acc)));
+}
+
+// Replicate stream 0 across the remaining residual streams, in place.
+//
+// Entry to a hyper-connection stack: the token embedding is written once, then
+// every stream starts from that same vector. Only slots at or past D are
+// written and only slots below D are read, so this is safe in place.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void hc_stream_broadcast_fp16(
+    device       half* streams [[buffer(0)]],  // [S * D], stream 0 populated
+    constant     uint& D       [[buffer(1)]],
+    constant     uint& S       [[buffer(2)]],
+    uint               tid     [[thread_position_in_grid]]
+) {
+    const uint total = D * S;
+    if (tid < D || tid >= total) return;
+    streams[tid] = streams[tid % D];
 }

@@ -197,6 +197,94 @@ import NVMAIValidationSupport
             < Tolerance.fp16ChainedReduction)
     }
 
+    @Test("Specialized decode pipelines honour a top-k other than 8")
+    func specializedPipelineComputesEveryExpertSlot() throws {
+        // The specialized decode pipelines bake D, F and k in as function
+        // constants. k was a hardcoded 8 while D and F came from the model,
+        // so a family that shares another family's hidden dimensions but
+        // routes to a different number of experts took the specialized path
+        // and silently computed only the first 8: phase 1 never wrote the
+        // remaining activation slots and the reduce summed zeros for them.
+        // The output stayed smooth and confident, which is why this needs a
+        // test rather than a review.
+        let k = 10
+        var rng = SeedTree(0x5E1).key("specialized-topk")
+        func matrix(rows: Int, columns: Int) -> [[Float]] {
+            (0..<rows).map { _ in (0..<columns).map { _ in rng.uniform(-0.4, 0.4) } }
+        }
+        let gates = (0..<k).map { _ in
+            matrix(rows: Self.intermediate, columns: Self.dimension) }
+        let ups = (0..<k).map { _ in
+            matrix(rows: Self.intermediate, columns: Self.dimension) }
+        let downs = (0..<k).map { _ in
+            matrix(rows: Self.dimension, columns: Self.intermediate) }
+        let x = (0..<Self.dimension).map { _ in Float(Float16(rng.uniform(-0.5, 0.5))) }
+        let residual = [Float](repeating: 0, count: Self.dimension)
+        // Descending weights, so dropping the last slots is a small, plausible
+        // error rather than an obvious one -- the shape of the real bug.
+        let routingWeights = (0..<k).map { Float(Float16(0.2 - Float($0) * 0.015)) }
+        let expected = MoeRef.applyStreamedRouted(
+            x: x, residual: residual,
+            routedGate: gates.map { $0.map { Quantization.quantizeInt4Affine($0) } },
+            routedUp: ups.map { $0.map { Quantization.quantizeInt4Affine($0) } },
+            routedDown: downs.map { $0.map { Quantization.quantizeInt4Affine($0) } },
+            indices: Array(0..<k), routingWeights: routingWeights,
+            d: Self.dimension, f: Self.intermediate)
+
+        let blobs = (0..<k).map {
+            Self.makeBlob(gate: gates[$0], up: ups[$0], down: downs[$0]) }
+        let context = try MetalContext()
+        // Specializing on this test's own shape is what forces the
+        // constant-folded pipelines to be the ones exercised.
+        let kernel = try MoE(context: context,
+                             specializedD: UInt32(Self.dimension),
+                             specializedF: UInt32(Self.intermediate),
+                             topKExperts: k)
+        let routedBuffers = blobs.compactMap {
+            context.device.makeBuffer(bytes: $0.bytes, length: $0.bytes.count,
+                                      options: .storageModeShared)
+        }
+        guard routedBuffers.count == k,
+              let xBuffer = Fp16Buffer.make(context.device, values: x),
+              let residualBuffer = Fp16Buffer.make(context.device, values: residual),
+              let routingBuffer = Fp16Buffer.make(context.device, values: routingWeights),
+              let acts = Fp16Buffer.make(context.device, count: k * Self.intermediate),
+              let output = Fp16Buffer.make(context.device, count: Self.dimension),
+              let argumentBuffer = kernel.makeRoutedArgumentBuffer(
+                routedBlobs: routedBuffers, topK: UInt32(k)) else {
+            Issue.record("buffer allocation failed")
+            return
+        }
+        let command = context.queue.makeCommandBuffer()!
+        try kernel.encodeRoutedPersistentPhase1U16Load(
+            commandBuffer: command, routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers, routedOffsets: blobs[0].offsets,
+            x: xBuffer, acts: acts,
+            d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(k))
+        try kernel.encodeRoutedPersistentPhase2Reduce(
+            commandBuffer: command, routedArgBuffer: argumentBuffer,
+            routedBlobs: routedBuffers, routedOffsets: blobs[0].offsets,
+            acts: acts, routingWeights: routingBuffer, residual: residualBuffer,
+            y: output, d: UInt32(Self.dimension), f: UInt32(Self.intermediate),
+            topK: UInt32(k))
+        command.commit()
+        command.waitUntilCompleted()
+        #expect(command.error == nil)
+
+        // Every slot must carry real activations. Slots 8 and 9 were exactly
+        // zero before the fix, so this names the failure directly.
+        let allActs = Fp16Buffer.read(acts, count: k * Self.intermediate)
+        for slot in 0..<k {
+            let slice = allActs[slot * Self.intermediate ..< (slot + 1) * Self.intermediate]
+            #expect(slice.contains { $0 != 0 },
+                    "expert slot \(slot) of \(k) was never written")
+        }
+        #expect(RelError.compute(actual: Fp16Buffer.read(output, count: Self.dimension),
+                                 reference: expected)
+            < Tolerance.fp16ChainedReduction)
+    }
+
     private static func makeBlob(gate: [[Float]],
                                  up: [[Float]],
                                  down: [[Float]]) -> RoutedBlob {

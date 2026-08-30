@@ -152,6 +152,9 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     let rms: RMSNorm
     let int4: DequantInt4GEMV
     let affine: AffineQuantGEMV?
+    /// Vocabulary head GEMV, keyed off `lmHeadWeightBits` rather than the
+    /// attention slot. Nil when the head is 4-bit.
+    let affineHead: AffineQuantGEMV?
     let attention: Attention
     let kvQuantizer: KVCacheQuantizer?
     let shared: SharedExpertRuntime
@@ -162,6 +165,19 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
     // Qwen 3.6 kernels. Nil on architectures that never dispatch them.
     let elementwise: Elementwise?
+    /// The Gated Residual, for families that carry one. Owns its own scratch,
+    /// so a family without hyper-connections allocates nothing.
+    /// Set by `NVMAI_ACT_DUMP`; nil disables every dump call site.
+    let activationDumpDirectory: URL?
+    let hyperConnection: HyperConnection?
+    /// The n-gram (PLE) block, its row addressing, and the table it reads.
+    /// All three or none: a family without PLE layers leaves them nil.
+    let pleBlock: PLEBlock?
+    let pleHash: PLEHash?
+    let ngramTable: NgramTableReader?
+    /// The current token and its predecessors, nearest first, as `PLEHash`
+    /// wants them. Only `ngramSize` entries are ever consulted.
+    var pleContext: [Int32] = []
     let gdn: GDN?
     let gdnState: GDNStateManager?
     let rope: RoPE?
@@ -327,7 +343,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         } else {
             yarnParameters = nil
         }
+        // The fused greedy head folds a plain RMSNorm into the vocabulary
+        // GEMV. A hyper-connection model does not end in an RMSNorm: it ends
+        // in the gated mixer that collapses the residual streams, so the
+        // fused path would normalize the wide residual and read stream 0 as
+        // if it were the whole hidden state. Correct output beats one fused
+        // dispatch; the family takes the two-step head.
         self.useFusedGreedyHead = runtimeConfiguration.headPath == .fusedRows
+            && !cfg.hyperConnections.enabled
             && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
@@ -391,6 +414,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.affine = model.attentionWeightBits == 4 ? nil
             : try AffineQuantGEMV(context: context,
                                   weightBits: model.attentionWeightBits)
+        // The vocabulary head carries its own bit width. It matched the
+        // attention slot in every earlier family, so the head simply reused
+        // the attention GEMV -- which reads an 8-bit head as packed 4-bit the
+        // moment a model quantizes the two differently, as this one does
+        // (4-bit attention, 8-bit embedding and head). The result is a full
+        // logit vector of confident nonsense, so the width is selected here
+        // rather than inherited.
+        self.affineHead = model.lmHeadWeightBits == 4 ? nil
+            : try AffineQuantGEMV(context: context,
+                                  weightBits: model.lmHeadWeightBits)
         self.attention = try Attention(context: context)
         self.kvQuantizer = runtimeConfiguration.kvCachePrecision.isQuantized
             ? try KVCacheQuantizer(context: context) : nil
@@ -446,6 +479,36 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             || cfg.sharedExpertGated
             || cfg.hasLinearAttentionLayers
         self.elementwise = needsElementwise ? try Elementwise(context: context) : nil
+        self.activationDumpDirectory = ProcessInfo.processInfo
+            .environment["NVMAI_ACT_DUMP"].map { URL(fileURLWithPath: $0) }
+        self.hyperConnection = cfg.hyperConnections.enabled
+            ? try HyperConnection(context: context,
+                                  dim: cfg.hiddenSize,
+                                  streams: cfg.hyperConnections.count,
+                                  lowRank: cfg.hyperConnections.lowRank)
+            : nil
+        if cfg.ple.enabled {
+            let constants = try PLEConstants.load(
+                directoryURL: model.directoryURL)
+            self.pleHash = constants.makeHash()
+            self.ngramTable = try NgramTableReader(
+                path: model.directoryURL.appendingPathComponent(
+                    Qwen38FlashTensors.ngramTableFile).path,
+                rowDim: constants.pleHeadDim,
+                rowCount: constants.tableRowCount)
+            self.pleBlock = try PLEBlock(
+                context: context,
+                dim: cfg.hiddenSize,
+                streams: cfg.hyperConnections.count,
+                embedDim: cfg.ple.embedDim,
+                kernelSize: cfg.ple.convKernelSize,
+                // The dilation is the n-gram size, not a constant of its own.
+                dilation: cfg.ple.ngramSize)
+        } else {
+            self.pleHash = nil
+            self.ngramTable = nil
+            self.pleBlock = nil
+        }
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
                                specializedHiddenSize: cfg.hiddenSize)
@@ -644,6 +707,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     public func reset() {
         kv?.reset()
         gdnState?.reset()
+        resetPLEState()
         resetTransientState()
     }
 

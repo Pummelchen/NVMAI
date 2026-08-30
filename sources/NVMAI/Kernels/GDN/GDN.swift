@@ -57,7 +57,10 @@ final class GDN {
         self.gatedNormPSO = try context.pipeline(
             "gdn_gated_norm",
             constants: [MetalFunctionConstant(index: 95,
-                                               value: .uint32(Self.normThreadsPerGroup))])
+                                               value: .uint32(Self.normThreadsPerGroup)),
+                        MetalFunctionConstant(
+                            index: 96,
+                            value: .bool(config.outputGate == .sigmoid))])
         self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",
                                               constants: [],
                                               maxTotalThreadsPerThreadgroup: 512)

@@ -110,12 +110,21 @@ struct PLEBlockTests {
         let ctx = try MetalContext()
         let e = try Elementwise(context: ctx)
         for tap in 0..<K {
-            var w = [Float16](repeating: 0, count: C * K)
+            // The conv taps are a BF16 checkpoint tensor, so the test has to
+            // hand the kernel BF16 -- feeding it FP16 would compare the
+            // kernel against a weight it will never see.
+            var w = [Float](repeating: 0, count: C * K)
             w[tap] = 1                       // isolate one tap
+            let wBits = w.map { Quantization.bf16Bits($0) }
             guard let xb = Fp16Buffer.make(ctx.device, halves: xpad),
-                  let wb = Fp16Buffer.make(ctx.device, halves: w),
+                  let wb = ctx.device.makeBuffer(length: wBits.count * 2,
+                                                 options: .storageModeShared),
                   let ob = Fp16Buffer.make(ctx.device, count: T * C) else {
                 Issue.record("alloc"); return
+            }
+            wBits.withUnsafeBufferPointer {
+                wb.contents().copyMemory(from: $0.baseAddress!,
+                                         byteCount: wBits.count * 2)
             }
             let cb = ctx.queue.makeCommandBuffer()!
             try e.encodePLEDilatedConv(commandBuffer: cb, xpad: xb, weight: wb,

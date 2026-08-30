@@ -138,6 +138,17 @@ public enum Qwen38FlashTensors {
 
     /// Dilated depthwise convolution over the gated n-gram value.
     public static func pleConv(_ l: Int) -> String { layer(l, "ple.conv1d") }
+    /// Projects the gathered n-gram embedding to the full residual width.
+    public static func pleKeyProj(_ l: Int) -> String {
+        layer(l, "ple.key_proj.weight")
+    }
+    /// Projects the same embedding to one stream's width.
+    public static func pleValueProj(_ l: Int) -> String {
+        layer(l, "ple.value_proj.weight")
+    }
+    public static func pleNormKey(_ l: Int) -> String { layer(l, "ple.norm_key") }
+    public static func pleNormQuery(_ l: Int) -> String { layer(l, "ple.norm_query") }
+    public static func pleNormConv(_ l: Int) -> String { layer(l, "ple.norm_conv") }
     /// The table and its hash constants are passthrough files in the install
     /// root rather than tensors, because the runtime gathers rows off storage.
     public static let ngramTableFile = "ngram_table.bin"

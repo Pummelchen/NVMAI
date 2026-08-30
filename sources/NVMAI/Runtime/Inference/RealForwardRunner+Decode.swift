@@ -84,9 +84,49 @@ extension RealForwardRunner {
         guard embedCB != nil else {
             throw ModelError.residentBufferWrapFailed
         }
+        // Entry to a hyper-connection stack: every stream starts from the
+        // token embedding. The embed kernel wrote stream 0; replicate it.
+        if cfg.hyperConnections.enabled {
+            _ = try runSync { cb in
+                try elementwise!.encodeHCBroadcast(
+                    commandBuffer: cb, streams: hidden,
+                    dim: cfg.hiddenSize,
+                    streamCount: cfg.hyperConnections.count)
+            }
+        }
         if let embedCB { recordKernelGPU(role: "embed", embedCB) }
+        // The n-gram rows depend only on this token and its predecessors, so
+        // the gather can run here, before any layer needs it.
+        try gatherPLERows(token: token)
+        if activationDumpActive(position: position) {
+            dumpActivationToken(token, position: position)
+            dumpActivation("embed", hidden, count: residualWidth, position: position)
+            if let ple = pleBlock {
+                dumpActivation("ple_embedding", ple.embedding,
+                               count: cfg.ple.embedDim, position: position)
+            }
+        }
 
         for L in 0..<cfg.numLayers {
+            // Dumping drains the previous layer's routed command first. The
+            // residual is only settled once that has landed, and a dump taken
+            // at encode time would read whatever the buffer held before the
+            // GPU ran -- which reads exactly like a wrong answer.
+            if activationDumpActive(position: position) {
+                if let pending = pendingRoutedCommand {
+                    try finishPendingRoutedCommand(pending, waitIfNeeded: true)
+                    pendingRoutedCommand = nil
+                    if L <= dumpLayerLimit {
+                        dumpActivation("L\(L - 1)_mlp_out", h2Buf,
+                                       count: cfg.hiddenSize, position: position)
+                        dumpActivation("L\(L - 1)_moe_acts", moeActs,
+                                       count: cfg.topKExperts
+                                           * cfg.moeIntermediateSize,
+                                       position: position)
+                    }
+                }
+                dumpActivation("L\(L)_entry", hidden, count: residualWidth, position: position)
+            }
             let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let isLinear = cfg.layerIsLinear(L)
 
@@ -115,9 +155,14 @@ extension RealForwardRunner {
             guard let attnCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
+            // The PLE block rewrites the wide residual before the attention
+            // read gate sees it, so it is encoded ahead of the entry.
+            try encodePLEDecode(commandBuffer: attnCB, layer: L,
+                                position: position, eps: eps)
             try encodeResidualEntryDecode(commandBuffer: attnCB,
                                           hidden: hidden, norm: inNorm,
-                                          out: normed, eps: eps)
+                                          out: normed, sublayer: .attention,
+                                          layer: L, eps: eps)
             var softmaxCB: MTLCommandBuffer?
             guard let tailCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
@@ -128,10 +173,12 @@ extension RealForwardRunner {
                                       layer: L, position: position,
                                       isLinear: isLinear, rmsEps: eps)
             try encodeResidualExitDecode(commandBuffer: tailCB,
-                                         hidden: hidden, delta: oOut)
+                                         hidden: hidden, delta: oOut,
+                                         sublayer: .attention, layer: L)
             try encodeResidualEntryDecode(commandBuffer: tailCB,
                                           hidden: hidden, norm: postAttn,
-                                          out: routedX, eps: eps)
+                                          out: routedX, sublayer: .mlp,
+                                          layer: L, eps: eps)
 
             try moe.encodeRouter(commandBuffer: tailCB,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
@@ -189,6 +236,29 @@ extension RealForwardRunner {
                 completionClock: overlapCompletionClock)
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             try waitForCompletion(tailCB)
+            // After the tail wait every attention-side buffer is settled and
+            // nothing overwrites them until the next layer, so the dumps cost
+            // no extra synchronization.
+            if activationDumpActive(position: position) && L <= dumpLayerLimit {
+                if let ple = pleBlock, cfg.ple.layerIndices.contains(L) {
+                    let wide = residualWidth
+                    dumpActivation("ple_key", ple.keyBuf, count: wide, position: position)
+                    dumpActivation("ple_value", ple.valueBuf, count: cfg.hiddenSize, position: position)
+                    dumpActivation("ple_key_normed", ple.keyNormed, count: wide, position: position)
+                    dumpActivation("ple_query", ple.queryNormed, count: wide, position: position)
+                    dumpActivation("ple_score", ple.scoreBuf,
+                                   count: cfg.hyperConnections.count, position: position)
+                    dumpActivation("ple_gate", ple.gateBuf,
+                                   count: cfg.hyperConnections.count, position: position)
+                    dumpActivation("ple_gated", ple.gatedBuf, count: wide, position: position)
+                    dumpActivation("ple_conv", ple.convOut, count: wide, position: position)
+                }
+                dumpActivation("L\(L)_attn_in", normed, count: cfg.hiddenSize, position: position)
+                dumpActivation("L\(L)_attn_out", oOut, count: cfg.hiddenSize, position: position)
+                dumpActivation("L\(L)_mlp_in", routedX, count: cfg.hiddenSize, position: position)
+                dumpActivation("L\(L)_hidden_post_attn", hidden,
+                               count: residualWidth, position: position)
+            }
             recordKernelGPU(role: "attn_norm_qkv", attnCB)
             if let attentionCB = softmaxCB {
                 recordKernelGPU(role: "attn_softmax", attentionCB)
@@ -238,12 +308,25 @@ extension RealForwardRunner {
         let fNorm = try model.finalNorm()
         let lm    = try model.lmHead()
         let gFinalNorm: (MTLCommandBuffer) throws -> Void = { cb in
-            try self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
-                                 weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
-                                 out: self.normed, d: D, eps: eps)
+            if let hc = self.hyperConnection {
+                // The stack ends by collapsing the streams through the
+                // model-level mixer: the same gated read a sublayer uses, with
+                // no inject, and its hc_norm serving as the final norm.
+                try hc.encodeRead(commandBuffer: cb,
+                                  streamsBuffer: self.hidden,
+                                  hcNorm: fNorm.buffer,
+                                  hcNormOffset: Int(fNorm.offset),
+                                  down: self.gateWeightsPublic(try self.model.hcMixerDown()),
+                                  up: self.gateWeightsPublic(try self.model.hcMixerUp()),
+                                  blockInput: self.normed, eps: eps)
+            } else {
+                try self.rms.encodeBF16W(commandBuffer: cb, x: self.hidden,
+                                     weight: fNorm.buffer, weightOffset: Int(fNorm.offset),
+                                     out: self.normed, d: D, eps: eps)
+            }
         }
         let gLmHead: (MTLCommandBuffer) throws -> Void = { cb in
-            try self.encodePrimaryGEMV(commandBuffer: cb,
+            try self.encodeHeadGEMV(commandBuffer: cb,
                              weights: lm.buffer, weightsOffset: Int(lm.offset),
                              scales:  lm.buffer, scalesOffset:  Int(lm.scaleOffset),
                              biases:  lm.buffer, biasesOffset:  Int(lm.biasOffset),
@@ -260,6 +343,13 @@ extension RealForwardRunner {
                 outToken: self.greedyTokenBuf,
                 d: D, vocab: UInt32(self.cfg.vocabSize),
                 rmsEps: eps)
+        }
+        if activationDumpActive(position: position) {
+            if let pending = pendingRoutedCommand {
+                try finishPendingRoutedCommand(pending, waitIfNeeded: true)
+                pendingRoutedCommand = nil
+            }
+            dumpActivation("stack_out", hidden, count: residualWidth, position: position)
         }
         if emitHead {
             let useFusedHeadForThisToken = useFusedGreedyHead && outputMode == .greedyIfAvailable
@@ -278,6 +368,12 @@ extension RealForwardRunner {
                     throw ModelError.residentBufferWrapFailed
                 }
                 recordKernelGPU(role: "head_logits", headCB)
+                if activationDumpActive(position: position) {
+                    dumpActivation("mixer_out", normed, count: cfg.hiddenSize,
+                                   position: position)
+                    dumpActivation("logits", logits, count: cfg.vocabSize,
+                                   position: position)
+                }
                 totalHeadNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tHead
             }
         }
@@ -541,6 +637,33 @@ extension RealForwardRunner {
                         biases: biases, biasesOffset: biasesOffset,
                         x: x, xOffset: xOffset, y: y, yOffset: yOffset,
                         m: m, n: n)
+        }
+    }
+
+    /// Vocabulary head GEMV. Same shape as `encodePrimaryGEMV` but keyed off
+    /// the head's own quantization, which a model may set independently of
+    /// the attention slot.
+    func encodeHeadGEMV(commandBuffer cb: MTLCommandBuffer,
+                        weights: MTLBuffer, weightsOffset: Int,
+                        scales: MTLBuffer, scalesOffset: Int,
+                        biases: MTLBuffer, biasesOffset: Int,
+                        x: MTLBuffer, xOffset: Int = 0,
+                        y: MTLBuffer, yOffset: Int = 0,
+                        m: UInt32, n: UInt32) throws {
+        if let affineHead {
+            try affineHead.encode(commandBuffer: cb,
+                                  weights: weights, weightsOffset: weightsOffset,
+                                  scales: scales, scalesOffset: scalesOffset,
+                                  biases: biases, biasesOffset: biasesOffset,
+                                  x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                                  m: m, n: n)
+        } else {
+            try int4.encode(commandBuffer: cb,
+                            weights: weights, weightsOffset: weightsOffset,
+                            scales: scales, scalesOffset: scalesOffset,
+                            biases: biases, biasesOffset: biasesOffset,
+                            x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                            m: m, n: n)
         }
     }
 
@@ -1129,10 +1252,9 @@ extension RealForwardRunner {
         // The phase-2 reduce already folded the shared branch (h1Buf
         // as its residual); the tail is a plain residual add.
         let gTail: (MTLCommandBuffer) throws -> Void = { [self] cb in
-            try elementwise!.encodeResidualAdd(commandBuffer: cb,
-                                           hidden: hidden,
-                                           delta: h2Buf,
-                                           count: cfg.hiddenSize)
+            try encodeResidualExitDecode(commandBuffer: cb,
+                                         hidden: hidden, delta: h2Buf,
+                                         sublayer: .mlp, layer: L)
         }
         guard let routedCB = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed

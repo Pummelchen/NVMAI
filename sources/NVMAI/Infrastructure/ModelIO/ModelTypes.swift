@@ -104,20 +104,34 @@ public struct PLEConfig: Sendable, Equatable {
 /// Gated-DeltaNet (linear attention) dimensions. Zeroed for architectures
 /// without linear-attention layers.
 public struct LinearAttentionConfig: Sendable, Equatable {
+    /// Nonlinearity applied to `z` before it scales the normalized delta
+    /// readout. Qwen 3.6 (like Qwen3-Next) uses silu; Qwen3.8-Flash-Next uses
+    /// sigmoid, which its config states as `output_gate_type`. Both are
+    /// smooth and positive-ish, so picking the wrong one produces confident
+    /// nonsense rather than an error -- it is declared per family, never
+    /// defaulted from the other one.
+    public enum OutputGate: String, Sendable, Equatable {
+        case silu
+        case sigmoid
+    }
+
     public let numKHeads: Int
     public let numVHeads: Int
     public let keyHeadDim: Int
     public let valueHeadDim: Int
     public let convKernelSize: Int
+    public let outputGate: OutputGate
 
     public init(numKHeads: Int, numVHeads: Int,
                 keyHeadDim: Int, valueHeadDim: Int,
-                convKernelSize: Int) {
+                convKernelSize: Int,
+                outputGate: OutputGate = .silu) {
         self.numKHeads = numKHeads
         self.numVHeads = numVHeads
         self.keyHeadDim = keyHeadDim
         self.valueHeadDim = valueHeadDim
         self.convKernelSize = convKernelSize
+        self.outputGate = outputGate
     }
 
     public static let none = LinearAttentionConfig(
@@ -397,7 +411,8 @@ public struct ArchConfig: Sendable, Equatable {
         linearAttention: LinearAttentionConfig(
             numKHeads: 16, numVHeads: 48,
             keyHeadDim: 128, valueHeadDim: 128,
-            convKernelSize: 4),
+            convKernelSize: 4,
+            outputGate: .sigmoid),
         hyperConnections: HyperConnectionConfig(count: 4, lowRank: 320),
         sparseIndexer: SparseIndexerConfig(
             numHeads: 4, numKVHeads: 1, headDim: 128,

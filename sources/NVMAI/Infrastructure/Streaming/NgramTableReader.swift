@@ -31,8 +31,9 @@ public final class NgramTableReader: @unchecked Sendable {
             case .openFailed(let p, let e):
                 return "n-gram table open(\(p)) failed: \(String(cString: strerror(e)))"
             case .sizeMismatch(let p, let expected, let actual):
-                return "n-gram table \(p) is \(actual) bytes, expected \(expected); "
-                    + "the table does not match the manifest's geometry"
+                return "n-gram table \(p) is \(actual) bytes; expected at least "
+                    + "\(expected) and at most 1 MiB of alignment padding past "
+                    + "it. The table does not match the manifest's geometry"
             case .rowOutOfRange(let row, let count):
                 return "n-gram row \(row) is outside the table's \(count) rows"
             case .readFailed(let row, let e):
@@ -73,10 +74,19 @@ public final class NgramTableReader: @unchecked Sendable {
         }
         let bytes = rowDim * MemoryLayout<Float16>.stride
         let expected = rowCount &* UInt64(bytes)
-        guard UInt64(st.st_size) == expected else {
+        // The checkpoint pads the table past its last addressable row (the
+        // shipped one rounds up to a 512-row boundary), so an exact size is
+        // the wrong check. What this must still catch is a table built for a
+        // different geometry, and that differs by a whole head -- 20M rows,
+        // 6.4 GB -- not by alignment. Allowing at most 1 MiB of surplus
+        // separates the two by three orders of magnitude.
+        let size = UInt64(st.st_size)
+        let surplusLimit: UInt64 = 1 << 20
+        guard size >= expected, size - expected <= surplusLimit,
+              size % UInt64(bytes) == 0 else {
             close(opened)
             throw Failure.sizeMismatch(path: path, expected: expected,
-                                       actual: UInt64(st.st_size))
+                                       actual: size)
         }
         self.fd = opened
         self.path = path

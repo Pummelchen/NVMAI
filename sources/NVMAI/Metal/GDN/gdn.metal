@@ -12,7 +12,8 @@ using namespace metal;
 //   conv_out  = silu(causal_depthwise_conv(mixed))    gdn_conv_mix_*
 //   q, k      = per-head no-weight RMS norm + scale   gdn_qk_norm_*
 //   y, S      = gated delta rule recurrence           gdn_delta_*
-//   out       = rmsnorm(y) * silu(z)                  gdn_gated_norm_*
+//   out       = rmsnorm(y) * gate(z)                  gdn_gated_norm_*
+//               gate is silu or sigmoid per FC_GDN_SIGMOID_GATE
 //   out_proj(out)                                     (existing INT4 GEMV)
 //
 // The recurrence follows the mlx-vlm reference (gated_delta.py): per value
@@ -37,6 +38,12 @@ constant bool FC_GDN_IN_USE_FC [[function_constant(94)]];
 // The wrapper passes the same value it dispatches with, so the partial-count
 // loop below can never drift from the actual SIMD-group count.
 constant uint FC_GDN_TG_THREADS [[function_constant(95)]];
+// Output gate of gdn_gated_norm. Qwen 3.6 / Qwen3-Next gate the normalized
+// delta readout with silu; Qwen3.8-Flash-Next gates it with sigmoid
+// (`output_gate_type` in its config). The two agree in sign and shape, so
+// using the wrong one costs no error and no crash -- it just produces a
+// different model. It has to be selected, not assumed.
+constant bool FC_GDN_SIGMOID_GATE [[function_constant(96)]];
 
 static inline uint gdn_tg_threads() {
     return is_function_constant_defined(FC_GDN_TG_THREADS)
@@ -69,6 +76,12 @@ static inline uint gdn_in_fc_n(constant uint& n) {
 
 static inline float gdn_silu(float x) {
     return x / (1.0f + exp(-x));
+}
+
+static inline float gdn_out_gate(float x) {
+    const bool sigmoidGate = is_function_constant_defined(FC_GDN_SIGMOID_GATE)
+        && FC_GDN_SIGMOID_GATE;
+    return sigmoidGate ? (1.0f / (1.0f + exp(-x))) : gdn_silu(x);
 }
 
 static inline float gdn_softplus(float x) {
@@ -585,7 +598,8 @@ kernel void gdn_delta_step_prefill(
 }
 
 // ----------------------------------------------------------------------------
-// Gated output norm: out = rmsnorm(y; weight, eps) * silu(z), per value head.
+// Gated output norm: out = rmsnorm(y; weight, eps) * gate(z), per value head,
+// where gate is silu or sigmoid (FC_GDN_SIGMOID_GATE).
 // One threadgroup per (head, row), 128 threads. Norm statistics span one
 // head's Dv elements; silu/product in FP32 (matches the reference's
 // _precise_swiglu).
@@ -636,7 +650,7 @@ kernel void gdn_gated_norm(
 
     for (uint i = tid; i < Dv; i += tgThreads) {
         const float normed = float(y[base + i]) * invRms * float(weight[i]);
-        const float gate = gdn_silu(float(z[base + i]));
+        const float gate = gdn_out_gate(float(z[base + i]));
         out[base + i] = half(normed * gate);
     }
 }

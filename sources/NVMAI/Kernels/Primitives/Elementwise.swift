@@ -20,6 +20,7 @@ final class Elementwise {
     private let pleGatePSO: MTLComputePipelineState
     private let pleBroadcastPSO: MTLComputePipelineState
     private let pleConvPSO: MTLComputePipelineState
+    private let hcBroadcastPSO: MTLComputePipelineState
 
     init(context: MetalContext) throws {
         self.sigmoidGateMulPSO = try context.pipeline("sigmoid_gate_mul_fp16")
@@ -35,6 +36,7 @@ final class Elementwise {
         self.pleGatePSO = try context.pipeline("ple_signed_sqrt_gate_fp16")
         self.pleBroadcastPSO = try context.pipeline("ple_broadcast_scale_fp16")
         self.pleConvPSO = try context.pipeline("ple_dilated_depthwise_conv_fp16")
+        self.hcBroadcastPSO = try context.pipeline("hc_stream_broadcast_fp16")
     }
 
     private func encodeUnary(_ pso: MTLComputePipelineState,
@@ -227,6 +229,25 @@ final class Elementwise {
         enc.dispatchThreads(MTLSize(width: total, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(
                                 width: min(pleConvPSO.maxTotalThreadsPerThreadgroup, 256),
+                                height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
+    /// Replicate stream 0 across the remaining residual streams, in place.
+    func encodeHCBroadcast(commandBuffer: MTLCommandBuffer,
+                           streams: MTLBuffer, streamsOffset: Int = 0,
+                           dim: Int, streamCount: Int) throws {
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(hcBroadcastPSO)
+        enc.setBuffer(streams, offset: streamsOffset, index: 0)
+        var d = UInt32(dim), s = UInt32(streamCount)
+        enc.setBytes(&d, length: MemoryLayout<UInt32>.size, index: 1)
+        enc.setBytes(&s, length: MemoryLayout<UInt32>.size, index: 2)
+        enc.dispatchThreads(MTLSize(width: dim * streamCount, height: 1, depth: 1),
+                            threadsPerThreadgroup: MTLSize(
+                                width: min(hcBroadcastPSO.maxTotalThreadsPerThreadgroup, 256),
                                 height: 1, depth: 1))
         enc.endEncoding()
     }

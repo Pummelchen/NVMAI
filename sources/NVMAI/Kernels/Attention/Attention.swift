@@ -46,7 +46,11 @@ final class Attention {
     /// Project ceilings for the split-KV partial scratch. `kAttnMaxHeadDim` in
     /// attention.metal is 512; the model has 16 Q heads; `maxChunks` bounds the
     /// split factor (and therefore the scratch size: 16·64·512 FP32 ≈ 2 MB).
-    static let maxQHeads = 16
+    // 32: Qwen3.8-Flash-Next has 24 query heads against Qwen 3.6's 16. This
+    // only sizes the split-KV reduction scratch (maxQHeads x maxChunks, and
+    // the same again x maxHeadDim), so the cost is ~2 MB of host-side buffer,
+    // and the kernels read the real head count from their arguments.
+    static let maxQHeads = 32
     static let maxHeadDim = 512
     static let maxChunks = 64
     /// Full attention uses 16 base chunks by default.

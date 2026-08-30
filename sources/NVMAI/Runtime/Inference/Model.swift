@@ -163,6 +163,60 @@ public struct Model {
     public func oProj(layer L: Int) throws -> TensorView {
         try resident(name: schema.oProj(L))
     }
+    // MARK: Hyper-connection (Gated Residual) weights
+    //
+    // Present only on families whose `hyperConnections` is enabled; asking for
+    // them elsewhere fails at the resident-index lookup with the missing name,
+    // which is the right error for a misconfigured install.
+
+    public func hcAttnMixDown(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.attnMixDown(L))
+    }
+    public func hcAttnMixUp(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.attnMixUp(L))
+    }
+    public func hcAttnInject(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.attnInject(L))
+    }
+    public func hcMlpMixDown(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.mlpMixDown(L))
+    }
+    // MARK: PLE n-gram block
+
+    public func pleKeyProj(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.pleKeyProj(L))
+    }
+    public func pleValueProj(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.pleValueProj(L))
+    }
+    public func pleNormKey(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.pleNormKey(L))
+    }
+    public func pleNormQuery(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.pleNormQuery(L))
+    }
+    public func pleNormConv(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.pleNormConv(L))
+    }
+    public func pleConv(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.pleConv(L))
+    }
+
+    public func hcMlpMixUp(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.mlpMixUp(L))
+    }
+    public func hcMlpInject(layer L: Int) throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.mlpInject(L))
+    }
+    /// The model-level mixer that collapses the streams before `lm_head`.
+    /// Same read gate as a sublayer's, with no inject.
+    public func hcMixerDown() throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.mixerDown)
+    }
+    public func hcMixerUp() throws -> TensorView {
+        try resident(name: Qwen38FlashTensors.mixerUp)
+    }
+
     public func router(layer L: Int) throws -> TensorView {
         try resident(name: schema.router(L))
     }
