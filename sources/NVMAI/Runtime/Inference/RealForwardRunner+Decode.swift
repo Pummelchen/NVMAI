@@ -245,8 +245,9 @@ extension RealForwardRunner {
             if let nextRouterW {
                 // Probe only: score the next router against the current
                 // post-attention normalized residual. The exact router above
-                // remains authoritative; this result is emitted solely to
-                // NVMAI_PREFETCH_TRACE for predictor qualification.
+                // remains authoritative; this result never selects experts for
+                // this layer. It drives NVMAI_PREFETCH_TRACE and, when
+                // NVMAI_PREDICTIVE_PREFETCH is set, the speculative ring.
                 try moe.encodeRouter(commandBuffer: tailCB,
                     weights: nextRouterW.buffer, weightsOffset: Int(nextRouterW.offset),
                     scales: nextRouterW.buffer, scalesOffset: Int(nextRouterW.scaleOffset),
@@ -1299,9 +1300,20 @@ extension RealForwardRunner {
         }
         if let predictivePrefetch, L + 1 < cfg.numLayers {
             let resident = Set(try model.routedExpertResidentIDs(layer: L + 1))
+            // The whole ranked prediction goes in; `begin` drops the experts
+            // that are already resident or already in flight and then fills
+            // whatever ring slots are free, in rank order.
+            //
+            // Truncating to top-M here first (v4.3) spent the budget before
+            // the residency filter ran. About 85% of the top-M predictions are
+            // already cached, so the filter starved the ring instead of aiming
+            // it: on a 191-position qwen38 trace, top-4 issued 0.94 reads per
+            // layer and covered 23% of the demand misses, where filtering
+            // first issues 2.59 and covers 46%. The ring size stays the cap on
+            // reads in flight; only the order of cap and filter changed.
             try predictivePrefetch.begin(
                 model: model, layer: L + 1,
-                experts: Array(predictedNextLayer.prefix(predictivePrefetchTopM)),
+                experts: predictedNextLayer,
                 resident: resident)
         }
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)

@@ -319,7 +319,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     let expertIOBackend: ExpertIOBackend
     let predictivePrefetch: ExpertPrefetchRing?
     let anePrefill: ANEPrefillAttention?
-    let predictivePrefetchTopM: Int
     public let rdadviseEnabled: Bool
     public let rdadvisePolicyMode: RDAdvicePolicyMode
     var rdadviseSkipUntilPosition: Int = -1
@@ -364,13 +363,20 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.expertIOBackend = try ExpertIOBackend.environmentValue()
         let rawPrefetchEnabled = ProcessInfo.processInfo.environment[
             "NVMAI_PREDICTIVE_PREFETCH"] == "1"
+        // One read deep, not four. The ring depth is a bandwidth decision, not
+        // a coverage one: the SSD is saturated while it reads, so a speculative
+        // read that misses its layer has stolen service from a demand read that
+        // did not. One read has the whole inter-layer window to itself and
+        // lands in time; deeper rings contend with the demand traffic and
+        // arrive too late to be adopted, which shows up as a *lower* hit rate.
+        // Measured on qwen38 4-bit, interleaved against prefetch off:
+        // M=1 +12.2% (hit 78.7%), M=2 +6.0% (77.9%), M=4 -9.8% (77.1%).
         let rawPrefetchTopM = Int(ProcessInfo.processInfo.environment[
-            "NVMAI_PREFETCH_TOP_M"] ?? "4") ?? 4
+            "NVMAI_PREFETCH_TOP_M"] ?? "1") ?? 1
         guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
             throw ModelError.internalInconsistency(
                 detail: "NVMAI_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
         }
-        self.predictivePrefetchTopM = rawPrefetchTopM
         self.predictivePrefetch = rawPrefetchEnabled
             ? try ExpertPrefetchRing(
                 device: context.device,
