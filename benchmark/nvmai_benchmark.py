@@ -46,7 +46,27 @@ MTP_STATS_RE = re.compile(
     r"mtp drafted=(\d+) accepted=(\d+) acceptance=([0-9.]+)% "
     r"target_passes=(\d+) emitted_per_pass=([0-9.]+)")
 
+# Resolved from the running server rather than hardcoded, so this harness can
+# benchmark any installed model. It used to name Ornith, which silently made
+# it the only model it could measure.
 MODEL_ID = "ornith-1.5-35b-a3b"
+
+
+def resolve_model_id(port):
+    """The API id the server derived from the model's manifest."""
+    global MODEL_ID
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/v1/models")
+        data = json.loads(conn.getresponse().read().decode())
+        conn.close()
+        ids = [row["id"] for row in data.get("data", [])
+               if not row["id"].endswith("-fast")]
+        if ids:
+            MODEL_ID = ids[0]
+    except (OSError, ValueError, KeyError):
+        pass
+    return MODEL_ID
 
 PROMPTS = [
     ("Basic fact", "What is the capital of France? Answer with only the city.", "Paris"),
@@ -530,6 +550,7 @@ def main():
             if not wait_ready(port):
                 print(f"Port {port} FAILED to become ready!", flush=True)
                 continue
+            print(f"Model id: {resolve_model_id(port)}", flush=True)
 
             run_config(cache_mode, mtp_config, config_label, port,
                        temperature=temperature)

@@ -44,6 +44,7 @@ import time
 
 from nvmai_profile import (
     DEFAULT_API_MODEL,
+    resolve_api_model,
     ROOT,
     benchmark_log_path,
     server_command,
@@ -62,11 +63,18 @@ TEMPERATURE = 0.6
 SEED = 42
 TOP_K = 20  # GenerationDefaults.topK; overridable with --top-k for A/B probes
 
+# The published workload was Ornith-only, which is why no comparable number
+# existed for any other model. `--model-dir` points the same protocol at any
+# install; the quant key then only selects a port.
 QUANTS = {
     "4bit": ROOT / "models/ornith-1.5_35B_A3B_4Bit",
     "8bit": ROOT / "models/ornith-1.5_35B_A3B_8Bit",
 }
 PORTS = {"4bit": 8091, "8bit": 8092}
+
+# Set from --model-dir; None keeps the published Ornith default.
+MODEL_OVERRIDE = None
+API_MODEL = None
 
 GENERATION_RE = re.compile(
     r"NVMAI generation prefill_s=([0-9.]+) decode_s=([0-9.]+) "
@@ -227,7 +235,8 @@ def launch(quant: str, port: int, log_name: str,
     binary = ROOT / ".build/arm64-apple-macosx/release/NVMAIServer"
     if not binary.exists():
         raise SystemExit(f"missing release binary: {binary}")
-    cmd = server_command(binary, port, model=QUANTS[quant])
+    cmd = server_command(binary, port,
+                         model=MODEL_OVERRIDE or QUANTS[quant])
     env = server_environment()
     env["NVMAI_RUNNER_STATS"] = "1"
     env["NVMAI_KERNEL_STATS"] = "1"
@@ -257,7 +266,7 @@ def wait_ready(port: int, attempts: int = 40) -> bool:
 
 def generate(port: int) -> dict | None:
     payload = json.dumps({
-        "model": DEFAULT_API_MODEL,
+        "model": API_MODEL or DEFAULT_API_MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": TEMPERATURE,
         "top_p": 0.95,
@@ -362,6 +371,9 @@ def run_quant(quant: str, runs: int) -> dict:
         if not wait_ready(port):
             _terminate_all()
             raise SystemExit(f"[{quant}] server did not become healthy")
+        # The advertised id names the quantization and differs per install, so
+        # it is asked for rather than assumed.
+        globals()["API_MODEL"] = resolve_api_model(port)
         result = generate(port)
         # stdout is block-buffered into the log; the footer only lands on disk
         # when the process exits, so always terminate before parsing.
@@ -482,6 +494,9 @@ def main() -> int:
     global TOP_K
     parser = argparse.ArgumentParser()
     parser.add_argument("--quant", choices=sorted(QUANTS), action="append")
+    parser.add_argument("--model-dir", default=None,
+                        help="run the published protocol against this install "
+                             "instead of the Ornith default")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--out", default=None)
     parser.add_argument("--top-k", type=int, default=TOP_K,
@@ -491,6 +506,8 @@ def main() -> int:
                              "results are not comparable with the benchmark")
     args = parser.parse_args()
     TOP_K = args.top_k
+    if args.model_dir:
+        globals()["MODEL_OVERRIDE"] = pathlib.Path(args.model_dir).resolve()
 
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)

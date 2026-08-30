@@ -7,6 +7,7 @@ the user-facing launcher profile.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 from collections.abc import Mapping
@@ -101,6 +102,29 @@ def server_environment(
     return environment
 
 
-def request_model(*, fast: bool = DEFAULT_FAST_ALIAS) -> str:
+def resolve_api_model(port, *, timeout=5):
+    """Ask the server which model it serves.
+
+    The id names the quantization now (`ornith-1.5-35b-a3b_4-Bit`), and it
+    differs per model, so a hardcoded default silently restricts every harness
+    to one install -- which is what it did.
+    """
+    import http.client
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        conn.request("GET", "/v1/models")
+        data = json.loads(conn.getresponse().read().decode())
+        conn.close()
+        ids = [row["id"] for row in data.get("data", [])
+               if not row["id"].endswith("-fast")]
+        if ids:
+            return ids[0]
+    except (OSError, ValueError, KeyError):
+        pass
+    return DEFAULT_API_MODEL
+
+
+def request_model(*, fast: bool = DEFAULT_FAST_ALIAS,
+                  base: str | None = None) -> str:
     """Return the base API model unless an experiment explicitly asks for fast."""
-    return DEFAULT_API_MODEL + ("-fast" if fast else "")
+    return (base or DEFAULT_API_MODEL) + ("-fast" if fast else "")

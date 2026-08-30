@@ -709,7 +709,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.modelFamily = model.config.family
         self.defaultModelID = ServerModelIdentity.apiModelID(
             manifestModelID: model.modelID,
-            family: model.config.family)
+            family: model.config.family,
+            weightBits: model.routedExpertWeightBits)
         self.runner = runner
         self.mtpDecoder = mtpDecoder
         self.scratch = scratch

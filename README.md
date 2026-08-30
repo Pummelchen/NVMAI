@@ -94,21 +94,42 @@ and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
 
 ## Benchmarks
 
-NVMAI v4.6 median results on a base 8-core M3 MacBook Pro with 24 GB. Ornith
-generated 512 tokens of continuous plain English about an ordinary day in a
-small town; each row used one discarded warmup and three fresh-process runs.
+Peak decode on a base 8-core M3 MacBook Pro with 24 GB, generating 512 tokens
+of continuous English prose. Each row is the median of three fresh-process
+runs after one discarded warmup, on an idle machine.
 
-| Quantization | Median decode | Median wall time | Change from v4.1 |
-| --- | ---: | ---: | ---: |
-| 4-bit | **22.53 tok/s** | 25.59 s | **+37.0%** |
-| 8-bit | **9.40 tok/s** | 59.48 s | **+7.4%** |
+**Qwen3.8-Flash-Next 125B-A6B**
+
+| Quantization | Peak decode |
+| --- | ---: |
+| 4-bit | **5.03 tok/s** |
+| 8-bit | not released |
+
+**Ornith 1.5 35B-A3B**
+
+| Quantization | Peak decode |
+| --- | ---: |
+| 4-bit | **22.53 tok/s** |
+| 8-bit | **10.17 tok/s** |
+
+**Qwen 3.6 35B-A3B**
+
+| Quantization | Peak decode |
+| --- | ---: |
+| 4-bit | **23.23 tok/s** |
+| 8-bit | **11.12 tok/s** |
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
-native 262K context, prompt cache on, 8-bit KV, and MTP off. The gain over
-v4.1 is the tiled Top-K sampler; the sampled token stream at a fixed seed is
-unchanged. With the experimental opt-in ANE prefill enabled, a 6,103-token
-prompt additionally measured **2.31x** faster prefill (132.9 s → 57.5 s) with
-decode speed unchanged.
+native 262K context, prompt cache on, 8-bit KV, and MTP off.
+
+Qwen3.8-Flash-Next is a 125B model with 6B active parameters, against 35B/3B
+for the other two, and its runtime has had no throughput work yet -- it is
+here as a reference point, not a tuned result. Decode is bound by streaming
+routed experts from SSD, so the 4-bit rows run roughly twice the 8-bit ones.
+
+ANE prefill is on by default for Ornith and Qwen 3.6. On a 9,316-token prompt
+it measured **3.14x** faster end to end at 4-bit (313.6 s -> 99.9 s) and
+**1.91x** at 8-bit; `NVMAI_PREFILL_ANE=off` opts out.
 
 [Full benchmark results](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
 

@@ -86,6 +86,9 @@ public struct Manifest: Decodable, Equatable, Sendable {
 public struct ManifestIdentity: Equatable, Sendable {
     public let modelID: String
     public let family: ModelFamily
+    /// Routed-expert width, which is what "a 4-bit model" names: the experts
+    /// are almost all of the payload.
+    public let weightBits: Int
 }
 
 public enum ManifestReader {
@@ -168,6 +171,7 @@ public enum ManifestReader {
         guard !wire.modelID.isEmpty else {
             throw ModelError.indexCorrupt(detail: "manifest modelID is empty")
         }
+        let bits = wire.quant?.routedExpert.weightBits ?? 4
         switch wire.arch.hiddenActivation {
         case "silu":
             break
@@ -183,15 +187,18 @@ public enum ManifestReader {
         // identified.
         if let declared = wire.arch.family,
            let family = ModelFamily(rawValue: declared) {
-            return ManifestIdentity(modelID: wire.modelID, family: family)
+            return ManifestIdentity(modelID: wire.modelID, family: family,
+                                    weightBits: bits)
         }
         let mtp = ArchConfig.qwen36MTP
         if wire.arch.numLayers == mtp.numLayers,
            wire.arch.slidingWindow == mtp.slidingWindow,
            wire.arch.fullAttentionLayerMask == mtp.fullAttentionLayerMask.map(Int.init) {
-            return ManifestIdentity(modelID: wire.modelID, family: .qwen36MTP)
+            return ManifestIdentity(modelID: wire.modelID, family: .qwen36MTP,
+                                    weightBits: bits)
         }
-        return ManifestIdentity(modelID: wire.modelID, family: .qwen36)
+        return ManifestIdentity(modelID: wire.modelID, family: .qwen36,
+                                weightBits: bits)
     }
 
     static func validate(_ m: Manifest,

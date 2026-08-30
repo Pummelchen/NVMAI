@@ -27,10 +27,26 @@ public struct ModelSessionFacts: Sendable, Equatable {
 }
 
 enum ServerModelIdentity {
+    /// The advertised id, which always ends in the quantization.
+    ///
+    /// Two installs of the same weights at different widths are different
+    /// models to anyone choosing between them, and an id that hides which one
+    /// is loaded makes `/v1/models` useless for telling them apart. The width
+    /// comes from the manifest's routed-expert slot rather than from parsing
+    /// the id, so it is right even when the id says nothing.
     static func apiModelID(manifestModelID: String,
-                           family: ModelFamily) -> String {
-        let quantizationSuffixes = ["-4bit", "-8bit", "-6bit"]
-        for suffix in quantizationSuffixes where manifestModelID.hasSuffix(suffix) {
+                           family: ModelFamily,
+                           weightBits: Int) -> String {
+        base(manifestModelID: manifestModelID, family: family)
+            + "_\(weightBits)-Bit"
+    }
+
+    /// The id with any quantization the manifest already spelled removed, so
+    /// the suffix is added exactly once.
+    private static func base(manifestModelID: String,
+                             family: ModelFamily) -> String {
+        for suffix in ["-4bit", "-8bit", "-6bit"]
+        where manifestModelID.hasSuffix(suffix) {
             return String(manifestModelID.dropLast(suffix.count))
         }
         if manifestModelID != "unknown/snapshot" {
@@ -151,7 +167,8 @@ public struct ModelSessionPlan: Sendable {
                                      effort: reasoningEffort)
         let defaultModelID = ServerModelIdentity.apiModelID(
             manifestModelID: identity.modelID,
-            family: family)
+            family: family,
+            weightBits: identity.weightBits)
         // Mirrors the precedence in ServerModelSession.load: an explicit
         // --prefill-chunk wins, otherwise qwen36 takes the long-prefill chunk
         // and anything else takes the runtime default. Family is the only

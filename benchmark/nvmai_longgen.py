@@ -11,7 +11,7 @@ import sys
 import time
 
 from nvmai_profile import (
-    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path, resolve_api_model,
     server_command, server_environment,
 )
 
@@ -52,8 +52,12 @@ def run_quant(model_path, label):
             pass
         time.sleep(0.05)
 
+    # The id names the quantization and differs per model, so it is asked for
+    # rather than assumed.
+    api_model = resolve_api_model(PORT)
+    print(f"  model id: {api_model}", flush=True)
     payload = json.dumps({
-        "model": DEFAULT_API_MODEL,
+        "model": api_model,
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": 0, "top_p": 0.95, "top_k": 20,
         "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,
