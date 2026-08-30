@@ -31,11 +31,27 @@ extension RealForwardRunner {
         // Decode must not share RAM with an idle ANE context (Track A):
         // prompts that end exactly on a chunk boundary reach here with the
         // last model still resident. No-op when ANE prefill is off or empty.
+        let handoverStart = PreadExpertStreamer.wireTraceEnabled
+            ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0
         anePrefill?.releaseModels()
-        // Wire the slot cache now that prefill is done with the headroom.
-        // Unwired, unrelated memory churn can reclaim the whole budget and
-        // decode then re-reads routed experts from SSD for the rest of the
-        // request -- measured at 94% more expert I/O after ANE prefill.
+        if PreadExpertStreamer.wireTraceEnabled, handoverStart != 0 {
+            let ms = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                            - handoverStart) / 1e6
+            if ms > 1 {
+                FileHandle.standardError.write(Data(
+                    "[wire] releaseModels \(String(format: "%.1f", ms)) ms\n".utf8))
+            }
+        }
+        // Wire the slot cache for decode. Unwired, unrelated memory churn can
+        // reclaim the budget and decode then re-reads routed experts from SSD
+        // for the rest of the request -- measured at 94% more expert I/O after
+        // ANE prefill.
+        //
+        // This is the only place the cache is ever wired: the release at
+        // prefill start is a no-op (see there). Wiring costs ~136 ms for
+        // 4.2 GiB across 40 layers, so it is not itself a decode cost --
+        // wiring at allocation instead measured identically (-28.5% against
+        // -27.9% for 4-bit ANE decode), which is why no wiring policy ships.
         model.setExpertCachePinned(true)
         try kv?.reserve(tokens: position + 1)
         guard position < maxContext else {

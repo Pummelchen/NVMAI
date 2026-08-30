@@ -39,11 +39,21 @@ extension RealForwardRunner {
             }
             return PrefillResult(newPosition: position, seed: .logitsWritten)
         }
-        // Release the slot-cache wiring for the duration of prefill: it
-        // streams experts in bulk and needs the headroom, and the ANE path in
-        // particular has to place Core ML arenas alongside it. Decode wires
-        // it again at the handover, which is the phase that actually depends
-        // on residency.
+        // Intended to release the slot-cache wiring for prefill, which streams
+        // experts in bulk and, on the ANE path, has to leave Core ML room for
+        // its arenas.
+        //
+        // In practice this is a no-op and has always been: the cache is not
+        // wired until the first decode token, so `slotsPinned` is already
+        // false when prefill asks. Measured with `NVMAI_WIRE_TRACE=1` over a
+        // full ANE-prefill request: 40 `mlock` calls at the handover, zero
+        // `munlock` calls anywhere. The shipped behaviour is "wire once, at
+        // the handover", not the release/re-apply cycle `703f35a`'s message
+        // describes.
+        //
+        // Kept because it is correct for any future path that does wire
+        // earlier, and because removing it would silently change that path's
+        // behaviour. It is not load-bearing today.
         model.setExpertCachePinned(false)
         guard config.mode == .chunked else {
             throw PrefillError.chunkedUnsupported(

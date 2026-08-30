@@ -240,17 +240,38 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             return
         }
         guard wanted != slotsPinned else { return }
+        let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         var achieved = 0
+        var bytes = 0
         for region in wireRegions {
             let rc = wanted
                 ? mlock(region.pointer, region.bytes)
                 : munlock(region.pointer, region.bytes)
-            if rc == 0 { achieved += 1 }
+            if rc == 0 { achieved += 1; bytes += region.bytes }
         }
         // Treat a partial wire as unpinned so the next call retries rather
         // than believing a half-applied state.
         slotsPinned = wanted && achieved == wireRegions.count
+        if Self.wireTraceEnabled {
+            let ms = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started) / 1e6
+            let verb = wanted ? "mlock" : "munlock"
+            FileHandle.standardError.write(Data(
+                "[wire] \(verb) \(achieved)/\(wireRegions.count) regions, "
+                    .appending("\(bytes / (1024 * 1024)) MiB in ")
+                    .appending(String(format: "%.1f", ms))
+                    .appending(" ms\n").utf8))
+        }
     }
+
+    /// Times the wire/unwire calls (`NVMAI_WIRE_TRACE=1`).
+    ///
+    /// `mlock` on a cache whose pages the OS reclaimed during prefill has to
+    /// fault them back before it returns, and the call sits on the critical
+    /// path of the first decode token. Whether that is where the post-handover
+    /// decode cost actually lives is the question this answers; fixing it
+    /// without measuring it first would be guessing.
+    static let wireTraceEnabled =
+        ProcessInfo.processInfo.environment["NVMAI_WIRE_TRACE"] == "1"
 
     public let layout: StreamLayout
     public let slotCount: Int
