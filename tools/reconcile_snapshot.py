@@ -125,8 +125,31 @@ def main() -> int:
         if stored_dtype != want_dtype:
             dtypes.append((name, want_dtype, stored_dtype))
 
+    # A zero-centred RMSNorm stores the offset from one, and the runtime
+    # multiplies by the stored value, so the converter folds the +1 in. Nothing
+    # about a name, a width or a dtype records whether that happened: an
+    # unfolded snapshot is structurally perfect and produces fluent nonsense.
+    # Sample the affected tensors against the checkpoint and say so.
+    unfolded: list[str] = []
+    fold_names = [n for n in want
+                  if (n[:-len(".weight")] if n.endswith(".weight") else n)
+                  .endswith(pq.UNIT_OFFSET_NORM_SUFFIXES) and n in have]
+    for name in fold_names[:6]:
+        src = want[name][0]
+        shard = snap_index["weight_map"][name]
+        with safe_open(args.snapshot / shard, framework="np") as f:
+            stored = np.asarray(f.get_tensor(name), np.float32).ravel()
+        original = patcher.fetch_bf16(src, ck_index).astype(np.float32).ravel()
+        if stored.size != original.size:
+            continue
+        if np.allclose(stored - original, 0.0, atol=1e-6):
+            unfolded.append(name)
+
     print(f"snapshot : {args.snapshot}")
     print(f"policy   : {args.bits}-bit build, {len(want)} tensors expected")
+    print(f"norm fold: {len(fold_names)} tensors need the +1; "
+          f"{'UNFOLDED -- rebuild or repair' if unfolded else 'folded'} "
+          f"(sampled {min(len(fold_names), 6)})")
     print(f"missing  : {len(missing)}")
     print(f"extra    : {len(extra)}")
     print(f"wrong bits: {len(wrong)}")
@@ -144,11 +167,11 @@ def main() -> int:
         print(f"   dtype    {name.split('language_model.')[-1]}: have {gotd}, want {wantd}")
 
     if args.check:
-        ok = not (missing or extra or wrong or dtypes)
+        ok = not (missing or extra or wrong or dtypes or unfolded)
         print("\nsnapshot matches the converter policy" if ok
               else "\nsnapshot has drifted from the converter policy")
         return 0 if ok else 1
-    if not (missing or extra or wrong or dtypes):
+    if not (missing or extra or wrong or dtypes or unfolded):
         print("\nnothing to do")
         return 0
 
@@ -167,6 +190,8 @@ def main() -> int:
     for name, _w, _g in dtypes:
         touched.setdefault(snap_index["weight_map"][name], []).append(name)
     for name in extra:
+        touched.setdefault(snap_index["weight_map"][name], []).append(name)
+    for name in fold_names if unfolded else []:
         touched.setdefault(snap_index["weight_map"][name], []).append(name)
 
     for shard, names in sorted(touched.items()):
@@ -190,7 +215,8 @@ def main() -> int:
                 # it. A passthrough tensor must go back to bf16: the resident
                 # index stores a dtype per entry and the runtime rejects the
                 # install outright if a norm arrives as F32.
-                block[name] = np.ascontiguousarray(piece).astype(ml_dtypes.bfloat16)
+                block[name] = np.ascontiguousarray(
+                    pq.fold_unit_offset(name, piece)).astype(ml_dtypes.bfloat16)
                 for k in (stem + ".scales", stem + ".biases"):
                     block.pop(k, None); snap_index["weight_map"].pop(k, None)
                 snap_index["weight_map"][name] = shard
