@@ -498,7 +498,7 @@ $ NVMAICLI --model qwen3.8-flash-next_125B_A6B_4Bit \
 
 ### How it was found
 
-Five defects stood between "runs" and "answers". Not one of them threw, and
+Six defects stood between "runs" and "answers" (the sixth is below). Not one of them threw, and
 not one was visible in the output as anything but fluent nonsense --- every
 single one produced a smooth, confident, wrong distribution. They were found
 by numerical parity against the reference implementation, stage by stage, and
@@ -565,6 +565,50 @@ separated "wrong block" from "wrong hand-off between tokens".
 The fused greedy head was also disabled for hyper-connection families: it
 folds a plain RMSNorm into the vocabulary GEMV, and this stack ends in the
 gated mixer that collapses the residual streams, not in an RMSNorm.
+
+### The sixth defect: zero-centred RMSNorm (2026-09-01)
+
+A build converted from Qwen's own bf16 release generated fluent nonsense while
+the MLX-sourced build answered. The cause was one line of convention.
+
+`Qwen3_5RMSNorm` initialises its parameter to **zeros** and computes
+`normalized * (1.0 + weight)`. The checkpoint therefore stores the *offset from
+one*, not the gain. NVMAI's runtime multiplies by the stored value, so the +1
+has to be folded in at conversion -- which is exactly what MLX's converter
+does. `prepare_qwen38.py` copied the raw value through, so gamma was wrong by
+one on **148 tensors**: every hyper-connection norm (97 of them -- both norms
+in all 48 layers plus the final mixer), the three PLE norms, and QSA's
+`q_norm`/`k_norm` and indexer layernorms.
+
+`linear_attn.norm` is untouched and must stay that way: it is
+`Qwen3NextRMSNormGated`, which uses `weight` directly. So must `ple.conv1d`,
+which is a convolution kernel and not a norm at all.
+
+**Why every check passed.** This is the instructive part, and it is a stronger
+version of the common-mode warning above.
+
+- Comparing the install against the checkpoint passed at cosine 1.000000,
+  because the checkpoint genuinely stores that form. The weights were never
+  wrong; the *interpretation* was.
+- Comparing per-tensor bit widths, names, the `gate_up` split, the 95.4 GiB
+  n-gram table and the PLE constants against the MLX build all passed, because
+  none of them is the affected quantity.
+- Running `transformers`' own `Qwen3_5GatedDeltaNet` on our weights matched at
+  cosine 1.000000 across positions -- but the hyper-connection, PLE and QSA
+  ground truths were built from *transcribed* norm classes, and the
+  transcription carried the same assumption. A ground truth is only as
+  independent as its weakest borrowed line.
+
+What finally isolated it was running the reference on the MLX build's weights
+over HTTP range requests: identical code, different weights, ` Paris`. That
+reduced the search to "which weights differ", and a direct install-vs-MLX
+comparison -- never run before, because both had already been compared against
+the checkpoint -- showed `MLX == mine + 1` on exactly the norms above, with
+`linear_attn.norm` identical.
+
+**The lesson to carry:** comparing two artifacts against a third does not
+establish that they agree with each other, and a convention is invisible to
+every check that reads the value the same way at both ends.
 
 ### Prefill
 

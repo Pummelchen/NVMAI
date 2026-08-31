@@ -217,7 +217,48 @@ STRIP_WEIGHT_SUFFIXES = (
     ".ple.norm_conv",
     ".ple.norm_key",
     ".ple.norm_query",
+    ".pre_fc_norm_embedding",
+    ".pre_fc_norm_hidden",
 )
+
+
+# RMSNorm weights the model reads as `1 + weight`.
+#
+# `Qwen3_5RMSNorm` initialises its parameter to *zeros* and computes
+# `normalized * (1.0 + weight)`, so the checkpoint stores the offset from one,
+# not the gain. The runtime multiplies by the stored value, so the +1 has to be
+# folded in here -- which is exactly what MLX's conversion does, and why a
+# build made from the MLX repack answered while one made from the original did
+# not.
+#
+# Two absences are deliberate. `linear_attn.norm` is `Qwen3NextRMSNormGated`,
+# which uses `weight` directly with no offset. `ple.conv1d` is a convolution
+# kernel, not a norm. Folding either would be as wrong as not folding these.
+#
+# Getting this wrong is silent. Every tensor still matches the checkpoint
+# byte for byte, every parity harness still agrees -- both sides read the same
+# stored value -- and the model generates fluent nonsense. It cost a full
+# investigation; see docs/qwen38-flash-next-port.md.
+UNIT_OFFSET_NORM_SUFFIXES = (
+    ".hc_norm",
+    ".self_attn.q_norm",
+    ".self_attn.k_norm",
+    ".self_attn.indexer.q_layernorm",
+    ".self_attn.indexer.k_layernorm",
+    ".ple.norm_conv",
+    ".ple.norm_key",
+    ".ple.norm_query",
+    ".pre_fc_norm_embedding",
+    ".pre_fc_norm_hidden",
+)
+
+
+def fold_unit_offset(out_name: str, value: np.ndarray) -> np.ndarray:
+    """Fold the implicit +1 into a zero-centred RMSNorm weight."""
+    stem = out_name[: -len(".weight")] if out_name.endswith(".weight") else out_name
+    if stem.endswith(UNIT_OFFSET_NORM_SUFFIXES):
+        return (value.astype(np.float32) + 1.0).astype(value.dtype)
+    return value
 
 
 def rename(name: str) -> str:
@@ -422,7 +463,8 @@ def convert_shard(path: Path, writer: OutputWriter, ngram: "NgramTable",
                     piece = value
                 bits = quant_bits(out_name, width)
                 if bits is None:
-                    writer.add(out_name, np.ascontiguousarray(piece))
+                    writer.add(out_name, np.ascontiguousarray(
+                        fold_unit_offset(out_name, piece)))
                     continue
                 stem = out_name[: -len(".weight")]
                 packed, scales, biases = quantize_affine(np.ascontiguousarray(piece), bits)
