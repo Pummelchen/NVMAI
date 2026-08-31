@@ -63,6 +63,9 @@ REPO = "Qwen/Qwen3.8-Flash-Next"
 BASE = f"https://huggingface.co/{REPO}/resolve/main"
 GROUP_SIZE = 64
 BITS_4, BITS_8 = 4, 8
+# indexer_n_heads * indexer_head_dim from the config; the remainder of
+# index_qk_proj's rows are the key projection.
+INDEXER_QUERY_ROWS = 512
 OUTPUT_SHARD_BYTES = 4 << 30
 
 # --- PLE constants, per the transformers reference -------------------------
@@ -183,9 +186,43 @@ def is_ngram(name: str) -> bool:
     return ".ngram_embedding.shard_" in name
 
 
+# The checkpoint carries the PLE hash constants as int64 buffers beside the
+# table. They are not weights, the repacker has no dtype for them, and this
+# converter derives the same values into ple_constants.json from the algorithm
+# in the transformers reference -- verified against these very buffers, which
+# match exactly. Carrying them would only give the repacker something it must
+# reject.
+PLE_BUFFERS = ("layer_multipliers", "ngram_heads_offsets", "ngram_heads_vocab_sizes")
+
+
+def is_ple_buffer(name: str) -> bool:
+    return name.startswith("model.language_model.layers.") \
+        and ".ple.ple_embedding." in name \
+        and name.rsplit(".", 1)[-1] in PLE_BUFFERS
+
+
+# Names the runtime's schema spells without `.weight`, where the checkpoint
+# has it. Not a family property -- it is what the repack the runtime was built
+# against happened to write -- so each one is listed rather than guessed at
+# from a pattern. `linear_attn.conv1d.weight` deliberately keeps its suffix:
+# the schema asks for that one with it, and stripping it by pattern would
+# break the GDN path.
+STRIP_WEIGHT_SUFFIXES = (
+    ".hc_norm",
+    ".self_attn.q_norm",
+    ".self_attn.k_norm",
+    ".self_attn.indexer.q_layernorm",
+    ".self_attn.indexer.k_layernorm",
+    ".ple.conv1d",
+    ".ple.norm_conv",
+    ".ple.norm_key",
+    ".ple.norm_query",
+)
+
+
 def rename(name: str) -> str:
-    for norm in (".hc_norm", ".self_attn.q_norm", ".self_attn.k_norm"):
-        if name.endswith(norm + ".weight"):
+    for suffix in STRIP_WEIGHT_SUFFIXES:
+        if name.endswith(suffix + ".weight"):
             return name[: -len(".weight")]
     return name
 
@@ -201,11 +238,16 @@ def quant_bits(name: str, width: int = BITS_4) -> int | None:
     family's own 4-bit install carried -- Ornith's 4-bit puts it at 4, so this
     is a per-family choice and not a general rule.
     """
-    if name.endswith(".A_log") or name.endswith(".dt_bias"):
+    # Anything that is not a `.weight` after renaming is passthrough. That
+    # covers A_log and dt_bias, and every norm whose `.weight` `rename` strips
+    # because the runtime spells it without one -- hc_norm, the q/k norms, the
+    # indexer layernorms and the PLE norms. Keying off the suffix rather than
+    # listing them means a norm added later cannot silently land at 4 bits.
+    if not name.endswith(".weight"):
         return None
     if name.endswith("conv1d.weight"):
         return None
-    if name.endswith(".hc_norm") or name.endswith("norm.weight"):
+    if name.endswith("norm.weight"):
         return None
     # Tensors whose 4-bit error does not average away keep 8 bits even in a
     # 4-bit install. The error itself is not special -- every tensor measures
@@ -248,7 +290,46 @@ def outputs_for(name: str, shape: list[int]) -> list[tuple[str, list[int]]]:
     if new.endswith(".mlp.experts.down_proj"):
         stem = new[: -len("experts.down_proj")] + "switch_mlp."
         return [(stem + "down_proj.weight", list(shape))]
+    if new.endswith(".self_attn.indexer.index_qk_proj.weight"):
+        # Fused query and key in the checkpoint, separate in the runtime.
+        # [640, 2560] is 4 heads x 128 of query followed by 1 kv head x 128 of
+        # key, which the config's indexer_n_heads/indexer_kv_heads confirm.
+        stem = new[: -len("index_qk_proj.weight")]
+        rows, hidden = shape
+        q = INDEXER_QUERY_ROWS
+        return [(stem + "index_q_proj.weight", [q, hidden]),
+                (stem + "index_k_proj.weight", [rows - q, hidden])]
     return [(new, list(shape))]
+
+
+
+def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
+    """Emit config.json with the `quantization` block NVMAIRepack reads.
+
+    The repacker resolves each tensor's width from `config.json -> quantization`:
+    a base `bits`/`group_size`/`mode`, plus per-tensor overrides keyed by the
+    tensor name with `.weight` stripped. Qwen's own config has no such block --
+    it describes an unquantised model -- so copying it verbatim leaves the
+    repacker with nothing to read and it refuses the snapshot.
+
+    Every tensor whose width differs from the base is listed explicitly rather
+    than relying on the repacker to re-derive the policy, so the snapshot
+    records what it actually contains.
+    """
+    overrides = {}
+    for name in tensor_names:
+        if not name.endswith(".weight"):
+            continue
+        bits = quant_bits(name, width)
+        if bits is None or bits == width:
+            continue
+        overrides[name[: -len(".weight")]] = {"bits": bits, "group_size": GROUP_SIZE}
+    config = dict(config)
+    config["quantization"] = {
+        "bits": width, "group_size": GROUP_SIZE, "mode": "affine", **overrides,
+    }
+    (out / "config.json").write_text(json.dumps(config, indent=1))
+    return config
 
 
 # --- transport -------------------------------------------------------------
@@ -332,12 +413,18 @@ def convert_shard(path: Path, writer: OutputWriter, ngram: "NgramTable",
             if is_ngram(name):
                 ngram.add(name, src.get_tensor(name))
                 continue
+            if is_ple_buffer(name):
+                continue
             value = src.get_tensor(name)
             for out_name, _ in outputs_for(name, list(value.shape)):
                 if out_name.endswith("switch_mlp.gate_proj.weight"):
                     piece = value[:, : value.shape[1] // 2, :]
                 elif out_name.endswith("switch_mlp.up_proj.weight"):
                     piece = value[:, value.shape[1] // 2:, :]
+                elif out_name.endswith("indexer.index_q_proj.weight"):
+                    piece = value[:INDEXER_QUERY_ROWS]
+                elif out_name.endswith("indexer.index_k_proj.weight"):
+                    piece = value[INDEXER_QUERY_ROWS:]
                 else:
                     piece = value
                 bits = quant_bits(out_name, width)
@@ -434,6 +521,8 @@ def main() -> int:
     ap.add_argument("--plan", action="store_true")
     ap.add_argument("--bits", type=int, choices=(4, 8), default=4,
                     help="routed-expert width of the install being built")
+    ap.add_argument("--rewrite-config", type=Path,
+                    help="regenerate config.json for an existing snapshot")
     ap.add_argument("--output", type=Path)
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
     ap.add_argument("--index", type=Path)
@@ -448,6 +537,19 @@ def main() -> int:
                                          capture_output=True, check=True).stdout)
 
     index = fetch_json(args.index, "model.safetensors.index.json")
+    if args.rewrite_config:
+        snap = args.rewrite_config
+        names = json.loads((snap / "model.safetensors.index.json").read_text())["weight_map"]
+        cfg = json.loads(subprocess.run(
+            ["curl", "-sfL", f"https://huggingface.co/{REPO}/raw/main/config.json"],
+            capture_output=True, check=True).stdout) if not (snap / "config.json").exists() \
+            else json.loads((snap / "config.json").read_text())
+        cfg.pop("quantization", None)
+        out = write_config(cfg, snap, names.keys(), args.bits)
+        n = len(out["quantization"]) - 3
+        print(f"wrote {snap}/config.json: base {args.bits}-bit, {n} overrides")
+        return 0
+
     if args.plan or not args.output:
         plan(index, args.bits)
         return 0
@@ -460,7 +562,6 @@ def main() -> int:
 
     constants = ple_constants(text_config)
     (args.output / "ple_constants.json").write_text(json.dumps(constants, indent=1))
-    (args.output / "config.json").write_text(json.dumps(config, indent=1))
     rows = sum(constants["ngram_heads_vocab_sizes"])
     divisor = text_config.get("make_ngram_vocab_size_divisible_by", 128)
     padded = math.ceil(rows / divisor) * divisor
@@ -497,6 +598,9 @@ def main() -> int:
 
     writer.finish()
     ngram.finish()
+    # Written last: the quantization block lists every tensor whose width
+    # differs from the base, which is only known once they have all been seen.
+    write_config(config, args.output, writer.index.keys(), args.bits)
     print(f"\naffine snapshot written to {args.output}")
     print(f"  {writer.shard_no} shards, {writer.total / 1e9:.1f} GB")
     print(f"  ngram_table.bin {ngram.rows} rows")

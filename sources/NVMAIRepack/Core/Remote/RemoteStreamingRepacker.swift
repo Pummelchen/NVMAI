@@ -559,6 +559,47 @@ public final class RemoteStreamingRepacker {
         try Posix.fsyncDirectory(paths.partialDirectory)
     }
 
+    /// Copies tokenizer assets from a local snapshot into the install.
+    ///
+    /// Mirrors the remote path's list, including which of them are optional:
+    /// `tokenizer.json` and `tokenizer_config.json` are required, the chat
+    /// template and special-token map are not, and `config.json` is recorded
+    /// under `tokenizer/` because that is where the loader looks for it.
+    private func copyLocalTokenizer(
+        snapshotDirectory: String,
+        partialDirectory: String,
+        record: (String, String) throws -> Void
+    ) throws {
+        let tokenizerDir = (partialDirectory as NSString)
+            .appendingPathComponent("tokenizer")
+        try Posix.mkdirP(tokenizerDir)
+        let files: [(name: String, required: Bool)] = [
+            ("config.json", true),
+            ("tokenizer.json", true),
+            ("tokenizer_config.json", true),
+            ("special_tokens_map.json", false),
+            ("chat_template.jinja", false),
+            ("chat_template.json", false),
+        ]
+        for file in files {
+            let source = (snapshotDirectory as NSString)
+                .appendingPathComponent(file.name)
+            guard (try? Posix.entryKind(source)) == .regular else {
+                if file.required {
+                    throw RepackError.configurationInvalid(
+                        detail: "local snapshot is missing \(file.name); a model "
+                            + "imported from a snapshot needs its tokenizer beside it")
+                }
+                continue
+            }
+            let destination = (tokenizerDir as NSString)
+                .appendingPathComponent(file.name)
+            let data = try Posix.readBoundedData(source, maximumBytes: 64 * 1024 * 1024)
+            try writeSmall(path: destination, data: data)
+            try record("tokenizer/\(file.name)", destination)
+        }
+    }
+
     private func outputFilesMatch(plan: RepackPlan,
                                   rangePlan: RangeCopyPlan) throws -> Bool {
         for output in rangePlan.expectedOutputs {
@@ -1027,6 +1068,22 @@ public extension RemoteStreamingRepacker {
             try recordOutputFile(relativePath: "packed_experts/layout.json",
                                  path: layoutPath,
                                  progress: progress)
+            // Tokenizer assets, copied from the snapshot the way the remote
+            // path fetches them from the release. Without these the install
+            // loads far enough to look finished and then the server refuses
+            // it, because a model with no chat template cannot be prompted.
+            //
+            // This path only ever built MTP sidecars before, which carry no
+            // tokenizer of their own -- they use the target's -- so the gap
+            // did not show until a whole model was imported from a local
+            // snapshot.
+            try copyLocalTokenizer(snapshotDirectory: local.inputSnapshotDir,
+                                   partialDirectory: paths.partialDirectory,
+                                   record: { relative, path in
+                                       try recordOutputFile(relativePath: relative,
+                                                            path: path,
+                                                            progress: progress)
+                                   })
             progress(.finalizing)
             try writeManifest(
                 plan: plan,
