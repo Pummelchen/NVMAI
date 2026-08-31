@@ -752,6 +752,29 @@ on dequantising one of these tensors, since everything above assumes they do.
 
 ## MTP: measured, and closed (2026-08-30)
 
+### Re-verified against the converted install (2026-09-01)
+
+The 2026-08-30 measurement paired the draft with the MLX-sourced target. After
+the target was rebuilt from Qwen's own release and the norm fold landed
+(`1cc393a`), the pairing was re-checked: the sidecar loads (`mtp=on:384MiB`),
+the two installs no longer share a `sourceSnapshotHash` and nothing objects,
+and the output is coherent.
+
+It is still a large loss. Same server settings, same prompt, 128 tokens,
+prompt cache off, warm:
+
+| | wall | approx tok/s |
+| --- | ---: | ---: |
+| MTP on | 65.6 s / 67.8 s | ~2.0 |
+| MTP off | 23.2 s / 22.5 s | ~6.4 |
+
+About **3x slower**, which is the same verdict the acceptance arithmetic gave
+and slightly worse than the 2.8x it predicted. The recommendation is unchanged:
+MTP stays off unless asked for. Note the draft head installed here still comes
+from `NVMAIRepack --model qwen38flash-mtp` against the MLX repack; the
+converter's own MTP path is fixed but has never produced a build.
+
+
 The draft head installs from its own 1.37 GB shard inside the target's
 repository (`NVMAIRepack --model qwen38flash-mtp`) and runs through the
 existing speculative loop (`NVMAIServer --mtp-model`). It is **off unless
