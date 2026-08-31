@@ -230,54 +230,47 @@ def rename(name: str) -> str:
 def quant_bits(name: str, width: int = BITS_4) -> int | None:
     """Bits for a tensor, or None to copy it through unquantised.
 
-    `width` is the install's routed-expert width, which is what "a 4-bit model"
-    names. It follows the convention the shipped manifests use: an 8-bit
-    install is 8 bits throughout, while a 4-bit install keeps the router at 8
-    because it is small and its argmax decides which experts are read at all.
-    The embedding also stays at 8 in the 4-bit build, matching what this
-    family's own 4-bit install carried -- Ornith's 4-bit puts it at 4, so this
-    is a per-family choice and not a general rule.
+    This mirrors the runtime's *slot* model, and it has to. `Model` derives a
+    tensor's expected size from `manifest.quant.<slot>.weightBits` and picks one
+    GEMV pipeline per slot -- `attentionWeightBits == 4 ? int4 : affine` -- so
+    every tensor in a slot shares one width. A per-tensor override in
+    config.json is honoured by the repacker, which packs the tensor at that
+    width, and then rejected by the runtime, which sizes it at the slot's:
+    "in_proj_a.weight size 122880 does not match expected 61440".
+
+    The slots, matching what a working install carries:
+
+        embedding     8   embed_tokens, lm_head
+        router        8   mlp.gate
+        attention   `width`   q/k/v/o, GDN, hyper-connection, indexer, PLE
+        sharedExpert `width`  shared_expert.*, shared_expert_gate
+        routedExpert `width`  switch_mlp.*
+
+    This is why the router already sits at 8 bits in a 4-bit build: it has its
+    own slot. The measurement in tools/precision_probe.py says the QSA indexer,
+    the hyper-connection write gate and the GDN gating projections deserve the
+    same treatment -- the indexer picks the same keys 0.0% of the time at 4
+    bits against 49.5% at 8, for about 10 MB. They cannot have it until the
+    runtime can size those tensors independently, which means either new slots
+    for them or per-tensor widths in the resident index. Recorded in
+    docs/ngram-table-sharing-plan.md rather than silently dropped.
     """
-    # Anything that is not a `.weight` after renaming is passthrough. That
-    # covers A_log and dt_bias, and every norm whose `.weight` `rename` strips
-    # because the runtime spells it without one -- hc_norm, the q/k norms, the
-    # indexer layernorms and the PLE norms. Keying off the suffix rather than
-    # listing them means a norm added later cannot silently land at 4 bits.
     if not name.endswith(".weight"):
         return None
     if name.endswith("conv1d.weight"):
         return None
     if name.endswith("norm.weight"):
         return None
-    # Tensors whose 4-bit error does not average away keep 8 bits even in a
-    # 4-bit install. The error itself is not special -- every tensor measures
-    # ~10% relative error at 4 bits and ~0.6% at 8, the bulk projections
-    # included -- so the criterion is what the error *does*.
-    #
-    # A ranking either matches or it does not. Measured on layer 3 against the
-    # bf16 original: the router picks the same 10 of 512 experts on 11.8% of
-    # inputs at 4 bits against 88.8% at 8, and the QSA indexer, which chooses
-    # which keys are attended to at all, is exactly right 0.0% of the time at 4
-    # bits against 49.5% at 8. A gate with a handful of outputs has nothing to
-    # average over either: block_inject is four values scaling a whole block
-    # into the residual, ninety-six times over, and in_proj_a/in_proj_b are the
-    # gating scalars whose A_log and dt_bias companions the checkpoint itself
-    # keeps unquantised.
-    #
-    # Together these are about 10 MB against a 157 GiB install.
-    if name.endswith(".mlp.gate.weight") or name.endswith(".shared_expert_gate.weight"):
-        return BITS_8
-    if ".indexer." in name:
-        return BITS_8
-    if name.endswith("block_inject_weight.weight"):
-        return BITS_8
-    if name.endswith("in_proj_a.weight") or name.endswith("in_proj_b.weight"):
-        return BITS_8
     if name.endswith("embed_tokens.weight") or name == "lm_head.weight":
-        return BITS_8
-    if ".mlp.switch_mlp." in name or name.endswith(".weight"):
-        return width
-    return None
+        return BITS_8                      # embedding slot
+    # Both of these validate against `quant.router` in Model.swift. The scalar
+    # gate does so explicitly and against expectation -- "quantized at the
+    # ROUTER's bit width ... independent of the sharedExpert slot" -- which is
+    # why grouping it with the shared expert produced a tensor half the size
+    # the loader wanted.
+    if name.endswith(".mlp.gate.weight") or name.endswith(".shared_expert_gate.weight"):
+        return BITS_8                      # router slot
+    return width                           # attention / sharedExpert / routedExpert
 
 
 def outputs_for(name: str, shape: list[int]) -> list[tuple[str, list[int]]]:

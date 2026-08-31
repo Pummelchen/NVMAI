@@ -1068,6 +1068,19 @@ public extension RemoteStreamingRepacker {
             try recordOutputFile(relativePath: "packed_experts/layout.json",
                                  path: layoutPath,
                                  progress: progress)
+            // Passthrough files, recorded the way the remote path records
+            // them. They are copied into the install either way, but a file
+            // the manifest does not list is a file the loader treats as
+            // absent: ple_constants.json on disk and missing from `files`
+            // fails the install at load with "missing required file".
+            for file in plan.passthroughFiles {
+                try Task.checkCancellation()
+                let passthroughPath = (paths.partialDirectory as NSString)
+                    .appendingPathComponent(file.destinationName)
+                try recordOutputFile(relativePath: file.destinationName,
+                                     path: passthroughPath,
+                                     progress: progress)
+            }
             // Tokenizer assets, copied from the snapshot the way the remote
             // path fetches them from the release. Without these the install
             // loads far enough to look finished and then the server refuses
