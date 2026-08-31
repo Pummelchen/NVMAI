@@ -647,6 +647,42 @@ byte-identical after all of this. The families differ from this one in every
 place that was touched: silu output gate, top-k of 8, and a head that shares
 the attention slot's width.
 
+### Parity of the build converted from Qwen's bf16 release
+
+The numbers above were measured on an install repacked from a third-party MLX
+4-bit release. Converting from `Qwen/Qwen3.8-Flash-Next` directly
+(`tools/prepare_qwen38.py`) produces a model that loads and runs but generates
+incoherent text, and position-0 parity does not reach the standard above:
+
+    layer 0 GDN   cos 0.99995   |runtime| / |reference| 0.993
+    layer 1 GDN   cos 0.97932                           0.835
+    layer 2 GDN   cos 0.99939                           0.941
+
+Every layer is short of 1.00000, not just the worst one, and the runtime's
+output is smaller than the reference at all three. The disagreement is spread
+evenly across channels rather than localised to any head, which is the shape
+of a scale or a gate rather than a corrupted tensor.
+
+What that rules out, each verified rather than assumed:
+
+- the expert `gate_up` split (MoE block exact at 1.00000)
+- the indexer query/key split (QSA exact; matches the reference's
+  `torch.split([n_heads * dim, kv_heads * dim])`)
+- the n-gram gather: row ids recomputed from `ple_constants.json` and read
+  straight out of `ngram_table.bin` match the runtime's dumped embedding at
+  cos 1.00000, max difference 0.0
+- the PLE hash constants, which reproduce the int64 buffers Qwen ships
+- the weights themselves: their ~10% deviation from bf16 is 4-bit
+  quantisation error and is common-mode, since the harness reads the same
+  install the runtime does
+
+What it points at is the quantiser. This build's affine group-64 packing is
+ours (`quantize_affine`); the previous one was MLX's. Both produce the same
+layout and both are read by the same dequantisation, so a systematic
+magnitude difference concentrated in the linear-attention path is the next
+thing to measure -- starting with whether the GPU and the numpy harness agree
+on dequantising one of these tensors, since everything above assumes they do.
+
 ### Still open
 
 - **Decode is 3-5 tok/s**, and it is bound by expert I/O, not compute: a
