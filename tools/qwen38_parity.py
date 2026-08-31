@@ -243,7 +243,11 @@ def ple_block(w, layer: int, wide: np.ndarray, embedding) -> np.ndarray:
     gated = value[None, :] * gate[:, None]
     normalized = grouped_rms_norm(gated.reshape(-1), w.get(P + "norm_conv"))
     # With no history only the tap that reads the current position survives.
-    conv = w.get(P + "conv1d")[:, PLE_K - 1] * normalized
+    # Reshaped like the GDN conv above: a depthwise weight is [C, 1, K] in the
+    # checkpoint and [C, K] once a repack squeezes it, and this has to read
+    # both. The runtime is indifferent -- it validates on element count and is
+    # passed channels and taps explicitly -- so the shape varies by producer.
+    conv = w.get(P + "conv1d").reshape(-1, PLE_K)[:, PLE_K - 1] * normalized
     return wide + gated.reshape(-1) + silu(conv)
 
 

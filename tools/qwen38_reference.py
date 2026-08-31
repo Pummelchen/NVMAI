@@ -309,7 +309,12 @@ class Reference:
         normalized = grouped_rms_norm(gated, g(prefix + "norm_conv"))
 
         window = np.concatenate([self.ple_conv, normalized[None, :]], axis=0)
-        conv_w = g(prefix + "conv1d")
+        # Reshaped like the GDN conv above. A depthwise weight is [C, 1, K] in
+        # the checkpoint and [C, K] once a repack squeezes it; both have the
+        # same channel-major byte layout, which is why the runtime reads either
+        # (its kernel takes the tap count explicitly) and only numpy indexing
+        # by shape can tell them apart.
+        conv_w = g(prefix + "conv1d").reshape(-1, PLE_K)
         # Tap k reads (K-1-k)*dilation positions back, i.e. row k*dilation of
         # the padded window.
         conv = sum(conv_w[:, k] * window[k * PLE_DILATION]
