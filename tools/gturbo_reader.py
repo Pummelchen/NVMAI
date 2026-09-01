@@ -142,10 +142,20 @@ class PackedExperts:
             start = base + spec["offset"]
             return blob[start:start + spec["size"]]
 
-        packed = take(name).reshape(rows, cols // 2)
-        q = np.empty((rows, cols), dtype=np.uint8)
-        q[:, 0::2] = packed & 0x0F
-        q[:, 1::2] = packed >> 4
+        # Width comes from the layout, not from an assumption: an 8-bit build
+        # stores one byte per weight where a 4-bit one packs two, and reshaping
+        # for the wrong width fails loudly here but would be silent in a kernel.
+        bits = int(t.get("bits", 4))
+        raw = take(name)
+        if bits == 8:
+            q = raw.reshape(rows, cols)
+        elif bits == 4:
+            packed = raw.reshape(rows, cols // 2)
+            q = np.empty((rows, cols), dtype=np.uint8)
+            q[:, 0::2] = packed & 0x0F
+            q[:, 1::2] = packed >> 4
+        else:
+            raise ValueError(f"{name}: unsupported expert width {bits}")
         groups = cols // GROUP_SIZE
         scales = _bf16_to_f32(take(f"{name}_scales").view(np.uint16)).reshape(rows, groups)
         biases = _bf16_to_f32(take(f"{name}_biases").view(np.uint16)).reshape(rows, groups)
