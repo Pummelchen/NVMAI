@@ -176,27 +176,29 @@ struct ResidualWidthTests {
                       routedExpert: slot(routed))
     }
 
-    /// An 8-bit install of this family is well formed and unexecutable: the
-    /// hyper-connection, PLE and QSA-indexer kernels are INT4-only, so they
-    /// read half the bytes of every gate as nibbles. It loaded and generated
-    /// " Paris" before degenerating, which is why this is a load-time refusal
-    /// rather than a note in a document.
-    @Test("An 8-bit attention slot is refused for hyper-connection families")
-    func refusesEightBitAttention() {
-        #expect(throws: ModelError.self) {
+    /// These three kernels took a `DequantInt4GEMV` unconditionally, so an
+    /// 8-bit install read half the bytes of every gate as nibbles: no error,
+    /// no noise, a model that answered " Paris" and degenerated. `SlotGEMV`
+    /// gives them both paths, so both widths are now executable.
+    @Test("Both supported widths are accepted for hyper-connection families")
+    func acceptsBothWidths() throws {
+        for bits in [4, 8] {
             try Model.validateFamilyQuantSupport(
-                config: .qwen38FlashNext, quant: Self.quant(attention: 8))
+                config: .qwen38FlashNext, quant: Self.quant(attention: bits))
         }
     }
 
-    @Test("The shipped 4-bit combination is accepted")
-    func acceptsFourBitAttention() throws {
-        try Model.validateFamilyQuantSupport(
-            config: .qwen38FlashNext, quant: Self.quant(attention: 4))
+    /// The guard stays because the failure it catches is silent: a width no
+    /// GEMV implements would otherwise reach these kernels and be misread
+    /// rather than refused.
+    @Test("An unimplemented width is still refused")
+    func refusesUnimplementedWidth() {
+        #expect(throws: ModelError.self) {
+            try Model.validateFamilyQuantSupport(
+                config: .qwen38FlashNext, quant: Self.quant(attention: 6))
+        }
     }
 
-    /// The limitation belongs to the kernels those families reach, not to a
-    /// name: a family without hyper-connections is unaffected at any width.
     @Test("Families without hyper-connections are unaffected")
     func qwen36AcceptsEightBit() throws {
         try Model.validateFamilyQuantSupport(

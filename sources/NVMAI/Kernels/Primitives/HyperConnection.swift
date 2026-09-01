@@ -29,7 +29,7 @@ final class HyperConnection {
     let lowRank: Int
 
     private let rms: RMSNorm
-    private let gemv: DequantInt4GEMV
+    private let gemv: SlotGEMV
     private let elementwise: Elementwise
 
     /// [streams * dim] normalized residual, shared by the read gate, the
@@ -52,14 +52,14 @@ final class HyperConnection {
     let maxRows: Int
 
     init(context: MetalContext, dim: Int, streams: Int, lowRank: Int,
-         maxRows: Int = 1) throws {
+         maxRows: Int = 1, weightBits: Int = 4) throws {
         precondition(dim > 0 && streams > 0 && lowRank > 0 && maxRows > 0)
         self.maxRows = maxRows
         self.dim = dim
         self.streams = streams
         self.lowRank = lowRank
         self.rms = try RMSNorm(context: context)
-        self.gemv = try DequantInt4GEMV(context: context)
+        self.gemv = try SlotGEMV(context: context, weightBits: weightBits)
         self.elementwise = try Elementwise(context: context)
         let wide = dim * streams * maxRows * MemoryLayout<Float16>.stride
         guard let normed = context.device.makeBuffer(

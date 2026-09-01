@@ -530,14 +530,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                   dim: cfg.hiddenSize,
                                   streams: cfg.hyperConnections.count,
                                   lowRank: cfg.hyperConnections.lowRank,
-                                  maxRows: gateRows)
+                                  maxRows: gateRows,
+                                  weightBits: model.attentionWeightBits)
             : nil
         self.qsaIndexer = cfg.sparseIndexer.enabled
             ? try QSAIndexer(context: context,
                              config: cfg.sparseIndexer,
                              budget: Self.qsaBudget(cfg.sparseIndexer),
                              ropeTheta: Float(cfg.fullRopeTheta),
-                             capacity: maxContext)
+                             capacity: maxContext,
+                             weightBits: model.attentionWeightBits)
             : nil
         if cfg.ple.enabled {
             let constants = try PLEConstants.load(
@@ -556,7 +558,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 kernelSize: cfg.ple.convKernelSize,
                 // The dilation is the n-gram size, not a constant of its own.
                 dilation: cfg.ple.ngramSize,
-                maxRows: gateRows)
+                maxRows: gateRows,
+                weightBits: model.attentionWeightBits)
         } else {
             self.pleHash = nil
             self.ngramTable = nil

@@ -968,32 +968,29 @@ extension Model {
                                        config: config, quant: quant)
     }
 
-    /// Refuse a width the family's kernels cannot execute.
+    /// Refuse a width no kernel on the path can execute.
     ///
-    /// `HyperConnection`, `PLEBlock` and `QSAIndexer` each construct a
-    /// `DequantInt4GEMV` unconditionally -- they have no affine variant and no
-    /// bit-width parameter. Handed an 8-bit attention slot they read half the
-    /// bytes of every gate and interpret them as nibbles, which does not throw
-    /// and does not produce noise: the model loads, runs, and generates fluent
-    /// nonsense. An 8-bit install of Qwen3.8-Flash-Next built and answered
-    /// " Paris" before degenerating, which is exactly the failure mode this
-    /// codebase keeps paying for.
+    /// `HyperConnection`, `PLEBlock` and `QSAIndexer` read weights whose width
+    /// comes from the attention slot. They took a `DequantInt4GEMV`
+    /// unconditionally until `SlotGEMV` gave them both paths, and an 8-bit
+    /// install then read half the bytes of every gate as nibbles -- no error,
+    /// no noise, just a model that answered " Paris" and degenerated.
     ///
-    /// Keyed on hyper-connections rather than on a family name because that is
-    /// the actual reason: any family reaching those kernels inherits the
-    /// limitation.
+    /// They now dispatch on the slot, so 4 and 8 are both executable and only
+    /// a width neither GEMV implements is refused. Kept as a guard rather than
+    /// deleted: the failure it catches is silent, and the next width added to
+    /// the format will reach these kernels before anyone remembers they exist.
     static func validateFamilyQuantSupport(
         config: ArchConfig,
         quant: ManifestQuant
     ) throws {
         guard config.hyperConnections.enabled else { return }
-        guard quant.attention.weightBits == 4 else {
+        guard [4, 8].contains(quant.attention.weightBits) else {
             throw ModelError.unsupportedArchitecture(
                 detail: "\(config.family) runs its hyper-connection, PLE and "
-                    + "QSA-indexer projections through INT4-only kernels, so "
-                    + "the attention slot must be 4-bit; this install declares "
-                    + "\(quant.attention.weightBits)-bit. The install is well "
-                    + "formed -- the runtime cannot execute it.")
+                    + "QSA-indexer projections through SlotGEMV, which "
+                    + "implements 4- and 8-bit; this install declares "
+                    + "\(quant.attention.weightBits)-bit.")
         }
     }
 

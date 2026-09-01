@@ -42,7 +42,7 @@ final class QSAIndexer {
     private let scoreRowsPSO: MTLComputePipelineState
     private let rms: RMSNorm
     private let rope: RoPE
-    private let gemv: DequantInt4GEMV
+    private let gemv: SlotGEMV
 
     /// `[heads * headDim]` query scratch, normed and roped in place.
     private let queryBuf: MTLBuffer
@@ -68,7 +68,7 @@ final class QSAIndexer {
 
     init(context: MetalContext, config: SparseIndexerConfig,
          budget: Int? = nil,
-         ropeTheta: Float, capacity: Int) throws {
+         ropeTheta: Float, capacity: Int, weightBits: Int = 4) throws {
         precondition(config.enabled, "QSAIndexer requires a configured indexer")
         precondition(capacity > 0)
         self.ctx = context
@@ -84,7 +84,7 @@ final class QSAIndexer {
         self.scoreRowsPSO = try context.pipeline("qsa_block_scores_rows")
         self.rms = try RMSNorm(context: context)
         self.rope = try RoPE(context: context)
-        self.gemv = try DequantInt4GEMV(context: context)
+        self.gemv = try SlotGEMV(context: context, weightBits: weightBits)
         let f16 = MemoryLayout<Float16>.stride
         guard let query = context.device.makeBuffer(
                   length: heads * headDim * f16, options: .storageModeShared),

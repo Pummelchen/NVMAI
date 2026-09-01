@@ -72,7 +72,7 @@ final class PLEBlock {
     private var hcDim: Int { dim * streams }
 
     private let rms: RMSNorm
-    private let gemv: DequantInt4GEMV
+    private let gemv: SlotGEMV
     private let elementwise: Elementwise
 
     /// Host-written gather destination: `embedDim` fp16 values.
@@ -97,7 +97,8 @@ final class PLEBlock {
     let maxRows: Int
 
     init(context: MetalContext, dim: Int, streams: Int, embedDim: Int,
-         kernelSize: Int, dilation: Int, maxRows: Int = 1) throws {
+         kernelSize: Int, dilation: Int, maxRows: Int = 1,
+         weightBits: Int = 4) throws {
         precondition(dim > 0 && streams > 0 && embedDim > 0)
         precondition(kernelSize > 1 && dilation > 0 && maxRows > 0)
         self.maxRows = maxRows
@@ -107,7 +108,7 @@ final class PLEBlock {
         self.kernelSize = kernelSize
         self.dilation = dilation
         self.rms = try RMSNorm(context: context)
-        self.gemv = try DequantInt4GEMV(context: context)
+        self.gemv = try SlotGEMV(context: context, weightBits: weightBits)
         self.elementwise = try Elementwise(context: context)
         let wide = dim * streams
         let f16 = MemoryLayout<Float16>.stride
