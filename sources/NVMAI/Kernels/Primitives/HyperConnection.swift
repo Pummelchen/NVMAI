@@ -89,16 +89,22 @@ final class HyperConnection {
         let scalesOffset: Int
         let biases: MTLBuffer
         let biasesOffset: Int
+        /// The tensor's own dtype, not the slot's. A promoted family is kept
+        /// at the checkpoint's bf16 inside an otherwise-quantized slot, and
+        /// scales/biases are then absent.
+        let isBF16: Bool
 
         init(weights: MTLBuffer, weightsOffset: Int = 0,
              scales: MTLBuffer, scalesOffset: Int = 0,
-             biases: MTLBuffer, biasesOffset: Int = 0) {
+             biases: MTLBuffer, biasesOffset: Int = 0,
+             isBF16: Bool = false) {
             self.weights = weights
             self.weightsOffset = weightsOffset
             self.scales = scales
             self.scalesOffset = scalesOffset
             self.biases = biases
             self.biasesOffset = biasesOffset
+            self.isBF16 = isBF16
         }
     }
 
@@ -190,7 +196,8 @@ final class HyperConnection {
                         scales: down.scales, scalesOffset: down.scalesOffset,
                         biases: down.biases, biasesOffset: down.biasesOffset,
                         x: normed, y: lowRankScratch,
-                        m: UInt32(lowRank), n: UInt32(wide))
+                        m: UInt32(lowRank), n: UInt32(wide),
+                        isBF16: down.isBF16)
         try elementwise.encodeSilu(commandBuffer: commandBuffer,
                                    x: lowRankScratch, out: lowRankScratch,
                                    count: lowRank, inScale: gateInputScale)
@@ -199,7 +206,8 @@ final class HyperConnection {
                         scales: up.scales, scalesOffset: up.scalesOffset,
                         biases: up.biases, biasesOffset: up.biasesOffset,
                         x: lowRankScratch, y: mixScratch,
-                        m: UInt32(wide), n: UInt32(lowRank))
+                        m: UInt32(wide), n: UInt32(lowRank),
+                        isBF16: up.isBF16)
         // The read gate is applied inside the reduce, which already reads
         // every element of the mix exactly once.
         try elementwise.encodeHCMixReduce(commandBuffer: commandBuffer,
@@ -221,7 +229,8 @@ final class HyperConnection {
                         scales: inject.scales, scalesOffset: inject.scalesOffset,
                         biases: inject.biases, biasesOffset: inject.biasesOffset,
                         x: normed, y: injectScratch,
-                        m: UInt32(streams), n: UInt32(dim * streams))
+                        m: UInt32(streams), n: UInt32(dim * streams),
+                        isBF16: inject.isBF16)
         // The write gate, 2 * sigmoid(...), opens to twice the read gate's
         // range so a stream can amplify a block rather than only attenuate it.
         // It is applied inside the inject rather than in its own dispatch.

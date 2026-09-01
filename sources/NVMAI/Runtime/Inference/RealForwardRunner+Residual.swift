@@ -44,7 +44,10 @@ extension RealForwardRunner {
                                 scales: view.buffer,
                                 scalesOffset: Int(view.scaleOffset),
                                 biases: view.buffer,
-                                biasesOffset: Int(view.biasOffset))
+                                biasesOffset: Int(view.biasOffset),
+                                // dtype 1 is BF16; a promoted tensor carries no
+                                // scales or biases and must not be unpacked.
+                                isBF16: view.dtype == 1)
     }
 
     /// Residual -> block input, for one decode token.
@@ -516,7 +519,8 @@ extension RealForwardRunner {
                             scales: view.buffer,
                             scalesOffset: Int(view.scaleOffset),
                             biases: view.buffer,
-                            biasesOffset: Int(view.biasOffset))
+                            biasesOffset: Int(view.biasOffset),
+                            isBF16: view.dtype == 1)
     }
 
     private func vector(_ view: TensorView) -> PLEBlock.Vector {

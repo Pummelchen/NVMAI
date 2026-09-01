@@ -38,6 +38,9 @@ final class PLEBlock {
         let scalesOffset: Int
         let biases: MTLBuffer
         let biasesOffset: Int
+        /// The tensor's own dtype, not the slot's -- a promoted family sits
+        /// at bf16 inside an otherwise-quantized slot.
+        var isBF16: Bool = false
     }
 
     /// A bf16 vector parameter (the three norms and the conv taps).
@@ -211,7 +214,8 @@ final class PLEBlock {
                             biases: weights.keyProj.biases,
                             biasesOffset: weights.keyProj.biasesOffset,
                             x: embedding, y: keyBuf,
-                            m: UInt32(wide), n: UInt32(embedDim))
+                            m: UInt32(wide), n: UInt32(embedDim),
+                            isBF16: weights.keyProj.isBF16)
             try gemv.encode(commandBuffer: commandBuffer,
                             weights: weights.valueProj.weights,
                             weightsOffset: weights.valueProj.weightsOffset,
@@ -220,7 +224,8 @@ final class PLEBlock {
                             biases: weights.valueProj.biases,
                             biasesOffset: weights.valueProj.biasesOffset,
                             x: embedding, y: valueBuf,
-                            m: UInt32(dim), n: UInt32(embedDim))
+                            m: UInt32(dim), n: UInt32(embedDim),
+                            isBF16: weights.valueProj.isBF16)
         }
         try rms.encodeBF16WGrouped(commandBuffer: commandBuffer,
                                    x: keyBuf,
