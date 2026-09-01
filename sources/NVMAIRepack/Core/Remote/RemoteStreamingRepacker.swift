@@ -1096,7 +1096,10 @@ public extension RemoteStreamingRepacker {
                 guard (try? Posix.entryKind(origin)) == .regular else { continue }
                 let destination = (paths.partialDirectory as NSString)
                     .appendingPathComponent(requirement.name)
-                if (try? Posix.entryKind(destination)) != nil {
+                // `entryKind` reports `.absent` for a missing path rather
+                // than throwing, so `try?` is `.some(.absent)` and a `!= nil`
+                // test is true for a file that is not there.
+                if (try? Posix.entryKind(destination)) == .regular {
                     try FileManager.default.removeItem(atPath: destination)
                 }
                 try FileManager.default.linkItem(atPath: origin, toPath: destination)
