@@ -109,7 +109,7 @@ extension Args {
 
     options:
       --max-new <int>           Generated-token limit (default 1024).
-      --max-context <int>       Native context limit, 1...262144 (default 4096).
+      --max-context <int>       Native context limit, 1...262144 (default 262144).
                                 With YaRN: 524288 or 1048576 (default 1048576).
       --rope-scaling <mode>     Context scaling: none or yarn (default none).
       --temperature <float>     Sampling temperature (default 0.6; 0 = greedy).
@@ -150,7 +150,11 @@ extension Args {
         var prompt: String?
         var messagesFile: String?
         var maxNew = 1_024
-        var maxContext = 4096
+        // Matches the server and the published benchmark settings. The
+        // allocation is lazy -- a server started at 262,144 loads with the
+        // same resident footprint as one started at 4,096 -- so defaulting
+        // low only surprised people whose prompt was longer than 4k.
+        var maxContext = RuntimeConfiguration.nativeMaximumContextTokens
         var maxContextWasSet = false
         var temperature: Float = GenerationDefaults.temperature
         var topK: Int? = GenerationDefaults.topK

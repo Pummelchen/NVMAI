@@ -1,0 +1,22 @@
+# prompt:      Explain what a mutex is and when you would use one.
+# max-new:     96
+# temperature: 0 (greedy)
+# seed:        1234
+# target:      qwen38-4 (4-bit)
+# captured-on: Mac15,3, 24 GB, macOS 26.6.2
+# commit:      8779804
+---
+
+
+<think>
+
+</think>
+
+# Mutex (Mutual Exclusion Lock)
+
+## What Is a Mutex?
+
+A **mutex** (short for **mutual exclusion**) is a synchronization primitive that ensures only **one thread at a time** can access a shared resource. It acts as a lock: when a thread acquires the mutex, other threads attempting to acquire it are blocked until the lock is released.
+
+### Core Mechanics
+1. **Lock/Acquire** –
