@@ -517,6 +517,21 @@ extension RealForwardRunner {
                            streamsBuffer: hidden, weights: weights,
                            tokens: tokens, eps: eps) {
             [self] cb, proj, x, y, rows, columns, count in
+            // Same reason as the hyper-connection gate: a promoted projection
+            // has no scales or biases for the batched QMM to read.
+            if proj.isBF16 {
+                let halfBytes = MemoryLayout<Float16>.stride
+                for row in 0..<count {
+                    try bf16Projection.encode(
+                        commandBuffer: cb,
+                        weights: proj.weights,
+                        weightsOffset: proj.weightsOffset,
+                        x: x, xOffset: row * columns * halfBytes,
+                        y: y, yOffset: row * rows * halfBytes,
+                        m: UInt32(rows), n: UInt32(columns))
+                }
+                return
+            }
             try prefillQMM.encode(commandBuffer: cb,
                                   weights: proj.weights,
                                   weightsOffset: proj.weightsOffset,
