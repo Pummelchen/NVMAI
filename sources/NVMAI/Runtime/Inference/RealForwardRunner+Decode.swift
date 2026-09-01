@@ -991,16 +991,11 @@ extension RealForwardRunner {
         if cfg.sharedExpertGated {
             // out = sigmoid(shared_expert_gate(moeX)) * shared_mlp(moeX)
             let gateView = sharedProj.scalarGate!
-            try int8ScalarGate!.encode(commandBuffer: sharedCB,
-                                   weights: gateView.buffer,
-                                   weightsOffset: Int(gateView.offset),
-                                   scales: gateView.buffer,
-                                   scalesOffset: Int(gateView.scaleOffset),
-                                   biases: gateView.buffer,
-                                   biasesOffset: Int(gateView.biasOffset),
-                                   x: routedX,
-                                   y: sharedScalarGateBuf!,
-                                   m: 1, n: D)
+            try encodeScalarGate(commandBuffer: sharedCB,
+                                 view: gateView,
+                                 x: routedX,
+                                 y: sharedScalarGateBuf!,
+                                 n: D)
             try elementwise!.encodeSigmoidScalarMul(commandBuffer: sharedCB,
                                                 y: h1Buf,
                                                 gate: sharedScalarGateBuf!,

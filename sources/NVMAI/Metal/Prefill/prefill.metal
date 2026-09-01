@@ -373,6 +373,23 @@ kernel void prefill_router_block(
         device const bfloat* b_row = biases + e * n_groups;
 
         float acc = 0.0f;
+        // bits == 16: the router was promoted to the checkpoint's own bf16.
+        // `row_bytes` above is already D * 16 / 8, the byte length of a bf16
+        // row, so only the read changes. Kept in step with the decode path in
+        // moe.metal -- prefill and decode must agree on routing or a prompt
+        // and its continuation would select different experts.
+        if (bits == 16u) {
+            device const bfloat* W_bf = (device const bfloat*)W_row;
+            for (uint g = 0; g < n_groups; ++g) {
+                device const half* xg = row_hidden + g * kPrefillGroupSize;
+                device const bfloat* eg = effective_scale + g * kPrefillGroupSize;
+                for (uint k = 0; k < kPrefillGroupSize; ++k) {
+                    const uint idx = g * kPrefillGroupSize + k;
+                    acc = fma(float(W_bf[idx]),
+                              float(xg[k]) * float(eg[k]), acc);
+                }
+            }
+        } else {
         for (uint g = 0; g < n_groups; ++g) {
             float s = float(s_row[g]);
             float b = float(b_row[g]);
@@ -389,6 +406,7 @@ kernel void prefill_router_block(
             }
             acc = fma(s, dot_qx, acc);
             acc = fma(b, sum_x, acc);
+        }
         }
         scores[e] = acc;
     }

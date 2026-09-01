@@ -560,19 +560,14 @@ extension RealForwardRunner {
         if cfg.sharedExpertGated {
             let gateView = sharedProj.scalarGate!
             for row in 0..<t {
-                try int8ScalarGate!.encode(
+                try encodeScalarGate(
                     commandBuffer: sharedCB,
-                    weights: gateView.buffer,
-                    weightsOffset: Int(gateView.offset),
-                    scales: gateView.buffer,
-                    scalesOffset: Int(gateView.scaleOffset),
-                    biases: gateView.buffer,
-                    biasesOffset: Int(gateView.biasOffset),
+                    view: gateView,
                     x: scratch.routedX,
                     xOffset: row * D * halfBytes,
                     y: scratch.sharedScalarGate,
                     yOffset: row * halfBytes,
-                    m: 1, n: UInt32(D))
+                    n: UInt32(D))
             }
             for row in 0..<t {
                 try elementwise!.encodeSigmoidScalarMul(

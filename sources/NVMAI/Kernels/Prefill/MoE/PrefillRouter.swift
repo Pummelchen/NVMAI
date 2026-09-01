@@ -31,7 +31,9 @@ final class PrefillRouter {
     private let pso: MTLComputePipelineState
 
     init(context: MetalContext, weightBits: Int = 8) throws {
-        precondition([4, 8].contains(weightBits))
+        // 16 means the router is unquantized bf16; the shader branches on it,
+        // and must stay in step with moe.metal's decode-side router.
+        precondition([4, 8, 16].contains(weightBits))
         self.pso = try context.pipeline(
             "prefill_router_block",
             constants: [MetalFunctionConstant(index: 79,

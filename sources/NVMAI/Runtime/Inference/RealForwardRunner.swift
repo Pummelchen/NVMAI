@@ -186,6 +186,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     let gdnState: GDNStateManager?
     let rope: RoPE?
     let int8ScalarGate: DequantInt8GEMV?
+    /// Used instead of `int8ScalarGate` when the scalar gate was promoted to
+    /// the checkpoint's bf16. Kept as a separate member rather than folded
+    /// into SlotGEMV because the quantized one is built with decode-specific
+    /// shapes that the generic wrapper does not carry.
+    let bf16ScalarGate: BF16GEMV?
 
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
@@ -473,7 +478,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
                                  routedWeightBits: model.routedExpertWeightBits,
-                                 routerWeightBits: model.routerWeightBits,
+                                 routerWeightBits: model.effectiveRouterWeightBits,
                                  eventGatedIO: expertIOSynchronization == .event,
                                  specializedD: UInt32(cfg.hiddenSize),
                                  specializedF: UInt32(cfg.moeIntermediateSize),
@@ -498,7 +503,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                          yarn: yarnParameters)
         self.prefillAttention = try PrefillAttention(context: context)
         self.prefillRouter = try PrefillRouter(context: context,
-                                               weightBits: model.routerWeightBits)
+                                               weightBits: model.effectiveRouterWeightBits)
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
             weightBits: model.sharedExpertWeightBits,
@@ -582,6 +587,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? try DequantInt8GEMV(context: context,
                                   additionalShapes: cfg.decodeInt8GEMVShapes)
             : nil
+        self.bf16ScalarGate = cfg.sharedExpertGated
+            ? try BF16GEMV(context: context) : nil
 
         let device = context.device
         let D = cfg.hiddenSize

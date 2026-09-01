@@ -527,3 +527,37 @@ extension RealForwardRunner {
         PLEBlock.Vector(buffer: view.buffer, offset: Int(view.offset))
     }
 }
+
+extension RealForwardRunner {
+    /// The shared expert's scalar gate, whichever way it is stored.
+    ///
+    /// The gate is one row of D and its error does not average over anything,
+    /// which is why the 8-bit build promotes it to the checkpoint's bf16. The
+    /// dtype travels on the tensor, not the slot, so the choice is made here
+    /// rather than when the kernels are built.
+    func encodeScalarGate(commandBuffer: MTLCommandBuffer,
+                          view: TensorView,
+                          x: MTLBuffer, xOffset: Int = 0,
+                          y: MTLBuffer, yOffset: Int = 0,
+                          n: UInt32) throws {
+        if view.dtype == 1 {
+            try bf16ScalarGate!.encode(commandBuffer: commandBuffer,
+                                       weights: view.buffer,
+                                       weightsOffset: Int(view.offset),
+                                       x: x, xOffset: xOffset,
+                                       y: y, yOffset: yOffset,
+                                       m: 1, n: n)
+        } else {
+            try int8ScalarGate!.encode(commandBuffer: commandBuffer,
+                                       weights: view.buffer,
+                                       weightsOffset: Int(view.offset),
+                                       scales: view.buffer,
+                                       scalesOffset: Int(view.scaleOffset),
+                                       biases: view.buffer,
+                                       biasesOffset: Int(view.biasOffset),
+                                       x: x, xOffset: xOffset,
+                                       y: y, yOffset: yOffset,
+                                       m: 1, n: n)
+        }
+    }
+}

@@ -204,16 +204,36 @@ static inline void router_gemv_body(
     device const bfloat* b_row = biases + uint(e) * n_groups;
 
     float acc = 0.0f;
-    for (uint g = 0; g < n_groups; ++g) {
-        const float s = float(s_row[g]);
-        const float b = float(b_row[g]);
-        const uint idx = g * kMoEGroupSize + lane * 2u;
-        const float q0 = float(router_affine_value(W_row, idx, bits));
-        const float q1 = float(router_affine_value(W_row, idx + 1u, bits));
-        const float x0 = float(hidden[idx]) * float(effective_scale[idx]);
-        const float x1 = float(hidden[idx + 1u]) * float(effective_scale[idx + 1u]);
-        acc = fma(s, q0 * x0 + q1 * x1, acc);
-        acc = fma(b, x0 + x1, acc);
+    // bits == 16 means the router was promoted to the checkpoint's own bf16:
+    // no packing, no per-group scale or bias, one multiply per weight. The
+    // row stride above already lands in the right place -- DD * 16 / 8 is the
+    // byte length of a bf16 row -- so only the inner read changes.
+    //
+    // The router produces a *ranking*, and a ranking either matches or it does
+    // not. That is why this one is worth promoting where a bulk projection is
+    // not: at 8 bits its top-10 selection agrees with bf16 on 98.8% of tokens,
+    // and the disagreements pick different experts.
+    if (bits == 16u) {
+        device const bfloat* W_bf = (device const bfloat*)W_row;
+        for (uint g = 0; g < n_groups; ++g) {
+            const uint idx = g * kMoEGroupSize + lane * 2u;
+            const float x0 = float(hidden[idx]) * float(effective_scale[idx]);
+            const float x1 = float(hidden[idx + 1u]) * float(effective_scale[idx + 1u]);
+            acc = fma(float(W_bf[idx]), x0, acc);
+            acc = fma(float(W_bf[idx + 1u]), x1, acc);
+        }
+    } else {
+        for (uint g = 0; g < n_groups; ++g) {
+            const float s = float(s_row[g]);
+            const float b = float(b_row[g]);
+            const uint idx = g * kMoEGroupSize + lane * 2u;
+            const float q0 = float(router_affine_value(W_row, idx, bits));
+            const float q1 = float(router_affine_value(W_row, idx + 1u, bits));
+            const float x0 = float(hidden[idx]) * float(effective_scale[idx]);
+            const float x1 = float(hidden[idx + 1u]) * float(effective_scale[idx + 1u]);
+            acc = fma(s, q0 * x0 + q1 * x1, acc);
+            acc = fma(b, x0 + x1, acc);
+        }
     }
     acc = simd_sum(acc);
     if (lane == 0) out_logits[e] = acc;

@@ -56,6 +56,22 @@ public struct Model {
     }
     public var attentionWeightBits: Int { manifest.quant?.attention.weightBits ?? 4 }
     public var routerWeightBits: Int { manifest.quant?.router.weightBits ?? 8 }
+
+    /// The width the router GEMV must actually be built for.
+    ///
+    /// The manifest slot says how the slot is stored; a family can be promoted
+    /// to the checkpoint's own bf16 inside it, and then the tensor's dtype is
+    /// what the kernel has to match. 16 means unquantized -- the shader reads
+    /// bfloat directly and ignores the scale and bias companions, which a
+    /// promoted tensor does not have.
+    ///
+    /// Read from the tensor rather than the slot because that is the thing
+    /// that can differ: getting it from the slot is exactly the mistake the
+    /// INT4-only kernels made.
+    public var effectiveRouterWeightBits: Int {
+        guard let view = try? router(layer: 0) else { return routerWeightBits }
+        return view.dtype == 1 ? 16 : routerWeightBits
+    }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
     public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
     /// The manifest's recorded digest of `model_weights.bin`. The manifest is

@@ -182,7 +182,8 @@ final class QSAIndexer {
                         x: hidden, xOffset: hiddenOffset,
                         y: buffers.raw,
                         yOffset: position * headDim * MemoryLayout<Float16>.stride,
-                        m: UInt32(headDim), n: UInt32(hiddenColumns(key)))
+                        m: UInt32(headDim), n: UInt32(hiddenColumns(key)),
+                        isBF16: key.dtype == 1)
 
         // Repool the block this token joined. Members present is what the
         // mean divides by, so a tail block is not diluted by absent members.
@@ -321,7 +322,8 @@ final class QSAIndexer {
                         biases: query.buffer, biasesOffset: Int(query.biasOffset),
                         x: hidden, xOffset: hiddenOffset,
                         y: queryBuf,
-                        m: UInt32(heads * headDim), n: UInt32(hiddenColumns(query)))
+                        m: UInt32(heads * headDim), n: UInt32(hiddenColumns(query)),
+                        isBF16: query.dtype == 1)
         try rms.encodeBF16WPerHead(commandBuffer: commandBuffer,
                                    x: queryBuf,
                                    weight: weights.queryNorm.buffer,

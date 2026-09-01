@@ -95,7 +95,8 @@ final class MoE {
                          + "expert slots (16)")
         self.maxStreamedExperts = topKExperts
         precondition([4, 8].contains(routedWeightBits))
-        precondition([4, 8].contains(routerWeightBits))
+        // 16 means the router is unquantized bf16; the shader branches on it.
+        precondition([4, 8, 16].contains(routerWeightBits))
         let activationConstants: [MetalFunctionConstant] = siluActivation
             ? [MetalFunctionConstant(index: 4, value: .bool(true))]
             : []
