@@ -33,6 +33,8 @@ private struct Arguments {
     var inputGTurbo: String?
     var inputSnapshot: String?
     var localModelID: String?
+    var draftHead = false
+    var shareNgramTable = false
 
     static func parse(_ values: [String]) throws -> Arguments {
         var parsed = Arguments()
@@ -66,6 +68,12 @@ private struct Arguments {
                 parsed.model = source
                 parsed.modelExplicit = true
                 index += 2
+            case "--draft-head":
+                parsed.draftHead = true
+                index += 1
+            case "--share-ngram-table":
+                parsed.shareNgramTable = true
+                index += 1
             case "--output", "--input-gturbo", "--input-snapshot", "--model-id":
                 guard index + 1 < values.count else {
                     throw ParseError.missingValue(flag)
@@ -118,7 +126,7 @@ private struct Arguments {
                   !parsed.discardPartial,
                   !parsed.verifyInstall else {
                 throw ParseError.invalidMode(
-                    "local snapshot import accepts only --input-snapshot, --model-id, --output, and --overwrite")
+                    "local snapshot import accepts only --input-snapshot, --model-id, --output, --draft-head, --share-ngram-table, and --overwrite")
             }
             return parsed
         }
@@ -208,6 +216,8 @@ private func run(_ values: [String]) async -> Int32 {
                     inputSnapshotDir: input,
                     outputDir: output,
                     modelID: modelID,
+                    draftHead: arguments.draftHead,
+                    shareNgramTable: arguments.shareNgramTable,
                     overwrite: arguments.overwrite))
             print("Imported local snapshot")
             print("Source fingerprint: \(result.resolvedCommit)")

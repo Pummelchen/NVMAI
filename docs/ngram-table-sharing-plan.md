@@ -1,5 +1,12 @@
 # Sharing `ngram_table.bin` between Qwen3.8-Flash-Next installs
 
+> **Implemented 2026-09-01.** `prepare_qwen38.py --reuse-ngram-table
+> <dir-or-file>` hardlinks an existing table and skips the 31 checkpoint
+> shards that carry nothing else; `NVMAIRepack --share-ngram-table` links it
+> into the install rather than copying it. Linking the two copies that already
+> existed on this machine recovered **95 GiB** (138 -> 233 GiB free), verified
+> byte-identical with `cmp` beforehand.
+
 ## Why
 
 The PLE n-gram table is 95.4 GiB and it is **the same bytes in every

@@ -4,6 +4,17 @@ public struct LocalSnapshotRepackOptions: Sendable {
     public let inputSnapshotDir: String
     public let outputDir: String
     public let modelID: String
+    /// Import only the `mtp.*` namespace as a one-layer draft head, the way
+    /// `--model <name>-mtp` does for a pinned remote source. The planner
+    /// already knows how to split the two namespaces; without this the local
+    /// path can only ever produce the target.
+    public let draftHead: Bool
+    /// Hardlink `ngram_table.bin` from the snapshot instead of copying it.
+    /// The table is 95 GiB and identical in every quantization of a model, so
+    /// a copy is 95 GiB spent to hold the same bytes twice. Linking is safe
+    /// here in a way it would not be across arbitrary installs: the file being
+    /// linked *is* the one that would have been copied.
+    public let shareNgramTable: Bool
     public let overwrite: Bool
     public let minFreeReserveBytes: UInt64
     public let rangeChunkBytes: Int
@@ -12,6 +23,8 @@ public struct LocalSnapshotRepackOptions: Sendable {
     public init(inputSnapshotDir: String,
                 outputDir: String,
                 modelID: String,
+                draftHead: Bool = false,
+                shareNgramTable: Bool = false,
                 overwrite: Bool = false,
                 minFreeReserveBytes: UInt64 = 1 * 1024 * 1024 * 1024,
                 rangeChunkBytes: Int = RemoteChunkPolicy.defaultBytes,
@@ -19,6 +32,8 @@ public struct LocalSnapshotRepackOptions: Sendable {
         self.inputSnapshotDir = inputSnapshotDir
         self.outputDir = outputDir
         self.modelID = modelID
+        self.draftHead = draftHead
+        self.shareNgramTable = shareNgramTable
         self.overwrite = overwrite
         self.minFreeReserveBytes = minFreeReserveBytes
         self.rangeChunkBytes = rangeChunkBytes
@@ -33,14 +48,18 @@ struct LocalSnapshot {
 }
 
 enum LocalSnapshotLoader {
-    static func load(directory: String) throws -> LocalSnapshot {
+    static func load(directory: String, draftHead: Bool = false) throws -> LocalSnapshot {
         let root = URL(fileURLWithPath: directory).standardizedFileURL.path
         guard try Posix.entryKind(root) == .directory else {
             throw RepackError.configurationInvalid(
                 detail: "local snapshot is not a directory: \(root)")
         }
         let metadata = try IndexLoader.load(snapshotDir: root)
-        let arch = try ArchInfo.load(configPath: metadata.configPath)
+        var arch = try ArchInfo.load(configPath: metadata.configPath)
+        if draftHead {
+            arch = try ArchInfo.qwen38FlashNextMTP(from: arch,
+                                                   configPath: metadata.configPath)
+        }
         let headers = try metadata.shardFilenames.map { shard in
             try loadHeader(shard: shard, directory: root)
         }

@@ -868,7 +868,8 @@ public extension RemoteStreamingRepacker {
         audit: RepackAudit = RepackAudit(),
         progress: @escaping @Sendable (ModelInstallProgress) -> Void = { _ in }
     ) async throws -> RemoteStreamingRepackResult {
-        let source = try LocalSnapshotLoader.load(directory: local.inputSnapshotDir)
+        let source = try LocalSnapshotLoader.load(directory: local.inputSnapshotDir,
+                                                  draftHead: local.draftHead)
         let worker = RemoteStreamingRepacker(
             options: RemoteStreamingRepackOptions(
                 repoID: "local/snapshot",
@@ -955,6 +956,7 @@ public extension RemoteStreamingRepacker {
         // PLE constants -- an install that loads and is quietly degraded,
         // which is worse than one that fails.
         var passthroughFiles: [PassthroughFile] = []
+        var sharedPassthrough: [(name: String, size: UInt64)] = []
         for requirement in RepackPlanner.passthroughRequirements(
             family: source.arch.family) {
             let path = (local.inputSnapshotDir as NSString)
@@ -969,6 +971,14 @@ public extension RemoteStreamingRepacker {
                         detail: "\(requirement.name) is required by this "
                             + "architecture; the snapshot is incomplete")
                 }
+                continue
+            }
+            if local.shareNgramTable && requirement.name == "ngram_table.bin" {
+                // Kept out of the copy plan entirely; linked below, once the
+                // partial directory exists, and recorded alongside the files
+                // that were copied so the manifest and receipt are identical
+                // either way.
+                sharedPassthrough.append((requirement.name, size))
                 continue
             }
             passthroughFiles.append(PassthroughFile(sourceName: requirement.name,
@@ -1073,6 +1083,38 @@ public extension RemoteStreamingRepacker {
             // the manifest does not list is a file the loader treats as
             // absent: ple_constants.json on disk and missing from `files`
             // fails the install at load with "missing required file".
+            // `prepareLocalPlan` kept these out of the copy plan; link them
+            // now that the partial directory exists. Deriving the set from the
+            // same requirement list both functions read keeps them from
+            // disagreeing about what was skipped.
+            for requirement in RepackPlanner.passthroughRequirements(
+                family: source.arch.family)
+            where local.shareNgramTable && requirement.name == "ngram_table.bin" {
+                try Task.checkCancellation()
+                let origin = (local.inputSnapshotDir as NSString)
+                    .appendingPathComponent(requirement.name)
+                guard (try? Posix.entryKind(origin)) == .regular else { continue }
+                let destination = (paths.partialDirectory as NSString)
+                    .appendingPathComponent(requirement.name)
+                if (try? Posix.entryKind(destination)) != nil {
+                    try FileManager.default.removeItem(atPath: destination)
+                }
+                try FileManager.default.linkItem(atPath: origin, toPath: destination)
+                let a = try FileManager.default.attributesOfItem(atPath: origin)
+                let b = try FileManager.default.attributesOfItem(atPath: destination)
+                let sa = (a[FileAttributeKey.size] as? NSNumber)?.uint64Value ?? 0
+                let sb = (b[FileAttributeKey.size] as? NSNumber)?.uint64Value ?? 1
+                guard sa == sb, sa > 0 else {
+                    throw RepackError.configurationInvalid(
+                        detail: "\(requirement.name): linked \(sb) bytes, expected \(sa)")
+                }
+                // Digested like any other output. A hardlink is the same
+                // bytes, so the receipt attests over it exactly as it would
+                // over a copy -- sharing changes the disk cost, not the proof.
+                try recordOutputFile(relativePath: requirement.name,
+                                     path: destination,
+                                     progress: progress)
+            }
             for file in plan.passthroughFiles {
                 try Task.checkCancellation()
                 let passthroughPath = (paths.partialDirectory as NSString)
@@ -1090,13 +1132,19 @@ public extension RemoteStreamingRepacker {
             // tokenizer of their own -- they use the target's -- so the gap
             // did not show until a whole model was imported from a local
             // snapshot.
-            try copyLocalTokenizer(snapshotDirectory: local.inputSnapshotDir,
-                                   partialDirectory: paths.partialDirectory,
-                                   record: { relative, path in
-                                       try recordOutputFile(relativePath: relative,
-                                                            path: path,
-                                                            progress: progress)
-                                   })
+            // A draft head is the exception the comment above describes: it is
+            // loaded beside a target and prompted through the target's
+            // tokenizer, so requiring one here would refuse a sidecar that is
+            // correct. Only a whole model needs its own.
+            if !local.draftHead {
+                try copyLocalTokenizer(snapshotDirectory: local.inputSnapshotDir,
+                                       partialDirectory: paths.partialDirectory,
+                                       record: { relative, path in
+                                           try recordOutputFile(relativePath: relative,
+                                                                path: path,
+                                                                progress: progress)
+                                       })
+            }
             progress(.finalizing)
             try writeManifest(
                 plan: plan,

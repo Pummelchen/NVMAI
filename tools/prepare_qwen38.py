@@ -482,14 +482,33 @@ class NgramTable:
     and is quietly wrong.
     """
 
-    def __init__(self, out: Path, expected_rows: int, dim: int):
+    def __init__(self, out: Path, expected_rows: int, dim: int,
+                 reuse: Path | None = None):
         self.path = out / "ngram_table.bin"
         self.expected_rows = expected_rows
         self.dim = dim
         self.pending: dict[int, np.ndarray] = {}
         self.next_index = 0
         self.rows = 0
-        self.handle = self.path.open("wb")
+        self.reused = reuse is not None
+        if reuse is None:
+            self.handle = self.path.open("wb")
+            return
+        # Hardlink, not copy and not symlink. Both directories then hold a
+        # reference to one inode: deleting either leaves the other intact,
+        # which a symlink would not, and the runtime's F_NOCACHE reads do not
+        # care about the extra link.
+        self.handle = None
+        expected_bytes = expected_rows * dim * 2
+        actual = reuse.stat().st_size
+        if actual != expected_bytes:
+            raise ValueError(
+                f"{reuse}: {actual} bytes, expected {expected_bytes} "
+                f"({expected_rows} rows x {dim} x fp16). A table of the wrong "
+                "size is a different model's, or a truncated copy.")
+        if self.path.exists():
+            self.path.unlink()
+        os.link(reuse, self.path)
 
     @staticmethod
     def index_of(name: str) -> int:
@@ -512,6 +531,10 @@ class NgramTable:
             self.next_index += 1
 
     def finish(self) -> None:
+        if self.reused:
+            if self.pending:
+                raise ValueError("n-gram shards arrived while reusing a table")
+            return
         self.handle.close()
         if self.pending:
             raise ValueError(f"n-gram shards never became contiguous: "
@@ -560,6 +583,12 @@ def main() -> int:
                     help="regenerate config.json for an existing snapshot")
     ap.add_argument("--output", type=Path)
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
+    ap.add_argument("--reuse-ngram-table", type=Path, metavar="DIR_OR_FILE",
+                    help="hardlink ngram_table.bin from an existing install or "
+                         "snapshot instead of fetching the table shards. The "
+                         "table is fp16 in every quantization and is fully "
+                         "determined by the checkpoint, so two builds of the "
+                         "same model cannot differ in it.")
     ap.add_argument("--index", type=Path)
     ap.add_argument("--config", type=Path)
     args = ap.parse_args()
@@ -604,7 +633,44 @@ def main() -> int:
     wm = index["weight_map"]
     shards = sorted(set(wm.values()))
     writer = OutputWriter(args.output)
-    ngram = NgramTable(args.output, padded, constants["ple_head_dim"])
+
+    reuse = args.reuse_ngram_table
+    if reuse is not None:
+        if reuse.is_dir():
+            sibling = reuse / "ple_constants.json"
+            if sibling.exists():
+                # The table is a hash table: its contents are meaningless
+                # under different multipliers, offsets or vocabulary sizes,
+                # and none of that is recoverable from the file itself. Refuse
+                # rather than link a table this build cannot address.
+                have = json.loads(sibling.read_text())
+                for key in ("layer_multipliers", "ngram_heads_offsets",
+                            "ngram_heads_vocab_sizes", "ngram_size",
+                            "heads_per_ngram", "ple_head_dim"):
+                    if have.get(key) != constants.get(key):
+                        raise SystemExit(
+                            f"--reuse-ngram-table: {key} differs between "
+                            f"{sibling} and this build; the table is addressed "
+                            "by those constants and would be read wrongly")
+            reuse = reuse / "ngram_table.bin"
+        if not reuse.exists():
+            raise SystemExit(f"--reuse-ngram-table: no such file: {reuse}")
+
+    ngram = NgramTable(args.output, padded, constants["ple_head_dim"], reuse)
+
+    if reuse is not None:
+        # Skip the shards that carry nothing else. Two of the 131 hold n-gram
+        # rows alongside ordinary tensors and are still fetched; convert_shard
+        # already ignores the n-gram names inside them.
+        by_shard: dict[str, list[str]] = {}
+        for name, shard in wm.items():
+            by_shard.setdefault(shard, []).append(name)
+        skippable = {shard for shard, names in by_shard.items()
+                     if all(is_ngram(n) for n in names)}
+        shards = [s for s in shards if s not in skippable]
+        print(f"reusing n-gram table: {reuse}")
+        print(f"  hardlinked, {padded * constants['ple_head_dim'] * 2 / 1e9:.1f} GB not written")
+        print(f"  {len(skippable)} of {len(by_shard)} checkpoint shards not fetched")
 
     # Fetch shard N+1 while shard N converts.
     queue: Queue = Queue(maxsize=1)
