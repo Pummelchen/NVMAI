@@ -539,6 +539,13 @@ class NgramTable:
             self.rows += block.shape[0]
             self.next_index += 1
 
+    def summary(self) -> str:
+        """What the table cost this build, in the mode it actually ran."""
+        if self.reused:
+            return (f"linked, {self.expected_rows} rows "
+                    f"({self.expected_rows * self.dim * 2 / 1e9:.1f} GB not written)")
+        return f"{self.rows} rows"
+
     def finish(self) -> None:
         if self.reused:
             if self.pending:
@@ -716,7 +723,7 @@ def main() -> int:
     write_config(config, args.output, writer.index.keys(), args.bits)
     print(f"\naffine snapshot written to {args.output}")
     print(f"  {writer.shard_no} shards, {writer.total / 1e9:.1f} GB")
-    print(f"  ngram_table.bin {ngram.rows} rows")
+    print(f"  ngram_table.bin {ngram.summary()}")
     return 0
 
 
