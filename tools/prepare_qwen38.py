@@ -566,6 +566,34 @@ class NgramTable:
 # --- driver ----------------------------------------------------------------
 
 
+# The repacker refuses a snapshot without these: a model imported from one has
+# no other source for them, and an install that loads but cannot be prompted is
+# worse than one that fails. `config.json` is written separately by
+# `write_config`, which adds the quantization block the repacker reads.
+TOKENIZER_FILES = (
+    ("tokenizer.json", True),
+    ("tokenizer_config.json", True),
+    ("special_tokens_map.json", False),
+    ("chat_template.jinja", False),
+    ("chat_template.json", False),
+)
+
+
+def fetch_tokenizer(out: Path) -> None:
+    """Copy the tokenizer beside the weights, so the snapshot stands alone."""
+    for name, required in TOKENIZER_FILES:
+        url = f"https://huggingface.co/{REPO}/resolve/main/{name}"
+        result = subprocess.run(["curl", "-sfL", "--max-time", "300", url],
+                                capture_output=True)
+        if result.returncode != 0 or not result.stdout:
+            if required:
+                raise SystemExit(f"cannot fetch {name} from {REPO}; the "
+                                 "snapshot would be rejected at repack")
+            continue
+        (out / name).write_bytes(result.stdout)
+        print(f"  {name} ({len(result.stdout) / 1e6:.2f} MB)")
+
+
 def plan(index: dict, width: int = BITS_4) -> None:
     wm = index["weight_map"]
     shards = sorted(set(wm.values()))
@@ -721,6 +749,8 @@ def main() -> int:
     # Written last: the quantization block lists every tensor whose width
     # differs from the base, which is only known once they have all been seen.
     write_config(config, args.output, writer.index.keys(), args.bits)
+    print("tokenizer:")
+    fetch_tokenizer(args.output)
     print(f"\naffine snapshot written to {args.output}")
     print(f"  {writer.shard_no} shards, {writer.total / 1e9:.1f} GB")
     print(f"  ngram_table.bin {ngram.summary()}")
