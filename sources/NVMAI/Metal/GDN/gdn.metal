@@ -45,6 +45,32 @@ constant uint FC_GDN_TG_THREADS [[function_constant(95)]];
 // different model. It has to be selected, not assumed.
 constant bool FC_GDN_SIGMOID_GATE [[function_constant(96)]];
 
+// Set when in_proj_a and in_proj_b were promoted to the checkpoint's own bf16.
+// Only those two: they are 48 rows each against qkv's 10,240, so the fused
+// dispatch keeps its shape and only the two narrow slots read differently.
+constant bool FC_GDN_AB_BF16 [[function_constant(97)]];
+
+static inline bool gdn_ab_bf16() {
+    return is_function_constant_defined(FC_GDN_AB_BF16) && FC_GDN_AB_BF16;
+}
+
+static inline void gdn_bf16_gemv_body(device const bfloat* W,
+                                      device const half* x,
+                                      device half* y,
+                                      uint N,
+                                      uint local_row,
+                                      uint lane) {
+    device const bfloat* row = W + local_row * N;
+    float acc = 0.0f;
+    for (uint base = 0; base < N; base += 64u) {
+        const uint idx = base + lane * 2u;
+        acc = fma(float(row[idx]), float(x[idx]), acc);
+        acc = fma(float(row[idx + 1u]), float(x[idx + 1u]), acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0u) y[local_row] = half(acc);
+}
+
 static inline uint gdn_tg_threads() {
     return is_function_constant_defined(FC_GDN_TG_THREADS)
         ? FC_GDN_TG_THREADS : 128u;
@@ -246,6 +272,11 @@ kernel void gdn_in_proj_gemv_simd(
         W = bW; scales = bS; biases = bB; y = bY;
         local_row = global_row - QKV - Z - AB;
         M = AB;
+    }
+    if (global_row >= QKV + Z && gdn_ab_bf16()) {
+        // a and b only; qkv and z keep whatever width the slot declares.
+        gdn_bf16_gemv_body((device const bfloat*)W, x, y, NN, local_row, lane);
+        return;
     }
     gdn_dequant_int4_gemv_simd_body(W, scales, biases, x, y, M, NN,
                                     1u, local_row, 0u, lane);

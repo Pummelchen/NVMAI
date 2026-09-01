@@ -57,6 +57,14 @@ public struct Model {
     public var attentionWeightBits: Int { manifest.quant?.attention.weightBits ?? 4 }
     public var routerWeightBits: Int { manifest.quant?.router.weightBits ?? 8 }
 
+    /// True when the GDN `in_proj_a` / `in_proj_b` pair was promoted to the
+    /// checkpoint's bf16. They travel together -- both are `numVHeads` rows of
+    /// the same projection -- so one probe decides the pair.
+    public var gdnABIsBF16: Bool {
+        guard let view = try? linearInProjA(layer: 0) else { return false }
+        return view.dtype == 1
+    }
+
     /// The width the router GEMV must actually be built for.
     ///
     /// The manifest slot says how the slot is stored; a family can be promoted

@@ -34,7 +34,8 @@ final class GDN {
     /// package: an unspecialized INT4 GEMV runs ~102 GB/s against ~141 GB/s
     /// specialized, so the runtime path must not be the only one available.
     init(context: MetalContext, config: LinearAttentionConfig,
-         specializedHiddenSize: Int? = nil) throws {
+         specializedHiddenSize: Int? = nil,
+         abBF16: Bool = false) throws {
         precondition(config.keyHeadDim > 0 && config.keyHeadDim % 32 == 0,
                      "keyHeadDim must be a positive multiple of 32")
         precondition(config.keyHeadDim / 32 <= 8,
@@ -61,9 +62,10 @@ final class GDN {
                         MetalFunctionConstant(
                             index: 96,
                             value: .bool(config.outputGate == .sigmoid))])
-        self.inProjPSO = try context.pipeline("gdn_in_proj_gemv_simd",
-                                              constants: [],
-                                              maxTotalThreadsPerThreadgroup: 512)
+        self.inProjPSO = try context.pipeline(
+            "gdn_in_proj_gemv_simd",
+            constants: [MetalFunctionConstant(index: 97, value: .bool(abBF16))],
+            maxTotalThreadsPerThreadgroup: 512)
         if let n = specializedHiddenSize {
             self.inProjSpecializedPSO = try context.pipeline(
                 "gdn_in_proj_gemv_simd",
@@ -73,6 +75,7 @@ final class GDN {
                     MetalFunctionConstant(index: 92, value: .uint32(UInt32(config.numVHeads))),
                     MetalFunctionConstant(index: 93, value: .uint32(UInt32(n))),
                     MetalFunctionConstant(index: 94, value: .bool(true)),
+                    MetalFunctionConstant(index: 97, value: .bool(abBF16)),
                 ],
                 maxTotalThreadsPerThreadgroup: 512)
         } else {

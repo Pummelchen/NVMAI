@@ -572,7 +572,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         }
         if cfg.hasLinearAttentionLayers {
             self.gdn = try GDN(context: context, config: cfg.linearAttention,
-                               specializedHiddenSize: cfg.hiddenSize)
+                               specializedHiddenSize: cfg.hiddenSize,
+                               abBF16: model.gdnABIsBF16)
             self.gdnState = try GDNStateManager(
                 device: context.device,
                 config: cfg,
