@@ -491,6 +491,7 @@ class NgramTable:
         self.next_index = 0
         self.rows = 0
         self.reused = reuse is not None
+        self.skipped = 0
         if reuse is None:
             self.handle = self.path.open("wb")
             return
@@ -515,6 +516,14 @@ class NgramTable:
         return int(name.rsplit(".shard_", 1)[1].split(".")[0])
 
     def add(self, name: str, value: np.ndarray) -> None:
+        if self.reused:
+            # Two of the 131 checkpoint shards carry n-gram rows alongside
+            # ordinary tensors, so they are fetched even when the table is
+            # reused and their n-gram names still arrive here. The linked
+            # table already contains those rows -- the size check in __init__
+            # is what guarantees it holds all of them -- so drop them.
+            self.skipped += 1
+            return
         self.pending[self.index_of(name)] = value
         while self.next_index in self.pending:
             block = self.pending.pop(self.next_index)
@@ -534,6 +543,9 @@ class NgramTable:
         if self.reused:
             if self.pending:
                 raise ValueError("n-gram shards arrived while reusing a table")
+            if self.skipped:
+                print(f"  {self.skipped} n-gram tensors in mixed shards ignored "
+                      f"(already in the linked table)")
             return
         self.handle.close()
         if self.pending:
