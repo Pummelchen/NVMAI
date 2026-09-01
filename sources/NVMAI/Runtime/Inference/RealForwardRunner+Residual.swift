@@ -111,6 +111,22 @@ extension RealForwardRunner {
     /// policy for which kernel serves which shape.
     var prefillGateProjection: HyperConnection.BatchedProjection {
         { [self] commandBuffer, weights, x, y, rows, columns, tokens in
+            // A promoted gate has no scales or biases, so the batched QMM
+            // cannot read it. One GEMV per row instead; block_inject is four
+            // rows, so there is little batching to lose.
+            if weights.isBF16 {
+                let halfBytes = MemoryLayout<Float16>.stride
+                for row in 0..<tokens {
+                    try bf16Projection.encode(
+                        commandBuffer: commandBuffer,
+                        weights: weights.weights,
+                        weightsOffset: weights.weightsOffset,
+                        x: x, xOffset: row * columns * halfBytes,
+                        y: y, yOffset: row * rows * halfBytes,
+                        m: UInt32(rows), n: UInt32(columns))
+                }
+                return
+            }
             try prefillQMM.encode(commandBuffer: commandBuffer,
                                   weights: weights.weights,
                                   weightsOffset: weights.weightsOffset,

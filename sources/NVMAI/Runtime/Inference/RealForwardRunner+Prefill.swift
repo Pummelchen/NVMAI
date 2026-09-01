@@ -429,6 +429,27 @@ extension RealForwardRunner {
                               xStrideElements: Int,
                               yStrideElements: Int,
                               useTwoRowProjection: Bool) throws {
+        // A promoted tensor carries no scales or biases, so none of the
+        // batched paths below can read it -- they would take the companions
+        // from offset zero, which is the file header. Fall straight to the
+        // per-row GEMV, which dispatches on dtype.
+        //
+        // The batching lost here is cheap: every promoted family is among the
+        // smallest tensors in the model, which is why they were chosen.
+        if weights.dtype == 1 {
+            for row in 0..<tokenCount {
+                try encodePrimaryGEMV(
+                    commandBuffer: commandBuffer,
+                    projection: weights,
+                    x: x,
+                    xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
+                    y: y,
+                    yOffset: row * yStrideElements * MemoryLayout<Float16>.stride,
+                    m: UInt32(rows),
+                    n: UInt32(columns))
+            }
+            return
+        }
         if tokenCount >= 32,
            family == .q || family == .kv || family == .o,
            let candidate = prefillMPPAffineInt4 {

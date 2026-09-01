@@ -191,6 +191,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// into SlotGEMV because the quantized one is built with decode-specific
     /// shapes that the generic wrapper does not carry.
     let bf16ScalarGate: BF16GEMV?
+    /// Used for any resident projection whose tensor was promoted to the
+    /// checkpoint's bf16. Held unconditionally: promotion is a property of the
+    /// install, not of the family, and the pipeline costs nothing unused.
+    let bf16Projection: BF16GEMV
 
     // Prefill kernels. These are initialized once per runner so the chunk path
     // cannot accidentally rebuild PSOs inside a per-layer loop.
@@ -475,6 +479,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.shared    = try SharedExpertRuntime(context: context,
                                                   weightBits: model.sharedExpertWeightBits,
                                                   siluActivation: silu)
+        if ProcessInfo.processInfo.environment["NVMAI_DEBUG_PROMOTION"] != nil {
+            FileHandle.standardError.write(Data((
+                "promotion: routerBits=\(model.effectiveRouterWeightBits) "
+                + "slotRouterBits=\(model.routerWeightBits) "
+                + "gdnAB_bf16=\(model.gdnABIsBF16)\n").utf8))
+        }
         self.moe       = try MoE(context: context,
                                  siluActivation: silu,
                                  routedWeightBits: model.routedExpertWeightBits,
@@ -590,6 +600,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             : nil
         self.bf16ScalarGate = cfg.sharedExpertGated
             ? try BF16GEMV(context: context) : nil
+        self.bf16Projection = try BF16GEMV(context: context)
 
         let device = context.device
         let D = cfg.hiddenSize

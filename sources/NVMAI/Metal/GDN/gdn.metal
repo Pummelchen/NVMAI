@@ -790,6 +790,25 @@ static inline void gdn_in_proj_rows(
         local_row = global_row - QKV - Z - AB;
         M = AB;
     }
+    // Same promotion branch as gdn_in_proj_gemv_simd. This is a second
+    // implementation of the identical slot selection -- one for the plain
+    // dispatch, one for the threadgroup-memory variant -- and patching only
+    // the first left this one reading bf16 weights through the INT4 body,
+    // whose scales pointer is then the file header read as bfloat: NaN.
+    if (global_row >= QKV + Z && gdn_ab_bf16()) {
+        device const bfloat* row = (device const bfloat*)W + local_row * NN;
+        float acc = 0.0f;
+        for (uint base = 0; base < NN; base += 64u) {
+            const uint idx = base + lane * 2u;
+            const float x0 = tgmem ? float(xt[idx]) : float(xd[idx]);
+            const float x1 = tgmem ? float(xt[idx + 1u]) : float(xd[idx + 1u]);
+            acc = fma(float(row[idx]), x0, acc);
+            acc = fma(float(row[idx + 1u]), x1, acc);
+        }
+        acc = simd_sum(acc);
+        if (lane == 0u) y[local_row] = half(acc);
+        return;
+    }
     if (tgmem) {
         gdn_dequant_int4_gemv_simd_body_tgmem(xt, W, scales, biases, y, M, NN,
                                               1u, local_row, 0u, lane);

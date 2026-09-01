@@ -670,6 +670,19 @@ extension RealForwardRunner {
                                    x: MTLBuffer, xOffset: Int = 0,
                                    y: MTLBuffer, yOffset: Int = 0,
                                    m: UInt32, n: UInt32) throws {
+        // A promoted tensor carries no scales or biases, so it cannot go
+        // through the quantized GEMV -- that would read the companions from
+        // offset zero, which is the file header, and produce NaN. Decided from
+        // the tensor's dtype because promotion is per tensor, not per slot.
+        if p.dtype == 1 {
+            try bf16Projection.encode(commandBuffer: cb,
+                                      weights: p.buffer,
+                                      weightsOffset: Int(p.offset),
+                                      x: x, xOffset: xOffset,
+                                      y: y, yOffset: yOffset,
+                                      m: m, n: n)
+            return
+        }
         try encodePrimaryGEMV(commandBuffer: cb,
                           weights: p.buffer, weightsOffset: Int(p.offset),
                           scales: p.buffer, scalesOffset: Int(p.scaleOffset),
