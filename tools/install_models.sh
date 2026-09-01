@@ -25,7 +25,7 @@ CATALOGUE=(
   "qwen36-8bit|qwen3.6_35B_A3B_8Bit|8|repack"
   "qwen36-mtp|qwen3.6_35B_A3B_MTP_4Bit|4|repack"
   "qwen38flash|qwen3.8-flash-next_125B_A6B_4Bit|4|convert"
-  "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|unsupported"
+  "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|convert"
   "qwen38flash-mtp|qwen3.8-flash-next_125B_A6B_MTP_4Bit|4|repack"
 )
 
@@ -35,7 +35,7 @@ Coverage
 
   Ornith 1.5 35B-A3B      4-bit, 8-bit, MTP draft
   Qwen 3.6 35B-A3B        4-bit, 8-bit, MTP draft
-  Qwen3.8-Flash-Next      4-bit, MTP draft  (8-bit is NOT executable, below)
+  Qwen3.8-Flash-Next      4-bit, 8-bit, MTP draft
 
 Sources
 
@@ -60,16 +60,17 @@ Sources
 
 8-bit and Qwen3.8-Flash-Next
 
-  This family runs its hyper-connection, PLE and QSA-indexer projections
-  through INT4-only kernels -- HyperConnection, PLEBlock and QSAIndexer each
-  construct a DequantInt4GEMV with no affine variant and no bit-width
-  parameter. An 8-bit install is well formed and unexecutable: handed 8-bit
-  gates those kernels read half the bytes as nibbles, which does not throw.
-  A built 8-bit install loaded, answered " Paris", and then degenerated.
+  Executable since the hyper-connection, PLE and QSA-indexer kernels gained an
+  affine path. Before that they took an INT4 GEMV unconditionally and read
+  8-bit gates as nibbles: the install built, loaded, answered " Paris" and
+  degenerated. If you are on a build older than that, 8-bit is refused at load
+  rather than producing nonsense.
 
-  The runtime now refuses it at load rather than generating nonsense. Making
-  it work means giving those three kernels an affine path, which is real work
-  and is not scheduled. The 4-bit build is the supported one.
+  Worth knowing before installing it: decode is bound by streaming routed
+  experts from SSD, and 8-bit doubles the per-expert record from 2.77 MB to
+  5.23 MB. It also halves how many experts fit the same cache budget, so
+  expect substantially less than half the 4-bit throughput. The reason to run
+  it is quality headroom, not speed.
 
 Disk
 

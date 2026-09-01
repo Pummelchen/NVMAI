@@ -4,8 +4,16 @@
 # pass". Phase 2 of the production audit needs this before RealForwardRunner
 # is decomposed.
 #
-#   tools/golden-baseline.sh [4|8 ...]       # default: Ornith 8-bit
-#   tools/golden-baseline.sh --check [...]   # compare against the stored file
+#   tools/golden-baseline.sh [target ...]     # default: ornith-8
+#   tools/golden-baseline.sh --check [...]    # compare against the stored file
+#
+# Targets: ornith-4, ornith-8, qwen38-4, qwen38-8. Bare 4 and 8 still mean
+# Ornith, because the stored baselines are named for it.
+#
+# Qwen3.8-Flash-Next is the broader gate: it is the only family exercising
+# hyper-connections, the PLE block and the QSA indexer, and at 8-bit it is the
+# only one exercising the affine GEMV path through them. Ornith reaches none
+# of that, so an Ornith-only baseline can pass while those kernels are wrong.
 #
 # Determinism comes from greedy decoding: --temperature 0 with a fixed seed and
 # a fixed prompt. Greedy means the sampler never draws, so the only inputs are
@@ -28,7 +36,7 @@ SEED="${SEED:-1234}"
 
 mode=capture
 if [ "${1:-}" = "--check" ]; then mode=check; shift; fi
-quants=("$@"); [ ${#quants[@]} -eq 0 ] && quants=(8)
+targets=("$@"); [ ${#targets[@]} -eq 0 ] && targets=(ornith-8)
 
 if [ ! -x "$CLI" ]; then
   echo "missing $CLI — run: swift build -c release" >&2
@@ -45,22 +53,27 @@ fi
 mkdir -p "$OUT_DIR" "$ROOT/.build"
 status=0
 
-for q in "${quants[@]}"; do
-  case "$q" in
-    4|8) ;;
-    *) echo "unsupported Ornith baseline quantization: $q (expected 4 or 8)" >&2
+for t in "${targets[@]}"; do
+  case "$t" in
+    4|ornith-4) dir="ornith-1.5_35B_A3B_4Bit"; file="ornith-1.5-35b-a3b-4bit.txt"; q=4 ;;
+    8|ornith-8) dir="ornith-1.5_35B_A3B_8Bit"; file="ornith-1.5-35b-a3b-8bit.txt"; q=8 ;;
+    qwen38-4)   dir="qwen3.8-flash-next_125B_A6B_4Bit"
+                file="qwen3.8-flash-next-125b-a6b-4bit.txt"; q=4 ;;
+    qwen38-8)   dir="qwen3.8-flash-next_125B_A6B_8Bit"
+                file="qwen3.8-flash-next-125b-a6b-8bit.txt"; q=8 ;;
+    *) echo "unknown target: $t (ornith-4, ornith-8, qwen38-4, qwen38-8)" >&2
        status=1; continue ;;
   esac
-  model="$ROOT/models/ornith-1.5_35B_A3B_${q}Bit"
+  model="$ROOT/models/$dir"
   if [ ! -f "$model/verified-install.json" ]; then
-    echo "missing ${q}-bit baseline model: no verified install at ${model#$ROOT/}" >&2
+    echo "missing baseline model $t: no verified install at ${model#$ROOT/}" >&2
     status=1
     continue
   fi
-  file="$OUT_DIR/ornith-1.5-35b-a3b-${q}bit.txt"
+  file="$OUT_DIR/$file"
   work="$(mktemp "$ROOT/.build/golden-baseline.XXXXXX")"
 
-  echo "== ${q}-bit =="
+  echo "== $t =="
   # --quiet keeps the timing footer out of the compared text; only the
   # generated tokens are the contract. Timings vary run to run by design.
   "$CLI" --model "$model" --prompt "$PROMPT" --max-new "$MAX_NEW" \
@@ -77,7 +90,7 @@ for q in "${quants[@]}"; do
       echo "# max-new:     $MAX_NEW"
       echo "# temperature: 0 (greedy)"
       echo "# seed:        $SEED"
-      echo "# quant:       ${q}-bit"
+      echo "# target:      $t (${q}-bit)"
       echo "# captured-on: $(sysctl -n hw.model), $(( $(sysctl -n hw.memsize) / 1073741824 )) GB, macOS $(sw_vers -productVersion)"
       echo "# commit:      $(git -C "$ROOT" rev-parse --short HEAD)"
       echo "---"
