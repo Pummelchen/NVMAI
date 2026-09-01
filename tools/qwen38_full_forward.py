@@ -9,6 +9,7 @@ math rather than in state threading.
 
 Usage:  python3 tools/qwen38_full_forward.py <model-dir> <dump-dir>
 """
+import os
 import sys
 from pathlib import Path
 
@@ -48,7 +49,12 @@ def main():
         if cos <= 0.999 and first_bad is None:
             first_bad = layer
         print(f"  L{layer:02d} entry  {flag} cos={cos:.5f}")
-        if first_bad is not None:
+        # Stop at the first divergence by default: past it the reference is
+        # being fed the runtime's own drifted state and every later layer is
+        # noise about the same fault. `NVMAI_PARITY_ALL=1` runs the whole
+        # stack anyway, which is what distinguishes one wrong layer from a
+        # gradual drift -- the shape of the curve is the diagnosis.
+        if first_bad is not None and not os.environ.get("NVMAI_PARITY_ALL"):
             break
 
         if layer in PLE_LAYERS:
