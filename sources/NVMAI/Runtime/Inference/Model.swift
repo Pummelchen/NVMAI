@@ -962,9 +962,39 @@ extension Model {
         // [query; gate] q_proj, and gated-DeltaNet layers carry the
         // linear_attn bundle. The Qwen checkpoints keep no auxiliary
         // sandwich/scale tensors.
+        try validateFamilyQuantSupport(config: config, quant: quant)
         try validateLayerTensors(checks: checks, config: config, quant: quant)
         try validateRoutedExpertLayout(checks: checks, layout: layout,
                                        config: config, quant: quant)
+    }
+
+    /// Refuse a width the family's kernels cannot execute.
+    ///
+    /// `HyperConnection`, `PLEBlock` and `QSAIndexer` each construct a
+    /// `DequantInt4GEMV` unconditionally -- they have no affine variant and no
+    /// bit-width parameter. Handed an 8-bit attention slot they read half the
+    /// bytes of every gate and interpret them as nibbles, which does not throw
+    /// and does not produce noise: the model loads, runs, and generates fluent
+    /// nonsense. An 8-bit install of Qwen3.8-Flash-Next built and answered
+    /// " Paris" before degenerating, which is exactly the failure mode this
+    /// codebase keeps paying for.
+    ///
+    /// Keyed on hyper-connections rather than on a family name because that is
+    /// the actual reason: any family reaching those kernels inherits the
+    /// limitation.
+    static func validateFamilyQuantSupport(
+        config: ArchConfig,
+        quant: ManifestQuant
+    ) throws {
+        guard config.hyperConnections.enabled else { return }
+        guard quant.attention.weightBits == 4 else {
+            throw ModelError.unsupportedArchitecture(
+                detail: "\(config.family) runs its hyper-connection, PLE and "
+                    + "QSA-indexer projections through INT4-only kernels, so "
+                    + "the attention slot must be 4-bit; this install declares "
+                    + "\(quant.attention.weightBits)-bit. The install is well "
+                    + "formed -- the runtime cannot execute it.")
+        }
     }
 
     /// Per-layer norms, router, shared expert, attention and GDN tensors.

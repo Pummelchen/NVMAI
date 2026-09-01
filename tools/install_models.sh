@@ -25,7 +25,7 @@ CATALOGUE=(
   "qwen36-8bit|qwen3.6_35B_A3B_8Bit|8|repack"
   "qwen36-mtp|qwen3.6_35B_A3B_MTP_4Bit|4|repack"
   "qwen38flash|qwen3.8-flash-next_125B_A6B_4Bit|4|convert"
-  "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|convert"
+  "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|unsupported"
   "qwen38flash-mtp|qwen3.8-flash-next_125B_A6B_MTP_4Bit|4|repack"
 )
 
@@ -35,7 +35,7 @@ Coverage
 
   Ornith 1.5 35B-A3B      4-bit, 8-bit, MTP draft
   Qwen 3.6 35B-A3B        4-bit, 8-bit, MTP draft
-  Qwen3.8-Flash-Next      4-bit, 8-bit, MTP draft
+  Qwen3.8-Flash-Next      4-bit, MTP draft  (8-bit is NOT executable, below)
 
 Sources
 
@@ -57,6 +57,19 @@ Sources
              mantissa -- full bandwidth cost on an I/O-bound decode for less
              than 8-bit quality. Third-party MLX 8-bit repacks have the same
              problem with less provenance.
+
+8-bit and Qwen3.8-Flash-Next
+
+  This family runs its hyper-connection, PLE and QSA-indexer projections
+  through INT4-only kernels -- HyperConnection, PLEBlock and QSAIndexer each
+  construct a DequantInt4GEMV with no affine variant and no bit-width
+  parameter. An 8-bit install is well formed and unexecutable: handed 8-bit
+  gates those kernels read half the bytes as nibbles, which does not throw.
+  A built 8-bit install loaded, answered " Paris", and then degenerated.
+
+  The runtime now refuses it at load rather than generating nonsense. Making
+  it work means giving those three kernels an affine path, which is real work
+  and is not scheduled. The 4-bit build is the supported one.
 
 Disk
 
@@ -118,6 +131,18 @@ EOF
         ;;
       prepare_ornith_mtp)
         echo "$name is prepared from the pinned checkpoint; see tools/prepare_ornith_mtp.py"
+        ;;
+      unsupported)
+        cat <<EOF
+$name cannot be run.
+
+Qwen3.8-Flash-Next drives its hyper-connection, PLE and QSA-indexer
+projections through INT4-only kernels, so an 8-bit install builds correctly
+and cannot execute -- the runtime refuses it at load. Use the 4-bit build.
+
+See --help for what making 8-bit work would require.
+EOF
+        return 1
         ;;
     esac
     return 0

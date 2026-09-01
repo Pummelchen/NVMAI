@@ -165,6 +165,44 @@ struct ResidualWidthTests {
         #expect(cfg.hyperConnections.count == 0)
     }
 
+    static func slot(_ bits: Int) -> ManifestQuantSlot {
+        ManifestQuantSlot(weightBits: bits, scheme: "affine",
+                          scaleType: "BF16", biasType: "BF16", groupSize: 64)
+    }
+
+    static func quant(attention: Int, routed: Int = 4) -> ManifestQuant {
+        ManifestQuant(embedding: slot(8), attention: slot(attention),
+                      router: slot(8), sharedExpert: slot(routed),
+                      routedExpert: slot(routed))
+    }
+
+    /// An 8-bit install of this family is well formed and unexecutable: the
+    /// hyper-connection, PLE and QSA-indexer kernels are INT4-only, so they
+    /// read half the bytes of every gate as nibbles. It loaded and generated
+    /// " Paris" before degenerating, which is why this is a load-time refusal
+    /// rather than a note in a document.
+    @Test("An 8-bit attention slot is refused for hyper-connection families")
+    func refusesEightBitAttention() {
+        #expect(throws: ModelError.self) {
+            try Model.validateFamilyQuantSupport(
+                config: .qwen38FlashNext, quant: Self.quant(attention: 8))
+        }
+    }
+
+    @Test("The shipped 4-bit combination is accepted")
+    func acceptsFourBitAttention() throws {
+        try Model.validateFamilyQuantSupport(
+            config: .qwen38FlashNext, quant: Self.quant(attention: 4))
+    }
+
+    /// The limitation belongs to the kernels those families reach, not to a
+    /// name: a family without hyper-connections is unaffected at any width.
+    @Test("Families without hyper-connections are unaffected")
+    func qwen36AcceptsEightBit() throws {
+        try Model.validateFamilyQuantSupport(
+            config: .qwen36_35B_A3B, quant: Self.quant(attention: 8, routed: 8))
+    }
+
     @Test("Only the residual widens; block-facing buffers stay D")
     func onlyResidualWidens() {
         let cfg = ArchConfig.qwen38FlashNext
