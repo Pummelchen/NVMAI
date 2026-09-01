@@ -268,6 +268,44 @@ def rename(name: str) -> str:
     return name
 
 
+# Families kept at the checkpoint's own bf16 in an 8-bit build.
+#
+# The 8-bit build exists for work where correctness outranks speed -- an
+# overnight coding run on a machine doing nothing else -- so it is worth
+# spending resident memory that a 4-bit build could not.
+#
+# Chosen by measurement, not by intuition. Every family measures 0.57-1.0%
+# relative error at 8 bits, so the selection is by what the error *does*, not
+# how large it is: the router and the indexer produce rankings, and a ranking
+# either matches or it does not (the router's top-10 agrees with bf16 on 98.8%
+# of tokens at 8 bits). The rest are the smallest tensors in the model, where
+# group-64 quantization has the fewest values to amortise over and the error is
+# correspondingly highest -- a 1-row gate has nothing to average.
+#
+# The cost is bounded and lands in the right place: ~108 MB of resident memory,
+# 2.0% of the active parameters per token, and about 0.3% of decode. Resident
+# weights come from RAM; the routed experts, which are 23x the parameters and
+# would double SSD traffic, are deliberately not here.
+PROMOTE_TO_BF16_AT_8BIT = (
+    ".mlp.gate",                        # router: picks which experts run
+    ".mlp.shared_expert_gate",          # 1 row of D; highest measured error
+    ".block_inject_weight",             # 4 rows; the write gate for every layer
+    ".linear_attn.in_proj_a",
+    ".linear_attn.in_proj_b",
+    ".ple.key_proj",
+    ".self_attn.indexer.index_q_proj",
+    ".self_attn.indexer.index_k_proj",
+)
+
+
+def promoted_to_bf16(name: str, width: int) -> bool:
+    """Is this tensor kept unquantized in a build of this width?"""
+    if width != BITS_8:
+        return False
+    stem = name[: -len(".weight")] if name.endswith(".weight") else name
+    return stem.endswith(PROMOTE_TO_BF16_AT_8BIT)
+
+
 def quant_bits(name: str, width: int = BITS_4) -> int | None:
     """Bits for a tensor, or None to copy it through unquantised.
 
@@ -301,6 +339,11 @@ def quant_bits(name: str, width: int = BITS_4) -> int | None:
     if name.endswith("conv1d.weight"):
         return None
     if name.endswith("norm.weight"):
+        return None
+    # Checked before the slot rules below: promotion overrides the slot, which
+    # is the whole point of it. The runtime reads these tensors' width from
+    # their own dtype rather than from the slot they nominally belong to.
+    if promoted_to_bf16(name, width):
         return None
     if name.endswith("embed_tokens.weight") or name == "lm_head.weight":
         return BITS_8                      # embedding slot

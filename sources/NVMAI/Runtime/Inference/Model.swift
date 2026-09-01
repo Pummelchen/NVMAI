@@ -1034,13 +1034,13 @@ extension Model {
         for layer in 0..<config.numLayers {
             try checks.requireBF16(schema.inputNorm(layer), count: blockNormWidth)
             try checks.requireBF16(schema.postAttnNorm(layer), count: blockNormWidth)
-            try checks.requireAffine(schema.router(layer),
+            try checks.requireAffineOrBF16(schema.router(layer),
                                      rows: config.numExperts, columns: config.hiddenSize,
                                      slot: quant.router)
             // The shared-expert scalar gate is quantized at the ROUTER's bit
             // width (8-bit on the target checkpoint, 4-bit on the MTP
             // sidecar), independent of the sharedExpert slot.
-            try checks.requireAffine(schema.sharedExpertScalarGate(layer),
+            try checks.requireAffineOrBF16(schema.sharedExpertScalarGate(layer),
                                      rows: 1, columns: config.hiddenSize,
                                      slot: quant.router)
             try checks.requireAffine(schema.sharedExpertGate(layer),
@@ -1086,10 +1086,10 @@ extension Model {
                 try checks.requireAffine(schema.gdnZ(layer),
                                          rows: la.valueDim, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine(schema.gdnA(layer),
+                try checks.requireAffineOrBF16(schema.gdnA(layer),
                                          rows: la.numVHeads, columns: config.hiddenSize,
                                          slot: quant.attention)
-                try checks.requireAffine(schema.gdnB(layer),
+                try checks.requireAffineOrBF16(schema.gdnB(layer),
                                          rows: la.numVHeads, columns: config.hiddenSize,
                                          slot: quant.attention)
                 try checks.requireAffine(schema.gdnOut(layer),
@@ -1211,6 +1211,23 @@ private struct RuntimeSchemaChecks {
             throw ModelError.tensorSizeMismatch(
                 name: name, expected: UInt64(count), actual: UInt64(elements))
         }
+    }
+
+    /// Accepts a tensor that is either affine-quantized at the slot's width or
+    /// kept at the checkpoint's own bf16.
+    ///
+    /// Promotion is per tensor, so a family can be unquantized inside a slot
+    /// that is not. Checking only the slot would refuse a correct install; not
+    /// checking at all would let a wrong one through, which for these tensors
+    /// is silent -- the kernels pick their reading from the same dtype.
+    func requireAffineOrBF16(_ name: String, rows: Int, columns: Int,
+                             slot: ManifestQuantSlot) throws {
+        let e = try entry(name)
+        if e.dtype == 1 {
+            try requireBF16(name, count: rows * columns)
+            return
+        }
+        try requireAffine(name, rows: rows, columns: columns, slot: slot)
     }
 
     func requireAffine(_ name: String, rows: Int, columns: Int,
