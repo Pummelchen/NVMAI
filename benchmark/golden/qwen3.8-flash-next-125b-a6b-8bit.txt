@@ -4,7 +4,7 @@
 # seed:        1234
 # target:      qwen38-8 (8-bit)
 # captured-on: Mac15,3, 24 GB, macOS 26.6.2
-# commit:      c7b4e02
+# commit:      0f12494
 ---
 
 
