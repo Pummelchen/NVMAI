@@ -1,5 +1,6 @@
 <img width="1774" height="887" alt="image" src="https://github.com/user-attachments/assets/dc91bc31-0cd4-42e6-bc7a-67ffb277efe0" />
 
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/slogan-dark.svg">
   <img alt="NVMAI is the fastest SSD/NVMe streamer for LLMs on Mac - M1 through M6."
@@ -15,10 +16,11 @@
   loading only the experts selected for each token.
 
 - NVMAI streams LLM's faster than any other similar project.
-- You can define a RAM limit and NVMAI will stay in that budget, so your Mac is free to do other tasks.
-- We use Apple's Neural Engine (ANE) to squeeze max performance out of the M-Chips.
-- We have our own Metal kernels and own engine to run LLM's tuned to reach the physical speed of your Mac.
-- We do not use MLX or GGUF - NVMAI uses its own high speed LLM format with a powerful converter.
+- A 125B model on 8 GB of RAM. NVMAI streams experts straight from SSD, so model size is bounded by your disk, not your memory.
+- You set the RAM budget. NVMAI stays inside it. Give it 8 GB or 40 GB — it holds the line, so your Mac stays yours while the model runs.
+- Apple Neural Engine acceleration for prompt processing. Opt-in ANE prefill, measured at 2.3× on Apple silicon.
+- Our own Metal kernels, our own engine. Purpose-built for Apple silicon and engineered against the hardware's real bandwidth limit, not a portability layer's.
+- No MLX. No GGUF. NVMAI ships its own high-speed model format and a converter that builds it straight from the original weights.
   
 
 ### Supported LLMs
