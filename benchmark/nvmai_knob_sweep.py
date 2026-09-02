@@ -100,6 +100,19 @@ ARMS: list[tuple[str, dict[str, str], str]] = [
     ("gdn_xsh8", {"NVMAI_GDN_INPROJ": "xsh8"}, "stage x in threadgroup memory"),
     ("gdn_r16", {"NVMAI_GDN_INPROJ": "r16"}, "16 rows/threadgroup, x unstaged"),
     ("gdn_xsh16", {"NVMAI_GDN_INPROJ": "xsh16"}, "both"),
+    # Each async piece was measured alone, where it pays its own overhead and
+    # still cannot remove the host wait because the other two force one.
+    # Together they are the only configuration that actually removes it.
+    ("async_all", {"NVMAI_DECODE_EXPERT_EXECUTION": "gpu-residency",
+                   "NVMAI_EXPERT_IO_SYNC": "event",
+                   "NVMAI_EXPERT_IO_BACKEND": "metal"},
+     "GPU classification + event sync + MTLIO together"),
+    ("async_event_metal", {"NVMAI_EXPERT_IO_SYNC": "event",
+                           "NVMAI_EXPERT_IO_BACKEND": "metal"},
+     "event sync on the backend that signals the event natively"),
+    ("async_pread", {"NVMAI_DECODE_EXPERT_EXECUTION": "gpu-residency",
+                     "NVMAI_EXPERT_IO_SYNC": "event"},
+     "GPU classification + event sync on pread -- avoids the MTLIO crash"),
     ("base_again", {}, "drift check -- must match base"),
 ]
 
@@ -153,8 +166,17 @@ def run_arm(name: str, env_delta: dict[str, str]) -> dict:
         if model_id is None:
             tail = Path(log_path).read_text().strip().splitlines()[-3:]
             return {"arm": name, "ok": False, "note": "; ".join(tail)[:160]}
-        request(model_id, 32)            # warm shaders and the cache
-        request(model_id, MAX_TOKENS)    # measured
+        # An arm that crashes the server drops the stream mid-read. Record it
+        # and continue: losing the rest of a multi-hour sweep to one bad
+        # configuration is worse than losing the arm.
+        try:
+            request(model_id, 32)            # warm shaders and the cache
+            request(model_id, MAX_TOKENS)    # measured
+        except Exception as exc:
+            alive = proc.poll() is None
+            return {"arm": name, "ok": False,
+                    "note": f"{type(exc).__name__}: {exc}"[:110]
+                            + ("" if alive else " (server died)")}
     finally:
         proc.terminate()
         try:

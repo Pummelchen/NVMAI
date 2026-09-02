@@ -602,9 +602,14 @@ public struct Model {
                 streamersBox.metalStagingPool = try MetalExpertStagingPool(
                     device: device,
                     byteCount: Int(packedExpertsLayout.expertStride),
-                    // Decode routes at most top-8 experts. A single exclusive
-                    // lease keeps native MTLIO shared-event values ordered.
-                    slotCapacity: 8)
+                    // One staging slot per routed expert: a layer can miss all
+                    // of them, and tryAcquire fails the whole request if the
+                    // ring is short. This was hardcoded to 8 for the top-8
+                    // families, which made the MTLIO + event path unreachable
+                    // on Qwen3.8-Flash-Next -- it routes top-10, so any layer
+                    // missing nine or more failed with "staging ring is
+                    // unavailable" and the combination could never be measured.
+                    slotCapacity: config.topKExperts)
             }
             if streamersBox.metalIOService == nil {
                 streamersBox.metalIOService = try MetalExpertIOService(
