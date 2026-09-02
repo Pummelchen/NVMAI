@@ -85,12 +85,14 @@ of continuous English prose. Each row is the median of fresh-process runs after
 one discarded warmup, on an idle machine, at the shipped defaults for that
 model -- nothing is pinned for the benchmark that a user would not get.
 
-**Qwen3.8-Flash-Next 125B-A6B**
+
+**Qwen 3.6 35B-A3B**
 
 | Quantization | Peak decode |
 | --- | ---: |
-| 4-bit | **6.82 tok/s** |
-| 8-bit | testing |
+| 4-bit | **23.28 tok/s** |
+| 8-bit | **12.72 tok/s** |
+
 
 **Ornith 1.5 35B-A3B**
 
@@ -99,12 +101,14 @@ model -- nothing is pinned for the benchmark that a user would not get.
 | 4-bit | **22.65 tok/s** |
 | 8-bit | **11.89 tok/s** |
 
-**Qwen 3.6 35B-A3B**
+
+**Qwen3.8-Flash-Next 125B-A6B**
 
 | Quantization | Peak decode |
 | --- | ---: |
-| 4-bit | **23.28 tok/s** |
-| 8-bit | **12.72 tok/s** |
+| 4-bit | **6.82 tok/s** |
+| 8-bit | testing |
+
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
 native 262K context, prompt cache on, 8-bit KV, and MTP off. Measured
