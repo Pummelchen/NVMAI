@@ -93,6 +93,13 @@ ARMS: list[tuple[str, dict[str, str], str]] = [
     ("slots_32", {"NVMAI_EXPERT_CACHE_SLOTS": "32"}, "8-bit: ~8 GB of cache"),
     ("slots_24", {"NVMAI_EXPERT_CACHE_SLOTS": "24"}, "8-bit: ~6 GB of cache"),
     ("slots_16", {"NVMAI_EXPERT_CACHE_SLOTS": "16"}, "8-bit: ~4 GB of cache"),
+    # --- GDN in_proj kernel variants: gdn.metal has carried these since the
+    # kernel was written and nothing ever selected them. attn_norm_qkv is
+    # 29.8 ms/token at an effective 26.2 GB/s against ~100 GB/s peak, and every
+    # row re-reads the 5 KiB x vector from device memory.
+    ("gdn_xsh8", {"NVMAI_GDN_INPROJ": "xsh8"}, "stage x in threadgroup memory"),
+    ("gdn_r16", {"NVMAI_GDN_INPROJ": "r16"}, "16 rows/threadgroup, x unstaged"),
+    ("gdn_xsh16", {"NVMAI_GDN_INPROJ": "xsh16"}, "both"),
     ("base_again", {}, "drift check -- must match base"),
 ]
 

@@ -62,13 +62,26 @@ final class GDN {
                         MetalFunctionConstant(
                             index: 96,
                             value: .bool(config.outputGate == .sigmoid))])
+        // gdn.metal has always carried three alternates to the base kernel and
+        // nothing ever selected them, so the decode path has only ever run the
+        // 8-row, unstaged variant. They matter because every row re-reads the
+        // whole x vector from device memory: a GDN layer is ~16,384 rows over a
+        // 5 KiB x, which is ~80 MB of redundant traffic per layer against
+        // 22.5 MiB of actual weights. Staging x once per threadgroup divides
+        // that by the rows-per-threadgroup.
+        //
+        // NVMAI_GDN_INPROJ picks one so the four can be measured against each
+        // other; the default is the historical kernel until a winner is
+        // demonstrated on this machine.
+        let variant = GDNInProjVariant.environmentValue()
+        self.inProjRowsPerThreadgroup = variant.rowsPerThreadgroup
         self.inProjPSO = try context.pipeline(
-            "gdn_in_proj_gemv_simd",
+            variant.functionName,
             constants: [MetalFunctionConstant(index: 97, value: .bool(abBF16))],
             maxTotalThreadsPerThreadgroup: 512)
         if let n = specializedHiddenSize {
             self.inProjSpecializedPSO = try context.pipeline(
-                "gdn_in_proj_gemv_simd",
+                variant.functionName,
                 constants: [
                     MetalFunctionConstant(index: 90, value: .uint32(UInt32(config.qkvDim))),
                     MetalFunctionConstant(index: 91, value: .uint32(UInt32(config.valueDim))),
@@ -82,6 +95,8 @@ final class GDN {
             self.inProjSpecializedPSO = nil
         }
     }
+
+    private let inProjRowsPerThreadgroup: Int
 
     /// Fused `in_proj_qkv` / `in_proj_z` / `in_proj_a` / `in_proj_b` INT4 GEMV.
     /// One dispatch over the concatenated row space replaces four, of which two
@@ -125,9 +140,11 @@ final class GDN {
         encoder.setBytes(&abRows, length: MemoryLayout<UInt32>.size, index: 19)
         encoder.setBytes(&n, length: MemoryLayout<UInt32>.size, index: 20)
         let totalRows = config.qkvDim + config.valueDim + 2 * config.numVHeads
+        // One simdgroup per row, so threads = 32 * rowsPerThreadgroup.
+        let rpt = inProjRowsPerThreadgroup
         encoder.dispatchThreadgroups(
-            MTLSize(width: (totalRows + 7) / 8, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            MTLSize(width: (totalRows + rpt - 1) / rpt, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32 * rpt, height: 1, depth: 1))
         encoder.endEncoding()
     }
 
@@ -373,5 +390,34 @@ final class GDN {
         encoder.dispatchThreads(
             MTLSize(width: width, height: height, depth: 1),
             threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
+    }
+}
+
+/// Which `gdn_in_proj` kernel decode runs. The alternates differ in rows per
+/// threadgroup and in whether `x` is staged in threadgroup memory before the
+/// row bodies read it; all four compute the same result.
+enum GDNInProjVariant: String {
+    case base, xsh8, r16, xsh16
+
+    var functionName: String {
+        switch self {
+        case .base:  return "gdn_in_proj_gemv_simd"
+        case .xsh8:  return "gdn_in_proj_gemv_simd_xsh8"
+        case .r16:   return "gdn_in_proj_gemv_simd_r16"
+        case .xsh16: return "gdn_in_proj_gemv_simd_xsh16"
+        }
+    }
+
+    var rowsPerThreadgroup: Int {
+        switch self {
+        case .base, .xsh8: return 8
+        case .r16, .xsh16: return 16
+        }
+    }
+
+    static func environmentValue(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> GDNInProjVariant {
+        environment["NVMAI_GDN_INPROJ"].flatMap(GDNInProjVariant.init(rawValue:)) ?? .base
     }
 }
