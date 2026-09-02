@@ -66,6 +66,32 @@ is saturated, so an overlapped read is a read taken from someone else.
 Item 4, "cut the control plane", is not reachable by removing host waits: that
 is exactly what event sync does, and it loses 15.5%.
 
+### Attention is dispatch-shaped, and that is not an inefficiency
+
+`attn_norm_qkv` moves 745.8 MiB/token in 29.8 ms -- an effective **26.2 GB/s**
+against ~100 GB/s peak -- while `head_logits` moves 644 MiB in a single
+dispatch at **67.8 GB/s** on the same memory. That 2.6x gap looks like a
+kernel problem and is not. Three attempts, all measured, all closed:
+
+| attempt | premise | result |
+| --- | --- | --- |
+| `gdn_in_proj_gemv_simd_xsh8/_r16/_xsh16` | every row re-reads x, ~80 MB/layer | +0.3% / +1.6% / -1.0%, drift 3.2% |
+| attn/tail command-buffer merge | ~0.15 ms/CB x 36 linear layers | **-1.8%**, reverted |
+| (implied) fuse the 48 layers | one large dispatch is 2.6x more efficient | impossible: layer L+1 depends on L |
+
+The x premise was simply wrong: x is **5 KiB**, so it sits in L1 and those
+"device memory" re-reads were already cache hits. The traffic was nominal.
+
+The command-buffer premise was right about the cost and wrong about where it
+falls. Committing `attnCB` before `tailCB` is encoded lets the GPU execute
+while the CPU is still encoding, so the buffer's overhead is already hidden
+behind that overlap; removing the buffer removed the overlap too, and the two
+cancelled with a slight loss.
+
+**The conclusion is structural.** 48 dependent small GEMVs cannot be made into
+one large one without changing the model's dependency chain, so 26 GB/s is what
+this shape costs. Do not re-open it as a kernel-tuning problem.
+
 ## What is actually left
 
 Only two things move this model on this hardware:
