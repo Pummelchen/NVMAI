@@ -11,14 +11,11 @@
 
 ### Core Benefits
 
-- **SSD-streamed inference:** NVMAI runs large MOE LLM's on
-  low RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
-  loading only the experts selected for each token.
-
 - NVMAI streams LLM's faster than any other similar project.
-- A 125B model on 8 GB of RAM. NVMAI streams experts straight from SSD, so model size is bounded by your disk, not your memory.
-- You set the RAM budget. NVMAI stays inside it. Give it 8 GB or 40 GB — it holds the line, so your Mac stays yours while the model runs.
-- Apple Neural Engine acceleration for prompt processing. Opt-in ANE prefill, measured at 2.3× on Apple silicon.
+- Run large MOE LLM's on low RAM Apple Silicon Macs by keeping the AI model on SSD/NVMe. 
+- A 125B model on 8 GB of RAM. NVMAI streams experts straight from SSD, so model size is bounded by your disk space, not your memory.
+- You set the RAM budget. NVMAI stays inside it. Give it 4 GB or 16 GB — it holds the line, so your Mac stays responsive while the model runs.
+- Apple Neural Engine acceleration for prompt processing, 2.3× faster than the GPU cores.
 - Our own Metal kernels, our own engine. Purpose-built for Apple silicon and engineered against the hardware's real bandwidth limit, not a portability layer's.
 - No MLX. No GGUF. NVMAI ships its own high-speed model format and a converter that builds it straight from the original weights.
   
