@@ -284,6 +284,11 @@ public protocol ServerInferenceBackend: Sendable {
     /// The backend's configured context window, used to validate
     /// max_tokens/max_completion_tokens against the session's maxContext (S11).
     var maximumContext: Int { get }
+    /// Sampling values used for whatever the request omits. A family whose
+    /// model card differs from the house settings reports its own here, so a
+    /// client that sends no temperature gets what the model was tuned for
+    /// rather than what the last family to need tuning wanted.
+    var samplingDefaults: GenerationDefaults.Sampling { get }
     func generate(_ request: ValidatedChatRequest,
                   onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion
 }
@@ -292,6 +297,7 @@ public extension ServerInferenceBackend {
     var maximumContext: Int {
         RuntimeConfiguration.supportedContextTokens.max() ?? 262_144
     }
+    var samplingDefaults: GenerationDefaults.Sampling { GenerationDefaults.house }
 }
 
 /// A backend that owns the model's residency and can release it on demand.
@@ -441,6 +447,9 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// The session's configured context window; the HTTP layer validates
     /// max_tokens against it (S11).
     public nonisolated var maximumContext: Int { maxContext }
+    public nonisolated var samplingDefaults: GenerationDefaults.Sampling {
+        GenerationDefaults.forFamily(modelFamily)
+    }
     private nonisolated let modelFamily: ModelFamily
 
     private let context: MetalContext

@@ -14,6 +14,12 @@ public struct Args: Equatable, Sendable {
     public var temperature: Float
     public var topK: Int?
     public var topP: Float?
+    /// Whether the caller named these, as opposed to inheriting the house
+    /// values. The family's own defaults are applied in `Run` once the
+    /// manifest is read; an explicit flag always wins over them.
+    public var temperatureWasSet: Bool = false
+    public var topKWasSet: Bool = false
+    public var topPWasSet: Bool = false
     public var repetitionPenalty: Float
     public var seed: UInt64?
     public var stops: [String]
@@ -39,6 +45,9 @@ public struct Args: Equatable, Sendable {
                 temperature: Float = GenerationDefaults.temperature,
                 topK: Int? = GenerationDefaults.topK,
                 topP: Float? = GenerationDefaults.topP,
+                temperatureWasSet: Bool = false,
+                topKWasSet: Bool = false,
+                topPWasSet: Bool = false,
                 repetitionPenalty: Float = 1.0,
                 seed: UInt64? = nil,
                 stops: [String] = [],
@@ -59,6 +68,9 @@ public struct Args: Equatable, Sendable {
         self.temperature = temperature
         self.topK = topK
         self.topP = topP
+        self.temperatureWasSet = temperatureWasSet
+        self.topKWasSet = topKWasSet
+        self.topPWasSet = topPWasSet
         self.repetitionPenalty = repetitionPenalty
         self.expertCacheSlots = expertCacheSlots
         self.rdadvise = rdadvise
@@ -112,7 +124,9 @@ extension Args {
       --max-context <int>       Native context limit, 1...262144 (default 262144).
                                 With YaRN: 524288 or 1048576 (default 1048576).
       --rope-scaling <mode>     Context scaling: none or yarn (default none).
-      --temperature <float>     Sampling temperature (default 0.6; 0 = greedy).
+      --temperature <float>     Sampling temperature (0 = greedy). Default is
+                                the family's: 1.0 for Qwen3.8-Flash-Next,
+                                0.6 elsewhere.
       --top-k <int>             Top-k truncation, 1...256 (default 20; 0 = off).
       --top-p <float>           Nucleus truncation (default 0.95).
       --repetition-penalty <f>  Repetition penalty (default 1.0).
@@ -156,6 +170,9 @@ extension Args {
         // low only surprised people whose prompt was longer than 4k.
         var maxContext = RuntimeConfiguration.nativeMaximumContextTokens
         var maxContextWasSet = false
+        var temperatureWasSet = false
+        var topKWasSet = false
+        var topPWasSet = false
         var temperature: Float = GenerationDefaults.temperature
         var topK: Int? = GenerationDefaults.topK
         var topP: Float? = GenerationDefaults.topP
@@ -228,6 +245,7 @@ extension Args {
                 guard let parsed = Float(value), parsed >= 0, parsed <= 2 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
+                temperatureWasSet = true
                 temperature = parsed
             case "--top-k":
                 let value = try takeValue(argv, &index, flag: flag)
@@ -235,12 +253,14 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 topK = parsed == 0 ? nil : parsed
+                topKWasSet = true
             case "--top-p":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed > 0, parsed <= 1 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 topP = parsed
+                topPWasSet = true
             case "--repetition-penalty":
                 let value = try takeValue(argv, &index, flag: flag)
                 guard let parsed = Float(value), parsed > 0 else {
@@ -325,6 +345,9 @@ extension Args {
                     temperature: temperature,
                     topK: topK,
                     topP: topP,
+                    temperatureWasSet: temperatureWasSet,
+                    topKWasSet: topKWasSet,
+                    topPWasSet: topPWasSet,
                     repetitionPenalty: repetitionPenalty,
                     seed: seed,
                     stops: stops,

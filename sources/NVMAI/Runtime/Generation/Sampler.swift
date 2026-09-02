@@ -2,12 +2,41 @@ import Foundation
 import Metal
 import Synchronization
 
-/// Canonical sampling defaults shared by every NVMAI model and quantization.
+/// Canonical sampling defaults. The bare constants are the house values; a
+/// family whose model card specifies otherwise overrides them in `forFamily`,
+/// because shipping a model at settings its authors did not intend is a
+/// quality decision disguised as a default.
 public enum GenerationDefaults {
     public static let temperature: Float = 0.6
     public static let topK = 20
     public static let topP: Float = 0.95
     public static let presencePenalty: Float = 0
+
+    public struct Sampling: Sendable, Equatable {
+        public var temperature: Float
+        public var topK: Int
+        public var topP: Float
+        public init(temperature: Float, topK: Int, topP: Float) {
+            self.temperature = temperature
+            self.topK = topK
+            self.topP = topP
+        }
+    }
+
+    public static let house = Sampling(temperature: temperature,
+                                       topK: topK, topP: topP)
+
+    /// Defaults for a family, used wherever the caller did not ask for a value.
+    /// An explicit request always wins -- this only fills the gap.
+    public static func forFamily(_ family: ModelFamily) -> Sampling {
+        switch family {
+        case .qwen38flash, .qwen38flashMTP:
+            // Qwen3.8-Flash-Next is specified at temperature 1.0 / top-p 0.95.
+            return Sampling(temperature: 1.0, topK: topK, topP: 0.95)
+        default:
+            return house
+        }
+    }
 }
 
 /// Generation knobs threaded from the caller through the `Generator` into the

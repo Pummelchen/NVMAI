@@ -113,11 +113,18 @@ public func run(args: Args,
                 2)
         }
         let effectiveMaxNew = min(args.maxNew, args.maxContext - promptIds.count)
+        // A family whose model card specifies its own sampling gets it here,
+        // where the manifest has been read. Anything the caller named on the
+        // command line wins; this only fills what they left alone.
+        let familySampling = GenerationDefaults.forFamily(
+            (try? ManifestReader.peekIdentity(directoryURL: modelURL))?.family
+                ?? .qwen36)
         let config = GenerationConfig(
             maxNewTokens: effectiveMaxNew,
-            temperature: args.temperature,
-            topK: args.topK,
-            topP: args.topP,
+            temperature: args.temperatureWasSet
+                ? args.temperature : familySampling.temperature,
+            topK: args.topKWasSet ? args.topK : familySampling.topK,
+            topP: args.topPWasSet ? args.topP : familySampling.topP,
             presencePenalty: GenerationDefaults.presencePenalty,
             repetitionPenalty: args.repetitionPenalty,
             seed: args.seed,

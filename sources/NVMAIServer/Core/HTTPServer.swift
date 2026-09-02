@@ -351,7 +351,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 OpenAIChatRequest.self, from: Data(body.readableBytesView))
             let request = try OpenAIRequestValidator.validate(
                 decoded, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile)
+                reasoningProfile: reasoningProfile,
+                sampling: backend.samplingDefaults)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -494,7 +495,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             let chatRequest = try ResponsesAPIMapper.chatRequest(decoded)
             let request = try OpenAIRequestValidator.validate(
                 chatRequest, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile)
+                reasoningProfile: reasoningProfile,
+                sampling: backend.samplingDefaults)
             let responseID = ResponsesAPIBuilder.responseID()
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)

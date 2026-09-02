@@ -344,7 +344,12 @@ public enum OpenAIRequestValidator {
                                 modelID: String,
                                 maxContext: Int = RuntimeConfiguration
                                     .supportedContextTokens.max() ?? 262_144,
-                                reasoningProfile: ServerReasoningProfile = .default) throws -> ValidatedChatRequest {
+                                reasoningProfile: ServerReasoningProfile = .default,
+                                // Filled in for a request that omits the value.
+                                // Defaults to the house settings so callers that
+                                // do not know the family keep today's behaviour.
+                                sampling: GenerationDefaults.Sampling
+                                    = GenerationDefaults.house) throws -> ValidatedChatRequest {
         // The "<model>-fast" alias selects the same weights as the base model
         // but enables the CLI-strip heuristic per request (chat-only speed),
         // so tool-using clients keep the base model and chat users opt in.
@@ -406,17 +411,17 @@ public enum OpenAIRequestValidator {
                           "max_tokens", "invalid_value")
         }
 
-        let temperature = request.temperature ?? GenerationDefaults.temperature
+        let temperature = request.temperature ?? sampling.temperature
         guard temperature >= 0, temperature <= 2 else {
             throw invalid("temperature must be between 0 and 2",
                           "temperature", "invalid_value")
         }
-        let topP = request.topP ?? GenerationDefaults.topP
+        let topP = request.topP ?? sampling.topP
         guard topP > 0, topP <= 1 else {
             throw invalid("top_p must be greater than 0 and at most 1",
                           "top_p", "invalid_value")
         }
-        let topK = request.topK ?? GenerationDefaults.topK
+        let topK = request.topK ?? sampling.topK
         guard (1...256).contains(topK) else {
             throw invalid("top_k must be between 1 and 256", "top_k", "invalid_value")
         }
