@@ -135,7 +135,11 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     public static let supportedYaRNContextTokens = [524_288, 1_048_576]
     public static let defaultYaRNContextTokens = 1_048_576
     public static let maximumContextTokens = 1_048_576
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 128]
+    // 112 exists because the useful range ends between 96 and 128 on a 24 GiB
+    // machine: 96 measured an 85.4% hit rate, 128 reaches 89.8% but needs
+    // ~17 GB of cache and swaps, costing 68%. Without a value in between
+    // there was no way to ask whether the extra hit rate is reachable.
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 64, 96, 112, 128]
 
     /// Target bytes for the routed-expert slot cache when no count is given.
     ///

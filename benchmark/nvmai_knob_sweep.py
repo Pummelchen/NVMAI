@@ -66,6 +66,27 @@ ARMS: list[tuple[str, dict[str, str], str]] = [
      "control: confirm parallel io earns its place"),
     ("keep_wired", {"NVMAI_KEEP_WIRED": "1"},
      "skip per-decode pinning"),
+    # --- second pass: knobs the first sweep listed but never ran -------------
+    ("rdadvise_off", {"NVMAI_RDADVISE_POLICY": "off"},
+     "rdadvise costs 5.1 ms/token, 3% of the budget"),
+    ("rdadvise_adaptive", {"NVMAI_RDADVISE_POLICY": "adaptive"}, "ditto"),
+    ("rdadvise_bounded", {"NVMAI_RDADVISE_POLICY": "bounded"}, "ditto"),
+    ("io_metal", {"NVMAI_EXPERT_IO_BACKEND": "metal"},
+     "the other I/O backend, never measured on this model"),
+    ("bounded_io_off", {"NVMAI_BOUNDED_IO": "0"},
+     "unbounded reader footprint"),
+    ("sampler_generic", {"NVMAI_SAMPLER_PATH": "generic"},
+     "control: the tiled sampler should win"),
+    ("slots_112", {"NVMAI_EXPERT_CACHE_SLOTS": "112"},
+     "the untested middle: 96 fits at 85.4%, 128 swaps at 89.8%"),
+    ("prefetch_4", {"NVMAI_PREFETCH_TOP_M": "4"},
+     "control: recorded -9.8%, confirm on this build"),
+    # The three arms that each landed inside drift. If they are real they
+    # stack; if they are noise they will not.
+    ("combo_marginal", {"NVMAI_KEEP_WIRED": "1",
+                        "NVMAI_PARALLEL_IO": "0",
+                        "NVMAI_EXPERT_CACHE_LAYOUT": "pool"},
+     "keep_wired +4.6%, no_parallel_io +3.7%, layout_pool +1.1% together"),
     ("base_again", {}, "drift check -- must match base"),
 ]
 
