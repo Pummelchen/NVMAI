@@ -275,9 +275,37 @@ public struct RuntimeConfiguration: Sendable, Equatable {
         }
         let perSlot = Double(expertStrideBytes) * Double(layers)
         let wanted = Double(budgetBytes) / perSlot
-        return allowedExpertCacheSlots.min {
+        var choice = allowedExpertCacheSlots.min {
             abs(Double($0) - wanted) < abs(Double($1) - wanted)
-        } ?? 8
+        } ?? allowedExpertCacheSlots.first ?? 8
+        // Nearest, then step down until the footprint honours the budget.
+        //
+        // Rounding to nearest alone can overshoot, and the overshoot grows with
+        // the expert stride: the wider the model, the further past the budget
+        // the nearest rung lands. Qwen3.8 at 8-bit wanted 51.4 slots and was
+        // handed 64 -- a 16.1 GiB cache against a 12 GiB budget, 34% over. On a
+        // 24 GiB machine that put the process into swap and cost 4.8x
+        // throughput: 0.42 tok/s at 64 slots against 2.01 at 32, with the hit
+        // rate *falling* 80% -> 67.7%, which is how a paging problem looks when
+        // it is mistaken for a cache problem. The same arithmetic at 4-bit
+        // wants 96.9 and gets 96, so it never showed on the model this was
+        // tuned against.
+        //
+        // 1.15 is not a new number: `chosenCountStaysNearTheRequestedBudget`
+        // has always asserted the footprint stays within 15% of the budget. It
+        // simply never sampled a 48-layer model at a 12 GiB budget, so the one
+        // configuration that broke the contract went unmeasured.
+        //
+        // Stepping down is the safe direction. The measured cache curve is flat
+        // below the RAM limit -- 112 slots cut 4-bit's I/O time 12% for no
+        // throughput at all -- and a cliff above it. Too few slots costs a
+        // little; too many costs everything.
+        let ceiling = Double(budgetBytes) * 1.15
+        while Double(choice) * perSlot > ceiling,
+              let smaller = allowedExpertCacheSlots.last(where: { $0 < choice }) {
+            choice = smaller
+        }
+        return choice
     }
     public static let allowedPrefillChunkTokens = [
         32, 64, 128, 256, 512, 1_024, 2_048, 4_096,

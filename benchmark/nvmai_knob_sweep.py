@@ -87,6 +87,12 @@ ARMS: list[tuple[str, dict[str, str], str]] = [
                         "NVMAI_PARALLEL_IO": "0",
                         "NVMAI_EXPERT_CACHE_LAYOUT": "pool"},
      "keep_wired +4.6%, no_parallel_io +3.7%, layout_pool +1.1% together"),
+    # --- 8-bit: the cache is sized in bytes, so a 1.89x expert stride buys
+    # fewer slots. 64 slots at 8-bit is 16.1 GB of cache -- essentially the
+    # footprint that cost 4-bit 68% at 128 slots. Sweep downward.
+    ("slots_32", {"NVMAI_EXPERT_CACHE_SLOTS": "32"}, "8-bit: ~8 GB of cache"),
+    ("slots_24", {"NVMAI_EXPERT_CACHE_SLOTS": "24"}, "8-bit: ~6 GB of cache"),
+    ("slots_16", {"NVMAI_EXPERT_CACHE_SLOTS": "16"}, "8-bit: ~4 GB of cache"),
     ("base_again", {}, "drift check -- must match base"),
 ]
 

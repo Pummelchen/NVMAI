@@ -28,6 +28,19 @@ PROMPTS = [
 ]
 
 
+# A full run is four prompts x (warmup + measured) x 512 tokens, which on a
+# swapping 8-bit configuration is about two hours. MAXTPUT_PROMPTS narrows it
+# to the ones being compared -- "essay" is the story-generation prompt and the
+# one whose routing diversity sits mid-ladder, so it is the fair single choice.
+_wanted = os.environ.get("MAXTPUT_PROMPTS")
+if _wanted:
+    _keep = {p.strip() for p in _wanted.split(",") if p.strip()}
+    PROMPTS = [p for p in PROMPTS if p[0] in _keep]
+    if not PROMPTS:
+        raise SystemExit(f"no prompt matches {sorted(_keep)}; "
+                         f"known: code, essay, count, digits")
+
+
 def main():
     # --mtp <dir> runs every model twice, once plain and once with the draft
     # head attached, so a speculative rate is compared against its own
