@@ -6,43 +6,28 @@
        src="assets/slogan-light.svg" width="660">
 </picture>
 
-Run models far larger than your RAM. A 125B-parameter model on a 24 GB
-MacBook, at reading speed.
-
-> [!NOTE]
-> **Qwen3.8-Flash-Next (125B-A6B) is supported.** Qwen's flagship sparse-MoE
-> model — 125B parameters with only 6B active per token — runs in 4-bit at
-> **6.82 tok/s** on a base M3 with 24 GB, a machine that cannot hold a
-> twentieth of it in memory. See the
-> [verified design record](https://github.com/Pummelchen/NVMAI/blob/main/docs/qwen38-flash-next-port.md)
-> and [issue #2](https://github.com/Pummelchen/NVMAI/issues/2).
-
 # NVMAI
 
-## Core Benefits
+### Core Benefits
 
-### Project Purpose
-
-- **SSD-streamed inference:** NVMAI runs large mixture-of-experts (MOE) models on
+- **SSD-streamed inference:** NVMAI runs large MOE LLM's on
   low-RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
   loading only the experts selected for each token.
 
+  - NVMAI runs faster than any other similar project.
+  - You can define a RAM limit and NVMAI will stay in that budget, so your Mac is free to do other tasks.
+  - We use Apple's Neural Engine (ANE) to squeeze max performance out of the M-Chips.
+  - We have our own Metal kernels and own engine to run LLM's tuned to reach the physical speed of your Mac.
+  - We do not use MLX or GGUF - NVMAI uses its own high speed LLM format with a powerful converter.
+  
+  You set how much RAM NVMAI can use and connect to its local server using OpenAI API.
+
 ### Supported LLMs
 
-- **Qwen3.8-Flash-Next 125B-A6B** — 4-bit. 48 layers of gated DeltaNet with
-  sparse-indexed attention, 512 experts at top-10, hyper-connection residual
-  streams and hashed n-gram embeddings. Text-only; the checkpoint's vision
-  tower is not repacked. Served as `qwen3.8-flash-next_4-Bit`.
-- **Ornith 1.5 35B-A3B** — 4-bit and 8-bit. Served as
-  `ornith-1.5-35b-a3b_4-Bit` / `_8-Bit`, each with a `-fast` chat-only alias.
-- **Qwen 3.6 35B-A3B** — 4-bit and 8-bit. Served as `qwen3.6-35b-a3b_4-Bit` /
-  `_8-Bit`, each with a `-fast` chat-only alias.
-- **Adaptable runtime:** The shared Qwen3.5-MoE parser, repacker, and inference
-  path make other tensor-compatible Qwen-based MoE models straightforward to
-  add after validation. NVMAI has no MLX dependency — it needs an affine
-  group-64 quantization layout, which it can produce itself from an ordinary
-  bf16 safetensors checkpoint, so it does not wait on anyone's quantized
-  release.
+- **Qwen3.8-Flash-Next 125B-A6B**
+- **Ornith 1.5 35B-A3B**
+- **Qwen 3.6 35B-A3B**
+
 
 Every model id ends in the routed-expert width, read from the manifest rather
 than parsed from the name, so two quantizations of the same weights stay
@@ -95,25 +80,6 @@ distinguishable. Ask `/v1/models` rather than assuming an id.
 - **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
   generation, streaming responses, and client-authorized function-tool calls.
 
-## Ornith 1.5 35B A3B
-
-> [!IMPORTANT]
-> NVMAI now supports text-only **Ornith-1.5-35B-A3B** installation and inference
-> in 4-bit and 8-bit. It reuses the verified Qwen3.5-MoE runtime and keeps routed
-> experts SSD-streamed with the same bounded-memory design. Ornith's native MTP
-> draft is available as an optional experimental sidecar; current M3 benchmarks
-> do not show a speed benefit. Vision is not included, and Qwen 3.6 remains
-> supported. **Ornith 1.5 8-bit is the default installer, app, launcher,
-> benchmark, and real-inference test baseline; Concise and Thinking default
-> to off.**
-
-[![Published Ornith 1.5 benchmark overview](assets/stats.png)](https://ornith.ai/ornith_1_5.html)
-
-Ornith is a 35B mixture-of-experts model with approximately 3B active
-parameters per token. The chart above is publisher-supplied, not an NVMAI
-measurement. See the [Ornith 1.5 announcement](https://ornith.ai/ornith_1_5.html)
-and [model card](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B).
-
 ## Benchmarks
 
 Peak decode on a base 8-core M3 MacBook Pro with 24 GB, generating 512 tokens
@@ -126,7 +92,7 @@ model -- nothing is pinned for the benchmark that a user would not get.
 | Quantization | Peak decode |
 | --- | ---: |
 | 4-bit | **6.82 tok/s** |
-| 8-bit | not released |
+| 8-bit | testing |
 
 **Ornith 1.5 35B-A3B**
 
