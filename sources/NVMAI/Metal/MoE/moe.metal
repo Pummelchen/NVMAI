@@ -31,9 +31,22 @@ constant bool FC_MOE_ACT_SILU [[function_constant(4)]];
 constant uint FC_MOE_WEIGHT_BITS [[function_constant(5)]];
 constant bool FC_MOE_EVENT_GATED [[function_constant(6)]];
 
+/// Whether an event-gated dispatch may dereference its expert slots.
+///
+/// Ordering is already guaranteed by `encodeWaitForEvent` on this command
+/// buffer: the coordinator writes the status word and only then advances the
+/// shared event, so a kernel that runs has necessarily observed a published
+/// token. The gate therefore exists for exactly one case -- a read that
+/// *failed* (status 2), whose slots hold incomplete bytes that must not be
+/// dereferenced.
+///
+/// Requiring status == 1 instead made "not yet observed" indistinguishable
+/// from "failed" and silently skipped the whole dispatch, so every expert
+/// contributed zero and the model emitted fluent nonsense at full speed. The
+/// 3 arm was dead: nothing has ever written that value.
 static inline bool moe_io_ready(device const uint* io_status) {
     return !(is_function_constant_defined(FC_MOE_EVENT_GATED) && FC_MOE_EVENT_GATED)
-        || io_status[0] == 1u || io_status[0] == 3u;
+        || io_status[0] != 2u;
 }
 
 static inline uint moe_weight_bits() {
