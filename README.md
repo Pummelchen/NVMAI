@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/slogan-dark.svg">
-  <img alt="NVMAI is the fastest SSD/NVMe streamer for LLMs on Mac — M1 through M6."
+  <img alt="NVMAI is the fastest SSD/NVMe streamer for LLMs on Mac - M1 through M6."
        src="assets/slogan-light.svg" width="660">
 </picture>
 
@@ -11,10 +11,10 @@
 ### Core Benefits
 
 - **SSD-streamed inference:** NVMAI runs large MOE LLM's on
-  low-RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
+  low RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
   loading only the experts selected for each token.
 
-- NVMAI runs faster than any other similar project.
+- NVMAI streams LLM's faster than any other similar project.
 - You can define a RAM limit and NVMAI will stay in that budget, so your Mac is free to do other tasks.
 - We use Apple's Neural Engine (ANE) to squeeze max performance out of the M-Chips.
 - We have our own Metal kernels and own engine to run LLM's tuned to reach the physical speed of your Mac.
