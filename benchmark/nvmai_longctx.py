@@ -21,7 +21,7 @@ import http.client
 
 from nvmai_profile import (
     DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
-    server_command, server_environment,
+    server_command, server_environment, resolve_api_model,
 )
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -71,7 +71,7 @@ def request(messages, max_new, label):
     """Stream one request; returns dict incl. chunk_times (t_since_start,
     cum_chars) per recv."""
     payload = json.dumps({
-        "model": DEFAULT_API_MODEL,
+        "model": resolve_api_model(PORT),
         "messages": messages,
         "temperature": 0,
         "top_p": 0.95,

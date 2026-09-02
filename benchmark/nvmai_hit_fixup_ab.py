@@ -25,7 +25,7 @@ from nvmai_profile import (
     DEFAULT_MODEL_PATH,
     benchmark_log_path,
     server_command,
-    server_environment,
+    server_environment, resolve_api_model,
 )
 
 
@@ -105,7 +105,7 @@ def memory_snapshot(process_id: int) -> dict[str, object]:
 
 def request(prompt: str) -> dict[str, object]:
     payload = json.dumps({
-        "model": DEFAULT_API_MODEL,
+        "model": resolve_api_model(PORT),
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.6,
         "top_p": 0.95,

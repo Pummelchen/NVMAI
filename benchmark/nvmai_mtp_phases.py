@@ -36,7 +36,7 @@ import time
 import nvmai_gate0_profile as g0
 from nvmai_profile import (
     DEFAULT_API_MODEL, DEFAULT_CONTEXT_TOKENS, DEFAULT_KV_BITS, ROOT,
-    benchmark_log_path, server_environment,
+    benchmark_log_path, server_environment, resolve_api_model,
 )
 
 # Rote continuation: maximally predictable so acceptance is high, mirroring
@@ -95,7 +95,7 @@ def launch(quant: str, mtp: bool, log_name: str) -> subprocess.Popen:
 
 def generate() -> dict | None:
     payload = json.dumps({
-        "model": DEFAULT_API_MODEL,
+        "model": resolve_api_model(PORT),
         "messages": [{"role": "user", "content": PROMPT}],
         "temperature": 0,
         "seed": 41,

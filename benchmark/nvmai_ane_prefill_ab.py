@@ -31,7 +31,7 @@ import sys
 import nvmai_gate0_profile as g0
 from nvmai_profile import (
     DEFAULT_API_MODEL, ROOT, benchmark_log_path, server_command,
-    server_environment,
+    server_environment, resolve_api_model,
 )
 
 PORT = 8098
@@ -87,7 +87,7 @@ MAX_TOKENS = 48
 
 def generate(prompt: str, max_tokens: int) -> dict | None:
     payload = json.dumps({
-        "model": DEFAULT_API_MODEL,
+        "model": resolve_api_model(PORT),
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "seed": 41,

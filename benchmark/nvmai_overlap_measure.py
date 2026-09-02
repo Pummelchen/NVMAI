@@ -12,7 +12,7 @@ import sys
 
 from nvmai_profile import (
     DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
-    server_command, server_environment,
+    server_command, server_environment, resolve_api_model,
 )
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -48,7 +48,7 @@ while time.time() - start < 120:
     time.sleep(0.05)
 
 payload = json.dumps({
-    "model": DEFAULT_API_MODEL,
+    "model": resolve_api_model(PORT),
     "messages": [{"role": "user", "content": PROMPT}],
     "temperature": 0, "top_p": 0.95, "top_k": 20,
     "presence_penalty": 0.0, "max_completion_tokens": MAX_TOKENS, "stream": True,
