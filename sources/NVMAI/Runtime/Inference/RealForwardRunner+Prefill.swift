@@ -823,7 +823,7 @@ extension RealForwardRunner {
         isFull: Bool, headDim: Int, numKVHeads: Int,
         qDim: Int, kvDim: Int, rmsEps eps: Float,
         useTwoRowProjection: Bool,
-        keepMask: (buffer: MTLBuffer, stride: Int)? = nil
+        keepMask: QSASelection? = nil
     ) throws {
         let qProjRows = cfg.attnOutputGate ? 2 * qDim : qDim
         try encodeAffineProjection(commandBuffer: cb,
@@ -963,8 +963,11 @@ extension RealForwardRunner {
                                               out: scratch.attentionOutput,
                                               params: params,
                                               kvRingCapacity: activeRingCapacity,
-                                              keepMask: keepMask?.buffer,
-                                              keepStride: keepMask?.stride ?? 0,
+                                              keepMask: keepMask?.mask,
+                                              keepStride: keepMask?.maskStride ?? 0,
+                                              keepIndices: keepMask?.indices,
+                                              keepIndexStride: keepMask?.indexStride ?? 0,
+                                              keepCounts: keepMask?.counts,
                                               path: keepMask == nil
                                                   ? prefillAttentionPath
                                                   // Only the tiled kernel

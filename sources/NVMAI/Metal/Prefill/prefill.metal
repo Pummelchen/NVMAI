@@ -800,6 +800,14 @@ kernel void attention_prefill_causal_tiled(
     device const uchar* keep [[buffer(5)]],
     constant uint& useKeep [[buffer(6)]],
     constant uint& keepStride [[buffer(7)]],
+    // useKeep == 2: the selection arrived compacted as ascending key ids,
+    // `keepCounts[query]` of them. The mask form made this loop O(context) --
+    // one byte-load per visible key per query per head -- to discover an
+    // answer the indexer already knew was O(budget). At 10k context that was
+    // 4.53s per layer-chunk against 1.42s at 2.4k, where the two coincide.
+    device const uint* keepIdx [[buffer(8)]],
+    device const uint* keepCount [[buffer(9)]],
+    constant uint& keepIdxStride [[buffer(10)]],
     uint3 tg [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
@@ -828,11 +836,26 @@ kernel void attention_prefill_causal_tiled(
     float row_sum = 0.0f;
     float acc = 0.0f;
 
-    for (uint key = first; key < last_exclusive; ++key) {
-        // Uniform across the threadgroup -- `t` and `key` are the same for
-        // every thread in it -- so skipping here cannot strand anyone at the
-        // threadgroup reduction below.
-        if (useKeep != 0u && keep[t * keepStride + key] == 0u) { continue; }
+    // Compacted selections iterate the budget; everything else iterates the
+    // visible range. Both bounds are uniform across the threadgroup, so the
+    // reduction below is reached by every thread the same number of times.
+    const bool compacted = (useKeep == 2u);
+    const uint iterations = compacted ? keepCount[t] : (last_exclusive - first);
+    for (uint step = 0u; step < iterations; ++step) {
+        uint key;
+        if (compacted) {
+            key = keepIdx[t * keepIdxStride + step];
+            // The host selects only visible keys, but a stale or truncated
+            // list must not read outside the cache rather than merely give a
+            // wrong answer.
+            if (key < first || key >= last_exclusive) { continue; }
+        } else {
+            key = first + step;
+            // Uniform across the threadgroup -- `t` and `key` are the same for
+            // every thread in it -- so skipping here cannot strand anyone at the
+            // threadgroup reduction below.
+            if (useKeep != 0u && keep[t * keepStride + key] == 0u) { continue; }
+        }
         const uint phys_key = prefill_kv_slot(key);
         const float qv = owns ? float(q_row[d]) : 0.0f;
         const uint flat = kvh * p.headDim + d;

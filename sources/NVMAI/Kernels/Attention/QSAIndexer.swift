@@ -55,6 +55,14 @@ final class QSAIndexer {
     /// `[n_blocks]` float scores, and the `[capacity]` byte selection.
     private var scoresBuf: MTLBuffer
     private var keepBuf: MTLBuffer
+    /// Compacted selection: `selectionWidth` ascending key indices per query,
+    /// plus how many of them are valid. The mask form costs the attention
+    /// kernel one byte-load per *visible* key per query per head, which is
+    /// O(context) work to discover an O(budget) answer -- measured at 4.53s per
+    /// layer-chunk at 10k context against 1.42s at 2.4k, where context and
+    /// budget coincide. Compacted, the loop is the budget regardless of depth.
+    private var keepIndexBuf: MTLBuffer?
+    private var keepCountBuf: MTLBuffer?
     private(set) var capacity: Int
     /// Chunk-sized scratch, grown on demand: a prefill chunk needs a query
     /// row and a selection row per token, which decode does not.
@@ -408,20 +416,32 @@ final class QSAIndexer {
         lastScoredBlocks = blocks
     }
 
-    /// The chunk's selection, one row of `keepStride` bytes per query, or nil
-    /// when every query in the chunk is inside the dense-exact window.
+    /// The chunk's selection, or nil when every query in the chunk is inside
+    /// the dense-exact window. Carries both forms: the mask that existing
+    /// callers and the activation dump read, and the compacted index list the
+    /// attention kernel loops over.
     ///
     /// Every query gets the same treatment the decode path gives one: its own
     /// ragged tail forced in, then complete blocks by score until the cell
     /// budget runs out. A query inside the window keeps everything it can see.
     func selectKeysPrefill(startPosition: Int, tokens: Int)
-        -> (buffer: MTLBuffer, stride: Int)? {
+        -> QSASelection? {
         let lastVisible = startPosition + tokens
         guard lastVisible > selectionWidth else { return nil }
         let stride = lastVisible
         guard (try? growKeepScratch(count: stride * tokens)) != nil else { return nil }
+        // One index slot per key the budget can admit. The dense-window rows
+        // keep `visible` keys, which is at most selectionWidth by the guard
+        // above, so this width covers both branches.
+        let indexWidth = selectionWidth
+        guard (try? growCompactScratch(rows: tokens, width: indexWidth)) != nil,
+              let indexBuf = keepIndexBuf, let countBuf = keepCountBuf
+        else { return nil }
         let keep = keepBuf.contents().bindMemory(to: UInt8.self,
                                                  capacity: stride * tokens)
+        let indices = indexBuf.contents().bindMemory(to: UInt32.self,
+                                                     capacity: tokens * indexWidth)
+        let counts = countBuf.contents().bindMemory(to: UInt32.self, capacity: tokens)
         let scores = scoresBuf.contents().bindMemory(
             to: Float.self, capacity: lastScoredBlocks * tokens)
         for row in 0..<tokens {
@@ -430,6 +450,9 @@ final class QSAIndexer {
             memset(keep + base, 0, stride)
             if visible <= selectionWidth {
                 memset(keep + base, 1, visible)
+                let out = indices + row * indexWidth
+                for key in 0..<visible { out[key] = UInt32(key) }
+                counts[row] = UInt32(visible)
                 continue
             }
             let completeCells = (visible / compressRatio) * compressRatio
@@ -449,8 +472,22 @@ final class QSAIndexer {
                 for offset in 0..<take { keep[cellBase + offset] = 1 }
                 remaining -= take
             }
+            // Compact ascending. Scanning the row once here is O(visible) on
+            // the host and replaces the same scan done once per query *per
+            // head* on the GPU; ascending order also keeps the K/V reads
+            // sequential, which a score-ordered list would not.
+            var written = 0
+            let out = indices + row * indexWidth
+            for key in 0..<visible where keep[base + key] != 0 {
+                if written == indexWidth { break }
+                out[written] = UInt32(key)
+                written += 1
+            }
+            counts[row] = UInt32(written)
         }
-        return (keepBuf, stride)
+        return QSASelection(mask: keepBuf, maskStride: stride,
+                            indices: indexBuf, indexStride: indexWidth,
+                            counts: countBuf)
     }
 
     private func growQueryScratch(rows: Int) throws {
@@ -473,6 +510,27 @@ final class QSAIndexer {
         }
         made.label = "qsa.scores"
         scoresBuf = made
+    }
+
+    private func growCompactScratch(rows: Int, width: Int) throws {
+        let idxBytes = rows * width * MemoryLayout<UInt32>.stride
+        let cntBytes = rows * MemoryLayout<UInt32>.stride
+        if keepIndexBuf == nil || keepIndexBuf!.length < idxBytes {
+            guard let made = ctx.device.makeBuffer(length: idxBytes,
+                                                   options: .storageModeShared) else {
+                throw MetalError.bufferAllocationFailed("QSA selection indices")
+            }
+            made.label = "qsa.keep.indices"
+            keepIndexBuf = made
+        }
+        if keepCountBuf == nil || keepCountBuf!.length < cntBytes {
+            guard let made = ctx.device.makeBuffer(length: cntBytes,
+                                                   options: .storageModeShared) else {
+                throw MetalError.bufferAllocationFailed("QSA selection counts")
+            }
+            made.label = "qsa.keep.counts"
+            keepCountBuf = made
+        }
     }
 
     private func growKeepScratch(count: Int) throws {

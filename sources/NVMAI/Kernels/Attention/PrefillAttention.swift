@@ -112,6 +112,9 @@ final class PrefillAttention {
                              kvRingCapacity: UInt32 = 0,
                              keepMask: MTLBuffer? = nil,
                              keepStride: Int = 0,
+                             keepIndices: MTLBuffer? = nil,
+                             keepIndexStride: Int = 0,
+                             keepCounts: MTLBuffer? = nil,
                              path: RuntimePrefillAttentionPath = .causalTiled) throws {
         validate(params)
 
@@ -168,11 +171,24 @@ final class PrefillAttention {
         precondition(keepMask == nil || !useTensorOps,
                      "sparse key selection is not implemented for the "
                          + "TensorOps prefill path")
-        var useKeep = UInt32(keepMask == nil ? 0 : 1)
+        // useKeep 2 means "the selection arrived compacted": loop over the
+        // index list instead of scanning every visible key for a mask byte.
+        // NVMAI_QSA_COMPACT=0 keeps the mask scan, so the two forms can be
+        // compared on one build. They must agree token for token: the
+        // compacted list is the same selection, only enumerated.
+        let compactionAllowed = ProcessInfo.processInfo
+            .environment["NVMAI_QSA_COMPACT"] != "0"
+        let compacted = compactionAllowed
+            && keepMask != nil && keepIndices != nil && keepCounts != nil
+        var useKeep = UInt32(keepMask == nil ? 0 : (compacted ? 2 : 1))
         var stride = UInt32(keepStride)
+        var indexStride = UInt32(keepIndexStride)
         enc.setBuffer(keepMask ?? emptyKeepMask, offset: 0, index: 5)
         enc.setBytes(&useKeep, length: MemoryLayout<UInt32>.size, index: 6)
         enc.setBytes(&stride, length: MemoryLayout<UInt32>.size, index: 7)
+        enc.setBuffer(keepIndices ?? emptyKeepMask, offset: 0, index: 8)
+        enc.setBuffer(keepCounts ?? emptyKeepMask, offset: 0, index: 9)
+        enc.setBytes(&indexStride, length: MemoryLayout<UInt32>.size, index: 10)
         let groups = useTensorOps
             ? MTLSize(width: Int(params.queryCount),
                       height: Int(params.numQHeads) / 8,

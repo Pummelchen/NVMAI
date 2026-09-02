@@ -280,12 +280,12 @@ extension RealForwardRunner {
     }
 
     /// The same snapshot from the chunked path, taken from its last row.
-    func dumpQSAChunkSnapshot(selection: (buffer: MTLBuffer, stride: Int),
+    func dumpQSAChunkSnapshot(selection: QSASelection,
                               lastVisible: Int, rows: Int) {
         guard let directory = activationDumpDirectory,
               let indexer = qsaIndexer else { return }
-        let base = (rows - 1) * selection.stride
-        let keep = selection.buffer.contents()
+        let base = (rows - 1) * selection.maskStride
+        let keep = selection.mask.contents()
             .bindMemory(to: UInt8.self, capacity: base + lastVisible)
         let bytes = (0..<lastVisible).map { keep[base + $0] }
         try? Data(bytes).write(
@@ -351,7 +351,7 @@ extension RealForwardRunner {
     func encodeQSAPrefill(cb: inout MTLCommandBuffer,
                           blockInput: MTLBuffer,
                           layer: Int, startPosition: Int, tokens: Int,
-                          eps: Float) throws -> (buffer: MTLBuffer, stride: Int)? {
+                          eps: Float) throws -> QSASelection? {
         guard let indexer = qsaIndexer,
               cfg.fullAttentionLayerMask[layer] == 1 else { return nil }
         let commandBuffer = cb
