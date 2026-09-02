@@ -1,5 +1,86 @@
 # Concept: what 20 tok/s would take for Qwen3.8-Flash-Next at 4-bit
 
+---
+
+# MEASURED, 2026-09-02: this document's inputs were wrong
+
+Everything below this line predates the profile it asks for in "Step 0". That
+profile has now been run on this model (`nvmai_overlap_measure`, 256-token warm
+request, 4-bit, 24 GiB M3) and it falsifies three of the inputs above. The
+analysis method was sound; the numbers fed into it were not.
+
+## The token, measured
+
+| component | ms/token | share |
+| --- | ---: | ---: |
+| GPU busy | 79 | 48.6% |
+| exposed expert I/O | 42 | 26% |
+| control plane / gaps | 41 | 25% |
+| **total** | **162.5** | |
+
+## What was wrong
+
+**The hit rate.** The ceiling table used 78%, labelled "128 slots, measured
+saturation". 78% is what **64** slots gives. Measured on this model:
+
+| slots | hit rate | tok/s |
+| ---: | ---: | ---: |
+| 64 | 78.1% | 5.58 |
+| 96 (shipped) | 85.4% | 5.71 |
+| 128 | 89.8% | 1.80 (swaps: ~17 GB of cache on a 24 GB machine) |
+
+So the curve does **not** saturate at 78%, and route A ("more resident memory")
+is blocked by this machine's RAM rather than by a saturating curve. On a 64 GiB
+machine it is ordinary work.
+
+**The binding constraint.** At the measured 87.4% warm hit rate the I/O floor is
+~48 ms, a ~19-21 tok/s ceiling -- not 12.3. The real floor is **GPU compute at
+79 ms/token = 12.6 tok/s**. The document's headline number is roughly right by
+coincidence and wrong in its reason.
+
+**The omission.** `attn_norm_qkv` (29.8 ms/token) and `attn_tail_router` (15.8)
+total **45.6 ms/token across 96 dispatches** -- larger than every MoE kernel
+combined, and absent from this document entirely. At that weight volume they run
+near unified-memory bandwidth, so there is no dispatch-fusion win hiding there.
+
+## What was tried, and closed
+
+A 15-arm sweep (`nvmai_knob_sweep.py`, baseline drift 2.9%) plus two defect
+fixes. **Nothing improved throughput correctly.**
+
+| lever | result |
+| --- | --- |
+| event I/O sync | **-15.5%** after fixing it; the +79% it first showed was a kernel returning early |
+| immediate submission | -9.8% -- speculative reads steal service from demand reads |
+| gpu-residency | -7.1% after fixing two defects; does strictly more work for the same answer |
+| prefetch depth 2 | -6.5% (reproduces the recorded -6.0%) |
+| cache policy lru / aging-lfu | -9.0% / -5.7% |
+| slots 128 | -68.5% |
+| layout pool, keep-wired, no-parallel-io | +1.1% to +4.6%, all inside drift |
+
+Item 1 of the plan above -- "overlap I/O with compute" -- is now measured and
+**backwards**. Three independent arms raised `io_hidden_pct` and every one of
+them lowered throughput. Overlap is a diagnostic, not an objective: the device
+is saturated, so an overlapped read is a read taken from someone else.
+
+Item 4, "cut the control plane", is not reachable by removing host waits: that
+is exactly what event sync does, and it loses 15.5%.
+
+## What is actually left
+
+Only two things move this model on this hardware:
+
+1. **A machine with more RAM.** 128 slots reach 89.8% and would fit.
+2. **GPU-side fetch planning**, so the CPU never blocks on the router at all.
+   Not a knob and not a fix -- an architecture change. `gpu-residency` is now
+   correct and is the prerequisite for it, at the cost of 7%.
+
+Falsifiers for *this* section: a profile showing GPU busy well under 79 ms/token,
+or any arm that raises `io_hidden_pct` and throughput together.
+
+---
+
+
 Published decode is **6.82 tok/s** (147 ms/token) on the 24 GiB M3. The target
 is 20 tok/s, 50 ms/token — a 2.9x cut.
 
