@@ -12,7 +12,7 @@ import sys
 import time
 
 from nvmai_profile import (
-    DEFAULT_API_MODEL, DEFAULT_MODEL_PATH, benchmark_log_path,
+    DEFAULT_MODEL_PATH, benchmark_log_path, resolve_api_model,
     server_command, server_environment,
 )
 
@@ -29,21 +29,35 @@ PROMPTS = [
 
 
 def main():
-    models = sys.argv[1:] or [str(DEFAULT_MODEL_PATH)]
+    # --mtp <dir> runs every model twice, once plain and once with the draft
+    # head attached, so a speculative rate is compared against its own
+    # non-speculative baseline on one machine state rather than across runs.
+    args = sys.argv[1:]
+    mtp = None
+    if "--mtp" in args:
+        i = args.index("--mtp")
+        mtp = args[i + 1]
+        del args[i:i + 2]
+    models = args or [str(DEFAULT_MODEL_PATH)]
     for model in models:
-        label = "4bit" if "6bit" not in model and "8bit" not in model else (
-            "6bit" if "6bit" in model else "8bit")
+        lowered = model.lower()
+        label = "8bit" if "8bit" in lowered else "6bit" if "6bit" in lowered else "4bit"
         run_quant(model, label)
+        if mtp:
+            run_quant(model, label + "-mtp", mtp_model=mtp)
 
 
-def run_quant(model, label):
+def run_quant(model, label, mtp_model=None):
     log_path = benchmark_log_path(f"maxtput_{label}.log")
     log = open(log_path, "w")
     proc = subprocess.Popen(
-        server_command(BIN, PORT, model=model),
+        server_command(BIN, PORT, model=model, mtp_model=mtp_model),
         env=server_environment(), stdout=log, stderr=subprocess.STDOUT)
     start = time.time()
-    while time.time() - start < 120:
+    # A 125B install streams off SSD for minutes before it serves. The old 120s
+    # budget was sized for a model that is no longer the default and turned a
+    # slow load into "server failed to start".
+    while time.time() - start < 2400:
         if proc.poll() is not None:
             raise SystemExit("server failed to start")
         try:
@@ -57,9 +71,11 @@ def run_quant(model, label):
             pass
         time.sleep(0.05)
 
+    api_model = resolve_api_model(PORT)
+
     def request(prompt):
         payload = json.dumps({
-            "model": DEFAULT_API_MODEL,
+            "model": api_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0, "top_p": 0.95, "top_k": 20,
             "presence_penalty": 0.0, "max_completion_tokens": 512, "stream": True,
@@ -88,7 +104,8 @@ def run_quant(model, label):
     rates, cts = [], []
     with open(log_path) as f:
         for line in f:
-            if "NVMAI generation" in line and "decode_tok_s=" in line:
+            if (("NVMAI generation" in line or "NVMAI mtp " in line)
+                    and "decode_tok_s=" in line):
                 rates.append(float(line.split("decode_tok_s=")[1].split()[0]))
             if "completed in" in line and "completion=" in line:
                 cts.append(int(line.split("completion=")[1].split()[0]))

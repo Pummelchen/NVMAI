@@ -69,8 +69,14 @@ def server_command(
     cache_mode: str = DEFAULT_PROMPT_CACHE_MODE,
     thinking_mode: str = DEFAULT_THINKING_MODE,
     ram_budget: str | None = DEFAULT_EXPERT_CACHE_BUDGET,
+    mtp_model: str | os.PathLike[str] | None = None,
 ) -> list[str]:
-    """Build the standard native-context, cache-on, non-MTP command."""
+    """Build the standard native-context, cache-on command.
+
+    `mtp_model` attaches a draft-head sidecar. It is the only way to reach
+    the speculative path -- there is no CLI flag for it -- so a harness that
+    cannot pass it cannot measure MTP at all.
+    """
     prompt_cache_memory_mib = (
         DEFAULT_PROMPT_CACHE_MEMORY_MIB if cache_mode != "off" else 0
     )
@@ -87,6 +93,8 @@ def server_command(
         "--kv-bits", str(DEFAULT_KV_BITS),
         "--thinking", thinking_mode,
     ]
+    if mtp_model is not None:
+        command += ["--mtp-model", str(mtp_model)]
     if ram_budget is not None:
         command += ["--ram-budget", str(ram_budget)]
     return command
