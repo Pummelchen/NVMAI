@@ -70,6 +70,7 @@ enum PrefillAttentionError: Error, CustomStringConvertible {
 final class PrefillAttention {
     private let context: MetalContext
     private let psoCausalTiled: MTLComputePipelineState
+    private let psoCausalQSATiled: MTLComputePipelineState?
     /// One byte, bound whenever no selection is in play; `useKeep` is what
     /// actually turns the mask off.
     private let emptyKeepMask: MTLBuffer
@@ -81,6 +82,10 @@ final class PrefillAttention {
     init(context: MetalContext) throws {
         self.context = context
         self.psoCausalTiled = try context.pipeline("attention_prefill_causal_tiled")
+        // Tile-synchronised variant: one barrier per tile of keys instead of
+        // one per key. NVMAI_QSA_TILED=0 falls back for A/B on one build.
+        self.psoCausalQSATiled = (try? context.pipeline(
+            "attention_prefill_causal_qsa_tiled"))
         guard let empty = context.device.makeBuffer(
                   length: 1, options: .storageModeShared) else {
             throw PrefillAttentionError.commandEncoderFailed
@@ -146,7 +151,16 @@ final class PrefillAttention {
         } else {
             // Explicit mode also falls back for incompatible shapes. Benchmark
             // fixtures must use 512/16/2 to prove that TensorOps ran.
-            pipeline = causalTiledPipeline(kvRingCapacity: kvRingCapacity)
+            // The tiled QSA kernel is only better when there is a selection
+            // to iterate: with none, `iterations` is the whole visible range
+            // and its per-tile bookkeeping buys nothing.
+            let wantQSATiled = keepMask != nil
+                && ProcessInfo.processInfo.environment["NVMAI_QSA_TILED"] != "0"
+            if wantQSATiled, let qsa = psoCausalQSATiled, kvRingCapacity == 0 {
+                pipeline = qsa
+            } else {
+                pipeline = causalTiledPipeline(kvRingCapacity: kvRingCapacity)
+            }
         }
         let headDim = Int(params.headDim)
         let threadWidth = max(1, pipeline.threadExecutionWidth)

@@ -787,6 +787,140 @@ static inline float prefill_attention_tg_sum(
     return partial[0];
 }
 
+constant constexpr uint kPrefillQSATile = 128u;
+constant constexpr uint kPrefillQSAMaxHeadDim = 512u;
+
+/// Same result as `attention_prefill_causal_tiled`, arranged so the threadgroup
+/// synchronises once per *tile* of keys instead of once per key.
+///
+/// The original owns one head-dim element per thread and reduces across the
+/// threadgroup for every key's dot product: ~2,048 reductions per query per
+/// head at the shipped budget, which is what left QSA layers at 6.8x a GDN
+/// layer even after the selection was compacted. Here a thread computes one
+/// key's dot product end to end -- no reduction at all -- the tile's scores go
+/// to threadgroup memory, and the running softmax advances once per tile.
+///
+/// Traffic is unchanged: phase A reads TILE x headDim of K, phase C reads
+/// TILE x headDim of V, exactly as before. Only the barrier count moves, from
+/// O(keys) to O(keys / TILE).
+kernel void attention_prefill_causal_qsa_tiled(
+    device const half* Q [[buffer(0)]],
+    device const uchar* K [[buffer(1)]],
+    device const uchar* V [[buffer(2)]],
+    device half* O [[buffer(3)]],
+    constant PrefillAttentionParams& p [[buffer(4)]],
+    device const uchar* keep [[buffer(5)]],
+    constant uint& useKeep [[buffer(6)]],
+    constant uint& keepStride [[buffer(7)]],
+    device const uint* keepIdx [[buffer(8)]],
+    device const uint* keepCount [[buffer(9)]],
+    constant uint& keepIdxStride [[buffer(10)]],
+    uint3 tg [[threadgroup_position_in_grid]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 threads3 [[threads_per_threadgroup]]
+) {
+    const uint t = tg.x;
+    const uint qh = tg.y;
+    if (t >= p.queryCount || qh >= p.numQHeads) return;
+
+    threadgroup float s_score[kPrefillQSATile];
+    threadgroup uint  s_key[kPrefillQSATile];
+    threadgroup half  q_smem[kPrefillQSAMaxHeadDim];
+
+    const uint threads = threads3.x;
+    const uint d = tid.x;
+    const uint HD = p.headDim;
+    const bool owns = d < HD;
+    const uint q_per_kv = p.numQHeads / p.numKVHeads;
+    const uint kvh = qh / q_per_kv;
+    const uint abs_q = p.startPosition + t;
+    uint first = 0u;
+    if (p.slidingWindow != 0u && abs_q + 1u > p.slidingWindow) {
+        first = abs_q + 1u - p.slidingWindow;
+    }
+    const uint last_exclusive = min(p.kvValidCount, abs_q + 1u);
+
+    device const half* q_row = Q + t * p.qTokenStrideElements + qh * HD;
+    for (uint i = d; i < HD; i += threads) { q_smem[i] = q_row[i]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const bool compacted = (useKeep == 2u);
+    const uint iterations = compacted ? keepCount[t] : (last_exclusive - first);
+
+    float row_max = -INFINITY;
+    float row_sum = 0.0f;
+    float acc = 0.0f;
+
+    for (uint base = 0u; base < iterations; base += kPrefillQSATile) {
+        const uint n = min(kPrefillQSATile, iterations - base);
+
+        // Phase A: one key per thread, whole dot product, no reduction.
+        for (uint i = d; i < n; i += threads) {
+            const uint step = base + i;
+            uint key;
+            bool valid;
+            if (compacted) {
+                key = keepIdx[t * keepIdxStride + step];
+                valid = (key >= first && key < last_exclusive);
+            } else {
+                key = first + step;
+                valid = (useKeep == 0u) || (keep[t * keepStride + key] != 0u);
+            }
+            float dot = 0.0f;
+            if (valid) {
+                const uint phys = prefill_kv_slot(key);
+                for (uint e = 0u; e < HD; ++e) {
+                    dot = fma(float(q_smem[e]),
+                              prefill_load_kv(K, phys, kvh * HD + e, p), dot);
+                }
+            }
+            s_key[i] = key;
+            // A dropped key must contribute nothing through the softmax, and
+            // exp(-inf - m) is exactly zero for any finite running maximum.
+            s_score[i] = valid ? dot * p.scale : -INFINITY;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Phase B: every thread reads the whole tile from threadgroup memory
+        // rather than reducing across threads -- n scratch loads beat a
+        // barrier, and it keeps the running softmax identical in every thread.
+        float tile_max = -INFINITY;
+        for (uint i = 0u; i < n; ++i) { tile_max = max(tile_max, s_score[i]); }
+        const float new_max = max(row_max, tile_max);
+        // A tile in which every key was dropped leaves new_max at -inf, and
+        // exp(-inf - -inf) is NaN rather than 0. Nothing in such a tile can
+        // contribute, so carry the running state through untouched. The test
+        // is uniform across the threadgroup, so the barrier below is still
+        // reached by every thread.
+        const bool tileContributes = isfinite(new_max);
+        const float old_scale = (row_sum > 0.0f && tileContributes)
+            ? fast::exp(row_max - new_max) : (row_sum > 0.0f ? 1.0f : 0.0f);
+
+        // Phase C: accumulate this thread's output element over the tile.
+        float tile_sum = 0.0f;
+        float a = acc * old_scale;
+        for (uint i = 0u; tileContributes && i < n; ++i) {
+            const float w = isfinite(s_score[i])
+                ? fast::exp(s_score[i] - new_max) : 0.0f;
+            tile_sum += w;
+            if (owns && w > 0.0f) {
+                const uint phys = prefill_kv_slot(s_key[i]);
+                a = fma(w, prefill_load_kv(V, phys, kvh * HD + d, p), a);
+            }
+        }
+        acc = a;
+        row_sum = row_sum * old_scale + tile_sum;
+        if (tileContributes) { row_max = new_max; }
+        // s_score/s_key are rewritten next iteration.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (owns) {
+        device half* out_row = O + t * p.oTokenStrideElements + qh * HD;
+        out_row[d] = row_sum > 0.0f ? half(acc / row_sum) : half(0.0f);
+    }
+}
+
 [[kernel, max_total_threads_per_threadgroup(512)]]
 kernel void attention_prefill_causal_tiled(
     device const half* Q [[buffer(0)]],
