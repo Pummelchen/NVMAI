@@ -14,13 +14,12 @@
   low-RAM Apple Silicon Macs by keeping routed experts on SSD/NVMe storage and
   loading only the experts selected for each token.
 
-  - NVMAI runs faster than any other similar project.
-  - You can define a RAM limit and NVMAI will stay in that budget, so your Mac is free to do other tasks.
-  - We use Apple's Neural Engine (ANE) to squeeze max performance out of the M-Chips.
-  - We have our own Metal kernels and own engine to run LLM's tuned to reach the physical speed of your Mac.
-  - We do not use MLX or GGUF - NVMAI uses its own high speed LLM format with a powerful converter.
+- NVMAI runs faster than any other similar project.
+- You can define a RAM limit and NVMAI will stay in that budget, so your Mac is free to do other tasks.
+- We use Apple's Neural Engine (ANE) to squeeze max performance out of the M-Chips.
+- We have our own Metal kernels and own engine to run LLM's tuned to reach the physical speed of your Mac.
+- We do not use MLX or GGUF - NVMAI uses its own high speed LLM format with a powerful converter.
   
-  You set how much RAM NVMAI can use and connect to its local server using OpenAI API.
 
 ### Supported LLMs
 
