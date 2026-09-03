@@ -213,9 +213,10 @@ extension RealForwardRunner {
                                               hidden: hidden, norm: inNorm,
                                               out: normed, sublayer: .attention,
                                               layer: L, eps: eps)
+            try rotate(&attnCB, role: "glue.entry_attn")
             }
             var softmaxCB: MTLCommandBuffer?
-            guard let tailCB = ctx.queue.makeCommandBuffer() else {
+            guard var tailCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
 
@@ -227,10 +228,12 @@ extension RealForwardRunner {
             try encodeResidualExitDecode(commandBuffer: tailCB,
                                          hidden: hidden, delta: oOut,
                                          sublayer: .attention, layer: L)
+            try rotate(&tailCB, role: "glue.exit_attn")
             try encodeResidualEntryDecode(commandBuffer: tailCB,
                                           hidden: hidden, norm: postAttn,
                                           out: routedX, sublayer: .mlp,
                                           layer: L, eps: eps)
+            try rotate(&tailCB, role: "glue.entry_mlp")
 
             try moe.encodeRouter(commandBuffer: tailCB,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
@@ -242,6 +245,7 @@ extension RealForwardRunner {
                 perExpertScaleOffset: perExpertScale.offset,
                 outIndices: outIndices, outWeights: outWeights,
                 numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+            try rotate(&tailCB, role: "glue.router")
             if let nextRouterW {
                 // Probe only: score the next router against the current
                 // post-attention normalized residual. The exact router above
