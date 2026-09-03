@@ -87,6 +87,35 @@ extension RealForwardRunner {
                                               startPosition: startPosition,
                                               config: config)
         do {
+            if layerMajorPrefillEnabled, spans.count > 1,
+               let residuals = try? bandResiduals(count: spans.count,
+                                                  scratch: scratch) {
+                // Layer-major: every chunk of the band sees layer L before any
+                // sees L+1, so each layer's experts stream once for the whole
+                // band instead of once per chunk. Prefill's expert hit rate is
+                // 0.4%, so that count is what the cost tracks.
+                for layer in 0..<cfg.numLayers {
+                    for (spanIndex, span) in spans.enumerated() {
+                        try Task.checkCancellation()
+                        let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
+                        let upper = tokens.index(lower, offsetBy: span.tokenCount)
+                        try await executePrefillChunk(
+                            tokens: tokens[lower..<upper],
+                            startPosition: span.startPosition,
+                            outputMode: outputMode,
+                            logits: logits,
+                            scratch: scratch,
+                            config: config,
+                            writeFinalHead: spanIndex == spans.count - 1,
+                            layerRange: layer..<(layer + 1),
+                            residual: residuals[spanIndex])
+                    }
+                    // Chunks inside a layer run in order, so GDN's recurrent
+                    // state, both conv histories and the PLE latch see the same
+                    // sequence they do chunk-major.
+                }
+                for span in spans { onProgress(span.completedCount) }
+            } else {
             for (spanIndex, span) in spans.enumerated() {
                 try Task.checkCancellation()
                 let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
@@ -101,6 +130,7 @@ extension RealForwardRunner {
                     writeFinalHead: spanIndex == spans.count - 1)
                 try Task.checkCancellation()
                 onProgress(span.completedCount)
+            }
             }
         } catch {
             // Any failure — cancellation, a GPU command-buffer error, an I/O
@@ -142,13 +172,30 @@ extension RealForwardRunner {
                                      preparedHidden: MTLBuffer? = nil,
                                      snapshotGDNAfterFirstToken: Bool = false,
                                      useTwoRowProjection: Bool = false,
-                                     pairRoutedMoE: Bool = false) async throws {
+                                     pairRoutedMoE: Bool = false,
+                                     // Layer-major prefill runs one layer over
+                                     // every chunk of a band before the next,
+                                     // so each layer's experts stream once
+                                     // rather than once per chunk. Defaults
+                                     // reproduce the chunk-major pass exactly.
+                                     layerRange: Range<Int>? = nil,
+                                     residual: MTLBuffer? = nil) async throws {
+        let layers = layerRange ?? 0..<cfg.numLayers
+        let runPrologue = layers.lowerBound == 0
+        let runEpilogue = layers.upperBound == cfg.numLayers
+        let scratch = residual.map { scratch.withResidual($0) } ?? scratch
         guard !tokens.isEmpty else { return }
         guard kv != nil else {
             throw PrefillError.chunkedUnsupported("chunked prefill attention requires a KV cache")
         }
         let kvPosition = kv?.position ?? 0
-        guard kvPosition == startPosition else {
+        // Chunk-major advances the cursor per chunk, so it always equals this
+        // chunk's start. Layer-major writes a whole band ahead of the cursor
+        // and advances once at the end, so the cursor is at or behind the
+        // start. Writes themselves are position-addressed and validateRange
+        // only bounds against maxContext, so running ahead is safe; this guard
+        // is an invariant, not a mechanism.
+        guard kvPosition == startPosition || (layerRange != nil && kvPosition <= startPosition) else {
             throw PrefillError.chunkedUnsupported(
                 "chunked prefill cursor \(kvPosition) != startPosition \(startPosition)")
         }
@@ -210,7 +257,10 @@ extension RealForwardRunner {
         let emb = try model.embedding()
 
 
-        prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
+        if runPrologue {
+            prefillChunkState.markDirty(startPosition: startPosition,
+                                        tokenCount: tokens.count)
+        }
         // The n-gram rows depend only on token ids, so the whole chunk's
         // gather runs before any layer needs it.
         try gatherPLERowsPrefill(tokens: tokens)
@@ -218,51 +268,56 @@ extension RealForwardRunner {
         guard var cb = ctx.queue.makeCommandBuffer() else {
             throw ModelError.residentBufferWrapFailed
         }
-        if let preparedHidden {
-            // The caller hands over `[t, D]` rows -- an MTP draft's fused
-            // hidden. A hyper-connection stack starts every stream from that
-            // same vector, so it lands in the narrow staging buffer and is
-            // widened exactly the way an embedding would be.
-            let target = hyperConnection == nil ? scratch.hidden : scratch.normed
-            guard let blit = cb.makeBlitCommandEncoder() else {
-                throw ModelError.residentBufferWrapFailed
-            }
-            blit.copy(from: preparedHidden,
-                      sourceOffset: 0,
-                      to: target,
-                      destinationOffset: 0,
-                      size: t * D * MemoryLayout<Float16>.stride)
-            blit.endEncoding()
-            if hyperConnection != nil {
-                try elementwise!.encodeHCExpand(
-                    commandBuffer: cb,
-                    source: scratch.normed, destination: scratch.hidden,
-                    dim: D, streamCount: residualStreamCount, tokens: t)
-            }
-        } else {
-            // A hyper-connection stack starts every stream from the token
-            // embedding, so the lookup lands in a one-stream staging buffer
-            // and is widened from there. `normed` is free until the first
-            // layer's read gate writes it.
-            let embedTarget = hyperConnection == nil ? scratch.hidden : scratch.normed
-            try prefillEmbed.encode(commandBuffer: cb,
-                                table: emb.buffer,
-                                tableOffset: Int(emb.offset),
-                                scales: emb.buffer,
-                                scalesOffset: Int(emb.scaleOffset),
-                                biases: emb.buffer,
-                                biasesOffset: Int(emb.biasOffset),
-                                tokens: tokenBuffer,
-                                out: embedTarget,
-                                t: UInt32(t),
-                                d: UInt32(D),
-                                outScale: embedOutScale,
-                                vocab: UInt32(cfg.vocabSize))
-            if hyperConnection != nil {
-                try elementwise!.encodeHCExpand(
-                    commandBuffer: cb,
-                    source: scratch.normed, destination: scratch.hidden,
-                    dim: D, streamCount: residualStreamCount, tokens: t)
+        // Only the first layer group seeds the residual. Layer-major
+        // calls this once per (layer, chunk); re-embedding on every layer
+        // would reset the residual the layers are accumulating into.
+        if runPrologue {
+            if let preparedHidden {
+                // The caller hands over `[t, D]` rows -- an MTP draft's fused
+                // hidden. A hyper-connection stack starts every stream from that
+                // same vector, so it lands in the narrow staging buffer and is
+                // widened exactly the way an embedding would be.
+                let target = hyperConnection == nil ? scratch.hidden : scratch.normed
+                guard let blit = cb.makeBlitCommandEncoder() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                blit.copy(from: preparedHidden,
+                          sourceOffset: 0,
+                          to: target,
+                          destinationOffset: 0,
+                          size: t * D * MemoryLayout<Float16>.stride)
+                blit.endEncoding()
+                if hyperConnection != nil {
+                    try elementwise!.encodeHCExpand(
+                        commandBuffer: cb,
+                        source: scratch.normed, destination: scratch.hidden,
+                        dim: D, streamCount: residualStreamCount, tokens: t)
+                }
+            } else {
+                // A hyper-connection stack starts every stream from the token
+                // embedding, so the lookup lands in a one-stream staging buffer
+                // and is widened from there. `normed` is free until the first
+                // layer's read gate writes it.
+                let embedTarget = hyperConnection == nil ? scratch.hidden : scratch.normed
+                try prefillEmbed.encode(commandBuffer: cb,
+                                    table: emb.buffer,
+                                    tableOffset: Int(emb.offset),
+                                    scales: emb.buffer,
+                                    scalesOffset: Int(emb.scaleOffset),
+                                    biases: emb.buffer,
+                                    biasesOffset: Int(emb.biasOffset),
+                                    tokens: tokenBuffer,
+                                    out: embedTarget,
+                                    t: UInt32(t),
+                                    d: UInt32(D),
+                                    outScale: embedOutScale,
+                                    vocab: UInt32(cfg.vocabSize))
+                if hyperConnection != nil {
+                    try elementwise!.encodeHCExpand(
+                        commandBuffer: cb,
+                        source: scratch.normed, destination: scratch.hidden,
+                        dim: D, streamCount: residualStreamCount, tokens: t)
+                }
             }
         }
 
@@ -291,10 +346,9 @@ extension RealForwardRunner {
         var prefillTailNanos: UInt64 = 0
         var prefillActiveExperts: UInt64 = 0
 
-        for L in 0..<cfg.numLayers {
+        for L in layers {
             try await runPrefillLayer(
-                L, cb: &cb, scratch: scratch, hidden: scratch.hidden,
-                layerViews: layerViews,
+                L, cb: &cb, scratch: scratch, layerViews: layerViews,
                 tokens: tokens, startPosition: startPosition, t: t, D: D,
                 eps: eps, useTwoRowProjection: useTwoRowProjection,
                 snapshotGDNAfterFirstToken: snapshotGDNAfterFirstToken,
@@ -316,16 +370,18 @@ extension RealForwardRunner {
                 + " (topK=\(cfg.topKExperts), max possible \(t * cfg.topKExperts))")
         }
 
-        if writeFinalHead {
+        if writeFinalHead, runEpilogue {
             try encodeFinalHead(logits: logits, scratch: scratch,
                                 tokenCount: t, hiddenSize: D, rmsEps: eps,
                                 outputMode: outputMode)
         }
 
-        aneChunk?.finishChunk(startPosition: startPosition,
-                              tokenCount: tokens.count)
-        kv?.advance(by: tokens.count)
-        prefillChunkState.markCommitted()
+        if runEpilogue {
+            aneChunk?.finishChunk(startPosition: startPosition,
+                                  tokenCount: tokens.count)
+            kv?.advance(by: tokens.count)
+            prefillChunkState.markCommitted()
+        }
     }
 
     /// Per-layer tensor views resolved once before the chunk loop.
@@ -1425,11 +1481,6 @@ extension RealForwardRunner {
         _ L: Int,
         cb: inout MTLCommandBuffer,
         scratch: PrefillChunkScratchBuffers,
-        // The residual, passed rather than taken from `scratch`, because it is
-        // the one buffer that must be per chunk when the loops are inverted:
-        // layer-major keeps a residual per chunk in flight and reuses every
-        // other scratch buffer per pass.
-        hidden: MTLBuffer,
         layerViews: [LayerPrefillQKVViews],
         tokens: ArraySlice<Int32>,
         startPosition: Int,
@@ -1458,11 +1509,11 @@ extension RealForwardRunner {
 
         if cfg.ple.layerIndices.contains(L) {
             try encodePLEPrefill(commandBuffer: cb,
-                                 hidden: hidden,
+                                 hidden: scratch.hidden,
                                  layer: L, tokens: t, eps: eps)
         }
         try encodeResidualEntryPrefill(commandBuffer: cb,
-                                       hidden: hidden,
+                                       hidden: scratch.hidden,
                                        norm: views.inputNorm,
                                        out: scratch.normed,
                                        sublayer: .attention, layer: L,
@@ -1498,12 +1549,12 @@ extension RealForwardRunner {
         // then one post-attention norm feeds router, shared expert,
         // and routed phase 1 (routedX doubles as moeX).
         try encodeResidualExitPrefill(commandBuffer: cb,
-                                      hidden: hidden,
+                                      hidden: scratch.hidden,
                                       delta: scratch.h1,
                                       sublayer: .attention, layer: L,
                                       tokens: t)
         try encodeResidualEntryPrefill(commandBuffer: cb,
-                                       hidden: hidden,
+                                       hidden: scratch.hidden,
                                        norm: views.postAttention,
                                        out: scratch.routedX,
                                        sublayer: .mlp, layer: L,
@@ -1522,6 +1573,36 @@ extension RealForwardRunner {
                 tailNanos: &prefillTailNanos,
                 activeExperts: &prefillActiveExperts)
         }
+    }
+
+
+    /// One residual per chunk of a band.
+    ///
+    /// The residual is the only buffer that has to survive between layers, so
+    /// layer-major needs one per chunk in flight while every other scratch
+    /// buffer stays per-pass. At 10,240 elements per token that is ~20 KB/token
+    /// -- 84 MB for a 4,096-token chunk -- so a band is bounded by this rather
+    /// than by the ~110 KB/token the full scratch would cost.
+    var layerMajorPrefillEnabled: Bool {
+        ProcessInfo.processInfo.environment["NVMAI_PREFILL_LAYER_MAJOR"] == "1"
+    }
+
+    func bandResiduals(count: Int,
+                       scratch: PrefillChunkScratchBuffers) throws -> [MTLBuffer] {
+        // The first chunk keeps the existing buffer; only the rest are new, so
+        // a single-chunk prompt allocates nothing.
+        var out: [MTLBuffer] = [scratch.hidden]
+        let bytes = scratch.hidden.length
+        for i in 1..<max(1, count) {
+            guard let made = ctx.device.makeBuffer(length: bytes,
+                                                   options: .storageModePrivate) else {
+                throw PrefillError.chunkedUnsupported(
+                    "layer-major prefill could not allocate residual \(i)")
+            }
+            made.label = "prefill.hidden.band\(i)"
+            out.append(made)
+        }
+        return out
     }
 
 }
