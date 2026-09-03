@@ -110,6 +110,8 @@ public struct Model {
     /// serial queue on the owning Model. The box exists so Model can stay a
     /// struct while still mutating per-layer streamer state.
     final class StreamersBox: @unchecked Sendable {
+        /// Overrides the configured slot count for layers opened while set.
+        var concentratedSlotCount: Int?
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
         /// One staging ring is shared by every lazy layer streamer. Allocating
@@ -550,6 +552,25 @@ public struct Model {
         }
     }
 
+    /// Slots to give a layer opened from here, overriding the configured
+    /// count. Set only by layer-major prefill, which can afford a large cache
+    /// because it keeps one layer live at a time. Stored on the streamers box
+    /// because `Model` is a value type and the runner holds it by `let`.
+    public var concentratedSlotCount: Int? {
+        get { streamersQueue.sync { streamersBox.concentratedSlotCount } }
+        nonmutating set { streamersQueue.sync { streamersBox.concentratedSlotCount = newValue } }
+    }
+
+    /// Drop a layer's expert cache. Safe once that layer's work is finished:
+    /// the next use reopens it lazily, which is how it was created.
+    public func releaseLayerStreamer(_ L: Int) {
+        streamersQueue.sync {
+            guard L >= 0, L < streamersBox.streamers.count else { return }
+            streamersBox.streamers[L] = nil
+            streamersBox.layerVerified[L] = false
+        }
+    }
+
     private func openLayerLocked(_ L: Int) throws {
         if streamersBox.streamers[L] != nil {
             return
@@ -595,6 +616,14 @@ public struct Model {
         case .pread(let configuredSlotCount):
             slotCount = configuredSlotCount
         }
+        // Layer-major prefill finishes a layer entirely before the next, so
+        // only one layer's cache has to exist at a time. That inverts the
+        // budget: 512 slots for one layer is 1.3 GiB, against 96 slots x 48
+        // layers at 11.9 GiB today -- less memory, and enough to hold a
+        // layer's whole ~512-expert working set instead of thrashing it. The
+        // measured 47,423 reloads against 65,234 misses is that thrashing.
+        let concentratedSlots = streamersBox.concentratedSlotCount
+        let effectiveSlotCount = concentratedSlots ?? slotCount
         let metalStagingPool: MetalExpertStagingPool?
         let metalIOService: MetalExpertIOService?
         if try ExpertIOBackend.environmentValue() == .metal {
@@ -624,7 +653,7 @@ public struct Model {
         streamersBox.streamers[L] = try PreadExpertStreamer(
             layout: layout,
             device: device,
-            slotCount: slotCount,
+            slotCount: effectiveSlotCount,
             cachePolicy: expertCachePolicy,
             eventCoordinator: expertIOEventCoordinator,
             metalStagingPool: metalStagingPool,

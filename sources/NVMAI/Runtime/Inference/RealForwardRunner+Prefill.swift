@@ -94,7 +94,20 @@ extension RealForwardRunner {
                 // sees L+1, so each layer's experts stream once for the whole
                 // band instead of once per chunk. Prefill's expert hit rate is
                 // 0.4%, so that count is what the cost tracks.
+                // One layer live at a time, so it can afford the whole
+                // working set. Without this, layer-major measured no reduction
+                // in expert reads at all (113.4 -> 113.8 GiB): a 96-slot cache
+                // against ~512 experts thrashes inside a single chunk, so
+                // nothing survives for the next chunk of the same layer to
+                // reuse. Reordering visits is worthless if a visit leaves
+                // nothing behind.
+                let concentrate = layerMajorSlotConcentration
+                if let concentrate { model.concentratedSlotCount = concentrate }
+                defer { model.concentratedSlotCount = nil }
                 for layer in 0..<cfg.numLayers {
+                    if concentrate != nil, layer > 0 {
+                        model.releaseLayerStreamer(layer - 1)
+                    }
                     for (spanIndex, span) in spans.enumerated() {
                         try Task.checkCancellation()
                         let lower = tokens.index(tokens.startIndex, offsetBy: span.tokenOffset)
@@ -1603,6 +1616,18 @@ extension RealForwardRunner {
             out.append(made)
         }
         return out
+    }
+
+
+    /// Slots for the active layer under layer-major prefill, or nil to leave
+    /// the configured count alone. 512 covers a layer's full expert set at
+    /// ~1.3 GiB -- less than the 11.9 GiB that 96 slots x 48 layers costs
+    /// today, because only one layer is resident.
+    var layerMajorSlotConcentration: Int? {
+        guard layerMajorPrefillEnabled else { return nil }
+        guard let raw = ProcessInfo.processInfo.environment["NVMAI_PREFILL_LAYER_SLOTS"],
+              let value = Int(raw), value > 0 else { return cfg.numExperts }
+        return value
     }
 
 }
