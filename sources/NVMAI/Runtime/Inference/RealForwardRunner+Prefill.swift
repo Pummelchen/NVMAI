@@ -293,7 +293,8 @@ extension RealForwardRunner {
 
         for L in 0..<cfg.numLayers {
             try await runPrefillLayer(
-                L, cb: &cb, scratch: scratch, layerViews: layerViews,
+                L, cb: &cb, scratch: scratch, hidden: scratch.hidden,
+                layerViews: layerViews,
                 tokens: tokens, startPosition: startPosition, t: t, D: D,
                 eps: eps, useTwoRowProjection: useTwoRowProjection,
                 snapshotGDNAfterFirstToken: snapshotGDNAfterFirstToken,
@@ -1424,6 +1425,11 @@ extension RealForwardRunner {
         _ L: Int,
         cb: inout MTLCommandBuffer,
         scratch: PrefillChunkScratchBuffers,
+        // The residual, passed rather than taken from `scratch`, because it is
+        // the one buffer that must be per chunk when the loops are inverted:
+        // layer-major keeps a residual per chunk in flight and reuses every
+        // other scratch buffer per pass.
+        hidden: MTLBuffer,
         layerViews: [LayerPrefillQKVViews],
         tokens: ArraySlice<Int32>,
         startPosition: Int,
@@ -1452,11 +1458,11 @@ extension RealForwardRunner {
 
         if cfg.ple.layerIndices.contains(L) {
             try encodePLEPrefill(commandBuffer: cb,
-                                 hidden: scratch.hidden,
+                                 hidden: hidden,
                                  layer: L, tokens: t, eps: eps)
         }
         try encodeResidualEntryPrefill(commandBuffer: cb,
-                                       hidden: scratch.hidden,
+                                       hidden: hidden,
                                        norm: views.inputNorm,
                                        out: scratch.normed,
                                        sublayer: .attention, layer: L,
@@ -1492,12 +1498,12 @@ extension RealForwardRunner {
         // then one post-attention norm feeds router, shared expert,
         // and routed phase 1 (routedX doubles as moeX).
         try encodeResidualExitPrefill(commandBuffer: cb,
-                                      hidden: scratch.hidden,
+                                      hidden: hidden,
                                       delta: scratch.h1,
                                       sublayer: .attention, layer: L,
                                       tokens: t)
         try encodeResidualEntryPrefill(commandBuffer: cb,
-                                       hidden: scratch.hidden,
+                                       hidden: hidden,
                                        norm: views.postAttention,
                                        out: scratch.routedX,
                                        sublayer: .mlp, layer: L,
