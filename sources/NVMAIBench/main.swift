@@ -184,7 +184,14 @@ struct NVMAIBench {
         }
         var blobs: [MTLBuffer] = []
         for i in 0..<Int(topK) {
-            blobs.append(makeBuffer(blobBytes, UInt8(0x11 + i)))
+            let blob = makeBuffer(blobBytes, UInt8(0x11 + i))
+            // Scale/bias regions as bf16 0x3C3C (~0.011) rather than the
+            // byte pattern (~1e-38), so the activations are non-zero and
+            // acts_fnv actually compares kernel variants.
+            for off in [gateSOff, gateBOff, upSOff, upBOff, downSOff, downBOff] {
+                memset(blob.contents().advanced(by: off), 0x3C, groups)
+            }
+            blobs.append(blob)
         }
         // Non-uniform activation pattern so staging/indexing bugs surface:
         // the uniform fill used before masked wrong-element reads.
@@ -232,17 +239,22 @@ struct NVMAIBench {
         case "moe_phase1_xsh16":
             phase1Variant = "moe_phase1_gate_up_act_u16load"
             phase1RowsPerTG = 16
+        case "moe_phase1_v2":
+            // Two rows per simdgroup, 16 simdgroups: 32 rows per 512 threads.
+            phase1Variant = "moe_phase1_gate_up_act_u16load_v2"
+            phase1RowsPerTG = 32
         default:
             // The production kernel is the 16-row threadgroup-staged layout.
             phase1Variant = nil
             phase1RowsPerTG = 16
         }
+        let phase1Threads = kernelName == "moe_phase1_v2" ? 512 : phase1RowsPerTG * 32
         let phase1Kernel = phase1Variant ?? "moe_phase1_gate_up_act_u16load"
 
         let phase1PSO = try context.pipeline(
             phase1Kernel,
             constants: [],
-            maxTotalThreadsPerThreadgroup: phase1RowsPerTG * 32)
+            maxTotalThreadsPerThreadgroup: phase1Threads)
         let phase2PSO = try context.pipeline(
             topK == 8 ? "moe_phase2_down_reduce_k8" : "moe_phase2_down_reduce_kn",
             constants: [],
@@ -267,6 +279,7 @@ struct NVMAIBench {
             fatalError("could not create compute encoder")
         }
         let runPhase1 = kernelName == "moe" || kernelName.hasPrefix("moe_phase1")
+        let phase1TG = MTLSize(width: phase1Threads, height: 1, depth: 1)
         let runPhase2 = kernelName == "moe_phase2" || kernelName == "moe"
         let runSubset = kernelName == "moe_phase1_subset"
         // active-slot buffer for the subset mode (all 8 experts active).
@@ -303,8 +316,7 @@ struct NVMAIBench {
                 enc.setBytes(&TK, length: MemoryLayout<UInt32>.size, index: 6)
                 enc.dispatchThreadgroups(
                     MTLSize(width: phase1Groups, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: phase1RowsPerTG * 32,
-                                                   height: 1, depth: 1))
+                    threadsPerThreadgroup: phase1TG)
             }
             if runPhase2 {
                 enc.setComputePipelineState(phase2PSO)
