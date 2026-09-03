@@ -1,4 +1,5 @@
 import Testing
+import NVMAI
 @testable import NVMAICLICore
 
 @Suite struct CLIArgumentsTests {
@@ -8,7 +9,7 @@ import Testing
         #expect(arguments.prompt == "hi")
         #expect(arguments.messagesFile == nil)
         #expect(arguments.maxNew == 1_024)
-        #expect(arguments.maxContext == 4096)
+        #expect(arguments.maxContext == RuntimeConfiguration.nativeMaximumContextTokens)
         #expect(arguments.temperature == 0.6)
         #expect(arguments.topK == 20)
         #expect(arguments.topP == 0.95)
