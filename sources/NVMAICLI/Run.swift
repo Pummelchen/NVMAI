@@ -191,13 +191,23 @@ public func run(args: Args,
                 prefillChunkTokens = RuntimeConfiguration.qwenLongPrefillChunkTokens
             case .qwen38flash:
                 // Measured on a 1,761-token prompt, interleaved A/B/B/A:
-                // 129.9 s at the 128 default against 75.2 s here, with the
+                // 129.9 s at the 128 default against 75.2 s at 2,048, with the
                 // repeats agreeing to 0.6%. Routed experts are what prefill
                 // spends its time on, and a longer chunk is what amortizes
-                // them. 2,048 rather than 4,096 because the sparse-attention
-                // gate caps this model's context at 2,051 anyway, so a larger
-                // chunk would only cost scratch.
-                prefillChunkTokens = 2_048
+                // them.
+                //
+                // That reasoning then stopped at 2,048, "because the
+                // sparse-attention gate caps this model's context at 2,051
+                // anyway, so a larger chunk would only cost scratch". True of
+                // attention and wrong about the experts. Prefill's expert cache
+                // is inert -- a chunk routes essentially every expert in a
+                // layer against 96 slots, so the hit rate is 0.6% and each
+                // chunk re-streams what the last one evicted. The cost tracks
+                // the chunk *count*, which the attention argument never
+                // considered: an 8k prompt is 5 chunks at 2,048 and 3 at 4,096,
+                // measured at 167.5 -> 111.0 GiB of expert reads and
+                // 506.4 -> 450.5 s of prefill (-11%), identical output.
+                prefillChunkTokens = RuntimeConfiguration.qwenLongPrefillChunkTokens
             default:
                 prefillChunkTokens = loadRuntime.prefillChunkTokens
             }

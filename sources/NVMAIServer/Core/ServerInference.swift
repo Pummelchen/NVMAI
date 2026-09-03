@@ -19,7 +19,14 @@ enum ServerInferenceError: Error, CustomStringConvertible {
 func defaultPrefillChunkTokens(family: ModelFamily, fallback: Int) -> Int {
     switch family {
     case .qwen36: return RuntimeConfiguration.qwenLongPrefillChunkTokens
-    case .qwen38flash: return 2_048
+    // 4,096 for Qwen3.8 too. Prefill's expert cache is inert -- a chunk routes
+    // essentially every expert in a layer against 96 slots, so the hit rate is
+    // 0.6% and each chunk re-streams what the last evicted. The cost is
+    // therefore proportional to the chunk *count*: an 8k prompt is 5 chunks at
+    // 2,048 and 3 at 4,096, measured at 167.5 -> 111.0 GiB of expert reads and
+    // 506.4 -> 450.5 s of prefill (-11%), with identical output on a
+    // multi-chunk prompt. The 2,048 here predates that measurement.
+    case .qwen38flash: return RuntimeConfiguration.qwenLongPrefillChunkTokens
     default: return fallback
     }
 }
