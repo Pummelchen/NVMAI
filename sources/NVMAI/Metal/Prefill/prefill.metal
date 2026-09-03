@@ -787,6 +787,74 @@ static inline float prefill_attention_tg_sum(
     return partial[0];
 }
 
+/// One key's Q.K with the affine-group work hoisted out of the element loop.
+///
+/// `prefill_load_kv` is correct but costs two integer divisions and three loads
+/// per element, and the scale/bias pair only changes every `kvGroupSize`
+/// elements -- two distinct groups for a 128-wide head. Per group this instead
+/// computes
+///
+///     sum_e q_e * (quant_e * s + b)  ==  s * sum_e q_e*quant_e + b * sum_e q_e
+///
+/// so the scale and bias are applied once per group rather than once per
+/// element, and `sum_e q_e` does not depend on the key at all -- the caller
+/// precomputes it once per query and passes it in.
+static inline float prefill_qsa_dot(
+    device const uchar* cache,
+    uint phys,
+    uint base,
+    uint HD,
+    threadgroup const half* q_smem,
+    threadgroup const float* q_group_sum,
+    constant PrefillAttentionParams& p
+) {
+    if (p.kvBits == 16u) {
+        device const half* fp16 = reinterpret_cast<device const half*>(cache);
+        device const half* row = fp16 + phys * p.kvTokenStrideElements + base;
+        float dot = 0.0f;
+        for (uint e = 0u; e < HD; ++e) { dot = fma(float(q_smem[e]), float(row[e]), dot); }
+        return dot;
+    }
+    device const uchar* row = cache + phys * p.kvTokenStrideBytes;
+    const uint elements_per_row = p.numKVHeads * p.headDim;
+    const uint groups = (elements_per_row + p.kvGroupSize - 1u) / p.kvGroupSize;
+    device const half* scales = reinterpret_cast<device const half*>(row + p.kvValueBytes);
+    device const half* biases = scales + groups;
+
+    float dot = 0.0f;
+    uint e = 0u;
+    // Span index, not e / kvGroupSize: the head's base need not sit on a group
+    // boundary, in which case the first span is short and every later index
+    // would be off by one against the producer.
+    uint gi = 0u;
+    while (e < HD) {
+        const uint flat = base + e;
+        const uint group = flat / p.kvGroupSize;
+        // How far to the end of this affine group, clamped to the head.
+        const uint span = min(HD - e, p.kvGroupSize - (flat % p.kvGroupSize));
+        float sq = 0.0f;
+        if (p.kvBits == 8u) {
+            for (uint i = 0u; i < span; ++i) {
+                sq = fma(float(q_smem[e + i]), float(row[flat + i]), sq);
+            }
+        } else {
+            for (uint i = 0u; i < span; ++i) {
+                const uint fe = flat + i;
+                const uchar packed = row[fe / 2u];
+                const uint q = (fe & 1u) == 0u ? uint(packed & 0x0fu) : uint(packed >> 4u);
+                sq = fma(float(q_smem[e + i]), float(q), sq);
+            }
+        }
+        // q_group_sum holds sum(q) for the same span, so the bias term is one
+        // multiply instead of `span` adds.
+        dot = fma(float(scales[group]), sq,
+                  fma(float(biases[group]), q_group_sum[gi], dot));
+        e += span;
+        gi += 1u;
+    }
+    return dot;
+}
+
 constant constexpr uint kPrefillQSATile = 128u;
 constant constexpr uint kPrefillQSAMaxHeadDim = 512u;
 
@@ -826,6 +894,7 @@ kernel void attention_prefill_causal_qsa_tiled(
     threadgroup float s_score[kPrefillQSATile];
     threadgroup uint  s_key[kPrefillQSATile];
     threadgroup half  q_smem[kPrefillQSAMaxHeadDim];
+    threadgroup float q_gsum[kPrefillQSAMaxHeadDim / 16u];
 
     const uint threads = threads3.x;
     const uint d = tid.x;
@@ -842,6 +911,23 @@ kernel void attention_prefill_causal_qsa_tiled(
 
     device const half* q_row = Q + t * p.qTokenStrideElements + qh * HD;
     for (uint i = d; i < HD; i += threads) { q_smem[i] = q_row[i]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // sum(q) per affine group: the bias half of every key's dot product, and
+    // the same for all of them.
+    const uint qBase = kvh * HD;   // K and V are indexed from the kv head
+    if (d == 0u) {
+        uint e = 0u;
+        uint gi = 0u;
+        while (e < HD) {
+            const uint flat = qBase + e;
+            const uint span = min(HD - e, p.kvGroupSize - (flat % p.kvGroupSize));
+            float acc_q = 0.0f;
+            for (uint i = 0u; i < span; ++i) { acc_q += float(q_smem[e + i]); }
+            q_gsum[gi] = acc_q;
+            e += span;
+            gi += 1u;
+        }
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const bool compacted = (useKeep == 2u);
@@ -868,11 +954,8 @@ kernel void attention_prefill_causal_qsa_tiled(
             }
             float dot = 0.0f;
             if (valid) {
-                const uint phys = prefill_kv_slot(key);
-                for (uint e = 0u; e < HD; ++e) {
-                    dot = fma(float(q_smem[e]),
-                              prefill_load_kv(K, phys, kvh * HD + e, p), dot);
-                }
+                dot = prefill_qsa_dot(K, prefill_kv_slot(key), kvh * HD, HD,
+                                      q_smem, q_gsum, p);
             }
             s_key[i] = key;
             // A dropped key must contribute nothing through the softmax, and
