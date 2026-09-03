@@ -26,6 +26,14 @@ func defaultPrefillChunkTokens(family: ModelFamily, fallback: Int) -> Int {
     // 2,048 and 3 at 4,096, measured at 167.5 -> 111.0 GiB of expert reads and
     // 506.4 -> 450.5 s of prefill (-11%), with identical output on a
     // multi-chunk prompt. The 2,048 here predates that measurement.
+    //
+    // It is a trade, not free. A/B/A on one machine state, 0.4% drift
+    // between the repeated arms: decode 6.97 / 7.19 / 7.00 tok/s at
+    // 4096 / 2048 / 4096, so 2,048 decodes ~3% faster -- the KV ring is
+    // sized from the chunk and this machine feels the reservation.
+    // 4,096 still wins for the long-prompt case it is chosen for: 56 s
+    // of prefill on a 10k prompt against ~2 s of a 512-token generation.
+    // A short-prompt, long-generation workload would want 2,048 back.
     case .qwen38flash: return RuntimeConfiguration.qwenLongPrefillChunkTokens
     default: return fallback
     }
