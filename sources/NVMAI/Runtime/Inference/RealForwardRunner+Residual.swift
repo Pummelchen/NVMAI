@@ -50,6 +50,12 @@ extension RealForwardRunner {
                                 isBF16: view.dtype == 1)
     }
 
+    /// Fused hyper-connection gates. Default off until the golden has proven
+    /// the fused kernels bit-identical; NVMAI_HC_FUSED=1 turns them on.
+    var hcFusedEnabled: Bool {
+        ProcessInfo.processInfo.environment["NVMAI_HC_FUSED"] == "1"
+    }
+
     /// Residual -> block input, for one decode token.
     func encodeResidualEntryDecode(commandBuffer: MTLCommandBuffer,
                                    hidden: MTLBuffer,
@@ -66,12 +72,22 @@ extension RealForwardRunner {
                 ? try model.hcAttnMixUp(layer: layer)
                 : try model.hcMlpMixUp(layer: layer)
             if !ablated("hcread") {
-            try hc.encodeRead(commandBuffer: commandBuffer,
+            let dw = gateWeights(down), uw = gateWeights(up)
+            if hcFusedEnabled, hc.canFuseRead(down: dw, up: uw) {
+                try hc.encodeReadFused(commandBuffer: commandBuffer,
+                                       streamsBuffer: hidden,
+                                       hcNorm: norm.buffer,
+                                       hcNormOffset: Int(norm.offset),
+                                       down: dw, up: uw,
+                                       blockInput: out, eps: eps)
+            } else {
+                try hc.encodeRead(commandBuffer: commandBuffer,
                                   streamsBuffer: hidden,
                                   hcNorm: norm.buffer,
                                   hcNormOffset: Int(norm.offset),
-                                  down: gateWeights(down), up: gateWeights(up),
+                                  down: dw, up: uw,
                                   blockInput: out, eps: eps)
+            }
             }
             return
         }
@@ -98,10 +114,18 @@ extension RealForwardRunner {
             let inject = sublayer == .attention
                 ? try model.hcAttnInject(layer: layer)
                 : try model.hcMlpInject(layer: layer)
-            try hc.encodeWrite(commandBuffer: commandBuffer,
-                               streamsBuffer: hidden,
-                               inject: gateWeights(inject),
-                               blockOut: delta)
+            let iw = gateWeights(inject)
+            if hcFusedEnabled, hc.canFuseWrite(inject: iw) {
+                try hc.encodeWriteFused(commandBuffer: commandBuffer,
+                                        streamsBuffer: hidden,
+                                        inject: iw,
+                                        blockOut: delta)
+            } else {
+                try hc.encodeWrite(commandBuffer: commandBuffer,
+                                   streamsBuffer: hidden,
+                                   inject: iw,
+                                   blockOut: delta)
+            }
             return
         }
         try elementwise!.encodeResidualAdd(commandBuffer: commandBuffer,

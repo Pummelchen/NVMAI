@@ -31,6 +31,12 @@ final class HyperConnection {
     private let rms: RMSNorm
     private let gemv: SlotGEMV
     private let elementwise: Elementwise
+    /// Fused decode gates: three dispatches for read+write instead of seven.
+    /// Optional because the kernels are int4-only; a promoted (bf16) gate or a
+    /// non-4-bit slot falls back to the composed path.
+    private let psoReadPhase1: MTLComputePipelineState?
+    private let psoReadPhase2: MTLComputePipelineState?
+    private let psoInject: MTLComputePipelineState?
 
     /// [streams * dim] normalized residual, shared by the read gate, the
     /// stream reduction, and the write gate.
@@ -61,6 +67,9 @@ final class HyperConnection {
         self.rms = try RMSNorm(context: context)
         self.gemv = try SlotGEMV(context: context, weightBits: weightBits)
         self.elementwise = try Elementwise(context: context)
+        self.psoReadPhase1 = try? context.pipeline("hc_read_phase1_int4")
+        self.psoReadPhase2 = try? context.pipeline("hc_read_phase2_int4")
+        self.psoInject = try? context.pipeline("hc_inject_int4")
         let wide = dim * streams * maxRows * MemoryLayout<Float16>.stride
         guard let normed = context.device.makeBuffer(
                   length: wide, options: .storageModeShared),
@@ -243,4 +252,89 @@ final class HyperConnection {
                                        dim: dim, streamCount: streams,
                                        inScale: gateInputScale)
     }
+
+    /// Whether the fused decode kernels can serve these gates: int4 weights,
+    /// a single row, and the threadgroup-memory bound of the phase-1 kernel.
+    func canFuseRead(down: Weights, up: Weights) -> Bool {
+        psoReadPhase1 != nil && psoReadPhase2 != nil
+            && !down.isBF16 && !up.isBF16
+            && dim * streams <= 10_240 && dim * streams % 64 == 0
+            && lowRank % 64 == 0 && 8 % streams == 0
+    }
+
+    func canFuseWrite(inject: Weights) -> Bool {
+        psoInject != nil && !inject.isBF16 && streams <= 8
+            && dim * streams % 64 == 0 && (dim * streams) % 256 == 0
+    }
+
+    /// Same result as `encodeRead` in two dispatches. See fused.metal for the
+    /// rounding points reproduced.
+    func encodeReadFused(commandBuffer: MTLCommandBuffer,
+                         streamsBuffer: MTLBuffer, streamsOffset: Int = 0,
+                         hcNorm: MTLBuffer, hcNormOffset: Int = 0,
+                         down: Weights, up: Weights,
+                         blockInput: MTLBuffer, blockInputOffset: Int = 0,
+                         eps: Float) throws {
+        guard let p1 = psoReadPhase1, let p2 = psoReadPhase2 else {
+            throw MetalError.noDevice
+        }
+        var d = UInt32(dim), s = UInt32(streams), r = UInt32(lowRank)
+        var e = eps, inScale = gateInputScale
+        guard let enc1 = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.noDevice }
+        enc1.setComputePipelineState(p1)
+        enc1.setBuffer(streamsBuffer, offset: streamsOffset, index: 0)
+        enc1.setBuffer(hcNorm, offset: hcNormOffset, index: 1)
+        enc1.setBuffer(down.weights, offset: down.weightsOffset, index: 2)
+        enc1.setBuffer(down.scales, offset: down.scalesOffset, index: 3)
+        enc1.setBuffer(down.biases, offset: down.biasesOffset, index: 4)
+        enc1.setBuffer(normed, offset: 0, index: 5)
+        enc1.setBuffer(lowRankScratch, offset: 0, index: 6)
+        enc1.setBytes(&d, length: 4, index: 7)
+        enc1.setBytes(&s, length: 4, index: 8)
+        enc1.setBytes(&r, length: 4, index: 9)
+        enc1.setBytes(&e, length: 4, index: 10)
+        enc1.setBytes(&inScale, length: 4, index: 11)
+        enc1.dispatchThreadgroups(MTLSize(width: (lowRank + 7) / 8, height: 1, depth: 1),
+                                  threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc1.endEncoding()
+        guard let enc2 = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.noDevice }
+        enc2.setComputePipelineState(p2)
+        enc2.setBuffer(up.weights, offset: up.weightsOffset, index: 0)
+        enc2.setBuffer(up.scales, offset: up.scalesOffset, index: 1)
+        enc2.setBuffer(up.biases, offset: up.biasesOffset, index: 2)
+        enc2.setBuffer(lowRankScratch, offset: 0, index: 3)
+        enc2.setBuffer(normed, offset: 0, index: 4)
+        enc2.setBuffer(blockInput, offset: blockInputOffset, index: 5)
+        enc2.setBytes(&d, length: 4, index: 6)
+        enc2.setBytes(&s, length: 4, index: 7)
+        enc2.setBytes(&r, length: 4, index: 8)
+        let dPer = 8 / streams
+        enc2.dispatchThreadgroups(MTLSize(width: (dim + dPer - 1) / dPer, height: 1, depth: 1),
+                                  threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc2.endEncoding()
+    }
+
+    /// Same result as `encodeWrite` in one dispatch.
+    func encodeWriteFused(commandBuffer: MTLCommandBuffer,
+                          streamsBuffer: MTLBuffer, streamsOffset: Int = 0,
+                          inject: Weights,
+                          blockOut: MTLBuffer, blockOutOffset: Int = 0) throws {
+        guard let p = psoInject else { throw MetalError.noDevice }
+        var d = UInt32(dim), s = UInt32(streams), inScale = gateInputScale
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.noDevice }
+        enc.setComputePipelineState(p)
+        enc.setBuffer(streamsBuffer, offset: streamsOffset, index: 0)
+        enc.setBuffer(normed, offset: 0, index: 1)
+        enc.setBuffer(inject.weights, offset: inject.weightsOffset, index: 2)
+        enc.setBuffer(inject.scales, offset: inject.scalesOffset, index: 3)
+        enc.setBuffer(inject.biases, offset: inject.biasesOffset, index: 4)
+        enc.setBuffer(blockOut, offset: blockOutOffset, index: 5)
+        enc.setBytes(&d, length: 4, index: 6)
+        enc.setBytes(&s, length: 4, index: 7)
+        enc.setBytes(&inScale, length: 4, index: 8)
+        enc.dispatchThreadgroups(MTLSize(width: (dim * streams) / 256, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        enc.endEncoding()
+    }
+
 }
