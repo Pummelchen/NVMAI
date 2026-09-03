@@ -145,6 +145,27 @@ final class Attention {
     // runtime: a reentrant encodeSplit would corrupt pass-1 state and is a
     // programming error, so it throws loudly instead of silently corrupting.
     private let splitStateLock: NSLock
+    /// Simdgroup-per-key pass 1 (attention_decode_partial_simd), used when a
+    /// sparse selection is in play. Built per (head_dim, heads, chunks) on
+    /// first use. NVMAI_ATTN_SIMD_PARTIAL=0 keeps the serial kernel.
+    private var simdPartialCache: [String: MTLComputePipelineState] = [:]
+    /// Test hook: forces the simd (true) or serial (false) pass 1.
+    var simdPartialOverride: Bool?
+    private var simdPartialEnabled: Bool {
+        simdPartialOverride ?? (ProcessInfo.processInfo.environment["NVMAI_ATTN_SIMD_PARTIAL"] != "0")
+    }
+    private func simdPartialPipeline(headDim: UInt32, numQHeads: UInt32,
+                                     numKVHeads: UInt32, numChunks: Int) -> MTLComputePipelineState? {
+        let key = "\(headDim)/\(numQHeads)/\(numKVHeads)/\(numChunks)"
+        if let pso = simdPartialCache[key] { return pso }
+        let specializedChunks = numChunks == 16 ? Optional(UInt32(numChunks)) : nil
+        guard let pso = try? Self.specializedPipeline(ctx, "attention_decode_partial_simd",
+                                                      headDim: headDim, numQHeads: numQHeads,
+                                                      numKVHeads: numKVHeads,
+                                                      numChunks: specializedChunks) else { return nil }
+        simdPartialCache[key] = pso
+        return pso
+    }
     /// One byte, bound whenever no selection is in play: Metal requires the
     /// argument, and `use_keep` is what actually turns the mask off.
     private let emptyKeepMask: MTLBuffer
@@ -296,12 +317,18 @@ final class Attention {
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
         let nChunks = geometry.numChunks
         let chunkLen = geometry.chunkLength
-        let partialPSO = partialPipeline(headDim: headDim,
+        var partialPSO = partialPipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
                                          numChunks: nChunks,
                                          useGQAPartial: useSWAGQAPartial,
                                          ringCapacity: ringCapacity)
+        if keepMask != nil, !useSWAGQAPartial, ringCapacity == 0, headDim % 32 == 0, headDim <= 256,
+           simdPartialEnabled,
+           let simd = simdPartialPipeline(headDim: headDim, numQHeads: numQHeads,
+                                          numKVHeads: numKVHeads, numChunks: nChunks) {
+            partialPSO = simd
+        }
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
         guard let p1 = commandBuffer.makeComputeCommandEncoder() else {

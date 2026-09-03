@@ -435,3 +435,176 @@ void attention_decode_combine(
         out_row[i] = half(acc * inv_d);
     }
 }
+
+// ============================================================================
+// Split-KV pass 1, simdgroup-per-key layout (attention_decode_partial_simd).
+//
+// attention_decode_partial walks its chunk one key at a time with the whole
+// threadgroup: a 128-wide dot spread over 256 threads, a two-barrier block
+// reduction, then the V update -- latency-bound, ~10 us per key. At 3.7k keys
+// that is 2.7 ms per full-attention layer, 32 ms/token over 12 layers, and it
+// grows with the context.
+//
+// Here each simdgroup takes every `simdgroups`-th key of the chunk, a lane
+// holds head_dim/32 contiguous dims of q, the dot is one simd_sum, and the
+// online-softmax state is per simdgroup; the eight partial states merge once
+// at the end through threadgroup memory. Same buffer contract and the same
+// (m, d, o) partial layout, so attention_decode_combine is unchanged. The
+// summation order differs from the serial kernel (keys interleave across
+// simdgroups), so this is selected only when a sparse selection is in play --
+// past the dense window -- and the short-prompt goldens keep the old kernel.
+// Requires head_dim % 32 == 0 and head_dim <= 512.
+// ============================================================================
+// head_dim <= 256 for this kernel: the merge buffer is what bounds
+// threadgroup memory (8 x 256 floats = 8 KB) and so threadgroups per core.
+constant constexpr uint kAttnSimdMaxHeadDim = 256u;
+constant constexpr uint kAttnSimdMaxDimsPerLane = kAttnSimdMaxHeadDim / 32u;
+
+[[kernel, max_total_threads_per_threadgroup(kAttnThreads)]]
+void attention_decode_partial_simd(
+    device const half*  Q             [[buffer(0)]],
+    device const uchar* K             [[buffer(1)]],
+    device const uchar* V             [[buffer(2)]],
+    device       float* m_out         [[buffer(3)]],
+    device       float* d_out         [[buffer(4)]],
+    device       float* o_out         [[buffer(5)]],
+    constant     uint&  head_dim      [[buffer(6)]],
+    constant     uint&  num_q_heads   [[buffer(7)]],
+    constant     uint&  num_kv_heads  [[buffer(8)]],
+    constant     uint&  seq_len       [[buffer(9)]],
+    constant     uint&  kv_start      [[buffer(10)]],
+    constant     uint&  chunk_len     [[buffer(11)]],
+    constant     uint&  num_chunks    [[buffer(12)]],
+    constant     float& scale         [[buffer(13)]],
+    constant     uint&  kv_bits       [[buffer(14)]],
+    constant     uint&  kv_stride     [[buffer(15)]],
+    constant     uint&  kv_value_bytes [[buffer(16)]],
+    constant     uint&  kv_group_size [[buffer(17)]],
+    device const uchar* keep          [[buffer(18)]],
+    constant     uint&  use_keep      [[buffer(19)]],
+    uint tg_id           [[threadgroup_position_in_grid]],
+    uint lid             [[thread_position_in_threadgroup]],
+    uint lsize           [[threads_per_threadgroup]],
+    uint lane            [[thread_index_in_simdgroup]],
+    uint sg              [[simdgroup_index_in_threadgroup]],
+    uint simdgroups      [[simdgroups_per_threadgroup]]
+) {
+    threadgroup float m_sg[kAttnMaxSimdGroups];
+    threadgroup float d_sg[kAttnMaxSimdGroups];
+    threadgroup float o_sg[kAttnMaxSimdGroups * kAttnSimdMaxHeadDim];
+    const uint HD = attn_fc_head_dim(head_dim);
+    const uint NQ = attn_fc_num_q_heads(num_q_heads);
+    const uint NKV = attn_fc_num_kv_heads(num_kv_heads);
+    const uint NC = attn_fc_num_chunks(num_chunks);
+    const uint q_head = tg_id / NC;
+    const uint chunk  = tg_id % NC;
+    const uint p_start = kv_start + chunk * chunk_len;
+    uint p_end = p_start + chunk_len;
+    if (p_end > seq_len) { p_end = seq_len; }
+    const uint kv_head = q_head / (NQ / NKV);
+    device const half* Q_row = Q + uint(q_head) * HD;
+    const uint dpl = HD / 32u;                 // dims per lane
+    const uint d0 = lane * dpl;                // this lane's first dim
+    float q_reg[kAttnSimdMaxDimsPerLane];
+    float o_reg[kAttnSimdMaxDimsPerLane];
+    for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+        q_reg[j] = (j < dpl) ? float(Q_row[d0 + j]) : 0.0f;
+        o_reg[j] = 0.0f;
+    }
+    const uint row_elems = NKV * HD;
+    const uint flat0 = kv_head * HD + d0;
+    const float sc = attn_fc_scale(scale);
+    float m_run = -INFINITY;
+    float d_run = 0.0f;
+    // int8 rows with this lane's dims inside one quant group: one scale and
+    // one bias per lane per key, plain byte loads, no per-element division.
+    // Anything else takes the generic per-element helper.
+    const bool fast8 = (kv_bits == 8u) && (kv_group_size % dpl == 0u);
+    const uint groups = (row_elems + kv_group_size - 1u) / kv_group_size;
+    const uint grp = flat0 / kv_group_size;
+    for (uint p = p_start + sg; p < p_end; p += simdgroups) {
+        if (use_keep != 0u && keep[p] == 0u) { continue; }
+        const uint phys_p = attn_ring_slot(p);
+        float partial = 0.0f;
+        if (fast8) {
+            device const uchar* krow = K + phys_p * kv_stride;
+            device const half* ks = reinterpret_cast<device const half*>(krow + kv_value_bytes);
+            const float kscale = float(ks[grp]);
+            const float kbias = float(ks[groups + grp]);
+            for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+                if (j < dpl) {
+                    const float kval = float(krow[flat0 + j]) * kscale + kbias;
+                    partial = fma(q_reg[j], kval, partial);
+                }
+            }
+        } else {
+            for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+                if (j < dpl) {
+                    const float kval = attn_load_kv(K, phys_p, flat0 + j, row_elems,
+                                                    kv_bits, kv_stride, kv_value_bytes,
+                                                    kv_group_size);
+                    partial = fma(q_reg[j], kval, partial);
+                }
+            }
+        }
+        const float s = simd_sum(partial) * sc;
+        const float m_new = max(m_run, s);
+        const float alpha = attn_softmax_exp(m_run - m_new);
+        const float p_exp = attn_softmax_exp(s - m_new);
+        d_run = d_run * alpha + p_exp;
+        if (fast8) {
+            device const uchar* vrow = V + phys_p * kv_stride;
+            device const half* vs = reinterpret_cast<device const half*>(vrow + kv_value_bytes);
+            const float vscale = float(vs[grp]);
+            const float vbias = float(vs[groups + grp]);
+            for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+                if (j < dpl) {
+                    const float vval = float(vrow[flat0 + j]) * vscale + vbias;
+                    o_reg[j] = o_reg[j] * alpha + p_exp * vval;
+                }
+            }
+        } else {
+            for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+                if (j < dpl) {
+                    const float vval = attn_load_kv(V, phys_p, flat0 + j, row_elems,
+                                                    kv_bits, kv_stride, kv_value_bytes,
+                                                    kv_group_size);
+                    o_reg[j] = o_reg[j] * alpha + p_exp * vval;
+                }
+            }
+        }
+        m_run = m_new;
+    }
+    if (lane == 0) { m_sg[sg] = m_run; d_sg[sg] = d_run; }
+    for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+        if (j < dpl) o_sg[sg * HD + d0 + j] = o_reg[j];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg != 0) return;
+    // Merge the simdgroup states into this (head, chunk) partial.
+    float m_g = -INFINITY;
+    for (uint c = 0; c < simdgroups; ++c) m_g = max(m_g, m_sg[c]);
+    const uint base = uint(q_head) * NC + chunk;
+    device float* o_row = o_out + base * HD;
+    if (m_g == -INFINITY) {
+        if (lane == 0) { m_out[base] = -INFINITY; d_out[base] = 0.0f; }
+        for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+            if (j < dpl) o_row[d0 + j] = 0.0f;
+        }
+        return;
+    }
+    float d_g = 0.0f;
+    float w[kAttnMaxSimdGroups];
+    for (uint c = 0; c < kAttnMaxSimdGroups; ++c) {
+        w[c] = (c < simdgroups && m_sg[c] != -INFINITY) ? attn_softmax_exp(m_sg[c] - m_g) : 0.0f;
+        if (c < simdgroups) d_g += d_sg[c] * w[c];
+    }
+    for (uint j = 0; j < kAttnSimdMaxDimsPerLane; ++j) {
+        if (j < dpl) {
+            float acc = 0.0f;
+            for (uint c = 0; c < simdgroups; ++c) acc += o_sg[c * HD + d0 + j] * w[c];
+            o_row[d0 + j] = acc;
+        }
+    }
+    if (lane == 0) { m_out[base] = m_g; d_out[base] = d_g; }
+}
