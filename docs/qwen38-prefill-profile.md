@@ -80,19 +80,49 @@ moves, O(keys) -> O(keys/128).
 
 | | per-key | tiled |
 | --- | ---: | ---: |
-| prefill | 570.6 s | **541.2 s** (-5.2%) |
 | QSA per layer-chunk | 3.25 s | **2.79 s** (-14%) |
 | GDN per layer-chunk | 0.48 s | 0.47 s (control) |
 
-**Cumulative: 653.9 s -> 541.2 s, -17.2%. QSA per layer-chunk 4.59 -> 2.79,
--39%.**
-
--14% is *less* than removing ~2,000 barriers per query suggested, and that is
+-14% is *less* than removing ~2,000 barriers per query suggested, and that was
 the finding rather than a disappointment: **the reduction was not the dominant
-cost.** What is left is the inner loop -- 128 serial iterations of dequantising
-an 8-bit KV value and one FMA, unvectorised. Still 5.9x a GDN layer, and that
-is where the rest sits. Vectorising the dequant is the next item, and it is a
-smaller change than either of the two above.
+cost.** What remained was the inner loop.
+
+## Then the inner loop
+
+`prefill_load_kv` costs two integer divisions and three loads per element, and
+the scale/bias pair only changes every `kvGroupSize` elements -- two distinct
+groups for a 128-wide head, so 126 of every 128 lookups recomputed the same
+answer. `prefill_qsa_dot` walks the head group by group:
+
+    sum_e q_e * (quant_e * s + b)  ==  s * sum_e q_e*quant_e + b * sum_e q_e
+
+Scale and bias apply once per group, and `sum_e q_e` does not depend on the key
+at all -- it is a property of the *query*, computed once into threadgroup
+memory and reused for every key it attends to, which removes the bias term from
+the inner loop entirely.
+
+| | tiled | + hoisted |
+| --- | ---: | ---: |
+| QSA per layer-chunk | 2.79 s | **2.21 s** (-32% vs per-key) |
+| GDN per layer-chunk | 0.47 s | 0.47 s (control) |
+
+## Where the kernel ended up
+
+| stage | QSA/layer-chunk | vs GDN |
+| --- | ---: | ---: |
+| original (mask scan + per-key reduction) | 4.59 s | 9.4x |
+| + selection compaction | 3.25 s | 6.8x |
+| + tile synchronisation | 2.79 s | 5.9x |
+| **+ inner-loop hoist** | **2.21 s** | **4.7x** |
+
+**QSA prefill attention is 52% faster and the gap to a GDN layer has halved.**
+All three are default-on (`NVMAI_QSA_COMPACT` / `NVMAI_QSA_TILED` set to `0`
+fall back for A/B on one build). Both goldens reproduce.
+
+**Prefill wall is the noisy metric, not this one.** In the last A/B the
+unchanged per-key arm moved 570.6 -> 505.6 s with its GPU roles identical: that
+65 s is the expert-I/O half varying between runs. Quote seconds-per-dispatch;
+treat prefill wall as carrying I/O noise of that order.
 
 **Metal caveat, learned the hard way:** these shaders compile at *runtime* from
 `program_source`. `swift build` validated none of this and passed twice while
