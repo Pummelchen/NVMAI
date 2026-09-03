@@ -205,7 +205,7 @@ extension RealForwardRunner {
             var keepMask: MTLBuffer?
             if qsaIndexer != nil, cfg.fullAttentionLayerMask[L] == 1 {
                 keepMask = try encodeQSAEntryAndSelect(
-                    passthrough: attnCB,
+                    passthrough: &attnCB,
                     hidden: hidden, norm: inNorm, out: normed,
                     layer: L, position: position, eps: eps)
             } else {
@@ -473,7 +473,7 @@ extension RealForwardRunner {
         ProcessInfo.processInfo.environment["NVMAI_KERNEL_SPLIT"] == "1"
     }
 
-    private func rotate(_ cb: inout MTLCommandBuffer, role: String) throws {
+    func rotate(_ cb: inout MTLCommandBuffer, role: String) throws {
         guard splitKernelTiming else { return }
         cb.commit()
         splitTimedBuffers.append((role, cb))
@@ -622,7 +622,7 @@ extension RealForwardRunner {
         }
     }
 
-    func encodeGatedFullAttentionDecode(_ cb: MTLCommandBuffer,
+    func encodeGatedFullAttentionDecode(_ cb: inout MTLCommandBuffer,
                                                 layer L: Int,
                                                 position: Int,
                                                 seqLen: UInt32,
@@ -655,6 +655,7 @@ extension RealForwardRunner {
             cb, layer: L, qOutput: qPackedScratch,
             kOutput: kWrite, vOutput: vWrite,
             qDimension: qDim, kvDimension: kvDim)
+        try rotate(&cb, role: "qsa.qkv")
         try elementwise.encodeSplitQGate(commandBuffer: cb,
                                      packed: qPackedScratch,
                                      q: qScratch,
@@ -684,6 +685,7 @@ extension RealForwardRunner {
                               numHeads: UInt32(cfg.numHeads),
                               rotaryDim: rotaryDim,
                               theta: Float(cfg.fullRopeTheta))
+        try rotate(&cb, role: "qsa.gate_norm_rope1")
         try rope.encodeNeoxSubdim(commandBuffer: cb,
                               data: kWrite.buffer,
                               dataOffset: kWrite.offset,
@@ -711,15 +713,18 @@ extension RealForwardRunner {
                              scale: Float(cfg.attentionScale),
                              kvFormat: keyView,
                              keepMask: keepMask)
+        try rotate(&cb, role: "qsa.attention")
         try elementwise.encodeSigmoidGateMul(commandBuffer: cb,
                                          out: attnOut,
                                          gate: attnGateScratch,
                                          count: Int(qDim))
+        try rotate(&cb, role: "qsa.gatemul")
         try encodePrimaryGEMV(commandBuffer: cb,
                     weights: o.buffer, weightsOffset: Int(o.offset),
                     scales: o.buffer, scalesOffset: Int(o.scaleOffset),
                     biases: o.buffer, biasesOffset: Int(o.biasOffset),
                     x: attnOut, y: oOut, m: D, n: qDim)
+        try rotate(&cb, role: "qsa.oproj")
     }
 
     func encodePrimaryGEMV(commandBuffer cb: MTLCommandBuffer,
@@ -840,7 +845,7 @@ extension RealForwardRunner {
         } else if cfg.attnOutputGate {
             // Qwen full attention: packed [query ; gate] q_proj, real
             // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.
-            try encodeGatedFullAttentionDecode(attnCB, layer: L,
+            try encodeGatedFullAttentionDecode(&attnCB, layer: L,
                                                position: position,
                                                seqLen: seqLen,
                                                keepMask: keepMask)

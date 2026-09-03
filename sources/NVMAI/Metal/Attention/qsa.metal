@@ -128,3 +128,99 @@ void qsa_block_scores_rows(
     }
     scores[tid] = total;
 }
+
+// ---------------------------------------------------------------------------
+// Decode-time key selection on the GPU. The reference (QSAIndexer.selectKeys)
+// ranks the complete blocks by score descending with the lower index first on
+// ties, keeps whole blocks in that order until the budget is spent, gives the
+// next block whatever cells remain, and always keeps the ragged tail of the
+// query's own block. Doing that on the CPU costs a command-buffer round trip
+// per full-attention layer per token once the context passes the budget.
+//
+// Here the ranking is a radix select over a 64-bit key (orderable score,
+// then inverted index) for the block at rank B = remaining / ratio: every
+// block whose key is larger is kept whole, the block at rank B gets the
+// partial, the rest are dropped. One threadgroup; eight 8-bit passes.
+// ---------------------------------------------------------------------------
+static inline uint qsa_orderable(float s) {
+    if (s == 0.0f) s = 0.0f;                 // -0.0 ties +0.0 in the reference
+    uint f = as_type<uint>(s);
+    return (f & 0x80000000u) ? ~f : (f | 0x80000000u);
+}
+
+static inline ulong qsa_select_key(device const float* scores, uint i) {
+    return (ulong(qsa_orderable(scores[i])) << 32) | ulong(0xFFFFFFFFu - i);
+}
+
+[[kernel, max_total_threads_per_threadgroup(1024)]]
+void qsa_select_decode(
+    device const float* scores  [[buffer(0)]],   // [>= blocks]
+    device uint8_t*     keep    [[buffer(1)]],   // [visible] out
+    constant uint&      visible [[buffer(2)]],
+    constant uint&      ratio   [[buffer(3)]],
+    constant uint&      width   [[buffer(4)]],   // selectionWidth
+    uint lid   [[thread_position_in_threadgroup]],
+    uint lsize [[threads_per_threadgroup]]
+) {
+    threadgroup atomic_uint hist[256];
+    threadgroup ulong prefix_tg;
+    threadgroup uint rank_tg;
+
+    const uint complete = (visible / ratio) * ratio;
+    const uint tail = visible - complete;
+    for (uint c = complete + lid; c < visible; c += lsize) keep[c] = 1u;
+    if (width <= tail) {
+        for (uint c = lid; c < complete; c += lsize) keep[c] = 0u;
+        return;
+    }
+    const uint remaining = width - tail;
+    const uint blocks = complete / ratio;
+    const uint B = remaining / ratio;
+    const uint partial = remaining - B * ratio;
+    if (B >= blocks) {
+        for (uint c = lid; c < complete; c += lsize) keep[c] = 1u;
+        return;
+    }
+
+    // Radix select: find the key of the block at rank B (0-based, descending).
+    if (lid == 0) { prefix_tg = 0ul; rank_tg = B; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int pass = 7; pass >= 0; --pass) {
+        const uint shift = uint(pass) * 8u;
+        for (uint b = lid; b < 256u; b += lsize)
+            atomic_store_explicit(&hist[b], 0u, memory_order_relaxed);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const ulong prefix = prefix_tg;
+        const ulong mask = (pass == 7) ? 0ul : (~0ul << (shift + 8u));
+        for (uint i = lid; i < blocks; i += lsize) {
+            const ulong k = qsa_select_key(scores, i);
+            if ((k & mask) == prefix) {
+                atomic_fetch_add_explicit(&hist[uint((k >> shift) & 0xFFul)], 1u,
+                                          memory_order_relaxed);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lid == 0) {
+            uint r = rank_tg;
+            uint digit = 0u;
+            for (int b = 255; b >= 0; --b) {
+                const uint n = atomic_load_explicit(&hist[uint(b)], memory_order_relaxed);
+                if (r < n) { digit = uint(b); break; }
+                r -= n;
+            }
+            rank_tg = r;
+            prefix_tg = prefix | (ulong(digit) << shift);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const ulong keyB = prefix_tg;
+    for (uint i = lid; i < blocks; i += lsize) {
+        const ulong k = qsa_select_key(scores, i);
+        const bool whole = k > keyB;
+        const bool at_rank = k == keyB;
+        const uint base = i * ratio;
+        for (uint c = 0; c < ratio; ++c) {
+            keep[base + c] = whole ? 1u : ((at_rank && c < partial) ? 1u : 0u);
+        }
+    }
+}

@@ -40,6 +40,8 @@ final class QSAIndexer {
     private let poolRangePSO: MTLComputePipelineState
     private let scorePSO: MTLComputePipelineState
     private let scoreRowsPSO: MTLComputePipelineState
+    /// Decode selection on the GPU; nil when the kernel is unavailable.
+    private let selectPSO: MTLComputePipelineState?
     private let rms: RMSNorm
     private let rope: RoPE
     private let gemv: SlotGEMV
@@ -90,6 +92,7 @@ final class QSAIndexer {
         self.poolRangePSO = try context.pipeline("qsa_pool_blocks")
         self.scorePSO = try context.pipeline("qsa_block_scores")
         self.scoreRowsPSO = try context.pipeline("qsa_block_scores_rows")
+        self.selectPSO = try? context.pipeline("qsa_select_decode")
         self.rms = try RMSNorm(context: context)
         self.rope = try RoPE(context: context)
         self.gemv = try SlotGEMV(context: context, weightBits: weightBits)
@@ -583,4 +586,36 @@ final class QSAIndexer {
         }
         return keepBuf
     }
+
+    var canSelectOnGPU: Bool { selectPSO != nil }
+
+    /// `selectKeys` on the GPU, riding `commandBuffer` after `encodeScores`:
+    /// same mask, no readback. Returns nil inside the dense window, exactly
+    /// where `selectKeys` does.
+    func encodeSelectKeys(commandBuffer: MTLCommandBuffer, visibleKeys: Int) throws -> MTLBuffer? {
+        guard visibleKeys > selectionWidth else { return nil }
+        guard let pso = selectPSO else { throw MetalError.commandEncoderFailed }
+        guard let enc = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        enc.setComputePipelineState(pso)
+        enc.setBuffer(scoresBuf, offset: 0, index: 0)
+        enc.setBuffer(keepBuf, offset: 0, index: 1)
+        var v = UInt32(visibleKeys), r = UInt32(compressRatio), w = UInt32(selectionWidth)
+        enc.setBytes(&v, length: 4, index: 2)
+        enc.setBytes(&r, length: 4, index: 3)
+        enc.setBytes(&w, length: 4, index: 4)
+        let threads = min(pso.maxTotalThreadsPerThreadgroup, 1024)
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        enc.endEncoding()
+        return keepBuf
+    }
+
+    /// The keep mask's first `count` bytes, for the verify mode.
+    func keepMaskBytes(count: Int) -> [UInt8] {
+        let p = keepBuf.contents().bindMemory(to: UInt8.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: p, count: count))
+    }
+
 }

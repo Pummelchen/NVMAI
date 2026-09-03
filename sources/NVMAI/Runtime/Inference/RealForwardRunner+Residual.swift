@@ -261,7 +261,19 @@ extension RealForwardRunner {
     /// the twelve full-attention layers, against a decode step that is bound
     /// by expert I/O; doing the selection on the GPU is the optimization, and
     /// it should be made against this as the reference.
-    func encodeQSAEntryAndSelect(passthrough: MTLCommandBuffer,
+    /// Decode key selection on the GPU (qsa_select_decode) instead of a
+    /// CPU sort behind a command-buffer round trip per full-attention layer.
+    /// Off until verified: NVMAI_QSA_GPU_SELECT=1 turns it on, =verify runs
+    /// both and reports any mask difference.
+    var qsaGPUSelectEnabled: Bool {
+        let v = ProcessInfo.processInfo.environment["NVMAI_QSA_GPU_SELECT"]
+        return v == "1" || v == "verify"
+    }
+    var qsaSelectVerify: Bool {
+        ProcessInfo.processInfo.environment["NVMAI_QSA_GPU_SELECT"] == "verify"
+    }
+
+    func encodeQSAEntryAndSelect(passthrough: inout MTLCommandBuffer,
                                  hidden: MTLBuffer,
                                  norm: TensorView,
                                  out: MTLBuffer,
@@ -284,6 +296,28 @@ extension RealForwardRunner {
                                         position: position, eps: eps)
             return nil
         }
+        let gpuSelect = qsaGPUSelectEnabled && indexer.canSelectOnGPU
+            && activationDumpDirectory == nil
+        if gpuSelect && !qsaSelectVerify {
+            // Everything rides the layer's own command buffer: entry, key
+            // append, scores, and the selection itself. No readback.
+            try encodeResidualEntryDecode(commandBuffer: passthrough, hidden: hidden,
+                                          norm: norm, out: out,
+                                          sublayer: .attention, layer: layer,
+                                          eps: eps)
+            try indexer.encodeAppendKey(commandBuffer: passthrough, hidden: out,
+                                        weights: weights, layer: layer,
+                                        position: position, eps: eps)
+            try rotate(&passthrough, role: "qsa.entry_append")
+            try indexer.encodeScores(commandBuffer: passthrough, hidden: out,
+                                     weights: weights, layer: layer,
+                                     position: position, eps: eps)
+            try rotate(&passthrough, role: "qsa.scores")
+            let mask = try indexer.encodeSelectKeys(commandBuffer: passthrough,
+                                                    visibleKeys: position + 1)
+            try rotate(&passthrough, role: "qsa.select")
+            return mask
+        }
         guard try runSync({ cb in
             try encodeResidualEntryDecode(commandBuffer: cb, hidden: hidden,
                                           norm: norm, out: out,
@@ -297,8 +331,29 @@ extension RealForwardRunner {
             try indexer.encodeScores(commandBuffer: cb, hidden: out,
                                      weights: weights, layer: layer,
                                      position: position, eps: eps)
+            if gpuSelect {
+                _ = try indexer.encodeSelectKeys(commandBuffer: cb,
+                                                 visibleKeys: position + 1)
+            }
         }) != nil else {
             throw ModelError.residentBufferWrapFailed
+        }
+        if gpuSelect {
+            // Verify mode: the GPU mask is captured, the CPU reference then
+            // overwrites the buffer and decides the attention; any difference
+            // is reported per (layer, position).
+            let gpuMask = indexer.keepMaskBytes(count: position + 1)
+            let mask = indexer.selectKeys(visibleKeys: position + 1)
+            let cpuMask = indexer.keepMaskBytes(count: position + 1)
+            if gpuMask != cpuMask {
+                let diff = zip(gpuMask, cpuMask).enumerated().filter { $0.element.0 != $0.element.1 }
+                FileHandle.standardError.write(
+                    "NVMAI qsa_select_verify MISMATCH layer=\(layer) position=\(position) cells=\(diff.count) first=\(diff.prefix(4).map { $0.offset })\n".data(using: .utf8)!)
+            } else if position % 64 == 0 {
+                FileHandle.standardError.write(
+                    "NVMAI qsa_select_verify ok layer=\(layer) position=\(position)\n".data(using: .utf8)!)
+            }
+            return mask
         }
         let mask = indexer.selectKeys(visibleKeys: position + 1)
         if layer == Self.qsaSnapshotLayer {
