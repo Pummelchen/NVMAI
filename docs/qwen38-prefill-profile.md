@@ -44,7 +44,8 @@ A 2,048-token chunk routes essentially all 512 experts per layer; the cache
 holds 96. So each chunk re-streams what the last one evicted, and one prompt
 reads ~2.5x the entire 68 GiB expert corpus. Nothing overlaps.
 
-**Untried:** processing the whole prompt layer-major rather than chunk-major
+**Untried, and now the largest remaining prefill item.** Processing the whole
+prompt layer-major rather than chunk-major
 would read each layer's experts once. The activations for 8k tokens are ~170 MB
 at the 4-stream residual width, so the memory is affordable. Worth ~12% on this
 profile and nobody has attempted it.
@@ -68,8 +69,36 @@ count) and iterating that. Measured at 8k, one build, one env var apart:
 
 The saving grows with context, because the removed term was O(context).
 
-**Still 6.8x a GDN layer.** The remaining cost is one threadgroup reduction per
-key rather than per tile. That is the next item and a larger change.
+## Then the per-key reduction, tiled
+
+The kernel gave each thread one head-dim element and reduced across the
+threadgroup for *every* key -- ~2,048 reductions per query per head.
+`attention_prefill_causal_qsa_tiled` gives a thread one key's whole dot product
+instead, puts the tile's scores in threadgroup memory, and advances the running
+softmax once per 128-key tile. Traffic is identical; only the barrier count
+moves, O(keys) -> O(keys/128).
+
+| | per-key | tiled |
+| --- | ---: | ---: |
+| prefill | 570.6 s | **541.2 s** (-5.2%) |
+| QSA per layer-chunk | 3.25 s | **2.79 s** (-14%) |
+| GDN per layer-chunk | 0.48 s | 0.47 s (control) |
+
+**Cumulative: 653.9 s -> 541.2 s, -17.2%. QSA per layer-chunk 4.59 -> 2.79,
+-39%.**
+
+-14% is *less* than removing ~2,000 barriers per query suggested, and that is
+the finding rather than a disappointment: **the reduction was not the dominant
+cost.** What is left is the inner loop -- 128 serial iterations of dequantising
+an 8-bit KV value and one FMA, unvectorised. Still 5.9x a GDN layer, and that
+is where the rest sits. Vectorising the dequant is the next item, and it is a
+smaller change than either of the two above.
+
+**Metal caveat, learned the hard way:** these shaders compile at *runtime* from
+`program_source`. `swift build` validated none of this and passed twice while
+the kernel was malformed. A `[[kernel]]` attribute must stay adjacent to its
+function, and every thread-position attribute in one signature must agree in
+shape (`uint3 tid` with `uint threads` is rejected).
 
 ## ANE: not yet, and for a different reason than first thought
 
@@ -78,11 +107,14 @@ are ~20% of prefill GPU; at 10k they are 41% of prefill wall time, because
 attention is quadratic where the 36 GDN layers are linear. So the port is worth
 more than the first estimate, not less.
 
-It is still second in line. ANE would have inherited the scan bug above, and
-the cost that remains after fixing it -- per-key threadgroup reductions -- is
-addressable in the same kernel by tiling, with no CoreML export, no sidecar, no
-one-resident-model rule, and no `>= 2048` fused-SDPA NaN hazard sitting exactly
-on QSA's budget.
+It is still second in line, and **today's work lowered its value**: ANE targets
+`prefill_attn_router`, which the two changes above cut by 39%, so the same
+2.31x now applies to a much smaller base. Step 1 partly consumed step 3's
+prize.
+
+It would also have inherited both bugs above, with no CoreML export, no
+sidecar, no one-resident-model rule, and no `>= 2048` fused-SDPA NaN hazard
+sitting exactly on QSA's budget to reason about.
 
 If tiling stalls, ANE becomes attractive: the selection is now a fixed 2,048
 keys, which is the dense shape ANE wants, and `export_ane_prefill.py` is
