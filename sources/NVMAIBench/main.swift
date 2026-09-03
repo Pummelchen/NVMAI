@@ -367,10 +367,15 @@ struct NVMAIBench {
                                iterations: Int,
                                context: MetalContext) throws {
         let device = context.device
-        let qkvRows: UInt32 = 8192
-        let zRows: UInt32 = 4096
-        let abRows: UInt32 = 32
-        let N: UInt32 = 2048
+        // Default shape is the Qwen 3.6 GDN layer. NVMAI_BENCH_GDN_SHAPE=qwen38
+        // selects Qwen3.8-Flash-Next's (16 k-heads x 128 + 48 v-heads x 128
+        // for qkv, 48 x 128 for z, 48 for a/b, hidden 2560), the shape the
+        // decode profile's gdn.inproj number comes from.
+        let qwen38 = ProcessInfo.processInfo.environment["NVMAI_BENCH_GDN_SHAPE"] == "qwen38"
+        let qkvRows: UInt32 = qwen38 ? 16384 : 8192
+        let zRows: UInt32 = qwen38 ? 6144 : 4096
+        let abRows: UInt32 = qwen38 ? 48 : 32
+        let N: UInt32 = qwen38 ? 2560 : 2048
         let groupCount = Int(N) / 64
 
         func makeBuffer(_ bytes: Int, _ value: UInt8) -> MTLBuffer {

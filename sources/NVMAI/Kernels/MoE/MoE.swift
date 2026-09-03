@@ -55,6 +55,12 @@ final class MoE {
     private let routerSelectK8SpecializedPSO: MTLComputePipelineState
     /// Used when top-k is not 8. The k8 kernel stays the golden path.
     private let routerSelectKNPSO: MTLComputePipelineState
+    /// One-simdgroup top-k for k != 8, same order as the serial kernel.
+    /// NVMAI_ROUTER_TOPK_SIMD=1 selects it; off until the golden proves it.
+    private let routerSelectKNSimdPSO: MTLComputePipelineState?
+    private var routerTopKSimd: Bool {
+        ProcessInfo.processInfo.environment["NVMAI_ROUTER_TOPK_SIMD"] == "1"
+    }
     private let residencyClassifyPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
@@ -132,6 +138,7 @@ final class MoE {
             "router_topk_select_k8",
             constants: routerConstants)
         self.routerSelectKNPSO = try context.pipeline("router_topk_select_kn")
+        self.routerSelectKNSimdPSO = try? context.pipeline("router_topk_select_kn_simd")
         self.residencyClassifyPSO = try context.pipeline("moe_classify_expert_residency")
         let phase1Name = routedWeightBits == 4
             ? "moe_phase1_gate_up_act_u16load" : "moe_affine_phase1_gate_up_act"
@@ -238,7 +245,8 @@ final class MoE {
         selector.setComputePipelineState(
             maxStreamedExperts == 8
                 ? (useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
-                : routerSelectKNPSO)
+                : ((routerTopKSimd && expertCount <= 1024)
+                    ? (routerSelectKNSimdPSO ?? routerSelectKNPSO) : routerSelectKNPSO))
         selector.setBuffer(routerLogits, offset: 0, index: 0)
         selector.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
         selector.setBuffer(outIndices, offset: 0, index: 2)

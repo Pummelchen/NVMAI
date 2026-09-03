@@ -323,6 +323,74 @@ kernel void router_topk_select_k8(
     }
 }
 
+// Same selection as router_topk_select_kn on one simdgroup instead of one
+// thread. The serial kernel scans NE logits with an insertion sort on a
+// single lane, which at 512 experts is thousands of dependent steps per layer.
+// Here each lane keeps NE/32 logits in registers and the top-k is K rounds
+// of (max score, then lowest index among equals) simd reductions, which is
+// the serial kernel's order exactly: score descending, lower index on ties,
+// NaN never selected. Lane 0 then runs the identical exp/sum sequence, so the
+// weights are bit-identical too.
+constant constexpr uint kRouterSimdMaxPerLane = 32u;   // NE <= 1024
+
+kernel void router_topk_select_kn_simd(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    constant uint& top_k [[buffer(5)]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint NE = router_fc_num_experts(num_experts);
+    const uint K = min(top_k, kMaxStreamedExperts);
+    const uint per_lane = (NE + 31u) / 32u;
+    float v[kRouterSimdMaxPerLane];
+    for (uint j = 0; j < kRouterSimdMaxPerLane; ++j) {
+        const uint e = lane + 32u * j;
+        v[j] = (j < per_lane && e < NE) ? logits[e] : -INFINITY;
+    }
+    uint top_idx[kMaxStreamedExperts];
+    float top_score[kMaxStreamedExperts];
+    for (uint r = 0; r < K; ++r) {
+        float best = -INFINITY;
+        uint bidx = 0xFFFFFFFFu;
+        for (uint j = 0; j < kRouterSimdMaxPerLane; ++j) {
+            if (j < per_lane && v[j] > best) {   // strict: first (lowest e) wins
+                best = v[j];
+                bidx = lane + 32u * j;
+            }
+        }
+        const float gmax = simd_max(best);
+        const uint cand = (best == gmax) ? bidx : 0xFFFFFFFFu;
+        const uint gidx = simd_min(cand);
+        // Nothing selectable (all -inf or NaN): the serial kernel leaves the
+        // slot at index 0 with score -inf.
+        top_score[r] = gmax;
+        top_idx[r] = (gidx == 0xFFFFFFFFu) ? 0u : gidx;
+        if (gidx != 0xFFFFFFFFu && (gidx & 31u) == lane) {
+            for (uint j = 0; j < kRouterSimdMaxPerLane; ++j) {
+                if (lane + 32u * j == gidx) v[j] = -INFINITY;
+            }
+        }
+    }
+    if (lane != 0) return;
+    const float max_s = top_score[0];
+    float sum_exp = 0.0f;
+    float exps[kMaxStreamedExperts];
+    for (uint i = 0; i < K; ++i) {
+        const float ex = fast::exp(top_score[i] - max_s);
+        exps[i] = ex;
+        sum_exp += ex;
+    }
+    for (uint i = 0; i < K; ++i) {
+        const uint expert_idx = top_idx[i];
+        const float weight = exps[i] / sum_exp;
+        out_indices[i] = expert_idx;
+        out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
+    }
+}
+
 // Top-k router select for k != 8. The k8 kernel above is left exactly as it
 // was: it is on the golden path for every shipping model, and a shared
 // implementation would put a k-dependent loop bound in front of output that is
