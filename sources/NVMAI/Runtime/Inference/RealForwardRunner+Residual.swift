@@ -65,19 +65,23 @@ extension RealForwardRunner {
             let up = sublayer == .attention
                 ? try model.hcAttnMixUp(layer: layer)
                 : try model.hcMlpMixUp(layer: layer)
+            if !ablated("hcread") {
             try hc.encodeRead(commandBuffer: commandBuffer,
-                              streamsBuffer: hidden,
-                              hcNorm: norm.buffer,
-                              hcNormOffset: Int(norm.offset),
-                              down: gateWeights(down), up: gateWeights(up),
-                              blockInput: out, eps: eps)
+                                  streamsBuffer: hidden,
+                                  hcNorm: norm.buffer,
+                                  hcNormOffset: Int(norm.offset),
+                                  down: gateWeights(down), up: gateWeights(up),
+                                  blockInput: out, eps: eps)
+            }
             return
         }
-        try rms.encodeBF16W(commandBuffer: commandBuffer,
-                            x: hidden,
-                            weight: norm.buffer, weightOffset: Int(norm.offset),
-                            out: out,
-                            d: UInt32(cfg.hiddenSize), eps: eps)
+        if !ablated("norm") {
+            try rms.encodeBF16W(commandBuffer: commandBuffer,
+                                x: hidden,
+                                weight: norm.buffer, weightOffset: Int(norm.offset),
+                                out: out,
+                                d: UInt32(cfg.hiddenSize), eps: eps)
+            }
     }
 
     /// Block output -> residual, for one decode token.

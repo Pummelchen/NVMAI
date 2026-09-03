@@ -179,7 +179,7 @@ extension RealForwardRunner {
             // attention pass on full layers, tailCB = O-proj + residual +
             // post-norm + router. Same queue, same order, one wait on the
             // last CB; only the router readback forces the barrier.
-            guard let attnCB = ctx.queue.makeCommandBuffer() else {
+            guard var attnCB = ctx.queue.makeCommandBuffer() else {
                 throw ModelError.residentBufferWrapFailed
             }
             // The PLE block rewrites the wide residual before the attention
@@ -219,7 +219,7 @@ extension RealForwardRunner {
                 throw ModelError.residentBufferWrapFailed
             }
 
-            try encodeDecodeAttention(attnCB: attnCB, tailCB: tailCB,
+            try encodeDecodeAttention(attnCB: &attnCB, tailCB: tailCB,
                                       softmaxCB: &softmaxCB,
                                       layer: L, position: position,
                                       isLinear: isLinear, rmsEps: eps,
@@ -313,6 +313,10 @@ extension RealForwardRunner {
                                count: residualWidth, position: position)
             }
             recordKernelGPU(role: "attn_norm_qkv", attnCB)
+            // Split-mode kernels were committed ahead of attnCB on the same
+            // queue, so they completed before the tail wait above.
+            for (role, cb) in splitTimedBuffers { recordKernelGPU(role: role, cb) }
+            splitTimedBuffers.removeAll(keepingCapacity: true)
             if let attentionCB = softmaxCB {
                 recordKernelGPU(role: "attn_softmax", attentionCB)
             }
@@ -444,7 +448,38 @@ extension RealForwardRunner {
     /// Gated-DeltaNet linear attention (layer mask 2), one decode step.
     /// Reads `normed`, updates the layer's recurrent state + conv tail in
     /// place, and leaves the attention-branch output in `oOut`.
-    func encodeLinearAttentionDecode(_ cb: MTLCommandBuffer, layer L: Int) throws {
+    /// Attribution only. NVMAI_ABLATE=<name> skips one kernel of the GDN
+    /// decode chain so the attention command buffer's GPU time can be
+    /// differenced per kernel. Output is wrong while it is set; the timing is
+    /// not, because none of these kernels' cost depends on the data.
+    func ablated(_ name: String) -> Bool {
+        ProcessInfo.processInfo.environment["NVMAI_ABLATE"] == name
+    }
+
+    /// Per-kernel GPU attribution for the GDN decode chain.
+    ///
+    /// NVMAI_KERNEL_SPLIT=1 gives every kernel of this chain its own command
+    /// buffer, committed in order on the same queue, so `recordKernelGPU` can
+    /// time each one rather than the chain as a whole. Data stays valid --
+    /// unlike ablation, which feeds garbage downstream and measures NaN
+    /// slow-paths and shortened generations instead of the kernel. The split
+    /// buffers are collected here and recorded after the layer's tail wait,
+    /// where their GPU timestamps exist.
+    var splitKernelTiming: Bool {
+        ProcessInfo.processInfo.environment["NVMAI_KERNEL_SPLIT"] == "1"
+    }
+
+    private func rotate(_ cb: inout MTLCommandBuffer, role: String) throws {
+        guard splitKernelTiming else { return }
+        cb.commit()
+        splitTimedBuffers.append((role, cb))
+        guard let next = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        cb = next
+    }
+
+    func encodeLinearAttentionDecode(_ cb: inout MTLCommandBuffer, layer L: Int) throws {
         guard let gdn, let gdnState, let gdnQKVRaw, let gdnConvOut,
               let gdnZ, let gdnA, let gdnB, let gdnY, let gdnOut else {
             throw ModelError.internalInconsistency(
@@ -465,13 +500,15 @@ extension RealForwardRunner {
         // One dispatch over the concatenated qkv/z/a/b row space instead of four
         // separate GEMVs (a and b were 4 threadgroups each).
         if model.attentionWeightBits == 4 {
-            try gdn.encodeInputProjections(commandBuffer: cb,
-                                   x: normed,
-                                   qkv: qkvW, qkvOut: gdnQKVRaw,
-                                   z: zW, zOut: gdnZ,
-                                   a: aW, aOut: gdnA,
-                                   b: bW, bOut: gdnB,
-                                   hiddenSize: cfg.hiddenSize)
+            if !ablated("inproj") {
+        try gdn.encodeInputProjections(commandBuffer: cb,
+                                       x: normed,
+                                       qkv: qkvW, qkvOut: gdnQKVRaw,
+                                       z: zW, zOut: gdnZ,
+                                       a: aW, aOut: gdnA,
+                                       b: bW, bOut: gdnB,
+                                       hiddenSize: cfg.hiddenSize)
+        }
         } else {
             try encodePrimaryGEMV(commandBuffer: cb, projection: qkvW,
                               x: normed, y: gdnQKVRaw,
@@ -486,33 +523,49 @@ extension RealForwardRunner {
                               x: normed, y: gdnB,
                               m: UInt32(la.numVHeads), n: D)
         }
+        try rotate(&cb, role: "gdn.inproj")
 
+        if !ablated("conv") {
         try gdn.encodeConvDecode(commandBuffer: cb,
-                             tail: gdnState.convTailBuffer(layer: L),
-                             qkv: gdnQKVRaw,
-                             convWeight: convW.buffer,
-                             convWeightOffset: Int(convW.offset),
-                             out: gdnConvOut)
+                                 tail: gdnState.convTailBuffer(layer: L),
+                                 qkv: gdnQKVRaw,
+                                 convWeight: convW.buffer,
+                                 convWeightOffset: Int(convW.offset),
+                                 out: gdnConvOut)
+        }
+        try rotate(&cb, role: "gdn.conv")
+        if !ablated("qknorm") {
         try gdn.encodeQKNorm(commandBuffer: cb, convOut: gdnConvOut)
+        }
+        try rotate(&cb, role: "gdn.qknorm")
+        if !ablated("delta") {
         try gdn.encodeDeltaStepDecode(commandBuffer: cb,
-                                  convOut: gdnConvOut,
-                                  aProj: gdnA,
-                                  bProj: gdnB,
-                                  aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
-                                  dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
-                                  state: gdnState.stateBuffer(layer: L),
-                                  y: gdnY)
+                                      convOut: gdnConvOut,
+                                      aProj: gdnA,
+                                      bProj: gdnB,
+                                      aLog: aLog.buffer, aLogOffset: Int(aLog.offset),
+                                      dtBias: dtBias.buffer, dtBiasOffset: Int(dtBias.offset),
+                                      state: gdnState.stateBuffer(layer: L),
+                                      y: gdnY)
+        }
+        try rotate(&cb, role: "gdn.delta")
+        if !ablated("gatednorm") {
         try gdn.encodeGatedNorm(commandBuffer: cb,
-                            y: gdnY,
-                            z: gdnZ,
-                            weight: gatedNormW.buffer,
-                            weightOffset: Int(gatedNormW.offset),
-                            out: gdnOut)
+                                y: gdnY,
+                                z: gdnZ,
+                                weight: gatedNormW.buffer,
+                                weightOffset: Int(gatedNormW.offset),
+                                out: gdnOut)
+        }
+        try rotate(&cb, role: "gdn.gatednorm")
+        if !ablated("outproj") {
         try encodePrimaryGEMV(commandBuffer: cb,
                     weights: outW.buffer, weightsOffset: Int(outW.offset),
                     scales: outW.buffer, scalesOffset: Int(outW.scaleOffset),
                     biases: outW.buffer, biasesOffset: Int(outW.biasOffset),
                     x: gdnOut, y: oOut, m: D, n: UInt32(la.valueDim))
+        }
+        try rotate(&cb, role: "gdn.outproj")
     }
 
     /// Qwen full attention (attn_output_gate), one decode step: packed
@@ -760,7 +813,7 @@ extension RealForwardRunner {
     /// scratch buffers; splitting them apart again would only re-create the
     /// dispatch this method exists to hold.
     func encodeDecodeAttention(
-        attnCB: MTLCommandBuffer,
+        attnCB: inout MTLCommandBuffer,
         tailCB: MTLCommandBuffer,
         softmaxCB: inout MTLCommandBuffer?,
         layer L: Int,
@@ -779,7 +832,7 @@ extension RealForwardRunner {
         if isLinear {
             // Gated-DeltaNet linear attention: no KV slots, no RoPE — a
             // fixed-size recurrent state updated in place.
-            try encodeLinearAttentionDecode(attnCB, layer: L)
+            try encodeLinearAttentionDecode(&attnCB, layer: L)
         } else if cfg.attnOutputGate {
             // Qwen full attention: packed [query ; gate] q_proj, real
             // v_proj, no V norm, NeoX sub-dim RoPE, sigmoid output gate.

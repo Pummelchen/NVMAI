@@ -1042,6 +1042,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         let end: TimeInterval
     }
     var kernelGPUTimings: [KernelGPUTiming] = []
+    /// Command buffers split out per kernel under NVMAI_KERNEL_SPLIT, awaiting
+    /// their GPU timestamps; drained into `kernelGPUTimings` after the layer's
+    /// tail wait.
+    var splitTimedBuffers: [(role: String, cb: MTLCommandBuffer)] = []
     let kernelGPUTimingsEnabled =
         ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil
     let runnerStatsEnabled =
