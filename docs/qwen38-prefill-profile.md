@@ -150,3 +150,31 @@ If tiling stalls, ANE becomes attractive: the selection is now a fixed 2,048
 keys, which is the dense shape ANE wants, and `export_ane_prefill.py` is
 hardcoded to Qwen 3.6 geometry (`D = 2048`, 40 layers, `FULL_LAYERS =
 range(3, 40, 4)`) and gated to `qwen36` in two places.
+
+## The chunk trade, measured on both widths
+
+Raising the chunk to 4,096 was measured on prefill; it also costs decode,
+because the KV ring is sized from it.
+
+| chunk | 4-bit decode | 8-bit decode |
+| --- | ---: | ---: |
+| 4096 | 6.97 | 2.09 |
+| 2048 | **7.19** | **2.17** |
+| 4096 (repeat) | 7.00 | 2.02 |
+| drift | 0.4% | 3.4% |
+
+Both widths pay ~3-5% of decode for the longer chunk. The expectation was that
+8-bit would not -- it is SSD-bound and runs a smaller cache since the slot fix
+-- so the cost is *not* memory headroom specific to 4-bit, and **the prefill
+chunk does not want a per-width split**. `decodeTuning` already dispatches on
+`(family, weightBits)`; there is simply no evidence for splitting this one.
+
+4,096 stays for both: 56 s of prefill on a 10k prompt against ~2 s from 3% of a
+512-token generation.
+
+**Machine state dwarfs all of it.** The same 4-bit config measured 5.14 tok/s
+during a story benchmark and 6.97-7.19 here -- a 36% swing, an order of
+magnitude larger than any tuning decision on this page. Cross-session absolute
+decode numbers are floors, not capabilities; only interleaved comparisons with
+a drift check carry weight.
+
