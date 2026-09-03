@@ -292,83 +292,16 @@ extension RealForwardRunner {
         var prefillActiveExperts: UInt64 = 0
 
         for L in 0..<cfg.numLayers {
-            try Task.checkCancellation()
-            let prefillLayerStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            model.beginOpeningRoutedExpertStreamer(layer: L)
-            let views = layerViews[L]
-            let isLinear = cfg.layerIsLinear(L)
-            let isFull = cfg.fullAttentionLayerMask[L] == 1
-            let headDim = isFull ? cfg.fullHeadDim : cfg.headDim
-            let numKVHeads = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
-            let qDim = cfg.numHeads * headDim
-            let kvDim = numKVHeads * headDim
-
-            if cfg.ple.layerIndices.contains(L) {
-                try encodePLEPrefill(commandBuffer: cb,
-                                     hidden: scratch.hidden,
-                                     layer: L, tokens: t, eps: eps)
-            }
-            try encodeResidualEntryPrefill(commandBuffer: cb,
-                                           hidden: scratch.hidden,
-                                           norm: views.inputNorm,
-                                           out: scratch.normed,
-                                           sublayer: .attention, layer: L,
-                                           tokens: t, eps: eps)
-            // The indexer caches a key for every prefilled token, in or out
-            // of the dense-exact window: decode crossing the boundary later
-            // must not find holes behind it.
-            let qsaSelection = try encodeQSAPrefill(
-                cb: &cb, blockInput: scratch.normed,
-                layer: L, startPosition: startPosition,
-                tokens: t, eps: eps)
-            if isLinear {
-                try encodeLinearAttentionPrefill(
-                    cb: cb, layer: L, views: views, scratch: scratch,
-                    tokenCount: t, hiddenSize: D,
-                    snapshotGDNAfterFirstToken: snapshotGDNAfterFirstToken,
-                    useTwoRowProjection: useTwoRowProjection)
-            } else if let ane = aneChunk, ane.coveredLayers.contains(L) {
-                try await runANEFullAttentionPrefill(
-                    ane: ane, cb: &cb, layer: L, scratch: scratch,
-                    tokenCount: t, hiddenSize: D,
-                    startPosition: startPosition, kvDim: kvDim)
-            } else {
-                try encodeFullAttentionPrefill(
-                    cb: cb, layer: L, views: views, scratch: scratch,
-                    tokenCount: t, hiddenSize: D, startPosition: startPosition,
-                    isFull: isFull, headDim: headDim, numKVHeads: numKVHeads,
-                    qDim: qDim, kvDim: kvDim, rmsEps: eps,
-                    useTwoRowProjection: useTwoRowProjection,
-                    keepMask: qsaSelection)
-            }
-            // Plain pre-norm residual block: hidden += attention branch,
-            // then one post-attention norm feeds router, shared expert,
-            // and routed phase 1 (routedX doubles as moeX).
-            try encodeResidualExitPrefill(commandBuffer: cb,
-                                          hidden: scratch.hidden,
-                                          delta: scratch.h1,
-                                          sublayer: .attention, layer: L,
-                                          tokens: t)
-            try encodeResidualEntryPrefill(commandBuffer: cb,
-                                           hidden: scratch.hidden,
-                                           norm: views.postAttention,
-                                           out: scratch.routedX,
-                                           sublayer: .mlp, layer: L,
-                                           tokens: t, eps: eps)
-            if pairRoutedMoE, t == 2 {
-                try await encodeRoutedMoEVerifyPair(
-                    cb: &cb, layer: L, views: views, scratch: scratch,
-                    hiddenSize: D)
-            } else {
-                try await encodeRoutedMoEPrefill(
-                    cb: &cb, layer: L, views: views, scratch: scratch,
-                    tokenCount: t, hiddenSize: D,
-                    layerStart: prefillLayerStart,
-                    routeNanos: &prefillRouteNanos,
-                    tileNanos: &prefillTileNanos,
-                    tailNanos: &prefillTailNanos,
-                    activeExperts: &prefillActiveExperts)
-            }
+            try await runPrefillLayer(
+                L, cb: &cb, scratch: scratch, layerViews: layerViews,
+                tokens: tokens, startPosition: startPosition, t: t, D: D,
+                eps: eps, useTwoRowProjection: useTwoRowProjection,
+                snapshotGDNAfterFirstToken: snapshotGDNAfterFirstToken,
+                aneChunk: aneChunk, pairRoutedMoE: pairRoutedMoE,
+                prefillRouteNanos: &prefillRouteNanos,
+                prefillTileNanos: &prefillTileNanos,
+                prefillTailNanos: &prefillTailNanos,
+                prefillActiveExperts: &prefillActiveExperts)
         }
 
         if prefillProfile {
@@ -1478,4 +1411,111 @@ extension RealForwardRunner {
                 }
                 prefillTailNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - prefillTileEnd
     }
+
+    /// One layer's prefill pass over one chunk.
+    ///
+    /// Extracted verbatim from the layer loop so the loops can be inverted:
+    /// layer-major prefill runs this for every chunk of a band before moving
+    /// to the next layer, which is what makes each layer's experts stream once
+    /// instead of once per chunk. Everything here is per (layer, chunk) except
+    /// `scratch.hidden`, which is the residual and therefore the one buffer the
+    /// caller must supply per chunk rather than per pass.
+    private func runPrefillLayer(
+        _ L: Int,
+        cb: inout MTLCommandBuffer,
+        scratch: PrefillChunkScratchBuffers,
+        layerViews: [LayerPrefillQKVViews],
+        tokens: ArraySlice<Int32>,
+        startPosition: Int,
+        t: Int,
+        D: Int,
+        eps: Float,
+        useTwoRowProjection: Bool,
+        snapshotGDNAfterFirstToken: Bool,
+        aneChunk: ANEPrefillAttention?,
+        pairRoutedMoE: Bool,
+        prefillRouteNanos: inout UInt64,
+        prefillTileNanos: inout UInt64,
+        prefillTailNanos: inout UInt64,
+        prefillActiveExperts: inout UInt64
+    ) async throws {
+        try Task.checkCancellation()
+        let prefillLayerStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        model.beginOpeningRoutedExpertStreamer(layer: L)
+        let views = layerViews[L]
+        let isLinear = cfg.layerIsLinear(L)
+        let isFull = cfg.fullAttentionLayerMask[L] == 1
+        let headDim = isFull ? cfg.fullHeadDim : cfg.headDim
+        let numKVHeads = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
+        let qDim = cfg.numHeads * headDim
+        let kvDim = numKVHeads * headDim
+
+        if cfg.ple.layerIndices.contains(L) {
+            try encodePLEPrefill(commandBuffer: cb,
+                                 hidden: scratch.hidden,
+                                 layer: L, tokens: t, eps: eps)
+        }
+        try encodeResidualEntryPrefill(commandBuffer: cb,
+                                       hidden: scratch.hidden,
+                                       norm: views.inputNorm,
+                                       out: scratch.normed,
+                                       sublayer: .attention, layer: L,
+                                       tokens: t, eps: eps)
+        // The indexer caches a key for every prefilled token, in or out
+        // of the dense-exact window: decode crossing the boundary later
+        // must not find holes behind it.
+        let qsaSelection = try encodeQSAPrefill(
+            cb: &cb, blockInput: scratch.normed,
+            layer: L, startPosition: startPosition,
+            tokens: t, eps: eps)
+        if isLinear {
+            try encodeLinearAttentionPrefill(
+                cb: cb, layer: L, views: views, scratch: scratch,
+                tokenCount: t, hiddenSize: D,
+                snapshotGDNAfterFirstToken: snapshotGDNAfterFirstToken,
+                useTwoRowProjection: useTwoRowProjection)
+        } else if let ane = aneChunk, ane.coveredLayers.contains(L) {
+            try await runANEFullAttentionPrefill(
+                ane: ane, cb: &cb, layer: L, scratch: scratch,
+                tokenCount: t, hiddenSize: D,
+                startPosition: startPosition, kvDim: kvDim)
+        } else {
+            try encodeFullAttentionPrefill(
+                cb: cb, layer: L, views: views, scratch: scratch,
+                tokenCount: t, hiddenSize: D, startPosition: startPosition,
+                isFull: isFull, headDim: headDim, numKVHeads: numKVHeads,
+                qDim: qDim, kvDim: kvDim, rmsEps: eps,
+                useTwoRowProjection: useTwoRowProjection,
+                keepMask: qsaSelection)
+        }
+        // Plain pre-norm residual block: hidden += attention branch,
+        // then one post-attention norm feeds router, shared expert,
+        // and routed phase 1 (routedX doubles as moeX).
+        try encodeResidualExitPrefill(commandBuffer: cb,
+                                      hidden: scratch.hidden,
+                                      delta: scratch.h1,
+                                      sublayer: .attention, layer: L,
+                                      tokens: t)
+        try encodeResidualEntryPrefill(commandBuffer: cb,
+                                       hidden: scratch.hidden,
+                                       norm: views.postAttention,
+                                       out: scratch.routedX,
+                                       sublayer: .mlp, layer: L,
+                                       tokens: t, eps: eps)
+        if pairRoutedMoE, t == 2 {
+            try await encodeRoutedMoEVerifyPair(
+                cb: &cb, layer: L, views: views, scratch: scratch,
+                hiddenSize: D)
+        } else {
+            try await encodeRoutedMoEPrefill(
+                cb: &cb, layer: L, views: views, scratch: scratch,
+                tokenCount: t, hiddenSize: D,
+                layerStart: prefillLayerStart,
+                routeNanos: &prefillRouteNanos,
+                tileNanos: &prefillTileNanos,
+                tailNanos: &prefillTailNanos,
+                activeExperts: &prefillActiveExperts)
+        }
+    }
+
 }
