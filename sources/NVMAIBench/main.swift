@@ -152,9 +152,13 @@ struct NVMAIBench {
                                iterations: Int,
                                context: MetalContext) throws {
         let device = context.device
-        let D: UInt32 = 2048   // qwen36_35B_A3B hiddenSize
-        let F: UInt32 = 512    // moeIntermediateSize
-        let topK: UInt32 = 8
+        // Default shape is Qwen 3.6 35B-A3B. NVMAI_BENCH_MOE_SHAPE=qwen38
+        // selects Qwen3.8-Flash-Next's routed expert (D 2560, F 640, top-10),
+        // the shape the decode profile's moe_* numbers come from.
+        let qwen38 = ProcessInfo.processInfo.environment["NVMAI_BENCH_MOE_SHAPE"] == "qwen38"
+        let D: UInt32 = qwen38 ? 2560 : 2048   // hiddenSize
+        let F: UInt32 = qwen38 ? 640 : 512     // moeIntermediateSize
+        let topK: UInt32 = qwen38 ? 10 : 8
         let groupCount = Int(D) / 64   // kMoEGroupSize = 64 elements
 
         // Per-blob 4-bit layout: gate_W, gate_s, gate_b, up_W, up_s, up_b,
@@ -240,7 +244,7 @@ struct NVMAIBench {
             constants: [],
             maxTotalThreadsPerThreadgroup: phase1RowsPerTG * 32)
         let phase2PSO = try context.pipeline(
-            "moe_phase2_down_reduce_k8",
+            topK == 8 ? "moe_phase2_down_reduce_k8" : "moe_phase2_down_reduce_kn",
             constants: [],
             maxTotalThreadsPerThreadgroup: 256)
         let subsetPSO = try context.pipeline(
@@ -417,13 +421,25 @@ struct NVMAIBench {
         case "gdn_inproj_xsh16":
             kernelName2 = "gdn_in_proj_gemv_simd_xsh16"
             rowsPerTG = 16
+        case "gdn_inproj_u4":
+            kernelName2 = "gdn_in_proj_gemv_simd_u4"
+            rowsPerTG = 8
+        case "gdn_inproj_sk4":
+            kernelName2 = "gdn_in_proj_gemv_simd_sk4"
+            rowsPerTG = 2
+        case "gdn_inproj_bw":
+            kernelName2 = "gdn_in_proj_gemv_simd_bw"
+            rowsPerTG = 8
         default:
             kernelName2 = "gdn_in_proj_gemv_simd"
             rowsPerTG = 8
         }
+        // sk4 runs four simdgroups per row, so its threadgroup is wider than
+        // rows * 32.
+        let threadsPerTG = kernelName == "gdn_inproj_sk4" ? 256 : rowsPerTG * 32
         let pso = try context.pipeline(
             kernelName2, constants: [],
-            maxTotalThreadsPerThreadgroup: rowsPerTG * 32)
+            maxTotalThreadsPerThreadgroup: threadsPerTG)
 
         // Full GDN decode chain (gdn_chain): in_proj + conv + qk_norm +
         // delta-step + gated_norm in one command buffer, mirroring the
@@ -485,7 +501,7 @@ struct NVMAIBench {
             enc.setComputePipelineState(pso)
             enc.dispatchThreadgroups(
                 MTLSize(width: (totalRows + rowsPerTG - 1) / rowsPerTG, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: rowsPerTG * 32, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: threadsPerTG, height: 1, depth: 1))
             if chain {
                 // conv: tail(0) qkv(1) convW(2) out(3) channels(4) taps(5)
                 enc.setComputePipelineState(convPSO)

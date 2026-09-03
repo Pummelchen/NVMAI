@@ -56,10 +56,14 @@ final class MoE {
     /// Used when top-k is not 8. The k8 kernel stays the golden path.
     private let routerSelectKNPSO: MTLComputePipelineState
     /// One-simdgroup top-k for k != 8, same order as the serial kernel.
-    /// NVMAI_ROUTER_TOPK_SIMD=1 selects it; off until the golden proves it.
+    /// Default on: both Qwen3.8 goldens are byte-identical with it, and it
+    /// takes the router pair (real + next-layer probe) from 11.0 to 3.8
+    /// ms/token because the serial kernel's insertion sort over 512 logits
+    /// was the router's cost, not the GEMV. NVMAI_ROUTER_TOPK_SIMD=0 restores
+    /// the serial kernel.
     private let routerSelectKNSimdPSO: MTLComputePipelineState?
     private var routerTopKSimd: Bool {
-        ProcessInfo.processInfo.environment["NVMAI_ROUTER_TOPK_SIMD"] == "1"
+        ProcessInfo.processInfo.environment["NVMAI_ROUTER_TOPK_SIMD"] != "0"
     }
     private let residencyClassifyPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer

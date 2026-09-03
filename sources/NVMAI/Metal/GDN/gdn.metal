@@ -862,3 +862,236 @@ kernel void NAME(                                                          \
 GDN_IN_PROJ_VARIANT(gdn_in_proj_gemv_simd_xsh8, 8,  1)
 GDN_IN_PROJ_VARIANT(gdn_in_proj_gemv_simd_r16, 16, 0)
 GDN_IN_PROJ_VARIANT(gdn_in_proj_gemv_simd_xsh16, 16, 1)
+
+// ----------------------------------------------------------------------------
+// Micro-benchmark candidates for the in_proj GEMV (NVMAIBench gdn_inproj_*).
+// The production kernel runs one simdgroup per row with one 4-byte weight
+// load per lane per iteration -- about 40 KB in flight across the whole
+// dispatch, which is what a latency-bound 50 GB/s looks like on a 100 GB/s
+// part. These test the two ways out and the ceiling:
+//   u4  -- same arithmetic, block loop unrolled 4x so four loads are in
+//          flight per lane (bit-exact with the production kernel);
+//   sk4 -- four simdgroups per row, each every 4th block, partials summed in
+//          simdgroup order (changes float association: a candidate, not a
+//          drop-in);
+//   bw  -- reads the rows with 16-byte loads and no dequant, the ceiling for
+//          this access pattern.
+// ----------------------------------------------------------------------------
+static inline void gdn_dequant_int4_gemv_simd_body_u4(
+    device const uint8_t* W, device const bfloat* scales, device const bfloat* biases,
+    device const half* x, device half* y, uint M, uint N,
+    uint rows_per_tg, uint tg_idx, uint sg_idx, uint lane
+) {
+    const uint row = tg_idx * rows_per_tg + sg_idx;
+    if (row >= M) return;
+    const uint n_groups  = N / kGdnGroupSize;
+    const uint row_bytes = N / 2;
+    device const uint8_t* W_row = W      + uint(row) * row_bytes;
+    device const bfloat*  s_row = scales + uint(row) * n_groups;
+    device const bfloat*  b_row = biases + uint(row) * n_groups;
+    float acc = 0.0f;
+    const uint full_blocks = n_groups / 4;
+    #pragma unroll 4
+    for (uint blk = 0; blk < full_blocks; ++blk) {
+        const uint byte_base = blk * 128u + lane * 4u;
+        device const ushort* wp = (device const ushort*)(W_row + byte_base);
+        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
+        const uint g  = blk * 4u + (lane >> 3);
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint elem = byte_base * 2u;
+        const half4 xa = *((device const half4*)(x + elem));
+        const half4 xb = *((device const half4*)(x + elem + 4u));
+        const uint b0 =  w4        & 0xFFu;
+        const uint b1 = (w4 >> 8)  & 0xFFu;
+        const uint b2 = (w4 >> 16) & 0xFFu;
+        const uint b3 = (w4 >> 24) & 0xFFu;
+        const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
+        const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
+        float dot = 0.0f;
+        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
+        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
+        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
+        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
+        const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        acc = fma(s, dot, acc);
+        acc = fma(b, sum, acc);
+    }
+    for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+        const float s = float(s_row[g]);
+        const float b = float(b_row[g]);
+        const uint8_t byte = W_row[g * (kGdnGroupSize / 2) + lane];
+        const float x0 = float(x[g * kGdnGroupSize + lane * 2u]);
+        const float x1 = float(x[g * kGdnGroupSize + lane * 2u + 1u]);
+        float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+        dot = fma(float(uint(byte >> 4)), x1, dot);
+        acc = fma(s, dot, acc);
+        acc = fma(b, x0 + x1, acc);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) y[row] = half(acc);
+}
+
+#define GDN_IN_PROJ_BUFFERS                                                  \
+    device const uint8_t* qkvW     [[buffer(0)]],                            \
+    device const bfloat*  qkvS     [[buffer(1)]],                            \
+    device const bfloat*  qkvB     [[buffer(2)]],                            \
+    device const uint8_t* zW       [[buffer(3)]],                            \
+    device const bfloat*  zS       [[buffer(4)]],                            \
+    device const bfloat*  zB       [[buffer(5)]],                            \
+    device const uint8_t* aW       [[buffer(6)]],                            \
+    device const bfloat*  aS       [[buffer(7)]],                            \
+    device const bfloat*  aB       [[buffer(8)]],                            \
+    device const uint8_t* bW       [[buffer(9)]],                            \
+    device const bfloat*  bS       [[buffer(10)]],                           \
+    device const bfloat*  bB       [[buffer(11)]],                           \
+    device const half*    x        [[buffer(12)]],                           \
+    device half*          qkvY     [[buffer(13)]],                           \
+    device half*          zY       [[buffer(14)]],                           \
+    device half*          aY       [[buffer(15)]],                           \
+    device half*          bY       [[buffer(16)]],                           \
+    constant uint&        qkvRows  [[buffer(17)]],                           \
+    constant uint&        zRows    [[buffer(18)]],                           \
+    constant uint&        abRows   [[buffer(19)]],                           \
+    constant uint&        N        [[buffer(20)]]
+
+// Slot selection shared by the candidates; mirrors gdn_in_proj_gemv_simd.
+#define GDN_IN_PROJ_SELECT(global_row)                                       \
+    device const uint8_t* W; device const bfloat* scales;                    \
+    device const bfloat* biases; device half* y; uint local_row; uint M;     \
+    if (global_row < QKV) {                                                  \
+        W = qkvW; scales = qkvS; biases = qkvB; y = qkvY;                    \
+        local_row = global_row; M = QKV;                                     \
+    } else if (global_row < QKV + Z) {                                       \
+        W = zW; scales = zS; biases = zB; y = zY;                            \
+        local_row = global_row - QKV; M = Z;                                 \
+    } else if (global_row < QKV + Z + AB) {                                  \
+        W = aW; scales = aS; biases = aB; y = aY;                            \
+        local_row = global_row - QKV - Z; M = AB;                            \
+    } else {                                                                 \
+        W = bW; scales = bS; biases = bB; y = bY;                            \
+        local_row = global_row - QKV - Z - AB; M = AB;                       \
+    }
+
+kernel void gdn_in_proj_gemv_simd_u4(
+    GDN_IN_PROJ_BUFFERS,
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint QKV = gdn_in_fc_qkv(qkvRows);
+    const uint Z   = gdn_in_fc_z(zRows);
+    const uint AB  = gdn_in_fc_ab(abRows);
+    const uint NN  = gdn_in_fc_n(N);
+    const uint global_row = tg_idx * rows_per_tg + sg_idx;
+    if (global_row >= QKV + Z + 2u * AB) return;
+    GDN_IN_PROJ_SELECT(global_row)
+    if (global_row >= QKV + Z && gdn_ab_bf16()) {
+        gdn_bf16_gemv_body((device const bfloat*)W, x, y, NN, local_row, lane);
+        return;
+    }
+    gdn_dequant_int4_gemv_simd_body_u4(W, scales, biases, x, y, M, NN,
+                                       1u, local_row, 0u, lane);
+}
+
+kernel void gdn_in_proj_gemv_simd_sk4(
+    GDN_IN_PROJ_BUFFERS,
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]]
+) {
+    threadgroup float partial[8];
+    constexpr uint rows_per_tg = 2, sg_per_row = 4;
+    const uint QKV = gdn_in_fc_qkv(qkvRows);
+    const uint Z   = gdn_in_fc_z(zRows);
+    const uint AB  = gdn_in_fc_ab(abRows);
+    const uint NN  = gdn_in_fc_n(N);
+    const uint total = QKV + Z + 2u * AB;
+    const uint row_in_tg = sg_idx / sg_per_row;
+    const uint part = sg_idx - row_in_tg * sg_per_row;
+    const uint global_row = min(tg_idx * rows_per_tg + row_in_tg, total - 1u);
+    const bool valid = tg_idx * rows_per_tg + row_in_tg < total;
+    GDN_IN_PROJ_SELECT(global_row)
+    const bool bf16_row = global_row >= QKV + Z && gdn_ab_bf16();
+    float acc = 0.0f;
+    if (valid && bf16_row) {
+        if (part == 0) gdn_bf16_gemv_body((device const bfloat*)W, x, y, NN, local_row, lane);
+    } else if (valid) {
+        const uint n_groups  = NN / kGdnGroupSize;
+        const uint row_bytes = NN / 2;
+        device const uint8_t* W_row = W      + uint(local_row) * row_bytes;
+        device const bfloat*  s_row = scales + uint(local_row) * n_groups;
+        device const bfloat*  b_row = biases + uint(local_row) * n_groups;
+        const uint full_blocks = n_groups / 4;
+        for (uint blk = part; blk < full_blocks; blk += sg_per_row) {
+            const uint byte_base = blk * 128u + lane * 4u;
+            device const ushort* wp = (device const ushort*)(W_row + byte_base);
+            const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
+            const uint g  = blk * 4u + (lane >> 3);
+            const float s = float(s_row[g]);
+            const float b = float(b_row[g]);
+            const uint elem = byte_base * 2u;
+            const half4 xa = *((device const half4*)(x + elem));
+            const half4 xb = *((device const half4*)(x + elem + 4u));
+            const uint b0 =  w4        & 0xFFu;
+            const uint b1 = (w4 >> 8)  & 0xFFu;
+            const uint b2 = (w4 >> 16) & 0xFFu;
+            const uint b3 = (w4 >> 24) & 0xFFu;
+            const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
+            const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
+            float dot = 0.0f;
+            dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
+            dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
+            dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
+            dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
+            const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+            acc = fma(s, dot, acc);
+            acc = fma(b, sum, acc);
+        }
+        if (part == 0) {
+            for (uint g = full_blocks * 4u; g < n_groups; ++g) {
+                const float s = float(s_row[g]);
+                const float b = float(b_row[g]);
+                const uint8_t byte = W_row[g * (kGdnGroupSize / 2) + lane];
+                const float x0 = float(x[g * kGdnGroupSize + lane * 2u]);
+                const float x1 = float(x[g * kGdnGroupSize + lane * 2u + 1u]);
+                float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+                dot = fma(float(uint(byte >> 4)), x1, dot);
+                acc = fma(s, dot, acc);
+                acc = fma(b, x0 + x1, acc);
+            }
+        }
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) partial[sg_idx] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (valid && !bf16_row && part == 0 && lane == 0) {
+        const uint base = row_in_tg * sg_per_row;
+        const float t = ((partial[base] + partial[base + 1u]) + partial[base + 2u]) + partial[base + 3u];
+        y[local_row] = half(t);
+    }
+}
+
+kernel void gdn_in_proj_gemv_simd_bw(
+    GDN_IN_PROJ_BUFFERS,
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 8;
+    const uint QKV = gdn_in_fc_qkv(qkvRows);
+    const uint Z   = gdn_in_fc_z(zRows);
+    const uint AB  = gdn_in_fc_ab(abRows);
+    const uint NN  = gdn_in_fc_n(N);
+    const uint global_row = tg_idx * rows_per_tg + sg_idx;
+    if (global_row >= QKV + Z + 2u * AB) return;
+    GDN_IN_PROJ_SELECT(global_row)
+    const uint row_bytes = NN / 2;
+    device const uint4* W_row = (device const uint4*)(W + uint(local_row) * row_bytes);
+    const uint n16 = row_bytes / 16u;
+    uint4 acc = uint4(0u);
+    for (uint i = lane; i < n16; i += 32u) acc ^= W_row[i];
+    const uint v = simd_sum(acc.x ^ acc.y ^ acc.z ^ acc.w);
+    if (lane == 0) y[local_row] = half(float(v & 0xFFu) * float(scales[0]) + float(biases[0]) * float(M));
+}
