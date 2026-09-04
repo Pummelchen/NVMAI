@@ -87,36 +87,16 @@ one discarded warmup, on an idle machine, at the shipped defaults for that
 model -- nothing is pinned for the benchmark that a user would not get.
 
 
-**Qwen 3.6 35B-A3B**
-
-| Quantization | Peak decode |
-| --- | ---: |
-| 4-bit | **23.28 tok/s** |
-| 8-bit | **12.72 tok/s** |
-
-
-**Ornith 1.5 35B-A3B**
-
-| Quantization | Peak decode |
-| --- | ---: |
-| 4-bit | **22.65 tok/s** |
-| 8-bit | **11.89 tok/s** |
-
-
-**Qwen3.8-Flash-Next 125B-A6B**
-
-| Quantization | Peak decode |
-| --- | ---: |
-| 4-bit | **5.25 tok/s** |
-| 8-bit | **2.03 tok/s** |
-
-
-**Qwen-AgentWorld 35B-A3B**
-
-| Quantization | Peak decode |
-| --- | ---: |
-| 4-bit | **18.57 tok/s** |
-| 8-bit | **9.46 tok/s** |
+| Model | Quantization | Peak decode |
+| --- | --- | ---: |
+| Qwen 3.6 35B-A3B | 4-bit | **23.28 tok/s** |
+| Ornith 1.5 35B-A3B | 4-bit | **22.65 tok/s** |
+| Qwen-AgentWorld 35B-A3B | 4-bit | **18.57 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.25 tok/s** |
+| Qwen 3.6 35B-A3B | 8-bit | **12.72 tok/s** |
+| Ornith 1.5 35B-A3B | 8-bit | **11.89 tok/s** |
+| Qwen-AgentWorld 35B-A3B | 8-bit | **9.46 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.03 tok/s** |
 
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
