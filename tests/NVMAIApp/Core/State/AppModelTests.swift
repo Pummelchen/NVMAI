@@ -281,7 +281,12 @@ import Testing
 
     @MainActor
     @Test func changingModelPathInvalidatesLoadedStateAndDiagnostics() {
-        let model = AppModel(client: MockInferenceClient())
+        // A mock installer, so the readiness label does not depend on the
+        // host's free disk space (the real probe reports "Not enough
+        // storage" on a machine that is nearly full).
+        let installer = MockModelInstallerClient(requirement: AppModelInstallRequirement(
+            probePath: "/volume", requiredBytes: 1, availableBytes: 2))
+        let model = AppModel(client: MockInferenceClient(), installer: installer)
         let oldURL = FileManager.default.temporaryDirectory.appendingPathComponent("old.gturbo")
         let newURL = FileManager.default.temporaryDirectory.appendingPathComponent("new.gturbo")
         model.modelPathText = oldURL.path
