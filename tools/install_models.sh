@@ -171,8 +171,15 @@ install_one() {
         local src=.build/ornith-mtp-src rev=e4dfb35a93d4b6822a811a7676f3488514abe7e2
         local base="https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B/resolve/$rev"
         mkdir -p "$src"
+        # A file is trusted only at the size the server reports; a partial
+        # left by an interrupted run is resumed, not skipped.
         for f in config.json model.safetensors.index.json model-00016-of-00016.safetensors; do
-          [[ -f "$src/$f" ]] || curl -fL --retry 5 -C - -o "$src/$f" "$base/$f" || return 1
+          local want have
+          want=$(curl -sIL --retry 5 "$base/$f" | grep -i '^content-length:' | tail -1 | tr -dc '0-9')
+          have=$(stat -f %z "$src/$f" 2>/dev/null || echo 0)
+          if [[ -z "$want" || "$have" != "$want" ]]; then
+            curl -fL --retry 20 --retry-delay 15 --retry-all-errors -C - -o "$src/$f" "$base/$f" || return 1
+          fi
         done
         if [[ ! -f ".build/ornith-mtp-affine/model.safetensors.index.json" ]]; then
           echo "converting $name -> .build/ornith-mtp-affine"
