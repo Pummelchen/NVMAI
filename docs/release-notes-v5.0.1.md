@@ -64,6 +64,8 @@ Measured on Qwen 3.6 4-bit, the same build with a 4-bit head decodes at
 | Qwen-AgentWorld 35B-A3B | 4-bit | 11.94 tok/s | **18.57 tok/s** |
 | Qwen-AgentWorld 35B-A3B | 8-bit | 8.41 tok/s | **9.46 tok/s** |
 | Qwen3.8-Flash-Next 125B-A6B | 4-bit | 5.25 tok/s | **5.05 tok/s** (unchanged within noise) |
+| Ornith 1.5 35B-A3B | 4-bit | 22.65 (mlx-community build, Aug 30) | **19.24 tok/s** (bf16-sourced build) |
+| Ornith 1.5 35B-A3B | 8-bit | 11.89 (mlx-community build, Aug 30) | **9.72 tok/s** |
 
 ### Checksum
 
