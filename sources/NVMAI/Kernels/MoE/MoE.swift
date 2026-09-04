@@ -246,17 +246,22 @@ final class MoE {
         guard let selector = commandBuffer.makeComputeCommandEncoder() else {
             throw MetalError.commandEncoderFailed
         }
+        // The one-simdgroup selector serves every k, k == 8 included: the k8
+        // kernel is the same single-thread insertion sort, and the simd
+        // kernel reproduces its order exactly (checked byte-identical on the
+        // AgentWorld goldens, top-8 over 256 experts).
+        let simdSelect = routerTopKSimd && expertCount <= 1024 && routerSelectKNSimdPSO != nil
         selector.setComputePipelineState(
-            maxStreamedExperts == 8
-                ? (useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
-                : ((routerTopKSimd && expertCount <= 1024)
-                    ? (routerSelectKNSimdPSO ?? routerSelectKNPSO) : routerSelectKNPSO))
+            simdSelect ? routerSelectKNSimdPSO!
+                : maxStreamedExperts == 8
+                    ? (useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
+                    : routerSelectKNPSO)
         selector.setBuffer(routerLogits, offset: 0, index: 0)
         selector.setBuffer(perExpertScale, offset: perExpertScaleOffset, index: 1)
         selector.setBuffer(outIndices, offset: 0, index: 2)
         selector.setBuffer(outWeights, offset: 0, index: 3)
         selector.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
-        if maxStreamedExperts != 8 {
+        if maxStreamedExperts != 8 || simdSelect {
             var k = UInt32(maxStreamedExperts)
             selector.setBytes(&k, length: MemoryLayout<UInt32>.stride, index: 5)
         }
