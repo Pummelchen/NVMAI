@@ -24,6 +24,20 @@ both widths, with the router, the scalar shared-expert gate, the DeltaNet
 gating projections and every norm kept at bf16. Goldens `agentworld-4` and
 `agentworld-8` pin both installs and gate releases.
 
+### Every install from its own bf16 release
+
+`tools/install_models.sh` no longer repacks any third-party quantization.
+Ornith 1.5, Qwen 3.6 and AgentWorld go through one converter
+(`tools/prepare_agentworld.py --model {ornith15,qwen36,agentworld}`, both
+widths from one ~70 GB download); Qwen 3.8 through its own; the three draft
+heads from the same originals (Qwen 3.6's through the converter's new
+`--draft-head` mode). In every build the router, the scalar shared-expert
+gate, the DeltaNet gating projections and every norm stay at bf16. The
+Qwen 3.6 rows below are from that build, not from mlx-community's. The
+Qwen 3.6 draft head built the same way pairs with its target (75%
+acceptance, 1.75 tokens per verify pass) and, like every draft head here,
+stays off by default because the verify pass costs more than it returns.
+
 ### Also in this release
 
 - Top-8 routing now uses the one-simdgroup selector too (byte-identical,
@@ -38,7 +52,8 @@ gating projections and every norm kept at bf16. Goldens `agentworld-4` and
 
 | Model | Quantization | 5.0 | 5.0.1 |
 | --- | --- | ---: | ---: |
-| Qwen 3.6 35B-A3B | 4-bit | 6.67 tok/s | **22.30 tok/s** |
+| Qwen 3.6 35B-A3B | 4-bit | 6.67 tok/s | **19.21 tok/s** (bf16-sourced build; 22.30 on the mlx-community build) |
+| Qwen 3.6 35B-A3B | 8-bit | n/a | **9.73 tok/s** |
 | Qwen-AgentWorld 35B-A3B | 4-bit | 11.94 tok/s | **18.57 tok/s** |
 | Qwen-AgentWorld 35B-A3B | 8-bit | 8.41 tok/s | **9.46 tok/s** |
 | Qwen3.8-Flash-Next 125B-A6B | 4-bit | 5.25 tok/s | **5.05 tok/s** (unchanged within noise) |
