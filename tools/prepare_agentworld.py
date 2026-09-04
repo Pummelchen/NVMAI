@@ -259,18 +259,23 @@ def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
 # --- transport ---------------------------------------------------------------
 
 
+# Small fetches retry like the shard download does; a single TLS hiccup on
+# the index fetch ended one 70 GB build before it started.
+RETRY = ["--retry", "5", "--retry-delay", "5", "--retry-all-errors"]
+
+
 def fetch_json(remote: str) -> dict:
-    raw = subprocess.run(["curl", "-sfL", "--max-time", "120", f"{BASE}/{remote}"],
+    raw = subprocess.run(["curl", "-sfL", "--max-time", "120", *RETRY, f"{BASE}/{remote}"],
                          capture_output=True, check=True).stdout
     return json.loads(raw)
 
 
 def fetch_header(shard: str) -> dict:
     url = f"{BASE}/{shard}"
-    raw = subprocess.run(["curl", "-sfL", "--max-time", "60", "-r", "0-7", url],
+    raw = subprocess.run(["curl", "-sfL", "--max-time", "60", *RETRY, "-r", "0-7", url],
                          capture_output=True, check=True).stdout
     size = struct.unpack("<Q", raw[:8])[0]
-    body = subprocess.run(["curl", "-sfL", "--max-time", "180", "-r", f"8-{8 + size - 1}", url],
+    body = subprocess.run(["curl", "-sfL", "--max-time", "180", *RETRY, "-r", f"8-{8 + size - 1}", url],
                           capture_output=True, check=True).stdout
     return json.loads(body)
 
@@ -311,7 +316,7 @@ def stop_download() -> None:
 
 def fetch_tokenizer(out: Path) -> None:
     for name, required in TOKENIZER_FILES:
-        result = subprocess.run(["curl", "-sfL", "--max-time", "300", f"{BASE}/{name}"],
+        result = subprocess.run(["curl", "-sfL", "--max-time", "300", *RETRY, f"{BASE}/{name}"],
                                 capture_output=True)
         if result.returncode != 0 or not result.stdout:
             if required:
