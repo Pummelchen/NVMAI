@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import struct
 import subprocess
 import sys
@@ -490,6 +491,11 @@ def main() -> int:
                 return
         queue.put(None)
 
+    # SIGTERM (pkill, a parent script dying) is not an exception in Python:
+    # without this the curl child outlives the converter and keeps writing
+    # a shard the next run resumes. Turn it into one so the except below
+    # stops the download.
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(143)))
     threading.Thread(target=fetcher, daemon=True).start()
     done = 0
     try:
