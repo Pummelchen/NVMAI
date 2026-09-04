@@ -115,8 +115,8 @@ model -- nothing is pinned for the benchmark that a user would not get.
 
 | Quantization | Peak decode |
 | --- | ---: |
-| 4-bit | testing |
-| 8-bit | testing |
+| 4-bit | **18.57 tok/s** |
+| 8-bit | **9.46 tok/s** |
 
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
@@ -125,7 +125,8 @@ measured 2026-08-30; the 4-bit ones are medians of seven runs and the 8-bit
 ones of three. The Qwen3.8-Flash-Next rows were re-measured 2026-09-04 on the
 story-generation prompt at that family's shipped defaults (temperature `1.0`,
 Top-P `0.95`): the 4-bit row is the median of three runs, the 8-bit row a
-single run.
+single run. The Qwen-AgentWorld rows are from the same day and prompt at the
+35B defaults, medians of three (4-bit) and two (8-bit) runs.
 
 Qwen-AgentWorld is Qwen's agentic fine-tune of the 35B-A3B geometry, built
 by `tools/install_models.sh agentworld` straight from Qwen's bf16 release
