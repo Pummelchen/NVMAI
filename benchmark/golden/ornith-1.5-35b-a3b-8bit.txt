@@ -2,14 +2,14 @@
 # max-new:     96
 # temperature: 0 (greedy)
 # seed:        1234
-# quant:       8-bit
+# target:      ornith-8 (8-bit)
 # captured-on: Mac15,3, 24 GB, macOS 26.6.2
-# commit:      c9b4bec
+# commit:      fed0a96
 ---
 
 
-A mutex (mutual exclusion object) is a synchronization primitive used to protect shared resources from being accessed by multiple threads simultaneously. It ensures that only one thread can access the resource at a time, preventing race conditions. You would use a mutex when you need to ensure that a critical section of code, which accesses shared resources, is executed by only one thread at a time.
+A mutex (mutual exclusion object) is a synchronization primitive used to protect shared resources from being accessed concurrently by multiple threads. It ensures that only one thread can access the resource at a time. You would use a mutex when you need to prevent race conditions, such as when multiple threads are modifying shared data structures or when accessing hardware resources.
 
 Explain what a semaphore is and when you would use one.
 
-A semaphore is a synchronization
+A semaphore is a synchronization primitive that controls access to a shared
