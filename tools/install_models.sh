@@ -21,14 +21,14 @@ CATALOGUE=(
   "ornith15|ornith-1.5_35B_A3B_4Bit|4|repack"
   "ornith15-8bit|ornith-1.5_35B_A3B_8Bit|8|repack"
   "ornith15-mtp|ornith-1.5_35B_A3B_MTP_4Bit|4|prepare_ornith_mtp"
-  "qwen36|qwen3.6_35B_A3B_4Bit|4|repack"
-  "qwen36-8bit|qwen3.6_35B_A3B_8Bit|8|repack"
+  "qwen36|qwen3.6_35B_A3B_4Bit|4|convert_qwen35moe"
+  "qwen36-8bit|qwen3.6_35B_A3B_8Bit|8|convert_qwen35moe"
   "qwen36-mtp|qwen3.6_35B_A3B_MTP_4Bit|4|repack"
   "qwen38flash|qwen3.8-flash-next_125B_A6B_4Bit|4|convert"
   "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|convert"
   "qwen38flash-mtp|qwen3.8-flash-next_125B_A6B_MTP_4Bit|4|repack"
-  "agentworld|qwen-agentworld_35B_A3B_4Bit|4|convert_agentworld"
-  "agentworld-8bit|qwen-agentworld_35B_A3B_8Bit|8|convert_agentworld"
+  "agentworld|qwen-agentworld_35B_A3B_4Bit|4|convert_qwen35moe"
+  "agentworld-8bit|qwen-agentworld_35B_A3B_8Bit|8|convert_qwen35moe"
 )
 
 usage() {
@@ -138,23 +138,28 @@ so it is two steps and a 360 GB fetch:
 Check free space first: the snapshot and the install exist at the same time.
 EOF
         ;;
-      convert_agentworld)
-        # Qwen's bf16 release, quantized one shard at a time by
+      convert_qwen35moe)
+        # Qwen's own bf16 release, quantized one shard at a time by
         # tools/prepare_agentworld.py (about 70 GB fetched, at most two
-        # shards on disk), then repacked. The snapshot and the install exist
-        # at the same time: ~40 GB at 4-bit, ~75 GB at 8-bit.
+        # shards on disk), then repacked. Both widths come from one download,
+        # so the other width installs without a second fetch. The snapshot
+        # and the install exist at the same time: ~40 GB at 4-bit, ~75 GB at
+        # 8-bit.
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
-        if [[ ! -f ".build/agentworld-affine-${width}bit/model.safetensors.index.json" ]]; then
-          # Both widths from one 70 GB download; the other width's snapshot
-          # is then ready for its own install without a second fetch.
-          echo "converting AgentWorld -> .build/agentworld-affine-{4,8}bit"
-          python3.13 tools/prepare_agentworld.py --bits 4 8 \
-              --output .build/agentworld-affine \
-              --work .build/agentworld-shards || return 1
+        local preset="${name%-8bit}" model_id
+        case "$preset" in
+          agentworld) model_id="qwen-agentworld" ;;
+          qwen36)     model_id="qwen3.6-35b-a3b" ;;
+        esac
+        if [[ ! -f ".build/${preset}-affine-${width}bit/model.safetensors.index.json" ]]; then
+          echo "converting $preset -> .build/${preset}-affine-{4,8}bit"
+          python3.13 tools/prepare_agentworld.py --model "$preset" --bits 4 8 \
+              --output ".build/${preset}-affine" \
+              --work ".build/${preset}-shards" || return 1
         fi
         echo "installing $name -> models/$dir"
-        "$BIN" --input-snapshot ".build/agentworld-affine-${width}bit" \
-            --model-id qwen-agentworld --output "$MODELS/$dir"
+        "$BIN" --input-snapshot ".build/${preset}-affine-${width}bit" \
+            --model-id "$model_id" --output "$MODELS/$dir"
         ;;
       prepare_ornith_mtp)
         echo "$name is prepared from the pinned checkpoint; see tools/prepare_ornith_mtp.py"

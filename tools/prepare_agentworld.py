@@ -1,6 +1,6 @@
 #!/usr/bin/env python3.13
-"""Convert Qwen/Qwen-AgentWorld-35B-A3B from its bf16 release into the affine
-4-bit or 8-bit snapshot NVMAIRepack installs.
+"""Convert a Qwen3.5-MoE 35B-A3B release (Qwen-AgentWorld, Qwen3.6) from its
+bf16 checkpoint into the affine 4-bit or 8-bit snapshot NVMAIRepack installs.
 
 AgentWorld's text model is the Qwen3.5-MoE 35B-A3B geometry this runtime
 already runs as the `qwen36` family (2048 hidden, 40 layers, 256 experts at
@@ -51,11 +51,22 @@ except ImportError as exc:  # pragma: no cover - environment, not logic
     sys.exit(f"missing dependency: {exc}\n"
              "  python3.13 -m pip install safetensors numpy ml_dtypes")
 
-REPO = "Qwen/Qwen-AgentWorld-35B-A3B"
-# Pinned: the install receipt records the source, and a moved `main` must
-# not silently change what "AgentWorld 4-bit" means.
-COMMIT = "60d2b0434a53d2e62a7c00a489586815d94ebffb"
+# Every Qwen3.5-MoE 35B-A3B release this converter builds. Pinned commits:
+# the install receipt records the source, and a moved `main` must not
+# silently change what "AgentWorld 4-bit" means.
+MODELS = {
+    "agentworld": ("Qwen/Qwen-AgentWorld-35B-A3B", "60d2b0434a53d2e62a7c00a489586815d94ebffb"),
+    "qwen36":     ("Qwen/Qwen3.6-35B-A3B",         "995ad96eacd98c81ed38be0c5b274b04031597b0"),
+}
+REPO = MODELS["agentworld"][0]
+COMMIT = MODELS["agentworld"][1]
 BASE = f"https://huggingface.co/{REPO}/resolve/{COMMIT}"
+
+
+def select_model(name: str) -> None:
+    global REPO, COMMIT, BASE
+    REPO, COMMIT = MODELS[name]
+    BASE = f"https://huggingface.co/{REPO}/resolve/{COMMIT}"
 GROUP_SIZE = 64
 BITS_4, BITS_8 = 4, 8
 OUTPUT_SHARD_BYTES = 4 << 30
@@ -105,6 +116,12 @@ def quantize_affine(value: np.ndarray, bits: int) -> tuple[np.ndarray, ...]:
 
 
 # --- naming ------------------------------------------------------------------
+
+
+def skipped(name: str) -> bool:
+    """The vision tower and the MTP draft head ride in Qwen3.6's index; the
+    text model is what this snapshot is."""
+    return name.startswith("model.visual.") or name.startswith("mtp.")
 
 
 def rename(name: str) -> str:
@@ -323,6 +340,8 @@ def convert_shard(path: Path, writers: dict[int, OutputWriter]) -> None:
     """One source shard into every requested width; the tensor is read once."""
     with safe_open(path, framework="np") as src:
         for name in src.keys():
+            if skipped(name):
+                continue
             value = src.get_tensor(name)
             for out_name, _ in outputs_for(name, list(value.shape)):
                 if out_name.endswith("switch_mlp.gate_proj.weight"):
@@ -347,14 +366,14 @@ def convert_shard(path: Path, writers: dict[int, OutputWriter]) -> None:
 def plan(index: dict, width: int) -> None:
     """Every tensor's fate, from the index alone. Checks group alignment."""
     wm = index["weight_map"]
-    shards = sorted(set(wm.values()))
+    shards = sorted({s for n, s in wm.items() if not skipped(n)})
     headers = {s: fetch_header(s) for s in shards}
     counts: dict[str, int] = {}
     bf16_bytes = 0
     total_out = 0
     for shard, header in headers.items():
         for name, meta in header.items():
-            if name == "__metadata__":
+            if name == "__metadata__" or skipped(name):
                 continue
             for out_name, out_shape in outputs_for(name, meta["shape"]):
                 bits = quant_bits(out_name, width)
@@ -379,6 +398,8 @@ def plan(index: dict, width: int) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--model", choices=sorted(MODELS), default="agentworld",
+                    help="which release to convert (pinned repo and commit)")
     ap.add_argument("--plan", action="store_true", help="classify from the index, download nothing")
     ap.add_argument("--bits", type=int, choices=(4, 8), nargs="+", default=[4],
                     help="one width, or both to write two snapshots from one download")
@@ -386,6 +407,7 @@ def main() -> int:
                     help="snapshot directory; with two widths, a prefix that gets -4bit/-8bit")
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
     args = ap.parse_args()
+    select_model(args.model)
 
     config = fetch_json("config.json")
     if config.get("model_type") != "qwen3_5_moe":
@@ -400,7 +422,8 @@ def main() -> int:
         ap.error("--output and --work are required unless --plan")
     work = args.work
     work.mkdir(parents=True, exist_ok=True)
-    shards = sorted(set(index["weight_map"].values()))
+    # Shards that carry only skipped tensors (vision, MTP) are not fetched.
+    shards = sorted({s for n, s in index["weight_map"].items() if not skipped(n)})
     if len(widths) == 1:
         outputs = {widths[0]: args.output}
     else:
