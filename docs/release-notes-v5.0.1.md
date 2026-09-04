@@ -38,6 +38,13 @@ Qwen 3.6 draft head built the same way pairs with its target (75%
 acceptance, 1.75 tokens per verify pass) and, like every draft head here,
 stays off by default because the verify pass costs more than it returns.
 
+The one quantity these builds give up against the mlx-community ones is
+speed on the 35B 4-bit installs, and it is entirely the head: mlx-community
+quantized the embedding and lm_head at 4-bit, NVMAI keeps them at 8-bit.
+Measured on Qwen 3.6 4-bit, the same build with a 4-bit head decodes at
+23.0 tok/s against 19.2. 8-bit stays the default for quality; the converter's
+`--head-bits 4` is there for anyone who wants the 20% back.
+
 ### Also in this release
 
 - Top-8 routing now uses the one-simdgroup selector too (byte-identical,
