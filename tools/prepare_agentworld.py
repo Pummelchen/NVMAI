@@ -57,6 +57,7 @@ except ImportError as exc:  # pragma: no cover - environment, not logic
 MODELS = {
     "agentworld": ("Qwen/Qwen-AgentWorld-35B-A3B", "60d2b0434a53d2e62a7c00a489586815d94ebffb"),
     "qwen36":     ("Qwen/Qwen3.6-35B-A3B",         "995ad96eacd98c81ed38be0c5b274b04031597b0"),
+    "ornith15":   ("ornith-ai/Ornith-1.5-35B-A3B",  "10fbf86fed7ecee4a061f8b499a618f46001cac1"),
 }
 REPO = MODELS["agentworld"][0]
 COMMIT = MODELS["agentworld"][1]
@@ -118,14 +119,33 @@ def quantize_affine(value: np.ndarray, bits: int) -> tuple[np.ndarray, ...]:
 # --- naming ------------------------------------------------------------------
 
 
+DRAFT_HEAD = False   # --draft-head: convert only the `mtp.*` namespace
+
+
+def is_draft_norm(name: str) -> bool:
+    """Every norm in the draft head (the layer norms, q/k norms, `norm`, and
+    `pre_fc_norm_embedding` / `pre_fc_norm_hidden`, whose names do not end
+    in `norm`) is zero-centred and kept at bf16."""
+    stem = name[: -len(".weight")] if name.endswith(".weight") else name
+    return "norm" in stem.rsplit(".", 1)[-1]
+
+
 def skipped(name: str) -> bool:
     """The vision tower and the MTP draft head ride in Qwen3.6's index; the
-    text model is what this snapshot is."""
+    text model is what this snapshot is -- unless the draft head is."""
+    if DRAFT_HEAD:
+        return not name.startswith("mtp.")
     return name.startswith("model.visual.") or name.startswith("mtp.")
 
 
 def rename(name: str) -> str:
     """Checkpoint name -> the MLX spelling the qwen36 family is repacked from."""
+    if DRAFT_HEAD:
+        # The qwen36 MTP sidecar is its own one-layer model: `mtp.` stripped,
+        # nothing else, matching prepare_ornith_mtp.py's output.
+        if name.startswith("mtp."):
+            return name[len("mtp."):]
+        raise ValueError(f"unexpected tensor outside the draft head: {name}")
     if name == "lm_head.weight":
         return "language_model.lm_head.weight"
     prefix = "model.language_model."
@@ -151,6 +171,10 @@ UNIT_OFFSET_NORM_SUFFIXES = (
 
 def fold_unit_offset(out_name: str, value: np.ndarray) -> np.ndarray:
     stem = out_name[: -len(".weight")] if out_name.endswith(".weight") else out_name
+    # The draft head has no gated norm; every norm in it is zero-centred
+    # (pre_fc_norm_embedding, pre_fc_norm_hidden, the layer norms, norm).
+    if DRAFT_HEAD and is_draft_norm(out_name):
+        return (value.astype(np.float32) + 1.0).astype(value.dtype)
     if stem.endswith(UNIT_OFFSET_NORM_SUFFIXES):
         return (value.astype(np.float32) + 1.0).astype(value.dtype)
     return value
@@ -182,6 +206,12 @@ def quant_bits(name: str, width: int) -> int | None:
         return None                                   # A_log, dt_bias
     if name.endswith("conv1d.weight") or name.endswith("norm.weight"):
         return None
+    if DRAFT_HEAD and is_draft_norm(name):
+        return None
+    if DRAFT_HEAD:
+        # Same policy as the Ornith draft: every weight at the build width,
+        # norms bf16. The MTP loader sizes every slot from the base width.
+        return width
     if kept_bf16(name):
         return None
     if name.endswith("embed_tokens.weight") or name.endswith("lm_head.weight"):
@@ -215,6 +245,9 @@ def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
             continue
         overrides[name[: -len(".weight")]] = {"bits": bits, "group_size": GROUP_SIZE}
     config = dict(config)
+    if DRAFT_HEAD:
+        config["model_type"] = "qwen3_5_mtp"
+        config["architectures"] = ["Qwen3_5MoeMTP"]
     config["quantization"] = {
         "bits": width, "group_size": GROUP_SIZE, "mode": "affine", **overrides,
     }
@@ -400,6 +433,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=sorted(MODELS), default="agentworld",
                     help="which release to convert (pinned repo and commit)")
+    ap.add_argument("--draft-head", action="store_true",
+                    help="convert the mtp.* draft head only, as a qwen3_5_mtp sidecar snapshot")
     ap.add_argument("--plan", action="store_true", help="classify from the index, download nothing")
     ap.add_argument("--bits", type=int, choices=(4, 8), nargs="+", default=[4],
                     help="one width, or both to write two snapshots from one download")
@@ -408,6 +443,8 @@ def main() -> int:
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
     args = ap.parse_args()
     select_model(args.model)
+    global DRAFT_HEAD
+    DRAFT_HEAD = args.draft_head
 
     config = fetch_json("config.json")
     if config.get("model_type") != "qwen3_5_moe":
@@ -463,8 +500,9 @@ def main() -> int:
         out = outputs[width]
         writer.finish()
         write_config(config, out, writer.index.keys(), width)
-        print(f"tokenizer ({width}-bit):")
-        fetch_tokenizer(out)
+        if not DRAFT_HEAD:            # a draft is prompted through its target's tokenizer
+            print(f"tokenizer ({width}-bit):")
+            fetch_tokenizer(out)
         print(f"\naffine snapshot written to {out}")
         print(f"  {writer.shard_no} shards, {writer.total / 1e9:.1f} GB")
     return 0
