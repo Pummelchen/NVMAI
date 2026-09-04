@@ -1,0 +1,385 @@
+#!/usr/bin/env python3.13
+"""Convert Qwen/Qwen-AgentWorld-35B-A3B from its bf16 release into the affine
+4-bit or 8-bit snapshot NVMAIRepack installs.
+
+AgentWorld's text model is the Qwen3.5-MoE 35B-A3B geometry this runtime
+already runs as the `qwen36` family (2048 hidden, 40 layers, 256 experts at
+top-8, gated-DeltaNet with full attention every fourth layer). What differs
+is the source: Qwen ships it as bf16 under the vision wrapper's tensor names,
+with the routed experts fused per layer. So this is prepare_qwen38.py's job
+-- fetch one shard at a time, quantize, write MLX-shaped output, delete the
+shard -- with this family's renames and slot policy, and without Qwen3.8's
+n-gram table, PLE constants and indexer.
+
+Disk footprint while running: two source shards (~7 GB) plus the output
+(about 19.5 GB at 4-bit, 37.8 GB at 8-bit). The install NVMAIRepack writes
+afterwards is a second copy of the output.
+
+    python3.13 tools/prepare_agentworld.py --plan            # no download
+    python3.13 tools/prepare_agentworld.py --bits 4 \\
+        --output .build/agentworld-affine-4bit --work .build/agentworld-shards
+
+Kept at the checkpoint's own bf16 in both widths -- "low-cost data at
+16-bit where it helps": the router and the scalar shared-expert gate (they
+produce decisions, and a decision either matches the reference or it does
+not), the GDN a/b projections (the smallest projections, where a 64-wide
+group has the least to amortise over), and every norm, conv tap, A_log and
+dt_bias. Together about 45 MB of resident memory. The runtime reads these
+tensors' width from their own dtype, which is what the Qwen3.8 8-bit build
+established.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import struct
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from queue import Queue
+
+try:
+    import ml_dtypes
+    import numpy as np
+    from safetensors import safe_open
+    from safetensors.numpy import save_file
+except ImportError as exc:  # pragma: no cover - environment, not logic
+    sys.exit(f"missing dependency: {exc}\n"
+             "  python3.13 -m pip install safetensors numpy ml_dtypes")
+
+REPO = "Qwen/Qwen-AgentWorld-35B-A3B"
+# Pinned: the install receipt records the source, and a moved `main` must
+# not silently change what "AgentWorld 4-bit" means.
+COMMIT = "60d2b0434a53d2e62a7c00a489586815d94ebffb"
+BASE = f"https://huggingface.co/{REPO}/resolve/{COMMIT}"
+GROUP_SIZE = 64
+BITS_4, BITS_8 = 4, 8
+OUTPUT_SHARD_BYTES = 4 << 30
+
+TOKENIZER_FILES = (
+    ("tokenizer.json", True),
+    ("tokenizer_config.json", True),
+    ("special_tokens_map.json", False),
+    ("chat_template.jinja", False),
+    ("chat_template.json", False),
+    ("generation_config.json", False),
+    ("vocab.json", False),
+    ("merges.txt", False),
+)
+
+
+# --- quantization ------------------------------------------------------------
+
+
+def quantize_affine(value: np.ndarray, bits: int) -> tuple[np.ndarray, ...]:
+    """Identical to prepare_qwen38.quantize_affine, deliberately.
+
+    Duplicated rather than imported so neither converter can drift silently;
+    a change to one must be made in the other.
+    """
+    value = value.astype(np.float32)
+    if value.shape[-1] % GROUP_SIZE:
+        raise ValueError(f"last dimension {value.shape[-1]} is not group-aligned")
+    shape = (*value.shape[:-1], value.shape[-1] // GROUP_SIZE, GROUP_SIZE)
+    grouped = value.reshape(shape)
+    bias = grouped.min(axis=-1)
+    high = grouped.max(axis=-1)
+    levels = (1 << bits) - 1
+    scale = np.where(high == bias, np.float32(1), (high - bias) / levels)
+    scale = scale.astype(ml_dtypes.bfloat16)
+    bias = bias.astype(ml_dtypes.bfloat16)
+    quantized = np.rint(
+        (grouped - bias.astype(np.float32)[..., None])
+        / scale.astype(np.float32)[..., None]
+    ).clip(0, levels).astype(np.uint32).reshape(value.shape)
+    lanes = 32 // bits
+    words = quantized.reshape(*quantized.shape[:-1], quantized.shape[-1] // lanes, lanes)
+    packed = np.zeros(words.shape[:-1], dtype=np.uint32)
+    for lane in range(lanes):
+        packed |= words[..., lane] << np.uint32(bits * lane)
+    return packed, scale, bias
+
+
+# --- naming ------------------------------------------------------------------
+
+
+def rename(name: str) -> str:
+    """Checkpoint name -> the MLX spelling the qwen36 family is repacked from."""
+    if name == "lm_head.weight":
+        return "language_model.lm_head.weight"
+    prefix = "model.language_model."
+    if name.startswith(prefix):
+        return "language_model.model." + name[len(prefix):]
+    raise ValueError(f"unexpected tensor outside the language model: {name}")
+
+
+# Kept at bf16 in both widths. Suffixes of the renamed stem (no `.weight`).
+KEEP_BF16 = (
+    ".mlp.gate",                 # router
+    ".mlp.shared_expert_gate",   # 1 row of D
+    ".linear_attn.in_proj_a",
+    ".linear_attn.in_proj_b",
+)
+
+
+def kept_bf16(name: str) -> bool:
+    stem = name[: -len(".weight")] if name.endswith(".weight") else name
+    return stem.endswith(KEEP_BF16)
+
+
+def quant_bits(name: str, width: int) -> int | None:
+    """Bits for a renamed tensor, or None to copy it through at bf16.
+
+    Mirrors the runtime's slot model for this family: embedding 8 (embed
+    and head), router 8, attention / shared expert / routed expert at the
+    build width. The bf16 keeps above override their slot; the runtime sizes
+    those tensors from their own dtype.
+    """
+    if not name.endswith(".weight"):
+        return None                                   # A_log, dt_bias
+    if name.endswith("conv1d.weight") or name.endswith("norm.weight"):
+        return None
+    if kept_bf16(name):
+        return None
+    if name.endswith("embed_tokens.weight") or name.endswith("lm_head.weight"):
+        return BITS_8
+    return width
+
+
+def outputs_for(name: str, shape: list[int]) -> list[tuple[str, list[int]]]:
+    new = rename(name)
+    if new.endswith(".mlp.experts.gate_up_proj"):
+        # [experts, 2F, hidden]: gate rows first, then up.
+        stem = new[: -len("experts.gate_up_proj")] + "switch_mlp."
+        experts, fused, hidden = shape
+        return [(stem + "gate_proj.weight", [experts, fused // 2, hidden]),
+                (stem + "up_proj.weight", [experts, fused // 2, hidden])]
+    if new.endswith(".mlp.experts.down_proj"):
+        stem = new[: -len("experts.down_proj")] + "switch_mlp."
+        return [(stem + "down_proj.weight", list(shape))]
+    return [(new, list(shape))]
+
+
+def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
+    """config.json with the `quantization` block NVMAIRepack reads: a base
+    width plus every tensor whose width differs, keyed by stem."""
+    overrides = {}
+    for name in tensor_names:
+        if not name.endswith(".weight"):
+            continue
+        bits = quant_bits(name, width)
+        if bits is None or bits == width:
+            continue
+        overrides[name[: -len(".weight")]] = {"bits": bits, "group_size": GROUP_SIZE}
+    config = dict(config)
+    config["quantization"] = {
+        "bits": width, "group_size": GROUP_SIZE, "mode": "affine", **overrides,
+    }
+    (out / "config.json").write_text(json.dumps(config, indent=1))
+    return config
+
+
+# --- transport ---------------------------------------------------------------
+
+
+def fetch_json(remote: str) -> dict:
+    raw = subprocess.run(["curl", "-sfL", "--max-time", "120", f"{BASE}/{remote}"],
+                         capture_output=True, check=True).stdout
+    return json.loads(raw)
+
+
+def fetch_header(shard: str) -> dict:
+    url = f"{BASE}/{shard}"
+    raw = subprocess.run(["curl", "-sfL", "--max-time", "60", "-r", "0-7", url],
+                         capture_output=True, check=True).stdout
+    size = struct.unpack("<Q", raw[:8])[0]
+    body = subprocess.run(["curl", "-sfL", "--max-time", "180", "-r", f"8-{8 + size - 1}", url],
+                          capture_output=True, check=True).stdout
+    return json.loads(body)
+
+
+def download(shard: str, work: Path) -> Path:
+    """Fetch one shard, resuming a partial file rather than restarting it."""
+    dest = work / shard
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["curl", "-fL", "--retry", "5", "--retry-delay", "5",
+                    "--retry-all-errors", "-C", "-", "--silent", "--show-error",
+                    "-o", str(dest), f"{BASE}/{shard}"], check=True)
+    return dest
+
+
+def fetch_tokenizer(out: Path) -> None:
+    for name, required in TOKENIZER_FILES:
+        result = subprocess.run(["curl", "-sfL", "--max-time", "300", f"{BASE}/{name}"],
+                                capture_output=True)
+        if result.returncode != 0 or not result.stdout:
+            if required:
+                raise SystemExit(f"cannot fetch {name} from {REPO}; the "
+                                 "snapshot would be rejected at repack")
+            continue
+        (out / name).write_bytes(result.stdout)
+        print(f"  {name} ({len(result.stdout) / 1e6:.2f} MB)")
+
+
+# --- conversion --------------------------------------------------------------
+
+
+class OutputWriter:
+    """Accumulates converted tensors and flushes them as safetensors shards."""
+
+    def __init__(self, out: Path):
+        self.out = out
+        self.out.mkdir(parents=True, exist_ok=True)
+        self.block: dict[str, np.ndarray] = {}
+        self.bytes = 0
+        self.index: dict[str, str] = {}
+        self.total = 0
+        self.shard_no = 0
+
+    def add(self, name: str, value: np.ndarray) -> None:
+        self.block[name] = value
+        self.bytes += value.nbytes
+        self.total += value.nbytes
+        if self.bytes >= OUTPUT_SHARD_BYTES:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.block:
+            return
+        self.shard_no += 1
+        name = f"model-{self.shard_no:05d}.safetensors"
+        save_file(self.block, str(self.out / name))
+        for key in self.block:
+            self.index[key] = name
+        print(f"    wrote {name} ({self.bytes / 1e9:.2f} GB, {len(self.block)} tensors)",
+              flush=True)
+        self.block.clear()
+        self.bytes = 0
+
+    def finish(self) -> None:
+        self.flush()
+        final = {}
+        for old_key, old_name in self.index.items():
+            n = int(old_name.split("-")[1].split(".")[0])
+            final[old_key] = f"model-{n:05d}-of-{self.shard_no:05d}.safetensors"
+        for n in range(1, self.shard_no + 1):
+            src = self.out / f"model-{n:05d}.safetensors"
+            src.rename(self.out / f"model-{n:05d}-of-{self.shard_no:05d}.safetensors")
+        (self.out / "model.safetensors.index.json").write_text(json.dumps(
+            {"metadata": {"total_size": self.total}, "weight_map": final}, indent=1))
+
+
+def convert_shard(path: Path, writer: OutputWriter, width: int) -> None:
+    with safe_open(path, framework="np") as src:
+        for name in src.keys():
+            value = src.get_tensor(name)
+            for out_name, _ in outputs_for(name, list(value.shape)):
+                if out_name.endswith("switch_mlp.gate_proj.weight"):
+                    piece = value[:, : value.shape[1] // 2, :]
+                elif out_name.endswith("switch_mlp.up_proj.weight"):
+                    piece = value[:, value.shape[1] // 2:, :]
+                else:
+                    piece = value
+                bits = quant_bits(out_name, width)
+                if bits is None:
+                    writer.add(out_name, np.ascontiguousarray(piece))
+                    continue
+                stem = out_name[: -len(".weight")]
+                packed, scales, biases = quantize_affine(np.ascontiguousarray(piece), bits)
+                writer.add(stem + ".weight", packed)
+                writer.add(stem + ".scales", scales)
+                writer.add(stem + ".biases", biases)
+
+
+def plan(index: dict, width: int) -> None:
+    """Every tensor's fate, from the index alone. Checks group alignment."""
+    wm = index["weight_map"]
+    shards = sorted(set(wm.values()))
+    headers = {s: fetch_header(s) for s in shards}
+    counts: dict[str, int] = {}
+    bf16_bytes = 0
+    total_out = 0
+    for shard, header in headers.items():
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            for out_name, out_shape in outputs_for(name, meta["shape"]):
+                bits = quant_bits(out_name, width)
+                n = int(np.prod(out_shape))
+                if bits is None:
+                    kind = "bf16"
+                    bf16_bytes += n * 2
+                    total_out += n * 2
+                else:
+                    if out_shape[-1] % GROUP_SIZE:
+                        raise SystemExit(f"{out_name}: last dim {out_shape[-1]} "
+                                         f"not a multiple of {GROUP_SIZE}")
+                    kind = f"{bits}-bit"
+                    total_out += n * bits // 8 + (n // GROUP_SIZE) * 4
+                counts[kind] = counts.get(kind, 0) + 1
+    print(f"{len(shards)} shards, {sum(len(h) - 1 for h in headers.values())} tensors")
+    for kind, n in sorted(counts.items()):
+        print(f"  {kind:>6}: {n} tensors")
+    print(f"  bf16 kept: {bf16_bytes / 1e6:.0f} MB")
+    print(f"  output: ~{total_out / 1e9:.1f} GB at {width}-bit")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--plan", action="store_true", help="classify from the index, download nothing")
+    ap.add_argument("--bits", type=int, choices=(4, 8), default=4)
+    ap.add_argument("--output", type=Path)
+    ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
+    args = ap.parse_args()
+
+    config = fetch_json("config.json")
+    if config.get("model_type") != "qwen3_5_moe":
+        raise SystemExit(f"unexpected model_type {config.get('model_type')!r}")
+    index = fetch_json("model.safetensors.index.json")
+    if args.plan:
+        plan(index, args.bits)
+        return 0
+    if not args.output or not args.work:
+        ap.error("--output and --work are required unless --plan")
+    work = args.work
+    work.mkdir(parents=True, exist_ok=True)
+    shards = sorted(set(index["weight_map"].values()))
+    writer = OutputWriter(args.output)
+
+    # Fetch shard N+1 while shard N converts; each shard is deleted once
+    # converted, so at most two are on disk.
+    queue: Queue = Queue(maxsize=1)
+
+    def fetcher() -> None:
+        for shard in shards:
+            try:
+                queue.put(download(shard, work))
+            except Exception as exc:                     # noqa: BLE001
+                queue.put(exc)
+                return
+        queue.put(None)
+
+    threading.Thread(target=fetcher, daemon=True).start()
+    done = 0
+    while True:
+        item = queue.get()
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            raise item
+        done += 1
+        print(f"[{done}/{len(shards)}] {item.name}", flush=True)
+        convert_shard(item, writer, args.bits)
+        item.unlink()
+    writer.finish()
+    write_config(config, args.output, writer.index.keys(), args.bits)
+    print("tokenizer:")
+    fetch_tokenizer(args.output)
+    print(f"\naffine snapshot written to {args.output}")
+    print(f"  {writer.shard_no} shards, {writer.total / 1e9:.1f} GB")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

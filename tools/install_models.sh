@@ -27,6 +27,8 @@ CATALOGUE=(
   "qwen38flash|qwen3.8-flash-next_125B_A6B_4Bit|4|convert"
   "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|convert"
   "qwen38flash-mtp|qwen3.8-flash-next_125B_A6B_MTP_4Bit|4|repack"
+  "agentworld|qwen-agentworld_35B_A3B_4Bit|4|convert_agentworld"
+  "agentworld-8bit|qwen-agentworld_35B_A3B_8Bit|8|convert_agentworld"
 )
 
 usage() {
@@ -129,6 +131,20 @@ so it is two steps and a 360 GB fetch:
 
 Check free space first: the snapshot and the install exist at the same time.
 EOF
+        ;;
+      convert_agentworld)
+        # Qwen's bf16 release, quantized one shard at a time by
+        # tools/prepare_agentworld.py (about 70 GB fetched, at most two
+        # shards on disk), then repacked. The snapshot and the install exist
+        # at the same time: ~40 GB at 4-bit, ~75 GB at 8-bit.
+        [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
+        echo "converting $name -> .build/agentworld-affine-${width}bit"
+        python3.13 tools/prepare_agentworld.py --bits "$width" \
+            --output ".build/agentworld-affine-${width}bit" \
+            --work .build/agentworld-shards || return 1
+        echo "installing $name -> models/$dir"
+        "$BIN" --input-snapshot ".build/agentworld-affine-${width}bit" \
+            --model-id qwen-agentworld --output "$MODELS/$dir"
         ;;
       prepare_ornith_mtp)
         echo "$name is prepared from the pinned checkpoint; see tools/prepare_ornith_mtp.py"
