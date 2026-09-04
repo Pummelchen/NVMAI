@@ -89,6 +89,8 @@ check_golden ornith-1.5_35B_A3B_8Bit 8
 check_golden ornith-1.5_35B_A3B_4Bit 4
 check_golden qwen3.8-flash-next_125B_A6B_4Bit qwen38-4
 check_golden qwen3.8-flash-next_125B_A6B_8Bit qwen38-8
+check_golden qwen-agentworld_35B_A3B_4Bit agentworld-4
+check_golden qwen-agentworld_35B_A3B_8Bit agentworld-8
 if [ "$GOLDENS_CHECKED" = 0 ]; then
   if compgen -G "$ROOT/models/*/verified-install.json" >/dev/null; then
     die "an installed model has no golden target; add it to golden-baseline.sh"

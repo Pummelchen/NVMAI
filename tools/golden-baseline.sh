@@ -8,7 +8,8 @@
 #   tools/golden-baseline.sh --check [...]    # compare against the stored file
 #   tools/golden-baseline.sh --server [...]   # CLI and server must agree
 #
-# Targets: ornith-4, ornith-8, qwen38-4, qwen38-8. Bare 4 and 8 still mean
+# Targets: ornith-4, ornith-8, qwen38-4, qwen38-8, agentworld-4, agentworld-8.
+# Bare 4 and 8 still mean
 # Ornith, because the stored baselines are named for it.
 #
 # Qwen3.8-Flash-Next is the broader gate: it is the only family exercising
@@ -197,7 +198,9 @@ for t in "${targets[@]}"; do
                 file="qwen3.8-flash-next-125b-a6b-4bit.txt"; q=4 ;;
     qwen38-8)   dir="qwen3.8-flash-next_125B_A6B_8Bit"
                 file="qwen3.8-flash-next-125b-a6b-8bit.txt"; q=8 ;;
-    *) echo "unknown target: $t (ornith-4, ornith-8, qwen38-4, qwen38-8)" >&2
+    agentworld-4) dir="qwen-agentworld_35B_A3B_4Bit"; file="qwen-agentworld-35b-a3b-4bit.txt"; q=4 ;;
+    agentworld-8) dir="qwen-agentworld_35B_A3B_8Bit"; file="qwen-agentworld-35b-a3b-8bit.txt"; q=8 ;;
+    *) echo "unknown target: $t (ornith-4, ornith-8, qwen38-4, qwen38-8, agentworld-4, agentworld-8)" >&2
        status=1; continue ;;
   esac
   model="$ROOT/models/$dir"
