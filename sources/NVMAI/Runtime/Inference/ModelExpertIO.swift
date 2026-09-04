@@ -176,12 +176,14 @@ extension Model {
 
     public func beginRoutedExpertPrefetch(layer: Int,
                                            experts: [Int],
-                                           into buffers: [MTLBuffer]) throws
+                                           into buffers: [MTLBuffer],
+                                           ioPolicy: Int32 = 0) throws
         -> ExpertLoadOperation {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         return try streamer.beginPrefetch(experts: experts,
-                                          destinations: buffers.map { $0.contents() })
+                                          destinations: buffers.map { $0.contents() },
+                                          ioPolicy: ioPolicy)
     }
 
     func pinRoutedExperts(for plan: RoutedExpertFetchPlan) throws -> RoutedExpertLease {

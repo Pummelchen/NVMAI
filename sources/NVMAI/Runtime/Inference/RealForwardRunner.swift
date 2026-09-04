@@ -412,7 +412,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? try ExpertPrefetchRing(
                 device: context.device,
                 expertStride: model.routedExpertByteStride(layer: 0),
-                slotCount: rawPrefetchTopM * Self.prefetchAhead)
+                slotCount: rawPrefetchTopM * Self.prefetchAhead,
+                ioPolicy: profile.prefetchIOTier)
             : nil
         // Track A: the ANE prefill sidecar, opt-in. Only the qwen36 target
         // family qualifies (the one-layer MTP draft has no exported sidecar

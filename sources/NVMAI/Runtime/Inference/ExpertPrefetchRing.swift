@@ -20,7 +20,11 @@ final class ExpertPrefetchRing: @unchecked Sendable {
     private let lock = NSLock()
     private var slots: [Slot]
 
-    init(device: MTLDevice, expertStride: Int, slotCount: Int) throws {
+    /// Disk I/O policy for the ring's reads (0 = default tier).
+    let ioPolicy: Int32
+
+    init(device: MTLDevice, expertStride: Int, slotCount: Int, ioPolicy: Int32 = 0) throws {
+        self.ioPolicy = ioPolicy
         guard expertStride > 0, slotCount > 0 else {
             throw ModelError.internalInconsistency(detail: "invalid prefetch ring geometry")
         }
@@ -73,7 +77,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
 
         do {
             let operation = try model.beginRoutedExpertPrefetch(
-                layer: layer, experts: selectedExperts, into: buffers)
+                layer: layer, experts: selectedExperts, into: buffers, ioPolicy: ioPolicy)
             lock.lock()
             for slot in selectedSlots { slots[slot].operation = operation }
             lock.unlock()

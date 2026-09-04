@@ -1,3 +1,4 @@
+import Darwin
 import Testing
 @testable import NVMAI
 
@@ -30,7 +31,10 @@ import Testing
     @Test func tabledValuesMatchWhatWasMeasured() {
         let q38 = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash, weightBits: 4, environment: [:])
         #expect(q38.expertCacheBudgetBytes == 12 << 30)
-        #expect(q38.prefetchDepth == 1)
+        #expect(q38.prefetchDepth == 2)
+        #expect(q38.prefetchIOTier == IOPOL_UTILITY)
+        let q38b = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash, weightBits: 8, environment: [:])
+        #expect(q38b.expertCacheBudgetBytes == Int(9.5 * Double(1 << 30)) && q38b.prefetchIOTier == 0)
         #expect(q38.sampling.temperature == 1.0 && q38.sampling.topP == 0.95)
         #expect(!q38.hcFused && !q38.qsaGPUSelect)
         let q36 = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 8, environment: [:])
@@ -51,7 +55,7 @@ import Testing
     }
 
     @Test func environmentOverridesTheTable() {
-        let env = ["NVMAI_ROUTER_TOPK_SIMD": "0", "NVMAI_HC_FUSED": "1",
+        let env = ["NVMAI_ROUTER_TOPK_SIMD": "0", "NVMAI_HC_FUSED": "1", "NVMAI_PREFETCH_IO_TIER": "throttle",
                    "NVMAI_PREDICTIVE_PREFETCH": "1", "NVMAI_PREFETCH_TOP_M": "3",
                    "NVMAI_QSA_GPU_SELECT": "verify"]
         let p = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 4, environment: env)
@@ -59,6 +63,7 @@ import Testing
         #expect(p.hcFused)
         #expect(p.qsaGPUSelect)
         #expect(p.prefetchDepth == 3)
+        #expect(p.prefetchIOTier == IOPOL_THROTTLE)
         let off = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash, weightBits: 4,
                                        environment: ["NVMAI_PREDICTIVE_PREFETCH": "0"])
         #expect(off.prefetchDepth == 0)

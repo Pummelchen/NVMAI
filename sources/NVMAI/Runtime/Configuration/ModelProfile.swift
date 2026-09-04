@@ -32,6 +32,10 @@ public struct ModelProfile: Sendable, Equatable {
     public var expertCacheBudgetBytes: Int
     /// Speculative expert reads in flight; 0 disables prefetch.
     public var prefetchDepth: Int
+    /// Disk I/O policy for those reads: 0 is the default tier, otherwise an
+    /// IOPOL_* value (IOPOL_UTILITY measured +3% at depth 2 on Qwen 3.8 4-bit;
+    /// IOPOL_THROTTLE measured a loss).
+    public var prefetchIOTier: Int32
     /// Prefill chunk in tokens; nil takes the front end's fallback.
     public var prefillChunkTokens: Int?
     public var sampling: GenerationDefaults.Sampling
@@ -45,29 +49,35 @@ public struct ModelProfile: Sendable, Equatable {
     public var qsaGPUSelect: Bool
 
     /// The shipped entries. Measured values, each on its own install.
-    public static let table: [Key: (budget: Int, prefetch: Int, chunk: Int?,
+    public static let table: [Key: (budget: Int, prefetch: Int, tier: Int32, chunk: Int?,
                                     sampling: GenerationDefaults.Sampling,
                                     topKSimd: Bool, attnSimd: Bool,
                                     hcFused: Bool, qsaSelect: Bool)] = [
         // Qwen 3.6 35B-A3B: 128 slots at 4-bit hold the working set; the
         // 8-bit cache is budget-capped to 64 and prefetch one deep pays there.
-        Key("qwen3.6-35b-a3b", 4): (8 << 30, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("qwen3.6-35b-a3b", 8): (8 << 30, 1, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen3.6-35b-a3b", 4): (8 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen3.6-35b-a3b", 8): (8 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
         // Ornith 1.5: same geometry, measured the same as Qwen 3.6 in August.
-        Key("ornith-1.5-35b-a3b", 4): (8 << 30, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("ornith-1.5-35b-a3b", 8): (8 << 30, 1, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("ornith-1.5-35b-a3b", 4): (8 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("ornith-1.5-35b-a3b", 8): (8 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
         // AgentWorld: ~91% hit rate at 128 slots against a 93% ceiling, so
         // no budget lever; residency and barrier execution both lose on it.
-        Key("qwen-agentworld", 4): (8 << 30, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("qwen-agentworld", 8): (8 << 30, 1, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen-agentworld", 4): (8 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen-agentworld", 8): (8 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
         // Qwen3.8-Flash-Next: 96 slots (12 GiB) still climbing, prefetch one
         // deep +12%; its card specifies temperature 1.0 / top-p 0.95. The
         // fused hyper-connection gates and the GPU key select are measured
         // washes and stay off.
-        Key("qwen3.8-flash-next", 4): (12 << 30, 1, 4_096,
+        // 4-bit: prefetch two deep on the utility disk tier, +3% over one deep
+        // on the default tier (5.46 / 5.40 vs 5.21 / 5.33, interleaved);
+        // two-layer-ahead prefetch and depth 4 measured washes.
+        Key("qwen3.8-flash-next", 4): (12 << 30, 2, IOPOL_UTILITY, 4_096,
                                        GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
                                        true, true, false, false),
-        Key("qwen3.8-flash-next", 8): (12 << 30, 1, 4_096,
+        // 8-bit: 32 slots (8 GiB) 2.05 / 2.06 tok/s; 40 slots (9.5 GiB) 2.18 /
+        // 2.27 with swap falling; 48 (13 GiB) 2.24-2.33 but ~1 GB of swap
+        // growth per run on this 24 GB machine. 40 is the no-paging middle.
+        Key("qwen3.8-flash-next", 8): (Int(9.5 * Double(1 << 30)), 1, 0, 4_096,
                                        GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
                                        true, true, false, false),
     ]
@@ -82,6 +92,7 @@ public struct ModelProfile: Sendable, Equatable {
             key: Key(modelID, weightBits), family: family,
             expertCacheBudgetBytes: familyTuning.expertCacheBudgetBytes,
             prefetchDepth: familyTuning.prefetchDepth,
+            prefetchIOTier: 0,
             prefillChunkTokens: nil,
             sampling: GenerationDefaults.forFamily(family),
             routerTopKSimd: true, attentionSimdPartial: true,
@@ -89,6 +100,7 @@ public struct ModelProfile: Sendable, Equatable {
         if let row = table[profile.key] {
             profile.expertCacheBudgetBytes = row.budget
             profile.prefetchDepth = row.prefetch
+            profile.prefetchIOTier = row.tier
             profile.prefillChunkTokens = row.chunk
             profile.sampling = row.sampling
             profile.routerTopKSimd = row.topKSimd
@@ -106,6 +118,13 @@ public struct ModelProfile: Sendable, Equatable {
         if let v = env["NVMAI_PREFETCH_TOP_M"].flatMap(Int.init), profile.prefetchDepth > 0 {
             profile.prefetchDepth = v
         }
+        switch env["NVMAI_PREFETCH_IO_TIER"] {
+        case "default": profile.prefetchIOTier = 0
+        case "standard": profile.prefetchIOTier = IOPOL_STANDARD
+        case "utility": profile.prefetchIOTier = IOPOL_UTILITY
+        case "throttle": profile.prefetchIOTier = IOPOL_THROTTLE
+        default: break
+        }
         return profile
     }
 
@@ -121,7 +140,7 @@ public struct ModelProfile: Sendable, Equatable {
     public var summary: String {
         "profile model=\(key.modelID) bits=\(key.weightBits) family=\(family.rawValue) "
         + (isTabled ? "tabled" : "family-default") + " "
-        + "budget=\(expertCacheBudgetBytes >> 20)MiB prefetch=\(prefetchDepth) "
+        + "budget=\(expertCacheBudgetBytes >> 20)MiB prefetch=\(prefetchDepth) tier=\(prefetchIOTier) "
         + "chunk=\(prefillChunkTokens.map(String.init) ?? "fallback") "
         + "sampling=\(sampling.temperature)/\(sampling.topK)/\(sampling.topP) "
         + "topk_simd=\(routerTopKSimd) attn_simd=\(attentionSimdPartial) "
