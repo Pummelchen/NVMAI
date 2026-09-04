@@ -115,7 +115,13 @@ install_one() {
       repack)
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
         echo "installing $name -> models/$dir"
-        "$BIN" --model "$name" --output "$MODELS/$dir" --resume
+        # --resume is refused when there is nothing to resume; pass it only
+        # when a previous attempt left its state behind.
+        if [[ -f "$MODELS/$dir.resume.json" ]]; then
+          "$BIN" --model "$name" --output "$MODELS/$dir" --resume
+        else
+          "$BIN" --model "$name" --output "$MODELS/$dir"
+        fi
         ;;
       convert)
         cat <<EOF
