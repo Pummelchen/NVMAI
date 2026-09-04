@@ -7,6 +7,22 @@ import Metal
 /// (docs/modularity-refactor.md) as pure code motion: one concern
 /// per file, no signature or behavior changes.
 extension RealForwardRunner {
+    /// Prefill-to-decode transition: forget prefill's LFU counts so decode's
+    /// working set can take the slots. Opt-in (NVMAI_EXPERT_USE_RESET=1):
+    /// measured decode-only on a 3.7k-token prompt, the first 64 decode
+    /// tokens hit 68% / 82% / 87% (tokens 0-16 / 16-32 / 32-64) with and
+    /// without it, identical to three decimals. The cache is not cold after
+    /// prefill -- the "52%" that suggested it was the runner's cumulative
+    /// statistic with prefill's tile misses mixed in -- and the leftovers
+    /// decode reuses outweigh the ones it has to evict.
+    var expertUseResetEnabled: Bool {
+        ProcessInfo.processInfo.environment["NVMAI_EXPERT_USE_RESET"] == "1"
+    }
+    func resetExpertUseCountsAfterPrefill() {
+        guard expertUseResetEnabled else { return }
+        model.resetRoutedExpertUseCounts()
+    }
+
     public func prefillChunked(tokens: ArraySlice<Int32>,
                                startPosition: Int,
                                outputMode: PrefillOutputMode,
@@ -14,6 +30,7 @@ extension RealForwardRunner {
                                into logits: MTLBuffer,
                                onProgress: (Int) -> Void) async throws -> PrefillResult {
         try prefillChunkState.requireClean(operation: "prefillChunked")
+        defer { resetExpertUseCountsAfterPrefill() }
         // The chunked path does not go through `produceToken`, so it needs
         // the sparse-attention gate of its own. The chunk's last query sees
         // the most keys and decides the whole chunk.
@@ -1128,6 +1145,7 @@ extension RealForwardRunner {
         views: LayerPrefillQKVViews,
         scratch: PrefillChunkScratchBuffers,
         tokenCount t: Int,
+        startPosition: Int,
         hiddenSize D: Int,
         layerStart prefillLayerStart: UInt64,
         routeNanos prefillRouteNanos: inout UInt64,
@@ -1186,6 +1204,16 @@ extension RealForwardRunner {
                 for i in 0..<routeCount {
                     routeIDScratch.append(min(idPtr[i], UInt32(cfg.numExperts - 1)))
                     routeWeightScratch.append(weightPtr[i])
+                }
+                if routeTraceFD >= 0 {
+                    // Same line format as the decode trace, prefixed with
+                    // the token's absolute position, so tail-window routing
+                    // can be compared with the response's.
+                    let k = cfg.topKExperts
+                    for row in 0..<t {
+                        recordRouteTrace(layer: L, position: startPosition + row,
+                                         experts: routeIDScratch[row * k ..< (row + 1) * k].map { Int($0) })
+                    }
                 }
                 let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDScratch,
                                                                weights: routeWeightScratch,
@@ -1579,7 +1607,7 @@ extension RealForwardRunner {
         } else {
             try await encodeRoutedMoEPrefill(
                 cb: &cb, layer: L, views: views, scratch: scratch,
-                tokenCount: t, hiddenSize: D,
+                tokenCount: t, startPosition: startPosition, hiddenSize: D,
                 layerStart: prefillLayerStart,
                 routeNanos: &prefillRouteNanos,
                 tileNanos: &prefillTileNanos,

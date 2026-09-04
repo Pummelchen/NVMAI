@@ -1136,6 +1136,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         return result
     }
 
+    /// Zero the LFU use counts, keeping the slots and their contents. Called
+    /// at the prefill-to-decode transition: a prefill chunk plans every
+    /// expert it touches hundreds of times, so the leftovers outrank any
+    /// expert decode has used once or twice and decode cannot evict them.
+    /// With the counts zeroed, ties fall to LRU order and decode's own
+    /// working set takes the slots within a few tokens.
+    public func resetExpertUseCounts() {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        for i in expertUseCount.indices { expertUseCount[i] = 0 }
+    }
+
     private func shouldEvictSlot(_ lhs: Int, before rhs: Int) -> Bool {
         if cachePolicy == .lru {
             return slotLastUse[lhs] < slotLastUse[rhs]

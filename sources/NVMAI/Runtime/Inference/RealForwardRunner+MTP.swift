@@ -365,6 +365,7 @@ extension RealForwardRunner {
                                into logits: MTLBuffer,
                                mtp: RealForwardRunner,
                                onProgress: (Int) -> Void) async throws -> MTPPrefillResult {
+        defer { resetExpertUseCountsAfterPrefill() }
         guard cfg.family == .qwen36 || cfg.family == .qwen38flash else {
             throw StreamingMTPError.targetMustBeQwen36
         }

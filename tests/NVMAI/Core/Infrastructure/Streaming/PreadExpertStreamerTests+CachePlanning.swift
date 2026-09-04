@@ -320,4 +320,36 @@ extension PreadExpertStreamerTests {
     #expect(streamer.statistics().loadingSlots == 0)
   }
 
+
+  /// The prefill-to-decode transition. Under LFU a prefill's leftovers carry
+  /// counts no decode expert can match, so decode evicts its own working set
+  /// first; zeroing the counts lets the leftovers go first instead.
+  @Test func resetExpertUseCountsLetsDecodeEvictPrefillLeftovers() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+
+    func run(reset: Bool) throws -> (afterThird: [Int], reloads: UInt64) {
+      let streamer = try PreadExpertStreamer(
+        layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
+      // "Prefill": experts 0 and 1 planned three times each.
+      for _ in 0..<3 { _ = try streamer.loadExpertsCached(experts: [0, 1]) }
+      if reset { streamer.resetExpertUseCounts() }
+      // "Decode": 2 evicts one leftover; 3 must evict the other, not 2.
+      _ = try streamer.loadExpertsCached(experts: [2])
+      _ = try streamer.loadExpertsCached(experts: [3])
+      let afterThird = streamer.residentExperts().sorted()
+      _ = try streamer.loadExpertsCached(experts: [2])
+      return (afterThird, streamer.statistics().reloads)
+    }
+
+    let polluted = try run(reset: false)
+    #expect(!polluted.afterThird.contains(2), "LFU pollution: 3 evicted 2 (count 1) over a leftover (count 3)")
+    #expect(polluted.reloads == 1)
+
+    let cleared = try run(reset: true)
+    #expect(cleared.afterThird == [2, 3])
+    #expect(cleared.reloads == 0)
+  }
+
 }

@@ -155,6 +155,13 @@ extension Model {
     /// Returns only fully valid routed experts immediately before cache
     /// planning. This is used by the optional v4.3 trace probe and never
     /// changes cache state or inference behavior.
+    /// Zero every open layer's LFU use counts (see
+    /// `PreadExpertStreamer.resetExpertUseCounts`).
+    public func resetRoutedExpertUseCounts() {
+        let streamers = streamersQueue.sync { streamersBox.streamers }
+        for streamer in streamers { streamer?.resetExpertUseCounts() }
+    }
+
     public func routedExpertResidentIDs(layer: Int) throws -> [Int] {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
