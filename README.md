@@ -95,8 +95,6 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 | Qwen-AgentWorld 35B-A3B | 8-bit | **9.46 tok/s** |
 | Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.03 tok/s** |
 
-[Full benchmark results](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
-
 ## Core Links
 
 - [Getting started](https://github.com/Pummelchen/NVMAI/wiki/Getting-Started)
