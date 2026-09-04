@@ -81,10 +81,7 @@ distinguishable. Ask `/v1/models` rather than assuming an id.
 
 ## Benchmarks
 
-Peak decode on a base 8-core M3 MacBook Pro with 24 GB, generating 512 tokens
-of continuous English prose. Each row is the median of fresh-process runs after
-one discarded warmup, on an idle machine, at the shipped defaults for that
-model -- nothing is pinned for the benchmark that a user would not get.
+Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 
 
 | Model | Quantization | Peak decode |
@@ -97,47 +94,6 @@ model -- nothing is pinned for the benchmark that a user would not get.
 | Qwen 3.6 35B-A3B | 8-bit | **9.73 tok/s** |
 | Qwen-AgentWorld 35B-A3B | 8-bit | **9.46 tok/s** |
 | Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.03 tok/s** |
-
-
-Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
-native 262K context, prompt cache on, 8-bit KV, and MTP off. The Qwen 3.6 and
-Qwen-AgentWorld rows were measured 2026-09-04 on the story-generation prompt,
-medians of three (4-bit) and two (8-bit) runs, on the builds the installer
-makes today. The Qwen3.8-Flash-Next rows are from the same day and prompt at
-that family's shipped defaults (temperature `1.0`, Top-P `0.95`), the median
-of three runs at 4-bit and a single run at 8-bit. The Ornith rows are from
-2026-08-30, measured as the best of four prompts on the mlx-community build
-the installer used then; they will be re-measured when Ornith is rebuilt from
-its bf16 release.
-
-Every install is built by `tools/install_models.sh` from the model's own
-bf16 release, one shard in flight at a time, quantized here to group-64
-affine with the router, the shared-expert gate, the DeltaNet gating
-projections and every norm kept at bf16 in both widths; no third-party
-quantization is used. Qwen-AgentWorld is Qwen's agentic fine-tune of the
-35B-A3B geometry. Qwen3.8-Flash-Next is a 125B model with 6B active
-parameters, against 35B/3B for the others. Decode is bound by streaming routed experts from SSD, so the
-4-bit rows run roughly twice the 8-bit ones, and the 125B model is slower again
-because 512 experts at top-10 spread across a far wider working set.
-
-Against the publication before 4.6's, Ornith 8-bit gained **+16.9%** (10.17)
-and Qwen 3.6 8-bit **+14.3%** (11.12), from the per-family expert-cache sizing
-and speculative prefetch. The Qwen3.8-Flash-Next 4-bit row is not comparable
-with the 6.82 published on 2026-08-30: that figure was the best of four prompts,
-where this one is the prose prompt alone, and it was taken with the routing
-top-k on a single GPU thread (since replaced, +5%). The two 4-bit 35B
-configurations did not change and reproduce their published numbers to within
-0.5%, which is what makes the other three readable as gains rather than drift.
-
-These are larger than the same changes measured in an interleaved A/B (+21.3%,
-+5.9%, +5.5%). Interleaving keeps every configuration page-cache-warm, which
-flatters the baseline far more than the tuned configuration, because the tuned
-one barely reaches the disk. Measured cold, the way a server actually starts,
-the gains are two to three times what the interleaved test credited.
-
-ANE prefill is on by default for Ornith and Qwen 3.6. On a 9,316-token prompt
-it measured **3.14x** faster end to end at 4-bit (313.6 s -> 99.9 s) and
-**1.91x** at 8-bit; `NVMAI_PREFILL_ANE=off` opts out.
 
 [Full benchmark results](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
 
