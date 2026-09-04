@@ -167,6 +167,8 @@ extension RealForwardRunner {
             } else {
                 nextRouterW = nil
             }
+            let next2RouterW: TensorView? = (Self.probe2TraceEnabled && L + 2 < cfg.numLayers)
+                ? try model.router(layer: L + 2) : nil
             let residencyResources = decodeExpertExecution == .gpuResidency
                 ? try model.routedExpertResidency(layer: L) : nil
             let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
@@ -265,6 +267,21 @@ extension RealForwardRunner {
                     numExperts: UInt32(cfg.numExperts), d: D,
                     topK: UInt32(cfg.topKExperts))
             }
+            if let next2RouterW {
+                // Trace-only: layer L+2's router on layer L's residual.
+                try moe.encodeRouter(commandBuffer: tailCB,
+                    weights: next2RouterW.buffer, weightsOffset: Int(next2RouterW.offset),
+                    scales: next2RouterW.buffer, scalesOffset: Int(next2RouterW.scaleOffset),
+                    biases: next2RouterW.buffer, biasesOffset: Int(next2RouterW.biasOffset),
+                    hidden: routedX,
+                    effectiveScale: effectiveScaleBuffers[L + 2],
+                    perExpertScale: perExpertScale.buffer,
+                    perExpertScaleOffset: perExpertScale.offset,
+                    outIndices: prefetchPrediction2Indices,
+                    outWeights: prefetchPrediction2Weights,
+                    numExperts: UInt32(cfg.numExperts), d: D,
+                    topK: UInt32(cfg.topKExperts))
+            }
             if let residencyResources {
                 try moe.encodeResidencyClassification(
                     commandBuffer: tailCB,
@@ -344,6 +361,17 @@ extension RealForwardRunner {
             } else {
                 predictedNextLayer = []
             }
+            let predictedNext2Layer: [Int]
+            if Self.probe2TraceEnabled, L + 2 < cfg.numLayers {
+                let ptr = prefetchPrediction2Indices.contents().bindMemory(
+                    to: UInt32.self, capacity: cfg.topKExperts)
+                predictedNext2Layer = (0..<cfg.topKExperts).map {
+                    min(Int(ptr[$0]), cfg.numExperts - 1)
+                }
+            } else {
+                predictedNext2Layer = []
+            }
+            self.lastPredictedNext2Layer = predictedNext2Layer
 
             // CPU readback to fetch routed-expert blobs from disk. The expert
             // id list is reused host scratch (R16); the runner is single-flight
@@ -1141,7 +1169,8 @@ extension RealForwardRunner {
         } ?? experts
         recordPrefetchTrace(layer: L, position: position, experts: experts,
                             misses: missesForTrace, resident: residentBeforePlan,
-                            nextLayerPrediction: predictedNextLayer)
+                            nextLayerPrediction: predictedNextLayer,
+                            next2LayerPrediction: lastPredictedNext2Layer)
         let expertLease = try plannedFetch.map { try model.pinRoutedExperts(for: $0) }
         // v4.2 Phase B: once slots and generations are reserved and pinned,
         // submit real storage immediately. Hit partitioning, argument binding,

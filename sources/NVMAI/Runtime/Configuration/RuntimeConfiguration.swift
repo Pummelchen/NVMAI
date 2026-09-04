@@ -139,7 +139,7 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     // machine: 96 measured an 85.4% hit rate, 128 reaches 89.8% but needs
     // ~17 GB of cache and swaps, costing 68%. Without a value in between
     // there was no way to ask whether the extra hit rate is reachable.
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 48, 64, 96, 112, 128]
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 40, 48, 64, 96, 112, 128]
 
     /// Target bytes for the routed-expert slot cache when no count is given.
     ///

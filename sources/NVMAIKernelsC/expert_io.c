@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 #define NVMAI_IO_MAX_THREADS 16
 
@@ -32,6 +33,7 @@ struct nvmai_expert_reader {
     size_t next_index;           // claimed by workers
     size_t outstanding;          // published minus completed
     int first_errno;
+    int throttled;               // this batch's reads run on the throttled I/O tier
     int shutting_down;
     uint64_t generation;         // so a worker cannot re-run a finished batch
 };
@@ -88,9 +90,19 @@ static void *worker_main(void *arg) {
             ? r->offsets[index]
             : (uint64_t)r->expert_ids[index] * (uint64_t)r->expert_stride;
         void *dst = r->destinations[index];
+        int throttled = r->throttled;
         pthread_mutex_unlock(&r->lock);
 
+        // Speculative batches run on the throttled disk tier so they yield
+        // to demand reads; the policy is per thread, so it is set for the
+        // read and restored after. Demand batches keep the default tier.
+        if (throttled) {
+            setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE);
+        }
         int rc = read_one(fd, dst, r->expert_stride, offset);
+        if (throttled) {
+            setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_DEFAULT);
+        }
 
         pthread_mutex_lock(&r->lock);
         if (rc != 0 && r->first_errno == 0) {
@@ -238,7 +250,8 @@ static int submit_batch(nvmai_expert_reader *r,
                         const uint32_t *expert_ids,
                         const uint64_t *offsets,
                         void *const *destinations,
-                        size_t count) {
+                        size_t count,
+                        int throttled) {
     pthread_mutex_lock(&r->lock);
     // A caller owns the published pointers until its workers finish and it
     // clears the batch below. Without this predicate a second caller could
@@ -259,6 +272,7 @@ static int submit_batch(nvmai_expert_reader *r,
     r->next_index = 0;
     r->outstanding = count;
     r->first_errno = 0;
+    r->throttled = throttled;
     r->generation++;
     pthread_cond_broadcast(&r->work_ready);
     while (r->outstanding > 0) {
@@ -285,7 +299,7 @@ int nvmai_expert_reader_fetch(nvmai_expert_reader *r,
         return EINVAL;
     }
     if (count == 0) { return 0; }
-    return submit_batch(r, expert_ids, NULL, destinations, count);
+    return submit_batch(r, expert_ids, NULL, destinations, count, 0);
 }
 
 int nvmai_expert_reader_fetch_offsets(nvmai_expert_reader *r,
@@ -296,7 +310,18 @@ int nvmai_expert_reader_fetch_offsets(nvmai_expert_reader *r,
         return EINVAL;
     }
     if (count == 0) { return 0; }
-    return submit_batch(r, NULL, offsets, destinations, count);
+    return submit_batch(r, NULL, offsets, destinations, count, 0);
+}
+
+int nvmai_expert_reader_fetch_offsets_throttled(nvmai_expert_reader *r,
+                                               const uint64_t *offsets,
+                                               void *const *destinations,
+                                               size_t count) {
+    if (r == NULL || (count > 0 && (offsets == NULL || destinations == NULL))) {
+        return EINVAL;
+    }
+    if (count == 0) { return 0; }
+    return submit_batch(r, NULL, offsets, destinations, count, 1);
 }
 
 int nvmai_expert_reader_threads(const nvmai_expert_reader *r) {

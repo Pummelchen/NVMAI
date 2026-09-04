@@ -232,6 +232,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// Trace-only next-layer router result. It is never read by inference.
     let prefetchPredictionIndices: MTLBuffer
     let prefetchPredictionWeights: MTLBuffer
+    /// NVMAI_PROBE2_TRACE=1: a second probe scores layer L+2's router on the
+    /// current residual, trace-only, to measure whether a two-layer-ahead
+    /// prediction is accurate enough to widen the prefetch window.
+    static let probe2TraceEnabled = ProcessInfo.processInfo.environment["NVMAI_PROBE2_TRACE"] == "1"
+    let prefetchPrediction2Indices: MTLBuffer
+    let prefetchPrediction2Weights: MTLBuffer
+    var lastPredictedNext2Layer: [Int] = []
     // Persistent MoE scratch, allocated once; about 56 KiB at production shape.
     let moeActs: MTLBuffer       // [topK * FmoE] FP16
     /// Width-2 MTP verify scratch (B2 pair schedule): per-row activation and
@@ -656,6 +663,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.outWeights    = try buf(cfg.topKExperts, label: "decode.outWeights")
         self.prefetchPredictionIndices = try buf(
             cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.prefetchPredictionIndices")
+        self.prefetchPrediction2Indices = try buf(
+            cfg.topKExperts, MemoryLayout<UInt32>.size, label: "decode.prefetchPrediction2Indices")
+        self.prefetchPrediction2Weights = try buf(
+            cfg.topKExperts, MemoryLayout<Float16>.size, label: "decode.prefetchPrediction2Weights")
         self.prefetchPredictionWeights = try buf(
             cfg.topKExperts, label: "decode.prefetchPredictionWeights")
         self.moeActs       = try buf(cfg.topKExperts * cfg.moeIntermediateSize, label: "decode.moeActs")

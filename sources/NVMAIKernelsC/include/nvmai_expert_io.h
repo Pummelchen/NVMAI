@@ -64,6 +64,13 @@ int nvmai_expert_reader_fetch_offsets(nvmai_expert_reader *reader,
                                      void *const *destinations,
                                      size_t count);
 
+/// As `nvmai_expert_reader_fetch_offsets`, on the throttled disk I/O tier
+/// (IOPOL_THROTTLE): for speculative reads that must yield to demand reads.
+int nvmai_expert_reader_fetch_offsets_throttled(nvmai_expert_reader *reader,
+                                               const uint64_t *offsets,
+                                               void *const *destinations,
+                                               size_t count);
+
 /// Threads actually in use, after clamping.
 int nvmai_expert_reader_threads(const nvmai_expert_reader *reader);
 

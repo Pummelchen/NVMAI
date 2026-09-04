@@ -8,7 +8,9 @@ import Metal
 /// exact file-byte reads, the short-read failure path,
 /// and round-robin slot reuse. No real model weights — a synthetic layer file
 /// of tagged expert blobs.
-@Suite struct PreadExpertStreamerTests {
+// Every test writes and reads the same synthetic layer path; the suite
+// cannot run in parallel with itself.
+@Suite(.serialized) struct PreadExpertStreamerTests {
 
     static let pageSize = Int(getpagesize())
 
