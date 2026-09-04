@@ -3,7 +3,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/slogan-dark.svg">
-  <img alt="NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6."
+  <img alt="NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6"
        src="assets/slogan-light.svg" width="660">
 </picture>
 
