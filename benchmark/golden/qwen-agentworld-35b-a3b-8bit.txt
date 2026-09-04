@@ -1,0 +1,20 @@
+# prompt:      Explain what a mutex is and when you would use one.
+# max-new:     96
+# temperature: 0 (greedy)
+# seed:        1234
+# target:      agentworld-8 (8-bit)
+# captured-on: Mac15,3, 24 GB, macOS 26.6.2
+# commit:      557ed9b
+---
+
+
+<think>
+Here's a thinking process that leads to the explanation of a mutex:
+
+1.  **Deconstruct the Request:**
+    *   **Topic:** Mutex (Mutual Exclusion).
+    *   **Core Tasks:** Explain *what* it is and explain *when* to use it.
+
+2.  **Define "Mutex" (What is it?):**
+    *   *Etymology:* Mutual Exclusion.
+    *   *
