@@ -106,22 +106,29 @@ model -- nothing is pinned for the benchmark that a user would not get.
 
 | Quantization | Peak decode |
 | --- | ---: |
-| 4-bit | **6.82 tok/s** |
-| 8-bit | testing |
+| 4-bit | **5.25 tok/s** |
+| 8-bit | **2.03 tok/s** |
 
 
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
-native 262K context, prompt cache on, 8-bit KV, and MTP off. Measured
-2026-08-30; the 4-bit 35B rows are medians of seven runs and the rest of three.
+native 262K context, prompt cache on, 8-bit KV, and MTP off. The 35B rows were
+measured 2026-08-30; the 4-bit ones are medians of seven runs and the 8-bit
+ones of three. The Qwen3.8-Flash-Next rows were re-measured 2026-09-04 on the
+story-generation prompt at that family's shipped defaults (temperature `1.0`,
+Top-P `0.95`): the 4-bit row is the median of three runs, the 8-bit row a
+single run.
 
 Qwen3.8-Flash-Next is a 125B model with 6B active parameters, against 35B/3B
 for the other two. Decode is bound by streaming routed experts from SSD, so the
 4-bit rows run roughly twice the 8-bit ones, and the 125B model is slower again
 because 512 experts at top-10 spread across a far wider working set.
 
-Against the previous publication, Qwen3.8-Flash-Next gained **+35.7%** (5.03),
-Ornith 8-bit **+16.9%** (10.17) and Qwen 3.6 8-bit **+14.3%** (11.12), from the
-per-family expert-cache sizing and speculative prefetch. The two 4-bit 35B
+Against the publication before 4.6's, Ornith 8-bit gained **+16.9%** (10.17)
+and Qwen 3.6 8-bit **+14.3%** (11.12), from the per-family expert-cache sizing
+and speculative prefetch. The Qwen3.8-Flash-Next 4-bit row is not comparable
+with the 6.82 published on 2026-08-30: that figure was the best of four prompts,
+where this one is the prose prompt alone, and it was taken with the routing
+top-k on a single GPU thread (since replaced, +5%). The two 4-bit 35B
 configurations did not change and reproduce their published numbers to within
 0.5%, which is what makes the other three readable as gains rather than drift.
 
