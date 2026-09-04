@@ -120,6 +120,7 @@ def quantize_affine(value: np.ndarray, bits: int) -> tuple[np.ndarray, ...]:
 
 
 DRAFT_HEAD = False   # --draft-head: convert only the `mtp.*` namespace
+HEAD_BITS = BITS_8   # --head-bits: the embedding and lm_head slot
 
 
 def is_draft_norm(name: str) -> bool:
@@ -215,7 +216,7 @@ def quant_bits(name: str, width: int) -> int | None:
     if kept_bf16(name):
         return None
     if name.endswith("embed_tokens.weight") or name.endswith("lm_head.weight"):
-        return BITS_8
+        return HEAD_BITS
     return width
 
 
@@ -433,6 +434,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=sorted(MODELS), default="agentworld",
                     help="which release to convert (pinned repo and commit)")
+    ap.add_argument("--head-bits", type=int, choices=(4, 8), default=8,
+                    help="embedding and lm_head width (default 8; the head is ~0.5 GB "
+                         "at 8-bit and ~3.5 ms of every 35B token)")
     ap.add_argument("--draft-head", action="store_true",
                     help="convert the mtp.* draft head only, as a qwen3_5_mtp sidecar snapshot")
     ap.add_argument("--plan", action="store_true", help="classify from the index, download nothing")
@@ -443,8 +447,9 @@ def main() -> int:
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
     args = ap.parse_args()
     select_model(args.model)
-    global DRAFT_HEAD
+    global DRAFT_HEAD, HEAD_BITS
     DRAFT_HEAD = args.draft_head
+    HEAD_BITS = args.head_bits
 
     config = fetch_json("config.json")
     if config.get("model_type") != "qwen3_5_moe":
