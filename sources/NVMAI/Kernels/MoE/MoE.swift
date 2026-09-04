@@ -62,9 +62,9 @@ final class MoE {
     /// was the router's cost, not the GEMV. NVMAI_ROUTER_TOPK_SIMD=0 restores
     /// the serial kernel.
     private let routerSelectKNSimdPSO: MTLComputePipelineState?
-    private var routerTopKSimd: Bool {
+    private static let routerTopKSimdFlag =
         ProcessInfo.processInfo.environment["NVMAI_ROUTER_TOPK_SIMD"] != "0"
-    }
+    private var routerTopKSimd: Bool { Self.routerTopKSimdFlag }
     private let residencyClassifyPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState

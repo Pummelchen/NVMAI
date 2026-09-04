@@ -52,9 +52,8 @@ extension RealForwardRunner {
 
     /// Fused hyper-connection gates. Default off until the golden has proven
     /// the fused kernels bit-identical; NVMAI_HC_FUSED=1 turns them on.
-    var hcFusedEnabled: Bool {
-        ProcessInfo.processInfo.environment["NVMAI_HC_FUSED"] == "1"
-    }
+    static let hcFusedFlag = ProcessInfo.processInfo.environment["NVMAI_HC_FUSED"] == "1"
+    var hcFusedEnabled: Bool { Self.hcFusedFlag }
 
     /// Residual -> block input, for one decode token.
     func encodeResidualEntryDecode(commandBuffer: MTLCommandBuffer,
@@ -265,13 +264,11 @@ extension RealForwardRunner {
     /// CPU sort behind a command-buffer round trip per full-attention layer.
     /// Off until verified: NVMAI_QSA_GPU_SELECT=1 turns it on, =verify runs
     /// both and reports any mask difference.
+    static let qsaGPUSelectValue = ProcessInfo.processInfo.environment["NVMAI_QSA_GPU_SELECT"]
     var qsaGPUSelectEnabled: Bool {
-        let v = ProcessInfo.processInfo.environment["NVMAI_QSA_GPU_SELECT"]
-        return v == "1" || v == "verify"
+        Self.qsaGPUSelectValue == "1" || Self.qsaGPUSelectValue == "verify"
     }
-    var qsaSelectVerify: Bool {
-        ProcessInfo.processInfo.environment["NVMAI_QSA_GPU_SELECT"] == "verify"
-    }
+    var qsaSelectVerify: Bool { Self.qsaGPUSelectValue == "verify" }
 
     func encodeQSAEntryAndSelect(passthrough: inout MTLCommandBuffer,
                                  hidden: MTLBuffer,

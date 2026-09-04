@@ -151,9 +151,9 @@ final class Attention {
     private var simdPartialCache: [String: MTLComputePipelineState] = [:]
     /// Test hook: forces the simd (true) or serial (false) pass 1.
     var simdPartialOverride: Bool?
-    private var simdPartialEnabled: Bool {
-        simdPartialOverride ?? (ProcessInfo.processInfo.environment["NVMAI_ATTN_SIMD_PARTIAL"] != "0")
-    }
+    private static let simdPartialDefault =
+        ProcessInfo.processInfo.environment["NVMAI_ATTN_SIMD_PARTIAL"] != "0"
+    private var simdPartialEnabled: Bool { simdPartialOverride ?? Self.simdPartialDefault }
     private func simdPartialPipeline(headDim: UInt32, numQHeads: UInt32,
                                      numKVHeads: UInt32, numChunks: Int) -> MTLComputePipelineState? {
         let key = "\(headDim)/\(numQHeads)/\(numKVHeads)/\(numChunks)"

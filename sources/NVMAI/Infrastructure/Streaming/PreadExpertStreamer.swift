@@ -214,6 +214,8 @@ private final class PrefetchDestinations: @unchecked Sendable {
 public final class PreadExpertStreamer: @unchecked Sendable {
     public static let scratchAlignment = 2 * 1024 * 1024
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }
+    /// Read once: this sits on the per-layer miss path.
+    static let parallelIOEnabled = ProcessInfo.processInfo.environment["NVMAI_PARALLEL_IO"] != "0"
 
     /// Slot allocations eligible for wiring: one region for the pooled
     /// layout, one per slot otherwise. Recorded at construction; wiring
@@ -778,7 +780,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             } else if let boundedReader {
                 try executeBoundedReads(plan, reader: boundedReader)
             } else {
-                let parallel = ProcessInfo.processInfo.environment["NVMAI_PARALLEL_IO"] != "0"
+                let parallel = Self.parallelIOEnabled
                     && plan.misses.count > 1
                 try executeCachedPreads(plan, parallel: parallel)
             }

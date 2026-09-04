@@ -456,9 +456,13 @@ extension RealForwardRunner {
     /// decode chain so the attention command buffer's GPU time can be
     /// differenced per kernel. Output is wrong while it is set; the timing is
     /// not, because none of these kernels' cost depends on the data.
-    func ablated(_ name: String) -> Bool {
-        ProcessInfo.processInfo.environment["NVMAI_ABLATE"] == name
-    }
+    /// Environment flags are read once per process. Reading
+    /// `ProcessInfo.processInfo.environment` rebuilds a dictionary from
+    /// environ every time; at ~20 kernels per layer that was ~800 rebuilds a
+    /// token, and on the 35B family's 65 ms token it showed up as the
+    /// hottest CPU frames in a decode sample (Swift String indexing).
+    static let ablationTarget = ProcessInfo.processInfo.environment["NVMAI_ABLATE"]
+    func ablated(_ name: String) -> Bool { Self.ablationTarget == name }
 
     /// Per-kernel GPU attribution for the GDN decode chain.
     ///
@@ -469,9 +473,8 @@ extension RealForwardRunner {
     /// slow-paths and shortened generations instead of the kernel. The split
     /// buffers are collected here and recorded after the layer's tail wait,
     /// where their GPU timestamps exist.
-    var splitKernelTiming: Bool {
-        ProcessInfo.processInfo.environment["NVMAI_KERNEL_SPLIT"] == "1"
-    }
+    static let splitKernelTimingFlag = ProcessInfo.processInfo.environment["NVMAI_KERNEL_SPLIT"] == "1"
+    var splitKernelTiming: Bool { Self.splitKernelTimingFlag }
 
     func rotate(_ cb: inout MTLCommandBuffer, role: String) throws {
         guard splitKernelTiming else { return }
