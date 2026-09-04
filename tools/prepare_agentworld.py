@@ -202,14 +202,38 @@ def fetch_header(shard: str) -> dict:
     return json.loads(body)
 
 
+_in_flight: subprocess.Popen | None = None
+
+
 def download(shard: str, work: Path) -> Path:
-    """Fetch one shard, resuming a partial file rather than restarting it."""
+    """Fetch one shard, resuming a partial file rather than restarting it.
+
+    The curl child is tracked so a failure elsewhere can stop it: a download
+    that outlives the converter keeps appending to a file the next run
+    resumes, and the shard then fails to deserialize.
+    """
+    global _in_flight
     dest = work / shard
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["curl", "-fL", "--retry", "5", "--retry-delay", "5",
-                    "--retry-all-errors", "-C", "-", "--silent", "--show-error",
-                    "-o", str(dest), f"{BASE}/{shard}"], check=True)
+    _in_flight = subprocess.Popen(
+        ["curl", "-fL", "--retry", "5", "--retry-delay", "5",
+         "--retry-all-errors", "-C", "-", "--silent", "--show-error",
+         "-o", str(dest), f"{BASE}/{shard}"])
+    code = _in_flight.wait()
+    _in_flight = None
+    if code != 0:
+        raise subprocess.CalledProcessError(code, "curl")
     return dest
+
+
+def stop_download() -> None:
+    proc = _in_flight
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def fetch_tokenizer(out: Path) -> None:
@@ -376,16 +400,20 @@ def main() -> int:
 
     threading.Thread(target=fetcher, daemon=True).start()
     done = 0
-    while True:
-        item = queue.get()
-        if item is None:
-            break
-        if isinstance(item, Exception):
-            raise item
-        done += 1
-        print(f"[{done}/{len(shards)}] {item.name}", flush=True)
-        convert_shard(item, writers)
-        item.unlink()
+    try:
+        while True:
+            item = queue.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            done += 1
+            print(f"[{done}/{len(shards)}] {item.name}", flush=True)
+            convert_shard(item, writers)
+            item.unlink()
+    except BaseException:
+        stop_download()
+        raise
     for width, writer in writers.items():
         out = outputs[width]
         writer.finish()
