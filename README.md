@@ -9,6 +9,8 @@
 
 # NVMAI
 
+NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
+
 ### Core Benefits
 
 - NVMAI streams LLM's faster than any other similar project.
