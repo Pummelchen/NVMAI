@@ -23,6 +23,7 @@
 ### Supported LLMs
 
 - **Qwen3.8-Flash-Next 125B-A6B**
+- **Qwen-AgentWorld 35B-A3B**
 - **Ornith 1.5 35B-A3B**
 - **Qwen 3.6 35B-A3B**
 
@@ -110,6 +111,14 @@ model -- nothing is pinned for the benchmark that a user would not get.
 | 8-bit | **2.03 tok/s** |
 
 
+**Qwen-AgentWorld 35B-A3B**
+
+| Quantization | Peak decode |
+| --- | ---: |
+| 4-bit | testing |
+| 8-bit | testing |
+
+
 Settings: temperature `0.6`, Top-P `0.95`, Top-K `20`, presence penalty `0.0`,
 native 262K context, prompt cache on, 8-bit KV, and MTP off. The 35B rows were
 measured 2026-08-30; the 4-bit ones are medians of seven runs and the 8-bit
@@ -118,8 +127,12 @@ story-generation prompt at that family's shipped defaults (temperature `1.0`,
 Top-P `0.95`): the 4-bit row is the median of three runs, the 8-bit row a
 single run.
 
+Qwen-AgentWorld is Qwen's agentic fine-tune of the 35B-A3B geometry, built
+by `tools/install_models.sh agentworld` straight from Qwen's bf16 release
+(one shard in flight at a time) with the router, the shared-expert gate, the
+DeltaNet gating projections and every norm kept at bf16 in both widths.
 Qwen3.8-Flash-Next is a 125B model with 6B active parameters, against 35B/3B
-for the other two. Decode is bound by streaming routed experts from SSD, so the
+for the others. Decode is bound by streaming routed experts from SSD, so the
 4-bit rows run roughly twice the 8-bit ones, and the 125B model is slower again
 because 512 experts at top-10 spread across a far wider working set.
 
