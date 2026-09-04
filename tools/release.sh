@@ -75,12 +75,27 @@ grep -q 'Test run with .* passed' "$STAGE_ROOT.testlog" 2>/dev/null \
 
 # The golden baseline is the only check that exercises real inference. Skip it
 # only when no model is installed — never to make a mismatch go away.
-if [ -f "$ROOT/models/ornith-1.5_35B_A3B_8Bit/verified-install.json" ]; then
-  "$SCRIPT_DIR/golden-baseline.sh" --check 8 || die "golden baseline mismatch"
-elif compgen -G "$ROOT/models/*/verified-install.json" >/dev/null; then
-  die "Ornith 1.5 8-bit baseline model is not installed"
-else
+# Every installed golden target is checked; the gate used to demand the
+# Ornith 8-bit install specifically and refused a machine that only has
+# Qwen3.8 installed, which is the machine 5.0 was cut on.
+GOLDENS_CHECKED=0
+check_golden() {  # <install dir> <golden target>
+  if [ -f "$ROOT/models/$1/verified-install.json" ]; then
+    "$SCRIPT_DIR/golden-baseline.sh" --check "$2" || die "golden baseline mismatch ($2)"
+    GOLDENS_CHECKED=$((GOLDENS_CHECKED + 1))
+  fi
+}
+check_golden ornith-1.5_35B_A3B_8Bit 8
+check_golden ornith-1.5_35B_A3B_4Bit 4
+check_golden qwen3.8-flash-next_125B_A6B_4Bit qwen38-4
+check_golden qwen3.8-flash-next_125B_A6B_8Bit qwen38-8
+if [ "$GOLDENS_CHECKED" = 0 ]; then
+  if compgen -G "$ROOT/models/*/verified-install.json" >/dev/null; then
+    die "an installed model has no golden target; add it to golden-baseline.sh"
+  fi
   echo "  no installed model; skipping golden baseline (state this in the notes)"
+else
+  echo "  $GOLDENS_CHECKED golden baseline(s) identical"
 fi
 
 # --- clean build ------------------------------------------------------------

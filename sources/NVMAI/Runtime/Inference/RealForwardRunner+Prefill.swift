@@ -23,6 +23,79 @@ extension RealForwardRunner {
         model.resetRoutedExpertUseCounts()
     }
 
+    /// The one-token-at-a-time prefill a hyper-connection family started
+    /// on, kept as the oracle the batched path is checked against.
+    ///
+    /// It runs the verified decode path per token, so it produces the KV
+    /// state and logits the batched path must reproduce. It is also
+    /// unusably slow -- every token pays a full pass over the routed
+    /// experts, where a chunk amortizes them -- so it is not the default.
+    private func prefillSequentialHyperConnection(
+        tokens: ArraySlice<Int32>, startPosition: Int,
+        outputMode: PrefillOutputMode, into logits: MTLBuffer,
+        onProgress: (Int) -> Void
+    ) async throws -> PrefillResult {
+        var position = startPosition
+        for (offset, token) in tokens.enumerated() {
+            try Task.checkCancellation()
+            try await produceToken(token: token,
+                                   position: position,
+                                   into: logits,
+                                   emitHead: offset == tokens.count - 1,
+                                   outputMode: outputMode)
+            position += 1
+            onProgress(offset + 1)
+        }
+        return PrefillResult(newPosition: position, seed: .logitsWritten)
+    }
+
+    /// Intended to release the slot-cache wiring for prefill, which streams
+    /// experts in bulk and, on the ANE path, has to leave Core ML room for
+    /// its arenas.
+    ///
+    /// In practice this is a no-op and has always been: the cache is not
+    /// wired until the first decode token, so `slotsPinned` is already
+    /// false when prefill asks. Measured with `NVMAI_WIRE_TRACE=1` over a
+    /// full ANE-prefill request: 40 `mlock` calls at the handover, zero
+    /// `munlock` calls anywhere. The shipped behaviour is "wire once, at
+    /// the handover", not the release/re-apply cycle `703f35a`'s message
+    /// describes.
+    ///
+    /// Kept because it is correct for any future path that does wire
+    /// earlier, and because removing it would silently change that path's
+    /// behaviour. It is not load-bearing today.
+    ///
+    /// Skipped entirely under NVMAI_KEEP_WIRED: pinning at allocation and
+    /// then releasing here is self-defeating, and cost me one wrong
+    /// conclusion already.
+    private func releasePrefillCacheWiring() {
+        if !Self.keepExpertCacheWired {
+            model.setExpertCachePinned(false)
+        }
+    }
+
+    private func validateChunkedPrefill(tokens: ArraySlice<Int32>,
+                                        startPosition: Int,
+                                        config: PrefillRuntimeConfig) throws {
+        guard config.mode == .chunked else {
+            throw PrefillError.chunkedUnsupported(
+                "prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
+        }
+        guard startPosition >= 0 else {
+            throw PrefillError.chunkedUnsupported(
+                "chunked prefill startPosition must be non-negative")
+        }
+        let kvPosition = kv?.position ?? 0
+        guard kvPosition == startPosition else {
+            throw PrefillError.chunkedUnsupported(
+                "chunked prefill cursor \(kvPosition) != startPosition \(startPosition)")
+        }
+        guard tokens.count <= maxContext - startPosition else {
+            throw PrefillError.chunkedUnsupported(
+                "chunked prefill range starting at \(startPosition) with \(tokens.count) tokens exceeds maxContext \(maxContext)")
+        }
+    }
+
     public func prefillChunked(tokens: ArraySlice<Int32>,
                                startPosition: Int,
                                outputMode: PrefillOutputMode,
@@ -43,58 +116,13 @@ extension RealForwardRunner {
         // unusably slow -- every token pays a full pass over the routed
         // experts, where a chunk amortizes them -- so it is not the default.
         if cfg.hyperConnections.enabled && Self.sequentialHyperConnectionPrefill {
-            var position = startPosition
-            for (offset, token) in tokens.enumerated() {
-                try Task.checkCancellation()
-                try await produceToken(token: token,
-                                       position: position,
-                                       into: logits,
-                                       emitHead: offset == tokens.count - 1,
-                                       outputMode: outputMode)
-                position += 1
-                onProgress(offset + 1)
-            }
-            return PrefillResult(newPosition: position, seed: .logitsWritten)
+            return try await prefillSequentialHyperConnection(
+                tokens: tokens, startPosition: startPosition,
+                outputMode: outputMode, into: logits, onProgress: onProgress)
         }
-        // Intended to release the slot-cache wiring for prefill, which streams
-        // experts in bulk and, on the ANE path, has to leave Core ML room for
-        // its arenas.
-        //
-        // In practice this is a no-op and has always been: the cache is not
-        // wired until the first decode token, so `slotsPinned` is already
-        // false when prefill asks. Measured with `NVMAI_WIRE_TRACE=1` over a
-        // full ANE-prefill request: 40 `mlock` calls at the handover, zero
-        // `munlock` calls anywhere. The shipped behaviour is "wire once, at
-        // the handover", not the release/re-apply cycle `703f35a`'s message
-        // describes.
-        //
-        // Kept because it is correct for any future path that does wire
-        // earlier, and because removing it would silently change that path's
-        // behaviour. It is not load-bearing today.
-        //
-        // Skipped entirely under NVMAI_KEEP_WIRED: pinning at allocation and
-        // then releasing here is self-defeating, and cost me one wrong
-        // conclusion already.
-        if !Self.keepExpertCacheWired {
-            model.setExpertCachePinned(false)
-        }
-        guard config.mode == .chunked else {
-            throw PrefillError.chunkedUnsupported(
-                "prefillChunked requires PrefillRuntimeConfig.mode == .chunked")
-        }
-        guard startPosition >= 0 else {
-            throw PrefillError.chunkedUnsupported(
-                "chunked prefill startPosition must be non-negative")
-        }
-        let kvPosition = kv?.position ?? 0
-        guard kvPosition == startPosition else {
-            throw PrefillError.chunkedUnsupported(
-                "chunked prefill cursor \(kvPosition) != startPosition \(startPosition)")
-        }
-        guard tokens.count <= maxContext - startPosition else {
-            throw PrefillError.chunkedUnsupported(
-                "chunked prefill range starting at \(startPosition) with \(tokens.count) tokens exceeds maxContext \(maxContext)")
-        }
+        releasePrefillCacheWiring()
+        try validateChunkedPrefill(tokens: tokens, startPosition: startPosition,
+                                   config: config)
         guard !tokens.isEmpty else {
             return PrefillResult(newPosition: startPosition, seed: .logitsWritten)
         }

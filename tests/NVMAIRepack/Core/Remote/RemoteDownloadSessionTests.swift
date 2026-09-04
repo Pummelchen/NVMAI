@@ -2,7 +2,9 @@ import Foundation
 import Testing
 @testable import NVMAIRepackCore
 
-@Suite
+// The fake HF URL protocol is process-global state (`resetFakeHF`);
+// tests that share it cannot run concurrently.
+@Suite(.serialized)
 struct RemoteDownloadSessionTests {
     @Test func typedSessionUsesStallTolerantSerialDefaults() {
         let session = RemoteDownloadSession()

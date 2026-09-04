@@ -1022,6 +1022,80 @@ public extension RemoteStreamingRepacker {
         audit.packedExpertLayoutMode = "identity"
     }
 
+    /// packed_experts/layout.json, validated and recorded; returns the
+    /// expert stride the manifest needs.
+    private func writeAndRecordLayout(
+        plan: RepackPlan,
+        paths: RemoteInstallPaths,
+        progress: @escaping @Sendable (ModelInstallProgress) -> Void
+    ) throws -> UInt64 {
+        let layoutPath = ((paths.partialDirectory as NSString)
+            .appendingPathComponent("packed_experts") as NSString)
+            .appendingPathComponent("layout.json")
+        let expertStride = plan.layers.first(where: {
+            $0.expertsPerLayer > 0
+        })?.expertStride ?? 0
+        let layoutData = try GTurboJSON.encodeLayout(
+            plan: plan,
+            expertStride: expertStride)
+        try writeSmall(path: layoutPath, data: layoutData)
+        try GTurboLayoutValidator.validate(path: layoutPath, plan: plan)
+        try recordOutputFile(relativePath: "packed_experts/layout.json",
+                             path: layoutPath,
+                             progress: progress)
+        return expertStride
+    }
+
+    /// The shared n-gram table, hard-linked and recorded (see the comment
+    /// inside for why it is linked here rather than copied with the plan).
+    private func linkSharedNgramTable(
+        source: LocalSnapshot,
+        local: LocalSnapshotRepackOptions,
+        paths: RemoteInstallPaths,
+        progress: @escaping @Sendable (ModelInstallProgress) -> Void
+    ) throws {
+        // Passthrough files, recorded the way the remote path records
+        // them. They are copied into the install either way, but a file
+        // the manifest does not list is a file the loader treats as
+        // absent: ple_constants.json on disk and missing from `files`
+        // fails the install at load with "missing required file".
+        // `prepareLocalPlan` kept these out of the copy plan; link them
+        // now that the partial directory exists. Deriving the set from the
+        // same requirement list both functions read keeps them from
+        // disagreeing about what was skipped.
+        for requirement in RepackPlanner.passthroughRequirements(
+            family: source.arch.family)
+        where local.shareNgramTable && requirement.name == "ngram_table.bin" {
+            try Task.checkCancellation()
+            let origin = (local.inputSnapshotDir as NSString)
+                .appendingPathComponent(requirement.name)
+            guard (try? Posix.entryKind(origin)) == .regular else { continue }
+            let destination = (paths.partialDirectory as NSString)
+                .appendingPathComponent(requirement.name)
+            // `entryKind` reports `.absent` for a missing path rather
+            // than throwing, so `try?` is `.some(.absent)` and a `!= nil`
+            // test is true for a file that is not there.
+            if (try? Posix.entryKind(destination)) == .regular {
+                try FileManager.default.removeItem(atPath: destination)
+            }
+            try FileManager.default.linkItem(atPath: origin, toPath: destination)
+            let a = try FileManager.default.attributesOfItem(atPath: origin)
+            let b = try FileManager.default.attributesOfItem(atPath: destination)
+            let sa = (a[FileAttributeKey.size] as? NSNumber)?.uint64Value ?? 0
+            let sb = (b[FileAttributeKey.size] as? NSNumber)?.uint64Value ?? 1
+            guard sa == sb, sa > 0 else {
+                throw RepackError.configurationInvalid(
+                    detail: "\(requirement.name): linked \(sb) bytes, expected \(sa)")
+            }
+            // Digested like any other output. A hardlink is the same
+            // bytes, so the receipt attests over it exactly as it would
+            // over a copy -- sharing changes the disk cost, not the proof.
+            try recordOutputFile(relativePath: requirement.name,
+                                 path: destination,
+                                 progress: progress)
+        }
+    }
+
     private func executeLocalCopy(
         source: LocalSnapshot,
         local: LocalSnapshotRepackOptions,
@@ -1064,60 +1138,10 @@ public extension RemoteStreamingRepacker {
                                      path: layer.path,
                                      progress: progress)
             }
-            let layoutPath = ((paths.partialDirectory as NSString)
-                .appendingPathComponent("packed_experts") as NSString)
-                .appendingPathComponent("layout.json")
-            let expertStride = plan.layers.first(where: {
-                $0.expertsPerLayer > 0
-            })?.expertStride ?? 0
-            let layoutData = try GTurboJSON.encodeLayout(
-                plan: plan,
-                expertStride: expertStride)
-            try writeSmall(path: layoutPath, data: layoutData)
-            try GTurboLayoutValidator.validate(path: layoutPath, plan: plan)
-            try recordOutputFile(relativePath: "packed_experts/layout.json",
-                                 path: layoutPath,
-                                 progress: progress)
-            // Passthrough files, recorded the way the remote path records
-            // them. They are copied into the install either way, but a file
-            // the manifest does not list is a file the loader treats as
-            // absent: ple_constants.json on disk and missing from `files`
-            // fails the install at load with "missing required file".
-            // `prepareLocalPlan` kept these out of the copy plan; link them
-            // now that the partial directory exists. Deriving the set from the
-            // same requirement list both functions read keeps them from
-            // disagreeing about what was skipped.
-            for requirement in RepackPlanner.passthroughRequirements(
-                family: source.arch.family)
-            where local.shareNgramTable && requirement.name == "ngram_table.bin" {
-                try Task.checkCancellation()
-                let origin = (local.inputSnapshotDir as NSString)
-                    .appendingPathComponent(requirement.name)
-                guard (try? Posix.entryKind(origin)) == .regular else { continue }
-                let destination = (paths.partialDirectory as NSString)
-                    .appendingPathComponent(requirement.name)
-                // `entryKind` reports `.absent` for a missing path rather
-                // than throwing, so `try?` is `.some(.absent)` and a `!= nil`
-                // test is true for a file that is not there.
-                if (try? Posix.entryKind(destination)) == .regular {
-                    try FileManager.default.removeItem(atPath: destination)
-                }
-                try FileManager.default.linkItem(atPath: origin, toPath: destination)
-                let a = try FileManager.default.attributesOfItem(atPath: origin)
-                let b = try FileManager.default.attributesOfItem(atPath: destination)
-                let sa = (a[FileAttributeKey.size] as? NSNumber)?.uint64Value ?? 0
-                let sb = (b[FileAttributeKey.size] as? NSNumber)?.uint64Value ?? 1
-                guard sa == sb, sa > 0 else {
-                    throw RepackError.configurationInvalid(
-                        detail: "\(requirement.name): linked \(sb) bytes, expected \(sa)")
-                }
-                // Digested like any other output. A hardlink is the same
-                // bytes, so the receipt attests over it exactly as it would
-                // over a copy -- sharing changes the disk cost, not the proof.
-                try recordOutputFile(relativePath: requirement.name,
-                                     path: destination,
+            let expertStride = try writeAndRecordLayout(plan: plan, paths: paths,
+                                                        progress: progress)
+            try linkSharedNgramTable(source: source, local: local, paths: paths,
                                      progress: progress)
-            }
             for file in plan.passthroughFiles {
                 try Task.checkCancellation()
                 let passthroughPath = (paths.partialDirectory as NSString)
@@ -1139,7 +1163,7 @@ public extension RemoteStreamingRepacker {
             // loaded beside a target and prompted through the target's
             // tokenizer, so requiring one here would refuse a sidecar that is
             // correct. Only a whole model needs its own.
-            if !local.draftHead {
+            if !local.draftHead && !source.arch.family.isDraftHead {
                 try copyLocalTokenizer(snapshotDirectory: local.inputSnapshotDir,
                                        partialDirectory: paths.partialDirectory,
                                        record: { relative, path in

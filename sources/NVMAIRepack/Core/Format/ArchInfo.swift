@@ -7,6 +7,15 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case qwen36MTP = "qwen36_mtp"
     case qwen38flash = "qwen38flash"
     case qwen38flashMTP = "qwen38flash_mtp"
+    /// A draft sidecar is loaded beside a target and prompted through the
+    /// target's tokenizer, so a local import of one carries no tokenizer of
+    /// its own.
+    var isDraftHead: Bool {
+        switch self {
+        case .qwen36MTP, .qwen38flashMTP: return true
+        default: return false
+        }
+    }
 }
 
 /// Architecture facts mirrored into `manifest.json -> arch`. Cross-checked by
