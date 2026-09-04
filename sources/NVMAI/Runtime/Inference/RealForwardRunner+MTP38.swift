@@ -59,7 +59,6 @@ extension RealForwardRunner {
             throw PrefillError.chunkedUnsupported(
                 "MTP adapter accepts 1...\(Self.mtpChunkCapacity) aligned rows")
         }
-        let D = cfg.hiddenSize
         let wide = residualWidth
         let expectedBytes = tokens.count * wide * MemoryLayout<Float16>.stride
         guard targetHiddenRows.count == expectedBytes else {

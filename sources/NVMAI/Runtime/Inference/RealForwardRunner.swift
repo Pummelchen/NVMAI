@@ -43,7 +43,7 @@ public struct RDAdviceAdaptivePolicyConfig: Sendable, Equatable {
 struct RDAdviceAdaptivePolicyState: Sendable, Equatable {
     var config: RDAdviceAdaptivePolicyConfig
     var skipUntilPosition: Int = -1
-    internal(set) var recentSlowCallNanos: UInt64 = 0
+    var recentSlowCallNanos: UInt64 = 0
 
     init(config: RDAdviceAdaptivePolicyConfig = .conservative) {
         self.config = config
@@ -1088,7 +1088,6 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
 
 
 
-    @discardableResult
 
 
 
