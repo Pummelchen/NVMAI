@@ -18,6 +18,9 @@ afterwards is a second copy of the output.
     python3.13 tools/prepare_agentworld.py --plan            # no download
     python3.13 tools/prepare_agentworld.py --bits 4 \\
         --output .build/agentworld-affine-4bit --work .build/agentworld-shards
+    python3.13 tools/prepare_agentworld.py --bits 4 8 \\
+        --output .build/agentworld-affine --work .build/agentworld-shards
+        # one download, two snapshots: <output>-4bit and <output>-8bit
 
 Kept at the checkpoint's own bf16 in both widths -- "low-cost data at
 16-bit where it helps": the router and the scalar shared-expert gate (they
@@ -270,7 +273,8 @@ class OutputWriter:
             {"metadata": {"total_size": self.total}, "weight_map": final}, indent=1))
 
 
-def convert_shard(path: Path, writer: OutputWriter, width: int) -> None:
+def convert_shard(path: Path, writers: dict[int, OutputWriter]) -> None:
+    """One source shard into every requested width; the tensor is read once."""
     with safe_open(path, framework="np") as src:
         for name in src.keys():
             value = src.get_tensor(name)
@@ -281,15 +285,17 @@ def convert_shard(path: Path, writer: OutputWriter, width: int) -> None:
                     piece = value[:, value.shape[1] // 2:, :]
                 else:
                     piece = value
-                bits = quant_bits(out_name, width)
-                if bits is None:
-                    writer.add(out_name, np.ascontiguousarray(piece))
-                    continue
-                stem = out_name[: -len(".weight")]
-                packed, scales, biases = quantize_affine(np.ascontiguousarray(piece), bits)
-                writer.add(stem + ".weight", packed)
-                writer.add(stem + ".scales", scales)
-                writer.add(stem + ".biases", biases)
+                piece = np.ascontiguousarray(piece)
+                for width, writer in writers.items():
+                    bits = quant_bits(out_name, width)
+                    if bits is None:
+                        writer.add(out_name, piece)
+                        continue
+                    stem = out_name[: -len(".weight")]
+                    packed, scales, biases = quantize_affine(piece, bits)
+                    writer.add(stem + ".weight", packed)
+                    writer.add(stem + ".scales", scales)
+                    writer.add(stem + ".biases", biases)
 
 
 def plan(index: dict, width: int) -> None:
@@ -328,8 +334,10 @@ def plan(index: dict, width: int) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", action="store_true", help="classify from the index, download nothing")
-    ap.add_argument("--bits", type=int, choices=(4, 8), default=4)
-    ap.add_argument("--output", type=Path)
+    ap.add_argument("--bits", type=int, choices=(4, 8), nargs="+", default=[4],
+                    help="one width, or both to write two snapshots from one download")
+    ap.add_argument("--output", type=Path,
+                    help="snapshot directory; with two widths, a prefix that gets -4bit/-8bit")
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
     args = ap.parse_args()
 
@@ -337,15 +345,21 @@ def main() -> int:
     if config.get("model_type") != "qwen3_5_moe":
         raise SystemExit(f"unexpected model_type {config.get('model_type')!r}")
     index = fetch_json("model.safetensors.index.json")
+    widths = sorted(set(args.bits))
     if args.plan:
-        plan(index, args.bits)
+        for width in widths:
+            plan(index, width)
         return 0
     if not args.output or not args.work:
         ap.error("--output and --work are required unless --plan")
     work = args.work
     work.mkdir(parents=True, exist_ok=True)
     shards = sorted(set(index["weight_map"].values()))
-    writer = OutputWriter(args.output)
+    if len(widths) == 1:
+        outputs = {widths[0]: args.output}
+    else:
+        outputs = {w: Path(f"{args.output}-{w}bit") for w in widths}
+    writers = {w: OutputWriter(out) for w, out in outputs.items()}
 
     # Fetch shard N+1 while shard N converts; each shard is deleted once
     # converted, so at most two are on disk.
@@ -370,14 +384,16 @@ def main() -> int:
             raise item
         done += 1
         print(f"[{done}/{len(shards)}] {item.name}", flush=True)
-        convert_shard(item, writer, args.bits)
+        convert_shard(item, writers)
         item.unlink()
-    writer.finish()
-    write_config(config, args.output, writer.index.keys(), args.bits)
-    print("tokenizer:")
-    fetch_tokenizer(args.output)
-    print(f"\naffine snapshot written to {args.output}")
-    print(f"  {writer.shard_no} shards, {writer.total / 1e9:.1f} GB")
+    for width, writer in writers.items():
+        out = outputs[width]
+        writer.finish()
+        write_config(config, out, writer.index.keys(), width)
+        print(f"tokenizer ({width}-bit):")
+        fetch_tokenizer(out)
+        print(f"\naffine snapshot written to {out}")
+        print(f"  {writer.shard_no} shards, {writer.total / 1e9:.1f} GB")
     return 0
 
 

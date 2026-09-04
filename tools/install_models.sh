@@ -138,10 +138,14 @@ EOF
         # shards on disk), then repacked. The snapshot and the install exist
         # at the same time: ~40 GB at 4-bit, ~75 GB at 8-bit.
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
-        echo "converting $name -> .build/agentworld-affine-${width}bit"
-        python3.13 tools/prepare_agentworld.py --bits "$width" \
-            --output ".build/agentworld-affine-${width}bit" \
-            --work .build/agentworld-shards || return 1
+        if [[ ! -f ".build/agentworld-affine-${width}bit/model.safetensors.index.json" ]]; then
+          # Both widths from one 70 GB download; the other width's snapshot
+          # is then ready for its own install without a second fetch.
+          echo "converting AgentWorld -> .build/agentworld-affine-{4,8}bit"
+          python3.13 tools/prepare_agentworld.py --bits 4 8 \
+              --output .build/agentworld-affine \
+              --work .build/agentworld-shards || return 1
+        fi
         echo "installing $name -> models/$dir"
         "$BIN" --input-snapshot ".build/agentworld-affine-${width}bit" \
             --model-id qwen-agentworld --output "$MODELS/$dir"
