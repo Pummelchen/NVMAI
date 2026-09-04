@@ -216,9 +216,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     public static var cachePolicyDefault: ExpertCachePolicy { .lfu }
     /// Read once: this sits on the per-layer miss path.
     static let parallelIOEnabled = ProcessInfo.processInfo.environment["NVMAI_PARALLEL_IO"] != "0"
-    /// NVMAI_PREFETCH_IO_THROTTLE=1: speculative reads on the throttled disk
-    /// tier, so a deeper prefetch ring stops delaying demand reads.
-    static let prefetchIOThrottled = ProcessInfo.processInfo.environment["NVMAI_PREFETCH_IO_THROTTLE"] == "1"
+    /// NVMAI_PREFETCH_IO_TIER = standard | utility | throttle: the disk I/O
+    /// policy for the prefetch ring's speculative reads, so they yield to
+    /// demand reads. Unset keeps the default tier. THROTTLE measured a loss
+    /// (the read lands too late to be adopted); the lighter tiers are the
+    /// open question.
+    static let prefetchIOPolicy: Int32 = {
+        switch ProcessInfo.processInfo.environment["NVMAI_PREFETCH_IO_TIER"] {
+        case "standard": return IOPOL_STANDARD
+        case "utility": return IOPOL_UTILITY
+        case "throttle": return IOPOL_THROTTLE
+        default: return 0
+        }
+    }()
 
     /// Slot allocations eligible for wiring: one region for the pooled
     /// layout, one per slot otherwise. Recorded at construction; wiring
@@ -1260,7 +1270,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             do {
                 if let boundedReader {
                     try boundedReader.fetch(offsets: offsets, into: safeDestinations.values,
-                                            throttled: Self.prefetchIOThrottled)
+                                            ioPolicy: Self.prefetchIOPolicy)
                 } else {
                     for (offset, destination) in zip(offsets, safeDestinations.values) {
                         try readFull(into: destination, fileOffset: offset,

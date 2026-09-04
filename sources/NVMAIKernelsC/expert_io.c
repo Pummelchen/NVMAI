@@ -33,7 +33,7 @@ struct nvmai_expert_reader {
     size_t next_index;           // claimed by workers
     size_t outstanding;          // published minus completed
     int first_errno;
-    int throttled;               // this batch's reads run on the throttled I/O tier
+    int throttled;               // this batch's disk I/O policy (0 = default tier)
     int shutting_down;
     uint64_t generation;         // so a worker cannot re-run a finished batch
 };
@@ -97,7 +97,7 @@ static void *worker_main(void *arg) {
         // to demand reads; the policy is per thread, so it is set for the
         // read and restored after. Demand batches keep the default tier.
         if (throttled) {
-            setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE);
+            setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, throttled);
         }
         int rc = read_one(fd, dst, r->expert_stride, offset);
         if (throttled) {
@@ -313,15 +313,16 @@ int nvmai_expert_reader_fetch_offsets(nvmai_expert_reader *r,
     return submit_batch(r, NULL, offsets, destinations, count, 0);
 }
 
-int nvmai_expert_reader_fetch_offsets_throttled(nvmai_expert_reader *r,
-                                               const uint64_t *offsets,
-                                               void *const *destinations,
-                                               size_t count) {
+int nvmai_expert_reader_fetch_offsets_tier(nvmai_expert_reader *r,
+                                          const uint64_t *offsets,
+                                          void *const *destinations,
+                                          size_t count,
+                                          int io_policy) {
     if (r == NULL || (count > 0 && (offsets == NULL || destinations == NULL))) {
         return EINVAL;
     }
     if (count == 0) { return 0; }
-    return submit_batch(r, NULL, offsets, destinations, count, 1);
+    return submit_batch(r, NULL, offsets, destinations, count, io_policy);
 }
 
 int nvmai_expert_reader_threads(const nvmai_expert_reader *r) {

@@ -40,9 +40,14 @@ final class ExpertPrefetchRing: @unchecked Sendable {
     /// Begins missing next-layer reads in unused staging slots. Already queued
     /// predictions are deduplicated; finished entries are reclaimed only when
     /// they have not been selected by a later exact route.
-    func begin(model: Model, layer: Int, experts: [Int], resident: Set<Int>) throws {
+    /// `currentLayer` is the layer whose demand reads have just been
+    /// planned; slots for it and earlier layers are stale and reclaimed.
+    /// Slots for later layers (a two-layer-ahead read still waiting for its
+    /// layer) are kept, which is what lets more than one layer be in flight.
+    func begin(model: Model, layer: Int, experts: [Int], resident: Set<Int>,
+               currentLayer: Int) throws {
         lock.lock()
-        reclaimTerminalSlotsUnlocked(exceptLayer: layer)
+        reclaimTerminalSlotsUnlocked(through: currentLayer)
         let active = Set(slots.compactMap { slot in
             slot.layer == layer && slot.expert >= 0 ? slot.expert : nil
         })
@@ -110,8 +115,8 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         }
     }
 
-    private func reclaimTerminalSlotsUnlocked(exceptLayer: Int) {
-        for index in slots.indices where slots[index].layer != exceptLayer {
+    private func reclaimTerminalSlotsUnlocked(through passedLayer: Int) {
+        for index in slots.indices where slots[index].layer <= passedLayer {
             switch slots[index].operation?.state {
             case .completed, .failed, .none:
                 slots[index].layer = -1

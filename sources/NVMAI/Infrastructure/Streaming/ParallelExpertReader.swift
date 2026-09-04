@@ -119,20 +119,23 @@ public final class ParallelExpertReader: @unchecked Sendable {
     ///
     /// The streamer's regions carry a per-layer base and a container offset, so an
     /// expert index alone would address the wrong layer.
+    /// `ioPolicy`: 0 for the default disk tier, or an IOPOL_* value
+    /// (IOPOL_STANDARD, IOPOL_UTILITY, IOPOL_THROTTLE) for a lower one.
     public func fetch(offsets: [UInt64],
                       into destinations: [UnsafeMutableRawPointer],
-                      throttled: Bool = false) throws {
+                      ioPolicy: Int32 = 0) throws {
         precondition(offsets.count == destinations.count,
                      "offsets and destinations must be the same length")
         guard !offsets.isEmpty else { return }
         let status = destinations.withUnsafeBufferPointer { dst in
             dst.withMemoryRebound(to: UnsafeMutableRawPointer?.self) { rebound in
                 offsets.withUnsafeBufferPointer { offs in
-                    throttled
-                        ? nvmai_expert_reader_fetch_offsets_throttled(handle,
-                                                                      offs.baseAddress,
-                                                                      rebound.baseAddress,
-                                                                      offsets.count)
+                    ioPolicy != 0
+                        ? nvmai_expert_reader_fetch_offsets_tier(handle,
+                                                                 offs.baseAddress,
+                                                                 rebound.baseAddress,
+                                                                 offsets.count,
+                                                                 ioPolicy)
                         : nvmai_expert_reader_fetch_offsets(handle,
                                                             offs.baseAddress,
                                                             rebound.baseAddress,

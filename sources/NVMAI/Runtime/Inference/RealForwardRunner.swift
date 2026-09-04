@@ -236,6 +236,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// current residual, trace-only, to measure whether a two-layer-ahead
     /// prediction is accurate enough to widen the prefetch window.
     static let probe2TraceEnabled = ProcessInfo.processInfo.environment["NVMAI_PROBE2_TRACE"] == "1"
+    /// NVMAI_PREFETCH_AHEAD=2: feed the prefetch ring from the two-layer-ahead
+    /// probe instead of the next-layer one, so each speculative read gets a
+    /// whole extra layer of compute to land in. Measured accuracy of the
+    /// second probe on Qwen 3.8: top-1 85.6% against the first's 90.8%.
+    static let prefetchAhead: Int = ProcessInfo.processInfo.environment["NVMAI_PREFETCH_AHEAD"] == "2" ? 2 : 1
     let prefetchPrediction2Indices: MTLBuffer
     let prefetchPrediction2Weights: MTLBuffer
     var lastPredictedNext2Layer: [Int] = []
@@ -407,7 +412,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             ? try ExpertPrefetchRing(
                 device: context.device,
                 expertStride: model.routedExpertByteStride(layer: 0),
-                slotCount: rawPrefetchTopM)
+                slotCount: rawPrefetchTopM * Self.prefetchAhead)
             : nil
         // Track A: the ANE prefill sidecar, opt-in. Only the qwen36 target
         // family qualifies (the one-layer MTP draft has no exported sidecar

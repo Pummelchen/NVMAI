@@ -167,7 +167,9 @@ extension RealForwardRunner {
             } else {
                 nextRouterW = nil
             }
-            let next2RouterW: TensorView? = (Self.probe2TraceEnabled && L + 2 < cfg.numLayers)
+            let next2RouterW: TensorView? =
+                ((Self.probe2TraceEnabled || (predictivePrefetch != nil && Self.prefetchAhead == 2))
+                 && L + 2 < cfg.numLayers)
                 ? try model.router(layer: L + 2) : nil
             let residencyResources = decodeExpertExecution == .gpuResidency
                 ? try model.routedExpertResidency(layer: L) : nil
@@ -362,7 +364,8 @@ extension RealForwardRunner {
                 predictedNextLayer = []
             }
             let predictedNext2Layer: [Int]
-            if Self.probe2TraceEnabled, L + 2 < cfg.numLayers {
+            if Self.probe2TraceEnabled || (predictivePrefetch != nil && Self.prefetchAhead == 2),
+               L + 2 < cfg.numLayers {
                 let ptr = prefetchPrediction2Indices.contents().bindMemory(
                     to: UInt32.self, capacity: cfg.topKExperts)
                 predictedNext2Layer = (0..<cfg.topKExperts).map {
@@ -1428,8 +1431,10 @@ extension RealForwardRunner {
                 }
             }
         }
-        if let predictivePrefetch, L + 1 < cfg.numLayers {
-            let resident = Set(try model.routedExpertResidentIDs(layer: L + 1))
+        if let predictivePrefetch, L + Self.prefetchAhead < cfg.numLayers {
+            let target = L + Self.prefetchAhead
+            let prediction = Self.prefetchAhead == 2 ? lastPredictedNext2Layer : predictedNextLayer
+            let resident = Set(try model.routedExpertResidentIDs(layer: target))
             // The whole ranked prediction goes in; `begin` drops the experts
             // that are already resident or already in flight and then fills
             // whatever ring slots are free, in rank order.
@@ -1442,9 +1447,9 @@ extension RealForwardRunner {
             // first issues 2.59 and covers 46%. The ring size stays the cap on
             // reads in flight; only the order of cap and filter changed.
             try predictivePrefetch.begin(
-                model: model, layer: L + 1,
-                experts: predictedNextLayer,
-                resident: resident)
+                model: model, layer: target,
+                experts: prediction,
+                resident: resident, currentLayer: L)
         }
         decodeRoutedBufsScratch.removeAll(keepingCapacity: true)
         decodeRoutedOffsetsScratch.removeAll(keepingCapacity: true)
