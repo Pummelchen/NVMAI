@@ -117,6 +117,28 @@ def rename(name: str) -> str:
     raise ValueError(f"unexpected tensor outside the language model: {name}")
 
 
+# Zero-centred RMSNorm: transformers' Qwen3_5MoeRMSNorm stores gamma - 1 and
+# applies (1 + weight); the runtime, like the MLX checkpoints it was built
+# against, applies the stored weight as is. Folded here. The gated
+# linear-attention norm (Qwen3_5MoeRMSNormGated) is initialised at one and
+# applied plainly, so it is not in this list -- its stored values centre on
+# 0.9, where these centre on 0.
+UNIT_OFFSET_NORM_SUFFIXES = (
+    ".input_layernorm",
+    ".post_attention_layernorm",
+    ".self_attn.q_norm",
+    ".self_attn.k_norm",
+    "language_model.model.norm",
+)
+
+
+def fold_unit_offset(out_name: str, value: np.ndarray) -> np.ndarray:
+    stem = out_name[: -len(".weight")] if out_name.endswith(".weight") else out_name
+    if stem.endswith(UNIT_OFFSET_NORM_SUFFIXES):
+        return (value.astype(np.float32) + 1.0).astype(value.dtype)
+    return value
+
+
 # Kept at bf16 in both widths. Suffixes of the renamed stem (no `.weight`).
 KEEP_BF16 = (
     ".mlp.gate",                 # router
@@ -313,7 +335,7 @@ def convert_shard(path: Path, writers: dict[int, OutputWriter]) -> None:
                 for width, writer in writers.items():
                     bits = quant_bits(out_name, width)
                     if bits is None:
-                        writer.add(out_name, piece)
+                        writer.add(out_name, fold_unit_offset(out_name, piece))
                         continue
                     stem = out_name[: -len(".weight")]
                     packed, scales, biases = quantize_affine(piece, bits)
