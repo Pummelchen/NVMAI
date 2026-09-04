@@ -67,3 +67,7 @@ analysis.
   promotions is refused at load with a message naming the fix (reinstall).
 - The MTP draft head for Qwen3.8 installs and verifies but stays off: at
   4-bit the two-row verify costs more than its 71% acceptance returns.
+
+### Checksum
+
+`nvmai-5.0-macos-arm64.tar.gz` sha256: `SHA256_PENDING`
