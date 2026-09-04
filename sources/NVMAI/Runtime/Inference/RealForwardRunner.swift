@@ -312,6 +312,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// allocation per layer. ~168 KB total at 30 layers × 2816 BF16 — bounded
     /// host work done once at init.
     let effectiveScaleBuffers: [MTLBuffer]
+    /// The (model, width) tuning this runner was built with.
+    let profile: ModelProfile
     let sharedExpertProjections: [LayerSharedExpertProjections]
 
     public let maxContext: Int
@@ -373,11 +375,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // The family's measured optimum is the default; an explicit
         // NVMAI_PREDICTIVE_PREFETCH still wins either way, so a probe can turn
         // it on where it ships off and off where it ships on.
-        let prefetchTuning = RuntimeConfiguration.decodeTuning(
-            family: cfg.family, weightBits: model.routedExpertWeightBits)
-        let rawPrefetchEnabled = ProcessInfo.processInfo.environment[
-            "NVMAI_PREDICTIVE_PREFETCH"].map { $0 == "1" }
-            ?? (prefetchTuning.prefetchDepth > 0)
+        let profile = ModelProfile.resolve(modelID: model.modelID, family: cfg.family,
+                                           weightBits: model.routedExpertWeightBits)
+        self.profile = profile
+        if ProcessInfo.processInfo.environment["NVMAI_RUNNER_STATS"] != nil
+            || ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
+            FileHandle.standardError.write(Data(("NVMAI \(profile.summary)\n").utf8))
+        }
+        let rawPrefetchEnabled = profile.prefetchDepth > 0
         // One read deep, not four. The ring depth is a bandwidth decision, not
         // a coverage one: the SSD is saturated while it reads, so a speculative
         // read that misses its layer has stolen service from a demand read that
@@ -386,9 +391,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // arrive too late to be adopted, which shows up as a *lower* hit rate.
         // Measured on qwen38 4-bit, interleaved against prefetch off:
         // M=1 +12.2% (hit 78.7%), M=2 +6.0% (77.9%), M=4 -9.8% (77.1%).
-        let rawPrefetchTopM = ProcessInfo.processInfo.environment[
-            "NVMAI_PREFETCH_TOP_M"].flatMap(Int.init)
-            ?? max(1, prefetchTuning.prefetchDepth)
+        let rawPrefetchTopM = max(1, profile.prefetchDepth)
         guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
             throw ModelError.internalInconsistency(
                 detail: "NVMAI_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
@@ -474,6 +477,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             : try AffineQuantGEMV(context: context,
                                   weightBits: model.lmHeadWeightBits)
         self.attention = try Attention(context: context)
+        self.attention.simdPartialOverride = profile.attentionSimdPartial
         self.kvQuantizer = runtimeConfiguration.kvCachePrecision.isQuantized
             ? try KVCacheQuantizer(context: context) : nil
         self.shared    = try SharedExpertRuntime(context: context,
@@ -486,6 +490,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                 + "gdnAB_bf16=\(model.gdnABIsBF16)\n").utf8))
         }
         self.moe       = try MoE(context: context,
+                                 routerTopKSimd: profile.routerTopKSimd,
                                  siluActivation: silu,
                                  routedWeightBits: model.routedExpertWeightBits,
                                  routerWeightBits: model.effectiveRouterWeightBits,

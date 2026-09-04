@@ -463,8 +463,9 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// max_tokens against it (S11).
     public nonisolated var maximumContext: Int { maxContext }
     public nonisolated var samplingDefaults: GenerationDefaults.Sampling {
-        GenerationDefaults.forFamily(modelFamily)
+        profileSampling
     }
+    private nonisolated let profileSampling: GenerationDefaults.Sampling
     private nonisolated let modelFamily: ModelFamily
 
     private let context: MetalContext
@@ -579,9 +580,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         let tunedBudget: Int
         if let identity = try? ManifestReader.peekIdentity(directoryURL: modelDirectory) {
             tunedBudget = RuntimeConfiguration.affordableExpertCacheBudget(
-                RuntimeConfiguration.decodeTuning(
-                    family: identity.family,
-                    weightBits: identity.weightBits).expertCacheBudgetBytes)
+                ModelProfile.resolve(identity: identity).expertCacheBudgetBytes)
         } else {
             tunedBudget = RuntimeConfiguration.defaultExpertCacheBudgetBytes
         }
@@ -611,6 +610,8 @@ public actor ServerModelSession: ServerInferenceBackend {
                 .map(RDAdvicePolicyMode.parse)
                 ?? loadRuntime.rdadvisePolicy,
             prefillChunkTokens: requestedPrefillChunkTokens
+                ?? ModelProfile.resolve(modelID: model.modelID, family: model.config.family,
+                                        weightBits: model.routedExpertWeightBits).prefillChunkTokens
                 ?? defaultPrefillChunkTokens(family: model.config.family,
                                              fallback: loadRuntime.prefillChunkTokens),
             prefillAttentionPath: loadRuntime.prefillAttentionPath,
@@ -742,6 +743,9 @@ public actor ServerModelSession: ServerInferenceBackend {
         self.model = model
         self.tokenizer = tokenizer
         self.modelFamily = model.config.family
+        self.profileSampling = ModelProfile.resolve(
+            modelID: model.modelID, family: model.config.family,
+            weightBits: model.routedExpertWeightBits).sampling
         self.defaultModelID = ServerModelIdentity.apiModelID(
             manifestModelID: model.modelID,
             family: model.config.family,

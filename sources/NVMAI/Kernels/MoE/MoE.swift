@@ -62,9 +62,7 @@ final class MoE {
     /// was the router's cost, not the GEMV. NVMAI_ROUTER_TOPK_SIMD=0 restores
     /// the serial kernel.
     private let routerSelectKNSimdPSO: MTLComputePipelineState?
-    private static let routerTopKSimdFlag =
-        ProcessInfo.processInfo.environment["NVMAI_ROUTER_TOPK_SIMD"] != "0"
-    private var routerTopKSimd: Bool { Self.routerTopKSimdFlag }
+    private let routerTopKSimd: Bool
     private let residencyClassifyPSO: MTLComputePipelineState
     private let routerLogits: MTLBuffer
     private let phase1U16PSO: MTLComputePipelineState
@@ -85,6 +83,7 @@ final class MoE {
     /// 2048/512/256). `siluActivation` selects the expert FFN activation
     /// (false = gelu_pytorch_tanh, true = silu).
     init(context: MetalContext,
+         routerTopKSimd: Bool = true,
          siluActivation: Bool = false,
          routedWeightBits: Int = 4,
          routerWeightBits: Int = 8,
@@ -93,6 +92,7 @@ final class MoE {
          specializedF: UInt32 = 704,
          specializedNumExperts: UInt32 = 128,
          topKExperts: Int = 8) throws {
+        self.routerTopKSimd = routerTopKSimd
         self.realDecodeD = specializedD
         self.realDecodeF = specializedF
         self.realDecodeTopK = UInt32(topKExperts)

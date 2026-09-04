@@ -116,9 +116,9 @@ public func run(args: Args,
         // A family whose model card specifies its own sampling gets it here,
         // where the manifest has been read. Anything the caller named on the
         // command line wins; this only fills what they left alone.
-        let familySampling = GenerationDefaults.forFamily(
-            (try? ManifestReader.peekIdentity(directoryURL: modelURL))?.family
-                ?? .qwen36)
+        let familySampling = (try? ManifestReader.peekIdentity(directoryURL: modelURL))
+            .map { ModelProfile.resolve(identity: $0).sampling }
+            ?? GenerationDefaults.forFamily(.qwen36)
         let config = GenerationConfig(
             maxNewTokens: effectiveMaxNew,
             temperature: args.temperatureWasSet
@@ -152,9 +152,7 @@ public func run(args: Args,
                 expertStrideBytes: manifest.expertStride,
                 layers: manifest.arch.numLayers,
                 budgetBytes: RuntimeConfiguration.affordableExpertCacheBudget(
-                    RuntimeConfiguration.decodeTuning(
-                        family: identity.family,
-                        weightBits: identity.weightBits).expertCacheBudgetBytes))
+                    ModelProfile.resolve(identity: identity).expertCacheBudgetBytes))
         } else {
             resolvedSlots = 64
         }
