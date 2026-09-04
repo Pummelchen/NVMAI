@@ -251,9 +251,22 @@ struct NVMAIBench {
         let phase1Threads = kernelName == "moe_phase1_v2" ? 512 : phase1RowsPerTG * 32
         let phase1Kernel = phase1Variant ?? "moe_phase1_gate_up_act_u16load"
 
+        // NVMAI_BENCH_MOE_SPECIALIZE=1 builds the phase-1 pipeline with the
+        // runtime's function constants (D, F, top-k, silu, host-gated I/O);
+        // the unspecialized kernel reads its shape from buffers and measures
+        // ~35 GB/s where the specialized one moves the same blobs at ~60.
+        let specialize = ProcessInfo.processInfo.environment["NVMAI_BENCH_MOE_SPECIALIZE"] == "1"
+        let phase1Constants: [MetalFunctionConstant] = specialize ? [
+            MetalFunctionConstant(index: 0, value: .uint32(D)),
+            MetalFunctionConstant(index: 1, value: .uint32(F)),
+            MetalFunctionConstant(index: 2, value: .uint32(topK)),
+            MetalFunctionConstant(index: 3, value: .bool(true)),
+            MetalFunctionConstant(index: 4, value: .bool(true)),
+            MetalFunctionConstant(index: 6, value: .bool(false)),
+        ] : []
         let phase1PSO = try context.pipeline(
             phase1Kernel,
-            constants: [],
+            constants: phase1Constants,
             maxTotalThreadsPerThreadgroup: phase1Threads)
         let phase2PSO = try context.pipeline(
             topK == 8 ? "moe_phase2_down_reduce_k8" : "moe_phase2_down_reduce_kn",

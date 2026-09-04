@@ -24,7 +24,7 @@ DEFAULT_PROMPT_CACHE_MEMORY_MIB = 256
 # 12 GiB that Qwen3.8-Flash-Next now ships with, and the published protocol would
 # stop measuring what a user actually gets. Pass ram_budget= explicitly to probe
 # a specific size.
-DEFAULT_EXPERT_CACHE_BUDGET = None
+DEFAULT_EXPERT_CACHE_BUDGET = os.environ.get("NVMAI_BENCH_RAM_BUDGET")  # None: the shipped default
 DEFAULT_KV_BITS = 8
 DEFAULT_CONCISE = False
 DEFAULT_FAST_ALIAS = False
