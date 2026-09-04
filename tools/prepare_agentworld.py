@@ -40,6 +40,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from queue import Queue
 
@@ -294,15 +295,21 @@ def download(shard: str, work: Path) -> Path:
     global _in_flight
     dest = work / shard
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _in_flight = subprocess.Popen(
-        ["curl", "-fL", "--retry", "5", "--retry-delay", "5",
-         "--retry-all-errors", "-C", "-", "--silent", "--show-error",
-         "-o", str(dest), f"{BASE}/{shard}"])
-    code = _in_flight.wait()
-    _in_flight = None
-    if code != 0:
-        raise subprocess.CalledProcessError(code, "curl")
-    return dest
+    # curl retries cover ~5 minutes of a flaky link; the outer loop covers
+    # an outage that outlasts them (a DNS failure, exit 6, once ended a
+    # build at shard 6 of 16). Resume keeps what was fetched.
+    for attempt in range(1, 7):
+        _in_flight = subprocess.Popen(
+            ["curl", "-fL", "--retry", "20", "--retry-delay", "15",
+             "--retry-all-errors", "-C", "-", "--silent", "--show-error",
+             "-o", str(dest), f"{BASE}/{shard}"])
+        code = _in_flight.wait()
+        _in_flight = None
+        if code == 0:
+            return dest
+        print(f"    {shard}: curl exit {code} (attempt {attempt}/6), waiting 60 s", flush=True)
+        time.sleep(60)
+    raise subprocess.CalledProcessError(code, "curl")
 
 
 def stop_download() -> None:
