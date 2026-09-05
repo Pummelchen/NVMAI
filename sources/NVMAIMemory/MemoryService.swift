@@ -25,6 +25,8 @@ public actor MemoryService {
     /// another's, and the "one file per workspace" the documentation promises
     /// would be false.
     private var workspaces: [MemoryScope: Workspace] = [:]
+    /// When each workspace was last used, for deciding which to let go of.
+    private var lastUsed: [MemoryScope: Date] = [:]
     private let localStore: InMemoryStore
     /// The engine-authored journal. Separate store, separate key space,
     /// separate trim policy: a busy week of sessions must never evict the
@@ -65,7 +67,10 @@ public actor MemoryService {
     /// that can fail, and an initializer cannot report that to the caller who
     /// will actually be affected by it.
     private func workspace(for scope: MemoryScope) async -> Workspace? {
-        if let existing = workspaces[scope] { return existing }
+        if let existing = workspaces[scope] {
+            lastUsed[scope] = Date()
+            return existing
+        }
         guard configuration.isEnabled else { return nil }
 
         if let injectedStore {
@@ -94,7 +99,44 @@ public actor MemoryService {
         let workspace = Workspace(store: store, journal: journal, engine: engine,
                                   persists: persists)
         workspaces[scope] = workspace
+        lastUsed[scope] = Date()
+        await enforceResidencyBudget(keeping: scope)
         return workspace
+    }
+
+    /// Keeps the whole subsystem inside the ceiling the machine was sized for.
+    ///
+    /// The ceiling is what memory adds to the process, not what each workspace
+    /// may take. Per-workspace limits alone would multiply it by the number of
+    /// workspaces a session has touched, so on an 8 GB machine "the model's
+    /// budget plus 256 MiB" would quietly become plus 256 MiB per repository.
+    ///
+    /// Over the ceiling, the least recently used workspace is closed. Nothing
+    /// is lost: everything it held is in its journal, and touching that
+    /// workspace again replays it. The workspace in use is never closed.
+    private func enforceResidencyBudget(keeping scope: MemoryScope) async {
+        guard let ceiling = configuration.storage.maximumMemoryBytes, ceiling > 0 else { return }
+        while workspaces.count > 1, await residentBytes() > ceiling {
+            let candidates = lastUsed
+                .filter { $0.key != scope && workspaces[$0.key] != nil }
+                .sorted { $0.value < $1.value }
+            guard let oldest = candidates.first?.key else { return }
+            await workspaces[oldest]?.engine?.shutDown()
+            workspaces[oldest] = nil
+            lastUsed[oldest] = nil
+            log(.degraded(operation: "residency",
+                          detail: "closed workspace \(oldest.workspace) to stay inside "
+                              + "\(ceiling >> 20) MiB"))
+        }
+    }
+
+    /// Bytes memory is holding in this process, across every open workspace.
+    public func residentBytes() async -> Int {
+        var total = 0
+        for workspace in workspaces.values {
+            total += await workspace.engine?.residentBytes() ?? 0
+        }
+        return total
     }
 
     /// Builds the engine, with a journal file when one can be opened.
@@ -163,6 +205,7 @@ public actor MemoryService {
                                droppedBytes: filteredPrompt.dropped + filteredReply.dropped)
         await journal.record(turn, in: session.scope)
         log(.journaled(session: session.session.id, index: index, bytes: turn.byteCount))
+        await enforceResidencyBudget(keeping: session.scope)
     }
 
     /// Close every workspace, flushing and releasing the workspace locks.
@@ -176,6 +219,7 @@ public actor MemoryService {
             await workspace.engine?.shutDown()
         }
         workspaces.removeAll()
+        lastUsed.removeAll()
     }
 
     /// The journal, for a caller that wants to read it back. Never used to
@@ -289,6 +333,10 @@ public actor MemoryService {
             }
         } else {
             log(.toolSucceeded(tool: name))
+            // Checked after the write, not only when a workspace is opened.
+            // A ceiling that only holds while the set of workspaces is
+            // changing is not a ceiling.
+            await enforceResidencyBudget(keeping: context.scope)
         }
         return result
     }

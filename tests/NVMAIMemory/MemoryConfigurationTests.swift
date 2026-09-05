@@ -128,7 +128,9 @@ import Testing
         let summary = configuration.summary
         #expect(summary.contains("memory enabled=true"))
         #expect(summary.contains("store=in-process"))
-        #expect(summary.contains("cache=512MiB"))
+        // Labelled as additional, because someone reading this line is
+        // working out whether the machine holds the model *and* this.
+        #expect(summary.contains("budget=512MiB+model"))
         // There is no host and no port to report any more.
         #expect(!summary.contains("6379"))
     }

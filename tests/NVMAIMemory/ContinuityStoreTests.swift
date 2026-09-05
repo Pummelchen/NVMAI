@@ -642,6 +642,86 @@ import ContinuityCore
         #expect(contents.contains("from second") == false)
     }
 
+    /// The ceiling is what memory adds to the process, not what each
+    /// workspace may take. Per-workspace limits alone would multiply it by
+    /// the number of repositories a session touched.
+    @Test func theCeilingCoversEveryWorkspaceTogether() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var configuration = configuration(directory: directory)
+        configuration.allowsPerRequestWorkspace = true
+        configuration.storage.maximumMemoryBytes = 128 << 10
+        configuration.limits.maximumValueBytes = 8 << 10
+
+        let service = MemoryService(configuration: configuration)
+        let filler = String(repeating: "x", count: 4 << 10)
+        for index in 0..<12 {
+            let context = try #require(
+                await service.beginSession(id: "s\(index)",
+                                           workspaceOverride: "repo-\(index)"))
+            for entry in 0..<8 {
+                _ = await service.execute(name: "memory_set",
+                                          arguments: ["key": .string("k\(entry)"),
+                                                      "value": .string(filler)],
+                                          in: context)
+            }
+            // Checked after every workspace, not just at the end: a ceiling
+            // that only holds once the work has stopped is not a ceiling.
+            let resident = await service.residentBytes()
+            #expect(resident <= 128 << 10,
+                    "resident \(resident) after workspace \(index)")
+        }
+        await service.shutDown()
+
+        // Everything written is still on disk; only residency was bounded.
+        let first = directory.appendingPathComponent("nvmai/local/repo-0.ndjson")
+        #expect(FileManager.default.fileExists(atPath: first.path))
+        let contents = try Data(contentsOf: first)
+        #expect(contents.count > 0)
+    }
+
+    /// A workspace closed to stay inside the ceiling has to come back
+    /// complete, or the bound is a data-loss bug wearing a budget's clothes.
+    @Test func aClosedWorkspaceReopensWithItsFacts() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var configuration = configuration(directory: directory)
+        configuration.allowsPerRequestWorkspace = true
+        configuration.storage.maximumMemoryBytes = 128 << 10
+        configuration.limits.maximumValueBytes = 8 << 10
+
+        let service = MemoryService(configuration: configuration)
+        let early = try #require(await service.beginSession(id: "s0",
+                                                            workspaceOverride: "repo-early"))
+        _ = await service.execute(name: "memory_set",
+                                  arguments: ["key": .string("decisions/storage"),
+                                              "value": .string("native swift")],
+                                  in: early)
+
+        // Enough other workspaces to push the first one out of residency.
+        let filler = String(repeating: "x", count: 4 << 10)
+        for index in 0..<12 {
+            let context = try #require(
+                await service.beginSession(id: "f\(index)",
+                                           workspaceOverride: "repo-\(index)"))
+            for entry in 0..<8 {
+                _ = await service.execute(name: "memory_set",
+                                          arguments: ["key": .string("k\(entry)"),
+                                                      "value": .string(filler)],
+                                          in: context)
+            }
+        }
+
+        let returning = try #require(await service.beginSession(id: "s1",
+                                                                workspaceOverride: "repo-early"))
+        #expect(returning.bootstrap.records.contains { $0.key.rawValue == "decisions/storage" })
+        let result = await service.execute(name: "memory_get",
+                                           arguments: ["key": .string("decisions/storage")],
+                                           in: returning)
+        #expect(result.jsonString().contains("native swift"))
+        await service.shutDown()
+    }
+
     @Test func shuttingDownHandsTheWorkspaceOver() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

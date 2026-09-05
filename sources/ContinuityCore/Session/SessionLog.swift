@@ -426,6 +426,10 @@ public actor SessionLog {
     /// Bytes this task's log holds in memory.
     public func byteCount(taskID: UUID) -> Int { bytes[taskID] ?? 0 }
 
+    /// Task identifiers, unsorted. For callers counting bytes on a hot path,
+    /// where `tasks()` sorting by creation date is pure waste.
+    public func taskIdentifiers() -> [UUID] { Array(tasks.keys) }
+
     // MARK: - Internals
 
     private func append(_ event: SessionEvent) async {

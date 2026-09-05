@@ -355,6 +355,19 @@ public actor ContinuityEngine {
 
     // MARK: - Maintenance
 
+    /// Bytes this engine currently holds, across every task.
+    ///
+    /// Cheap on purpose: a caller policing a process-wide budget has to be
+    /// able to ask often, and `statistics()` walks every event to count them.
+    public func residentBytes() async -> Int {
+        var total = 0
+        for taskID in await sessionLog.taskIdentifiers() {
+            total += await memory.byteCount(taskID: taskID)
+            total += await sessionLog.byteCount(taskID: taskID)
+        }
+        return total
+    }
+
     public func statistics() async -> ContinuityStatistics {
         let tasks = await sessionLog.tasks()
         var sessionCount = 0

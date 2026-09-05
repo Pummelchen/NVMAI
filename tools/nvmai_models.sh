@@ -67,6 +67,12 @@ NVMAI_ALL_MODELS=(ornith qwen36 agentworld qwen38)
 # Override with NVMAI_MEMORY_CACHE_MIB, and the location with
 # NVMAI_MEMORY_DIR (default ~/.nvmai/memory).
 #
+# This RAM is ADDITIONAL. It is not taken out of --ram-budget: an 8 GB
+# machine runs the expert cache at its 4 GiB and memory brings the total to
+# 4 GiB + 256 MiB. The ceiling covers every open workspace together, not
+# each one, so turning memory on costs the same whether a session touches
+# one repository or five.
+#
 # The workspace defaults to the directory the launcher was run from, which
 # is the repository being worked on, so two checkouts never share memory.
 

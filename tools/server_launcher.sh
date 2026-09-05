@@ -228,7 +228,9 @@ fi
 # this was launched from, so each repository keeps its own memory.
 nvmai_export_memory_environment "$PWD"
 if [[ "${NVMAI_MEMORY:-0}" == "1" ]]; then
-  echo "Memory: on (in-process, ${NVMAI_MEMORY_DIR}, cache ${NVMAI_MEMORY_CACHE_MIB} MiB, workspace $(basename "$PWD"))"
+  # The memory budget is additional: it sits on top of the expert-cache RAM
+  # budget, it is not taken out of it.
+  echo "Memory: on (in-process, ${NVMAI_MEMORY_DIR}, +${NVMAI_MEMORY_CACHE_MIB} MiB on top of the model budget, workspace $(basename "$PWD"))"
 fi
 
 echo "Starting NVMAIServer ($ai_model $quant, $mode_word, $think_word)..."

@@ -142,8 +142,18 @@ thousand short facts and does not grow with the host:
 | Up to 16 GB | 512 MiB |
 | More than 16 GB | 1 GiB |
 
+**This RAM is additional.** It is not taken out of `--ram-budget`, which is the
+expert cache's own ceiling (default 8 GiB, capped at half of physical memory).
+On an 8 GB machine the expert cache gets its 4 GiB and memory brings the total
+to 4 GiB + 256 MiB. Sizing the machine means adding the two.
+
+The ceiling covers every open workspace **together**, not each one, so turning
+memory on costs the same whether a session touches one repository or five. Over
+the ceiling, the least recently used workspace is closed; nothing is lost,
+because everything it held is in its journal and touching it again replays it.
+
 Override with `NVMAI_MEMORY_CACHE_MIB`. The ceiling is enforced by counting
-actual bytes, and is split between the two stores:
+actual bytes, and within a workspace it is split between the two stores:
 
 | Store | Share | At the limit |
 | --- | ---: | --- |

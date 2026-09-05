@@ -12,8 +12,13 @@ public struct ContinuityStorageConfiguration: Sendable, Equatable {
     /// a process crash loses nothing either way, because the write has
     /// already reached the kernel.
     public var synchronizesEveryWrite: Bool
-    /// Ceiling for what the store may hold, in bytes. Nil leaves it unbounded,
-    /// which is only sensible in tests.
+    /// Ceiling for what the store may hold, in bytes, across every open
+    /// workspace. Nil leaves it unbounded, which is only sensible in tests.
+    ///
+    /// This is what memory *adds* to the process. It is not taken out of the
+    /// model's `--ram-budget`: on an 8 GB machine the expert cache gets its
+    /// 4 GiB and memory brings the total to 4 GiB + 256 MiB. Sizing the
+    /// machine means adding the two.
     public var maximumMemoryBytes: Int?
 
     public init(directory: URL = ContinuityStorageConfiguration.defaultDirectory,
@@ -247,9 +252,14 @@ public struct MemoryConfiguration: Sendable, Equatable {
     }
 
     /// One line for the log at startup.
+    ///
+    /// The ceiling is labelled as additional because that is what it is: it
+    /// is not carved out of `--ram-budget`, it is what memory adds to the
+    /// process on top of it. Someone reading this line is working out whether
+    /// the machine can hold both.
     public var summary: String {
         let cache = storage.maximumMemoryBytes.map { "\($0 >> 20)MiB" } ?? "unbounded"
-        return "memory enabled=\(isEnabled) store=in-process cache=\(cache) "
+        return "memory enabled=\(isEnabled) store=in-process budget=\(cache)+model "
             + "namespace=\(namespace) user=\(user) workspace=\(workspace) "
             + "tools=\(toolSurface.rawValue) rounds=\(maximumToolRounds) "
             + "bootstrap=\(limits.bootstrapRecords)/\(limits.bootstrapBytes)B "
