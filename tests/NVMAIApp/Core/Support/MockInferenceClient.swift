@@ -8,6 +8,13 @@ final class MockInferenceClient: AppInferenceClient, @unchecked Sendable {
     var tokenDelayNanos: UInt64
     var failureMessage: String?
     var prefillSteps: Int = 3
+    /// Park the generation after the first prefill step until it is
+    /// cancelled, so a test that cancels "during prefill" cannot lose the
+    /// race to a mock that finished first (the 1 ms token delay is no
+    /// guarantee on a starved main actor).
+    var holdDuringPrefill = false
+    /// Likewise park after the first streamed token.
+    var holdAfterFirstToken = false
 
     private let lock = NSLock()
     private var activeTask: Task<Void, Never>?
@@ -108,6 +115,7 @@ final class MockInferenceClient: AppInferenceClient, @unchecked Sendable {
             }
             try? await Task.sleep(nanoseconds: tokenDelayNanos)
             continuation.yield(.prefillProgress(done: step + 1, total: prefillSteps))
+            if holdDuringPrefill { await parkUntilCancelled() }
         }
         prefillEndDate = Date()
 
@@ -139,6 +147,7 @@ final class MockInferenceClient: AppInferenceClient, @unchecked Sendable {
                 index: index,
                 textDelta: piece,
                 elapsedDecodeSeconds: max(Date().timeIntervalSince(decodeStart), 0))))
+            if holdAfterFirstToken { await parkUntilCancelled() }
         }
 
         let diagnostics = makeDiagnostics(request: request, generated: generated,
@@ -147,6 +156,15 @@ final class MockInferenceClient: AppInferenceClient, @unchecked Sendable {
                                           stopReason: generated >= request.maxNewTokens ? .maxTokens : .eos)
         continuation.yield(.finished(diagnostics))
         continuation.finish()
+    }
+
+    /// Sleeps in short steps until the generation task is cancelled; the
+    /// loop that called this checks `Task.isCancelled` next and reports the
+    /// cancellation the way the real client would.
+    private func parkUntilCancelled() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
     }
 
     private func responsePieces(for request: AppGenerationRequest) -> [String] {

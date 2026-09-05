@@ -209,6 +209,7 @@ import Testing
     @Test func cancelAfterPartialOutputCanBeCleared() async throws {
         let client = MockInferenceClient(response: "one two three four five", tokenDelayNanos: 20_000_000)
         client.prefillSteps = 0
+        client.holdAfterFirstToken = true
         let model = readyModel(client: client)
         model.promptText = "stop after token"
         model.maxNewTokensOverride = 10
@@ -243,6 +244,7 @@ import Testing
     @Test func cancelDuringPrefillKeepsPromptSnapshotUntilClear() async throws {
         let client = MockInferenceClient(response: "unused", tokenDelayNanos: 1_000_000)
         client.prefillSteps = 20
+        client.holdDuringPrefill = true
         let model = readyModel(client: client)
         model.promptText = "prefill prompt"
         model.run()
@@ -320,12 +322,15 @@ import Testing
         return model
     }
 
-    /// Polls `condition` for up to the wait budget (2 s), sleeping 5 ms
-    /// between checks. Returns whether the condition became true. Tests must
-    /// assert on the return value so a hung run fails loudly instead of
-    /// silently asserting on stale state after the poll expires.
+    /// Polls `condition`, sleeping 5 ms between checks, and returns whether
+    /// it became true. The budget is a hang guard, not a performance bound:
+    /// a full parallel `swift test` starves the main actor for over a minute
+    /// at a time, and every wait here is on the mock client's own progress,
+    /// which arrives whenever the actor is next scheduled. Tests must assert
+    /// on the return value so a hung run fails loudly instead of silently
+    /// asserting on stale state after the poll expires.
     @MainActor
-    private func waitUntil(timeoutNanos: UInt64 = 2_000_000_000,
+    private func waitUntil(timeoutNanos: UInt64 = 180_000_000_000,
                            _ condition: () -> Bool) async -> Bool {
         let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanos
         while !condition() && DispatchTime.now().uptimeNanoseconds < deadline {

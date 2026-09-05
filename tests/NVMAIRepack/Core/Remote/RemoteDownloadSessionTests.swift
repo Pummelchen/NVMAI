@@ -3,9 +3,14 @@ import Testing
 @testable import NVMAIRepackCore
 
 // The fake HF URL protocol is process-global state (`resetFakeHF`);
-// tests that share it cannot run concurrently.
-@Suite(.serialized)
-struct RemoteDownloadSessionTests {
+// tests that share it cannot run concurrently. Nesting under the serialized
+// RemotePayloadCopyTests (like RemoteRangeTransferTests) serializes this
+// suite with every other user of the fake; a separate top-level suite,
+// serialized only within itself, still raced them and left a payload copy
+// mid-flight with an emptied file table (remote HTTP 404).
+extension RemotePayloadCopyTests {
+  @Suite
+  struct RemoteDownloadSessionTests {
     @Test func typedSessionUsesStallTolerantSerialDefaults() {
         let session = RemoteDownloadSession()
         let configuration = session.configurationSnapshot
@@ -126,4 +131,5 @@ struct RemoteDownloadSessionTests {
             _ = try await remote.resolveFileInfo(filename: "model.bin")
         }
     }
+}
 }
