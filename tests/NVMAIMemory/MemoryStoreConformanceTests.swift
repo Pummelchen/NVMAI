@@ -5,7 +5,7 @@ import Testing
 /// The contract every backend has to satisfy.
 ///
 /// These run against `InMemoryStore` here and, when a server is reachable,
-/// against the Valkey backend through the same suite, so the two cannot
+/// against the continuity-backed store through the same suite, so the two cannot
 /// drift on the rules that matter: scope isolation, value limits, bootstrap
 /// bounds, and what a rewrite does to timestamps.
 @Suite struct MemoryStoreConformanceTests {

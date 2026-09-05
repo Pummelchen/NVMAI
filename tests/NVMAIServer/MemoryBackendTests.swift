@@ -84,7 +84,7 @@ import Testing
         configuration.workspace = workspace
         configuration.user = "local"
         configuration.maximumToolRounds = rounds
-        configuration.exposesTools = tools
+        configuration.toolSurface = tools ? .full : .off
         return (MemoryService(configuration: configuration, durableStore: store), configuration)
     }
 
@@ -101,7 +101,11 @@ import Testing
         // untouched.
         let system = seen.messages.first { $0.role == .system }?.content ?? ""
         #expect(system.contains("Persistent memory"))
-        #expect(system.contains("memory_search"))
+        // With tools off the fragment names none of them. Telling a model to
+        // search memory with a tool the request does not carry is how a
+        // session ends up using no memory at all.
+        #expect(!system.contains("memory_search"))
+        #expect(!system.contains("memory_get"))
         #expect(seen.messages.last?.role == .user)
         #expect(seen.messages.last?.content == "hello")
         // Tools ship off: the fragment tells the model memory exists, and the
@@ -115,7 +119,7 @@ import Testing
         configuration.isEnabled = true
         configuration.workspace = "repo-a"
         configuration.user = "local"
-        configuration.exposesTools = true
+        configuration.toolSurface = .full
         let inner = ScriptedBackend([completion("hi")])
         let backend = MemoryBackend(
             wrapping: inner,

@@ -1,9 +1,10 @@
 import Foundation
+import ContinuityCore
 
 /// What the serving engine talks to.
 ///
-/// It owns the choice of backend, the fallback when Valkey is unreachable,
-/// and the session lifecycle. The engine calls four things: `beginSession`,
+/// It owns the choice of backend, the fallback when durable storage cannot
+/// be written, and the session lifecycle. The engine calls four things: `beginSession`,
 /// `instructions`, `execute` and `endSession`. Everything else stays here.
 ///
 /// The service never throws at the engine. Memory is optional by design, so
@@ -13,6 +14,9 @@ import Foundation
 public actor MemoryService {
     public private(set) var configuration: MemoryConfiguration
     private let durableStore: (any MemoryStore)?
+    /// The in-process engine, when this service built one. Nil when a caller
+    /// injected its own store, which is how the tests drive it.
+    private let engine: ContinuityEngine?
     private let localStore: InMemoryStore
     /// The engine-authored journal. Separate store, separate key space,
     /// separate trim policy: a busy week of sessions must never evict the
@@ -22,6 +26,7 @@ public actor MemoryService {
     /// Set once a durable operation has failed, so the session prompt can say
     /// memory is not persisting instead of the model assuming it is.
     private var isDegraded = false
+    private var engineStarted = false
     private var log: @Sendable (MemoryLogEvent) -> Void
 
     public init(configuration: MemoryConfiguration,
@@ -34,28 +39,69 @@ public actor MemoryService {
         self.log = log
         if let durableStore {
             self.durableStore = durableStore
+            self.engine = nil
         } else if configuration.isEnabled {
-            let connection = ValkeyConnection(configuration: configuration.valkey)
-            self.durableStore = ValkeyMemoryStore(connection: connection,
-                                                  prefix: "nvmai:mem",
-                                                  limits: configuration.limits,
-                                                  maximumIndexScan: configuration.maximumIndexScan)
+            // One engine for both stores: the same file, the same restart,
+            // and a session that means the same thing to each of them.
+            let engine = Self.makeEngine(configuration: configuration, log: log)
+            let store = ContinuityStore(engine: engine, limits: configuration.limits)
+            self.engine = engine
+            self.durableStore = store
         } else {
+            self.engine = nil
             self.durableStore = nil
         }
         if let journal {
             self.journal = journal
-        } else if configuration.isEnabled, configuration.journalEnabled {
-            // Its own connection: journal writes happen after a completion has
-            // already been returned, and must never queue behind a read the
-            // model is waiting on.
-            self.journal = ValkeyJournal(connection: ValkeyConnection(
-                configuration: configuration.valkey),
-                                         prefix: "nvmai:mem",
-                                         limits: configuration.journalLimits)
+        } else if configuration.isEnabled, configuration.journalEnabled,
+                  let engine = self.engine,
+                  let store = self.durableStore as? ContinuityStore {
+            self.journal = ContinuityJournalStore(engine: engine, store: store,
+                                                  limits: configuration.journalLimits)
         } else {
             self.journal = nil
         }
+    }
+
+    /// Builds the engine, with a journal file when one can be opened.
+    ///
+    /// A directory that cannot be written is not fatal: the engine still runs
+    /// in memory for the session. It is logged, and `isDurable` reports false,
+    /// so the prompt tells the model its writes will not outlive the session
+    /// rather than letting it assume they will.
+    private static func makeEngine(configuration: MemoryConfiguration,
+                                   log: @Sendable (MemoryLogEvent) -> Void) -> ContinuityEngine {
+        let limits = ContinuityCore.MemoryLimits(
+            maxValueBytes: configuration.limits.maximumValueBytes,
+            maxItemsPerTask: itemCeiling(for: configuration))
+        let engineConfiguration = ContinuityConfiguration(
+            memoryLimits: limits,
+            journalsSessionContent: configuration.journalEnabled)
+        guard let scope = configuration.scope() else {
+            return ContinuityEngine(configuration: engineConfiguration)
+        }
+        do {
+            let journal = try FileJournal(
+                url: configuration.storage.journalURL(for: scope),
+                synchronizesEveryWrite: configuration.storage.synchronizesEveryWrite)
+            return ContinuityEngine(configuration: engineConfiguration, journal: journal)
+        } catch {
+            log(.degraded(operation: "openJournal", detail: "\(error)"))
+            return ContinuityEngine(configuration: engineConfiguration)
+        }
+    }
+
+    /// Turns the byte budget into an item ceiling.
+    ///
+    /// The bound is the worst case, every record at the maximum value size,
+    /// so the store cannot exceed the budget the machine was sized for even
+    /// when every fact the model writes is enormous.
+    static func itemCeiling(for configuration: MemoryConfiguration) -> Int {
+        guard let budget = configuration.storage.maximumMemoryBytes, budget > 0 else {
+            return 8192
+        }
+        let perItem = max(1, configuration.limits.maximumValueBytes)
+        return max(64, budget / perItem)
     }
 
     /// Records a completed turn. Content is filtered to substance here, so no
@@ -105,6 +151,7 @@ public actor MemoryService {
                              workspaceOverride: String? = nil,
                              modelID: String? = nil) async -> MemorySessionContext? {
         guard configuration.isEnabled else { return nil }
+        await startEngineIfNeeded()
         guard let scope = configuration.scope(workspaceOverride: workspaceOverride) else {
             log(.rejectedScope(workspaceOverride ?? configuration.workspace))
             return nil
@@ -133,18 +180,35 @@ public actor MemoryService {
                                     isDurable: isDurable)
     }
 
+    /// Replays the journal once, before the first session.
+    ///
+    /// Deferred rather than done in `init` because a replay is I/O and an
+    /// initializer that reads a file cannot report a failure to the caller
+    /// that will actually be affected by it.
+    private func startEngineIfNeeded() async {
+        guard let engine, !engineStarted else { return }
+        engineStarted = true
+        do {
+            try await engine.start()
+        } catch {
+            isDegraded = true
+            log(.degraded(operation: "start", detail: "\(error)"))
+        }
+    }
+
     /// The system-prompt fragment for a session.
     public func instructions(for context: MemorySessionContext) -> String {
         MemoryPrompt.instructions(scope: context.scope,
                                   session: context.session,
                                   bootstrap: context.bootstrap,
-                                  isDurable: context.isDurable)
+                                  isDurable: context.isDurable,
+                                  tools: toolDefinitions().map(\.name))
     }
 
     /// The tool definitions to advertise, or none when tools are off.
     public func toolDefinitions() -> [MemoryToolDefinition] {
-        guard configuration.isEnabled, configuration.exposesTools else { return [] }
-        return MemoryTools.definitions()
+        guard configuration.isEnabled else { return [] }
+        return MemoryTools.definitions(surface: configuration.toolSurface)
     }
 
     /// Runs one memory tool call in a session's scope.

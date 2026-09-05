@@ -3,7 +3,7 @@ import Testing
 @testable import NVMAIMemory
 
 /// The service is where "memory is optional" is actually decided: what
-/// happens when Valkey is gone, what the model is told, and what a tool call
+/// happens when durable storage is gone, what the model is told, and what a tool call
 /// is allowed to reach.
 @Suite struct MemoryServiceTests {
     private func configuration(enabled: Bool = true,
@@ -15,11 +15,11 @@ import Testing
         configuration.workspace = workspace
         configuration.user = "local"
         configuration.degradesToLocalStore = degrades
-        configuration.exposesTools = tools
+        configuration.toolSurface = tools ? .full : .off
         return configuration
     }
 
-    /// A store whose operations fail, standing in for an unreachable Valkey.
+    /// A store whose operations fail, standing in for storage that cannot be written.
     private struct UnavailableStore: MemoryStore {
         func get(_: MemoryKey, in _: MemoryScope) async throws -> MemoryRecord? {
             throw MemoryError.backendUnavailable("connection refused")
@@ -173,7 +173,7 @@ import Testing
         #expect(await quiet.toolDefinitions().isEmpty)
 
         var withTools = configuration()
-        withTools.exposesTools = true
+        withTools.toolSurface = .full
         let service = MemoryService(configuration: withTools, durableStore: InMemoryStore())
         #expect(Set(await service.toolDefinitions().map(\.name)) == MemoryTools.names)
     }

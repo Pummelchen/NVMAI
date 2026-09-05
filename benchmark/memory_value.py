@@ -12,7 +12,13 @@ is the measurement.
 Two arms, identical prompts:
 
     control   memory off
-    memory    memory on, tools on, journal on
+    minimal   memory on, two tools (set, get), journal on
+    full      memory on, all six tools, journal on
+
+The third arm exists because the tool schemas, not the memory fragment, are
+what memory actually costs: measured on this model the six definitions are
+about 1,120 prompt tokens against roughly 210 for the fragment. If two tools
+carry the same decisions, most of the tax was avoidable.
 
 What is measured, and why it differs by store:
 
@@ -40,6 +46,9 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# control: memory off. minimal: bootstrap plus memory_set/memory_get.
+# full: bootstrap plus all six tools.
+ARMS = ("control", "minimal", "full")
 OUT = ROOT / ".build/benchmark-logs/memory-value"
 PORT = int(os.environ.get("NVMAI_PORT", "8096"))
 BASE = f"http://127.0.0.1:{PORT}/v1"
@@ -71,17 +80,23 @@ STAGES = [
 ]
 
 # The parameters stage 1 is free to choose and stages 2 and 3 must match if
-# anything carried. Each is read out of the model's own prose and code.
+# anything carried.
+#
+# Read from the model's stated rule list, not from the whole answer: scanning
+# everything made "clamped to ±70°" register as a field height, which is the
+# kind of error that turns a measurement into a number that merely looks like
+# one. The rules are what the prompt asks for first, so the list is where the
+# claim lives and the code is only its consequence.
 PARAMETERS = {
-    "field_width": r"(?:width|field)\D{0,20}?(\d{2,4})",
-    "field_height": r"(?:height)\D{0,20}?(\d{2,4})",
-    "win_score": r"(?:win|winning|first to|match)\D{0,25}?(\d{1,2})\s*(?:points|score)?",
-    "paddle_speed": r"paddle\s*speed\D{0,15}?([\d.]+)",
-    "speed_increase": r"(?:speed(?:s)?\s*(?:up|increase)|accelerat)\D{0,30}?([\d.]+)",
+    "field": r"(\d{3,4})\s*(?:x|×|by)\s*(\d{3,4})",
+    "win_score": r"(?:first\s+to|winning\s+score|win(?:s)?\s+at)\D{0,12}?(\d{1,2})",
+    "ball_start_speed": r"(?:ball).{0,40}?start\w*\D{0,12}?([\d.]+)",
+    "ball_increment": r"(?:\+|increase[sd]?\s+by|increment\w*\D{0,8})\s*([\d.]+)\s*(?:per|each|every)",
+    "paddle_speed": r"(?:max(?:imum)?\s+speed|paddle\s+speed)\D{0,12}?([\d.]+)",
 }
 
 
-def post(messages, model, max_tokens=2600):
+def post(messages, model, max_tokens=5200):
     body = json.dumps(
         {
             "model": model,
@@ -129,14 +144,26 @@ def run_arm(arm: str):
     (OUT / f"{arm}.json").write_text(json.dumps(results, indent=2))
 
 
+def rules_section(text: str) -> str:
+    """The stated rules, which is everything before the first code block.
+
+    The prompt asks for the list first and the code second, so this is the
+    model's own claim about what it is implementing, uncontaminated by
+    constants that happen to appear in the source.
+    """
+    head = text.split("```", 1)[0]
+    return head if head.strip() else text[:2000]
+
+
 def extract(text: str) -> dict:
-    """Reads the parameters out of a stage's answer."""
+    """Reads the parameters out of a stage's stated rules."""
     found = {}
-    lowered = text.lower()
+    lowered = rules_section(text).lower().replace(",", "")
     for name, pattern in PARAMETERS.items():
         match = re.search(pattern, lowered)
-        if match:
-            found[name] = match.group(1)
+        if not match:
+            continue
+        found[name] = "x".join(match.groups()) if name == "field" else match.group(1)
     return found
 
 
@@ -177,7 +204,7 @@ def compiles(stage: str, code: str) -> bool | None:
 
 def report():
     rows = {}
-    for arm in ("control", "memory"):
+    for arm in ARMS:
         path = OUT / f"{arm}.json"
         if not path.exists():
             continue
@@ -222,7 +249,7 @@ def report():
 
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "report"
-    if command in ("control", "memory"):
+    if command in ARMS:
         run_arm(command)
     else:
         report()

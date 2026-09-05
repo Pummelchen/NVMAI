@@ -60,10 +60,12 @@ NVMAI_ALL_MODELS=(ornith qwen36 agentworld qwen38)
 
 # --- Persistent memory -------------------------------------------------
 #
-# Off unless NVMAI_MEMORY=1. The Valkey cache ceiling defaults by machine
+# Off unless NVMAI_MEMORY=1. Memory runs inside the server process, so there
+# is no database to install or start. The store ceiling defaults by machine
 # memory, since the working set is a few thousand short facts and does not
 # grow with the host: 256 MiB at 8 GB, 512 MiB at 16 GB, 1 GiB above that.
-# Override with NVMAI_MEMORY_CACHE_MIB.
+# Override with NVMAI_MEMORY_CACHE_MIB, and the location with
+# NVMAI_MEMORY_DIR (default ~/.nvmai/memory).
 #
 # The workspace defaults to the directory the launcher was run from, which
 # is the repository being worked on, so two checkouts never share memory.
@@ -89,8 +91,8 @@ nvmai_export_memory_environment() {
   local workspace_dir="${1:-$PWD}"
   export NVMAI_MEMORY="${NVMAI_MEMORY:-0}"
   [[ "$NVMAI_MEMORY" == "1" ]] || return 0
-  export VALKEY_URL="${VALKEY_URL:-redis://127.0.0.1:6379}"
   export NVMAI_MEMORY_CACHE_MIB="${NVMAI_MEMORY_CACHE_MIB:-$(nvmai_default_cache_mib)}"
   export NVMAI_WORKSPACE_DIR="${NVMAI_WORKSPACE_DIR:-$workspace_dir}"
   export NVMAI_MEMORY_NAMESPACE="${NVMAI_MEMORY_NAMESPACE:-nvmai}"
+  export NVMAI_MEMORY_DIR="${NVMAI_MEMORY_DIR:-$HOME/.nvmai/memory}"
 }

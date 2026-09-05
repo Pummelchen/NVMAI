@@ -1,61 +1,50 @@
 import Foundation
 
-/// How to reach Valkey. Parsed from a URL plus explicit overrides, so
-/// `redis://user:pass@host:6379/2` works and so does setting the pieces one
-/// at a time.
-public struct ValkeyConfiguration: Sendable, Equatable {
-    public var host: String
-    public var port: Int
-    public var username: String?
-    public var password: String?
-    public var database: Int
-    public var connectTimeoutMilliseconds: Int
-    public var operationTimeoutMilliseconds: Int
-    /// Applied with `CONFIG SET maxmemory` at connect. Nil leaves the
-    /// server's own configuration alone.
+/// Where continuity state lives on this machine.
+///
+/// There is no host and no port. The store runs inside the server process,
+/// so the only things left to configure are the directory it writes to and
+/// how much it is allowed to hold.
+public struct ContinuityStorageConfiguration: Sendable, Equatable {
+    /// Directory holding the journal. Created with owner-only permissions.
+    public var directory: URL
+    /// Force every append to disk. Correct across a power cut and slower;
+    /// a process crash loses nothing either way, because the write has
+    /// already reached the kernel.
+    public var synchronizesEveryWrite: Bool
+    /// Ceiling for what the store may hold, in bytes. Nil leaves it unbounded,
+    /// which is only sensible in tests.
     public var maximumMemoryBytes: Int?
 
-    public init(host: String = "127.0.0.1",
-                port: Int = 6379,
-                username: String? = nil,
-                password: String? = nil,
-                database: Int = 0,
-                connectTimeoutMilliseconds: Int = 1_000,
-                operationTimeoutMilliseconds: Int = 250,
+    public init(directory: URL = ContinuityStorageConfiguration.defaultDirectory,
+                synchronizesEveryWrite: Bool = false,
                 maximumMemoryBytes: Int? = nil) {
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-        self.database = database
-        self.connectTimeoutMilliseconds = connectTimeoutMilliseconds
-        self.operationTimeoutMilliseconds = operationTimeoutMilliseconds
+        self.directory = directory
+        self.synchronizesEveryWrite = synchronizesEveryWrite
         self.maximumMemoryBytes = maximumMemoryBytes
     }
 
-    /// Parses `redis://`, `rediss://` or `valkey://` URLs. Credentials in the
-    /// URL are supported because that is how deployments pass them; they are
-    /// never logged and never reach the model.
-    public static func parse(url raw: String) -> ValkeyConfiguration? {
-        guard let url = URL(string: raw),
-              let scheme = url.scheme?.lowercased(),
-              ["redis", "rediss", "valkey"].contains(scheme) else { return nil }
-        var configuration = ValkeyConfiguration()
-        configuration.host = url.host ?? "127.0.0.1"
-        configuration.port = url.port ?? 6379
-        if let user = url.user, !user.isEmpty { configuration.username = user }
-        if let password = url.password, !password.isEmpty { configuration.password = password }
-        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if let database = Int(path) { configuration.database = database }
-        return configuration
+    public static var defaultDirectory: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".nvmai", isDirectory: true)
+            .appendingPathComponent("memory", isDirectory: true)
+    }
+
+    /// The journal file for a scope. One file per workspace, so deleting a
+    /// project's memory is deleting a file rather than editing a shared one.
+    public func journalURL(for scope: MemoryScope) -> URL {
+        directory
+            .appendingPathComponent(scope.namespace, isDirectory: true)
+            .appendingPathComponent(scope.user, isDirectory: true)
+            .appendingPathComponent("\(scope.workspace).ndjson")
     }
 }
 
 /// The memory subsystem's whole configuration surface.
 public struct MemoryConfiguration: Sendable, Equatable {
     public var isEnabled: Bool
-    public var valkey: ValkeyConfiguration
-    /// Separates deployments sharing one Valkey.
+    public var storage: ContinuityStorageConfiguration
+    /// Separates deployments sharing one machine.
     public var namespace: String
     /// Separates people sharing one server. Defaults to the OS user.
     public var user: String
@@ -69,14 +58,14 @@ public struct MemoryConfiguration: Sendable, Equatable {
     /// Keys scanned from a scope's index before ranking. Bounds the cost of
     /// a search on a large store; nothing ever reads the whole database.
     public var maximumIndexScan: Int
-    /// Whether the engine offers the model memory tools at all.
+    /// How much of the memory API the model is shown.
     ///
     /// Off by default. The tool loop is where the request-lifecycle risk and
     /// the dependence on the model's tool discipline concentrate, and whether
     /// a 3B-active model uses six memory tools well is a measurement rather
     /// than a claim. Bootstrap injection and the session journal carry the
     /// feature's value without it.
-    public var exposesTools: Bool
+    public var toolSurface: MemoryToolSurface
     /// Rounds of memory tool calls the engine will service inside one
     /// request before it stops and answers.
     public var maximumToolRounds: Int
@@ -89,34 +78,34 @@ public struct MemoryConfiguration: Sendable, Equatable {
     /// Ask the model, at session end, what is worth keeping. Off by default:
     /// it costs a generation the user did not ask for.
     public var sessionConsolidation: Bool
-    /// Serve memory from process-local storage when Valkey cannot be reached,
+    /// Serve memory from process-local storage when the journal cannot be written,
     /// so a session still has working memory. It does not survive restart,
     /// and the model is told which one it is talking to.
     public var degradesToLocalStore: Bool
 
     public init(isEnabled: Bool = false,
-                valkey: ValkeyConfiguration = .init(),
+                storage: ContinuityStorageConfiguration = .init(),
                 namespace: String = "nvmai",
                 user: String = MemoryConfiguration.defaultUser,
                 workspace: String = "default",
                 allowsPerRequestWorkspace: Bool = true,
                 limits: MemoryLimits = .init(),
                 maximumIndexScan: Int = 2_000,
-                exposesTools: Bool = false,
+                toolSurface: MemoryToolSurface = .off,
                 maximumToolRounds: Int = 4,
                 journalEnabled: Bool = true,
                 journalLimits: JournalLimits = .init(),
                 sessionConsolidation: Bool = false,
                 degradesToLocalStore: Bool = true) {
         self.isEnabled = isEnabled
-        self.valkey = valkey
+        self.storage = storage
         self.namespace = namespace
         self.user = user
         self.workspace = workspace
         self.allowsPerRequestWorkspace = allowsPerRequestWorkspace
         self.limits = limits
         self.maximumIndexScan = maximumIndexScan
-        self.exposesTools = exposesTools
+        self.toolSurface = toolSurface
         self.maximumToolRounds = maximumToolRounds
         self.journalEnabled = journalEnabled
         self.journalLimits = journalLimits
@@ -130,7 +119,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
         return sanitized.isEmpty ? "local" : String(sanitized.prefix(32))
     }
 
-    /// Default Valkey ceiling for this machine, following the sizing the
+    /// Default store ceiling for this machine, following the sizing the
     /// deployment asks for: 256 MiB at 8 GB, 512 MiB at 16 GB, 1 GiB above.
     /// A memory store is worth a fixed slice, not a fraction: the working set
     /// is a few thousand short facts and does not grow with the machine.
@@ -147,7 +136,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
     /// scripts and the launchers pass it.
     ///
     /// Every value has a default that works on a developer machine with a
-    /// local Valkey, and the subsystem stays off unless NVMAI_MEMORY is set,
+    /// machine, and the subsystem stays off unless NVMAI_MEMORY is set,
     /// so nothing about serving changes for someone who has not asked for it.
     public static func fromEnvironment(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
@@ -156,25 +145,14 @@ public struct MemoryConfiguration: Sendable, Equatable {
         let flag = environment["NVMAI_MEMORY"]?.lowercased()
         configuration.isEnabled = flag == "1" || flag == "on" || flag == "true"
 
-        if let url = environment["VALKEY_URL"] ?? environment["NVMAI_MEMORY_URL"],
-           let parsed = ValkeyConfiguration.parse(url: url) {
-            configuration.valkey = parsed
+        if let directory = environment["NVMAI_MEMORY_DIR"], !directory.isEmpty {
+            configuration.storage.directory = URL(fileURLWithPath: directory)
         }
-        if let host = environment["VALKEY_HOST"] { configuration.valkey.host = host }
-        if let port = environment["VALKEY_PORT"].flatMap(Int.init) { configuration.valkey.port = port }
-        if let user = environment["VALKEY_USERNAME"] { configuration.valkey.username = user }
-        if let password = environment["VALKEY_PASSWORD"] { configuration.valkey.password = password }
-        if let database = environment["VALKEY_DB"].flatMap(Int.init) {
-            configuration.valkey.database = database
-        }
-        if let value = environment["NVMAI_MEMORY_CONNECT_TIMEOUT_MS"].flatMap(Int.init) {
-            configuration.valkey.connectTimeoutMilliseconds = max(10, value)
-        }
-        if let value = environment["NVMAI_MEMORY_TIMEOUT_MS"].flatMap(Int.init) {
-            configuration.valkey.operationTimeoutMilliseconds = max(10, value)
+        if let value = environment["NVMAI_MEMORY_FSYNC"] {
+            configuration.storage.synchronizesEveryWrite = value == "1"
         }
         let cacheMiB = environment["NVMAI_MEMORY_CACHE_MIB"].flatMap(Int.init)
-        configuration.valkey.maximumMemoryBytes = cacheMiB.map { $0 << 20 } ?? defaultCacheBytes()
+        configuration.storage.maximumMemoryBytes = cacheMiB.map { $0 << 20 } ?? defaultCacheBytes()
 
         if let namespace = environment["NVMAI_MEMORY_NAMESPACE"] { configuration.namespace = namespace }
         if let user = environment["NVMAI_MEMORY_USER"] { configuration.user = user }
@@ -195,7 +173,15 @@ public struct MemoryConfiguration: Sendable, Equatable {
         if let value = environment["NVMAI_MEMORY_TOOL_ROUNDS"].flatMap(Int.init) {
             configuration.maximumToolRounds = max(0, min(value, 16))
         }
-        if let value = environment["NVMAI_MEMORY_TOOLS"] { configuration.exposesTools = value == "1" }
+        if let value = environment["NVMAI_MEMORY_TOOLS"] {
+            // "1" and "0" kept working: they predate the surface.
+            switch value.lowercased() {
+            case "1", "full", "on": configuration.toolSurface = .full
+            case "0", "off": configuration.toolSurface = .off
+            default: configuration.toolSurface = MemoryToolSurface(rawValue: value.lowercased())
+                ?? configuration.toolSurface
+            }
+        }
         if let value = environment["NVMAI_MEMORY_JOURNAL"] {
             configuration.journalEnabled = value != "0"
         }
@@ -245,15 +231,14 @@ public struct MemoryConfiguration: Sendable, Equatable {
         return try? MemoryScope(namespace: namespace, user: user, workspace: effective)
     }
 
-    /// One line for the log at startup. Never includes credentials.
+    /// One line for the log at startup.
     public var summary: String {
-        let target = "\(valkey.host):\(valkey.port)/\(valkey.database)"
-        let cache = valkey.maximumMemoryBytes.map { "\($0 >> 20)MiB" } ?? "server default"
-        return "memory enabled=\(isEnabled) valkey=\(target) cache=\(cache) "
+        let cache = storage.maximumMemoryBytes.map { "\($0 >> 20)MiB" } ?? "unbounded"
+        return "memory enabled=\(isEnabled) store=in-process cache=\(cache) "
             + "namespace=\(namespace) user=\(user) workspace=\(workspace) "
-            + "tools=\(exposesTools) rounds=\(maximumToolRounds) "
+            + "tools=\(toolSurface.rawValue) rounds=\(maximumToolRounds) "
             + "bootstrap=\(limits.bootstrapRecords)/\(limits.bootstrapBytes)B "
-            + "timeout=\(valkey.operationTimeoutMilliseconds)ms "
+            + "dir=\(storage.directory.path) "
             + "journal=\(journalEnabled) "
             + "journal_limits=\(journalLimits.turnsPerSession)/"
             + "\(journalLimits.sessionsPerWorkspace) "

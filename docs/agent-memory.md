@@ -20,9 +20,17 @@ NVMAIServer ── MemoryBackend (decorator) ── inner backend (inference)
                      ├─ installs the instruction fragment + memory tools
                      ├─ executes memory_* calls the model makes
                      └─ MemoryService
-                            ├─ ValkeyMemoryStore ── RESP client ── Valkey
+                            ├─ ContinuityStore ─┐
+                            ├─ ContinuityJournalStore ─┴─ ContinuityEngine
+                            │                              └─ FileJournal
                             └─ InMemoryStore (fallback, and the test double)
 ```
+
+Memory runs inside the server process. There is no database to install, no
+port to open and no connection to lose: `ContinuityEngine` is a Swift actor in
+the same binary as the model, and the only thing it touches outside memory is
+one journal file per workspace. The engine itself is documented in
+[`sources/ContinuityCore/README.md`](../sources/ContinuityCore/README.md).
 
 The engine's request lifecycle is unchanged. `MemoryBackend` wraps any
 `ServerInferenceBackend`: on the way in it installs a short system fragment
@@ -44,7 +52,7 @@ than stranding its result.
 <namespace> / <user> / <workspace>
 ```
 
-- **namespace** separates deployments sharing one Valkey (`nvmai` by default).
+- **namespace** separates deployments sharing one machine (`nvmai` by default).
 - **user** separates people sharing one server (the OS user by default).
 - **workspace** is the repository. The start scripts pass the directory they
   were launched from, and the identifier is the directory name plus a digest
@@ -108,13 +116,9 @@ Environment variables, which is how the start scripts pass them:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `NVMAI_MEMORY` | `0` | `1` enables memory |
-| `VALKEY_URL` | `redis://127.0.0.1:6379` | Server, optionally `user:pass@host:port/db` |
-| `VALKEY_HOST`, `VALKEY_PORT` | | Override the URL's host and port |
-| `VALKEY_USERNAME`, `VALKEY_PASSWORD` | | Credentials, never logged |
-| `VALKEY_DB` | `0` | Database index |
-| `NVMAI_MEMORY_CACHE_MIB` | by machine memory | Valkey `maxmemory` applied at connect |
-| `NVMAI_MEMORY_TIMEOUT_MS` | `250` | Per-operation deadline |
-| `NVMAI_MEMORY_CONNECT_TIMEOUT_MS` | `1000` | Connect deadline |
+| `NVMAI_MEMORY_DIR` | `~/.nvmai/memory` | Directory holding the journals |
+| `NVMAI_MEMORY_FSYNC` | `0` | `1` forces every append to disk |
+| `NVMAI_MEMORY_CACHE_MIB` | by machine memory | Store ceiling, as a worst-case item bound |
 | `NVMAI_MEMORY_NAMESPACE` | `nvmai` | Deployment namespace |
 | `NVMAI_MEMORY_USER` | OS user | User component of the scope |
 | `NVMAI_MEMORY_WORKSPACE` | from `NVMAI_WORKSPACE_DIR` | Explicit workspace id |
@@ -127,74 +131,58 @@ Environment variables, which is how the start scripts pass them:
 | `NVMAI_MEMORY_LOCAL_FALLBACK` | `1` | `0` disables memory instead of degrading |
 | `NVMAI_MEMORY_CONSOLIDATION` | `0` | Session-end consolidation hook |
 
-### Cache sizing
+### Store sizing
 
-The Valkey ceiling defaults by machine memory, because the working set is a
-few thousand short facts and does not grow with the host:
+The ceiling defaults by machine memory, because the working set is a few
+thousand short facts and does not grow with the host:
 
-| Machine memory | Default cache |
+| Machine memory | Default ceiling |
 | --- | ---: |
 | Up to 8 GB | 256 MiB |
 | Up to 16 GB | 512 MiB |
 | More than 16 GB | 1 GiB |
 
-Override with `NVMAI_MEMORY_CACHE_MIB`. NVMAI applies the ceiling and
-`noeviction` at connect: durable memory should refuse writes when full rather
-than quietly drop the facts the model relies on.
+Override with `NVMAI_MEMORY_CACHE_MIB`. The budget becomes a worst-case item
+bound: the ceiling divided by the largest permitted value, so the store cannot
+exceed what the machine was sized for even if every fact the model writes is
+enormous. Reaching the bound refuses writes rather than evicting, because
+silently dropping a fact the model relies on is the worse failure.
 
 ## Setup
 
-### macOS
-
-```bash
-brew install valkey
-brew services start valkey
-```
-
-### Linux
-
-```bash
-sudo apt install valkey-server   # or: dnf install valkey
-sudo systemctl enable --now valkey
-```
-
-### Either, with Docker
-
-```bash
-docker compose -f tools/memory/docker-compose.yml up -d
-```
-
-That compose file is RAM-first with persistence: appendonly on, periodic
-snapshots, `noeviction`, bound to loopback.
-
-### Running the server with memory
+There is none. Memory is off until you ask for it, and turning it on needs no
+service:
 
 ```bash
 NVMAI_MEMORY=1 tools/start-qwen3.6-8bit.sh
 ```
 
 The start scripts export the memory environment themselves: the workspace is
-the directory you launched from, and the cache ceiling follows the table
-above. To point at a different server or workspace:
+the directory you launched from, so two checkouts never share memory, and the
+ceiling follows the table above. To place the store elsewhere or name the
+workspace explicitly:
 
 ```bash
-NVMAI_MEMORY=1 VALKEY_URL=redis://127.0.0.1:6379 \
+NVMAI_MEMORY=1 NVMAI_MEMORY_DIR=/var/lib/nvmai \
   NVMAI_MEMORY_WORKSPACE=my-project tools/start-ornith-8bit.sh
 ```
+
+State lives in one file per workspace, `<dir>/<namespace>/<user>/<workspace>.ndjson`,
+created owner-readable only. Deleting a project's memory is deleting its file.
 
 ## Failure behaviour
 
 Memory never fails a completion.
 
-- Valkey unreachable at session start: the session runs on a process-local
-  store, and the prompt tells the model its writes will not persist. Set
+- A journal file that cannot be opened: the session runs in memory only, and
+  the prompt tells the model its writes will not persist. Set
   `NVMAI_MEMORY_LOCAL_FALLBACK=0` to run with no memory instead.
 - An operation that fails mid-session degrades the same way, once, and logs it.
 - A failed write is reported to the model as a tool error. It is never
   reported as success: a model that believes it saved a fact it did not is
   worse than one with no memory.
-- A timeout closes the connection rather than risking a reply being matched to
-  the next command.
+- A torn final line in a journal, the normal result of a crash, is dropped on
+  replay rather than stranding every good record behind it.
 
 ## Security
 
@@ -203,22 +191,26 @@ Memory never fails a completion.
   before any backend sees them.
 - The model gets logical memory operations, never raw commands, and cannot
   name another workspace.
-- Credentials are never logged and never reach the model. Log lines carry
-  operational detail only, never memory contents, which a test asserts.
+- Log lines carry operational detail only, never memory contents, which a
+  test asserts.
+- Nothing in the memory path opens a socket. `NVMAIMemory` and
+  `ContinuityCore` have no networking dependency at all, so memory cannot
+  reach off the machine and cannot be reached from it.
 - Values are capped, results are capped, and index scans are capped.
 - Deletion is per key within the current scope. There is no bulk delete.
 
 ## Testing
 
 ```bash
-swift test --filter NVMAIMemoryTests     # store, Valkey wire, config, service
+swift test --filter NVMAIMemoryTests     # store, config, service, durability
+swift test --filter ContinuityCoreTests  # the engine underneath it
 swift test --filter MemoryBackendTests   # the decorator in the request path
 ```
 
-The Valkey suite runs against an in-process fake that speaks real RESP over a
-real socket, so framing, pipelining, error replies, timeouts and the config
-handshake are covered with no server on the machine or in CI. The same
-conformance rules are asserted against both backends.
+The durable backend is tested the same way the reference store is, with the
+same contract, plus what the reference store never had to satisfy: an address
+mapping that round-trips, and state that survives a restart. Nothing needs a
+server, in CI or on a machine, because there is no server.
 
 ## Two sessions, worked through
 
@@ -261,8 +253,12 @@ it retrieved memory is evidence rather than truth.
 - **Streaming shows memory rounds as text.** Content the model produces before
   a memory call is streamed as it happens. The tool calls are hidden; the
   words around them are not.
-- **One connection.** Pipelined and shared, which is ample for memory-sized
-  traffic, but a very large store searched constantly would want a pool.
+- **The store is RAM-primary.** Everything for a workspace is held in memory
+  and journalled to a file; there is no partial load. That is right for a few
+  thousand short facts and would be wrong for a million.
+- **Search is linear.** Every query walks the workspace's records. At the
+  sizes the item ceiling permits this is not worth indexing, but it is a
+  linear scan, not a lookup.
 
 ## A future semantic layer
 

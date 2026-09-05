@@ -5,9 +5,9 @@ import NVMAIMemory
 /// Bridges the memory subsystem to the server's own types.
 ///
 /// `NVMAIMemory` knows nothing about chat messages, tool definitions or
-/// requests, and the serving code knows nothing about Valkey. Everything that
-/// has to speak both lives here: deriving a session identity from a
-/// conversation, turning memory tools into the tokenizer's function
+/// requests, and the serving code knows nothing about how memory is stored.
+/// Everything that has to speak both lives here: deriving a session identity
+/// from a conversation, turning memory tools into the tokenizer's function
 /// definitions, and turning a model's tool call into a memory operation and
 /// its result back into a message.
 enum ServerMemory {

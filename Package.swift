@@ -9,12 +9,14 @@ let package = Package(
     products: [
         .library(name: "NVMAI", targets: ["NVMAI"]),
         .library(name: "NVMAIFormat", targets: ["NVMAIFormat"]),
+        .library(name: "ContinuityCore", targets: ["ContinuityCore"]),
         .executable(name: "NVMAIRepack", targets: ["NVMAIRepack"]),
         .executable(name: "NVMAICLI", targets: ["NVMAICLI"]),
         .executable(name: "NVMAIMac", targets: ["NVMAIMac"]),
         .executable(name: "NVMAIDecodeService", targets: ["NVMAIDecodeService"]),
         .executable(name: "NVMAIServer", targets: ["NVMAIServer"]),
         .executable(name: "NVMAIBench", targets: ["NVMAIBench"]),
+        .executable(name: "ContinuityDemo", targets: ["ContinuityDemo"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -89,15 +91,28 @@ let package = Package(
             dependencies: ["NVMAIAppCore", "NVMAIDecodeProtocol"],
             path: "sources/NVMAIDecodeService"
         ),
-        // Agent memory: a store abstraction plus its backends. Depends on
-        // nothing in the engine, so the serving path can use it without the
-        // memory subsystem being able to reach back into inference.
+        // Continuity: sessions, task memory and context assembly, in this
+        // process. Depends on nothing at all, not even NIO, so it cannot
+        // reach the network and cannot be reached from one.
+        .target(
+            name: "ContinuityCore",
+            path: "sources/ContinuityCore"
+        ),
+        // Worked examples and a scale check for ContinuityCore. Not part of
+        // the server; it exists so the package's claims can be run.
+        .executableTarget(
+            name: "ContinuityDemo",
+            dependencies: ["ContinuityCore"],
+            path: "sources/ContinuityDemo"
+        ),
+        // Agent memory: the model-facing surface (keys, tools, prompt
+        // fragment, journal filter) over ContinuityCore. Depends on nothing
+        // in the engine, so the serving path can use it without the memory
+        // subsystem being able to reach back into inference, and on no
+        // networking, so it cannot reach off the machine.
         .target(
             name: "NVMAIMemory",
-            dependencies: [
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-            ],
+            dependencies: ["ContinuityCore"],
             path: "sources/NVMAIMemory"
         ),
         .target(
@@ -164,8 +179,13 @@ let package = Package(
             path: "tests/NVMAIApp/MacPresentation"
         ),
         .testTarget(
+            name: "ContinuityCoreTests",
+            dependencies: ["ContinuityCore"],
+            path: "tests/ContinuityCore"
+        ),
+        .testTarget(
             name: "NVMAIMemoryTests",
-            dependencies: ["NVMAIMemory"],
+            dependencies: ["NVMAIMemory", "ContinuityCore"],
             path: "tests/NVMAIMemory"
         ),
         .testTarget(

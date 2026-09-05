@@ -8,6 +8,33 @@ import Foundation
 /// launch configuration and the request, and passed in here. A call cannot
 /// name another workspace, and a key that would escape the scope fails to
 /// parse before any backend sees it.
+/// How much of the memory API to put in front of the model.
+///
+/// The surface is not free: measured on Qwen 3.6 35B, all six definitions
+/// cost about 1,120 prompt tokens against roughly 210 for the instruction
+/// fragment, so five sixths of memory's prompt tax is tool schemas. On an
+/// engine that prefills at about twice its decode rate that is real
+/// wall-clock time on every session, which is why the surface is a choice.
+public enum MemoryToolSurface: String, Sendable, CaseIterable {
+    /// No tools. The fragment and the bootstrap still work; the model can
+    /// read what it was given but cannot write anything back.
+    case off
+    /// Write, and read one key by name. Discovery comes from the bootstrap,
+    /// which already lists what exists, so the two tools the model cannot
+    /// do without are the ones that store a fact and fetch its full text.
+    case minimal
+    /// Everything: search, list and delete as well.
+    case full
+
+    public var toolNames: Set<String> {
+        switch self {
+        case .off: return []
+        case .minimal: return ["memory_set", "memory_get"]
+        case .full: return MemoryTools.names
+        }
+    }
+}
+
 public enum MemoryTools {
     public static let names: Set<String> = [
         "memory_get", "memory_set", "memory_delete",
@@ -20,7 +47,13 @@ public enum MemoryTools {
     ///
     /// Descriptions are part of the behaviour: they are where the model reads
     /// what a key should look like and when a write is worth making.
-    public static func definitions() -> [MemoryToolDefinition] {
+    public static func definitions(surface: MemoryToolSurface = .full)
+        -> [MemoryToolDefinition] {
+        let wanted = surface.toolNames
+        return allDefinitions().filter { wanted.contains($0.name) }
+    }
+
+    static func allDefinitions() -> [MemoryToolDefinition] {
         [
             MemoryToolDefinition(
                 name: "memory_search",
