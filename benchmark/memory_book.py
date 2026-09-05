@@ -266,11 +266,18 @@ def report():
         for result in results:
             session = result["session"]
             expected = truth(session)
-            wrong = [k for k in QUIZ_KEYS
-                     if normalise(k, result["answers"].get(k)) != expected[k]]
+            # An unanswered quiz is a different failure from a wrong one: the
+            # model did not comply, rather than did not remember. It still
+            # counts as zero, because the reader of the book got no answer
+            # either, but it is labelled so nobody reads it as amnesia.
+            if not result["answers"]:
+                detail = "(no quiz answered)"
+            else:
+                detail = ", ".join(k for k in QUIZ_KEYS
+                                   if normalise(k, result["answers"].get(k)) != expected[k])
             print(f"{arm:8s} {session:7d} {result['prompt_tokens']:7d} "
                   f"{result['completion_tokens']:11d} {result['seconds']:8.0f} "
-                  f"{result['correct']:3d}/{result['total']:<2d}  {', '.join(wrong)}")
+                  f"{result['correct']:3d}/{result['total']:<2d}  {detail}")
             if session > 1:
                 carried_correct += result["correct"]
                 carried_total += result["total"]
