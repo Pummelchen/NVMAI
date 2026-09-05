@@ -240,6 +240,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// probe instead of the next-layer one, so each speculative read gets a
     /// whole extra layer of compute to land in. Measured accuracy of the
     /// second probe on Qwen 3.8: top-1 85.6% against the first's 90.8%.
+    public internal(set) var totalEarlyHitLayers: UInt64 = 0
     /// NVMAI_PREFETCH_MIN_MARGIN: minimum probe-weight margin over the
     /// lowest-ranked prediction for a prefetch read to be issued; 0 (default)
     /// issues in rank order as before. Read once.
@@ -385,16 +386,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             && model.lmHeadWeightBits == 4
             && model.attentionWeightBits == 4
         self.prefillAttentionPath = runtimeConfiguration.prefillAttentionPath
-        self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
-        self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
-        self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
-        self.expertIOBackend = try ExpertIOBackend.environmentValue()
         // The family's measured optimum is the default; an explicit
         // NVMAI_PREDICTIVE_PREFETCH still wins either way, so a probe can turn
         // it on where it ships off and off where it ships on.
         let profile = ModelProfile.resolve(modelID: model.modelID, family: cfg.family,
                                            weightBits: model.routedExpertWeightBits)
         self.profile = profile
+        // Early hits need the GPU residency classifier and the pooled cache
+        // layout. The profile row selects both; NVMAI_DECODE_EXPERT_EXECUTION
+        // and NVMAI_EXPERT_CACHE_LAYOUT still override, so a probe can pin
+        // either independently.
+        if profile.earlyExpertHits,
+           ProcessInfo.processInfo.environment["NVMAI_DECODE_EXPERT_EXECUTION"] == nil {
+            self.decodeExpertExecution = .gpuResidency
+        } else {
+            self.decodeExpertExecution = runtimeConfiguration.decodeExpertExecution
+        }
+        if profile.earlyExpertHits,
+           ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_LAYOUT"] == nil {
+            model.setExpertCacheLayout(.pool)
+        }
+        self.expertIOSynchronization = runtimeConfiguration.expertIOSynchronization
+        self.expertIOSubmission = runtimeConfiguration.expertIOSubmission
+        self.expertIOBackend = try ExpertIOBackend.environmentValue()
         if ProcessInfo.processInfo.environment["NVMAI_RUNNER_STATS"] != nil
             || ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
             FileHandle.standardError.write(Data(("NVMAI \(profile.summary)\n").utf8))

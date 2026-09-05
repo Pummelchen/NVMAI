@@ -69,6 +69,10 @@ final class MoE {
     private let phase1U16SpecializedPSO: MTLComputePipelineState
     private let phase1SubsetU16PSO: MTLComputePipelineState
     private let phase1SubsetU16SpecializedPSO: MTLComputePipelineState
+    /// Early-hit phase 1 over the pooled cache; int4 routed weights only.
+    private let phase1PoolU16PSO: MTLComputePipelineState?
+    private let phase1PoolU16SpecializedPSO: MTLComputePipelineState?
+    var supportsEarlyHits: Bool { phase1PoolU16SpecializedPSO != nil }
     private let phase2ReduceK8PSO: MTLComputePipelineState
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     /// Used when top-k is not 8; the k8 kernels stay the golden path.
@@ -160,6 +164,16 @@ final class MoE {
         self.phase1SubsetU16SpecializedPSO = try context.pipeline(
             phase1SubsetName,
             constants: moeConstants)
+        if routedWeightBits == 4 {
+            self.phase1PoolU16PSO = try context.pipeline(
+                "moe_phase1_gate_up_act_pool_u16load",
+                constants: activationConstants + weightConstants + ioConstants)
+            self.phase1PoolU16SpecializedPSO = try context.pipeline(
+                "moe_phase1_gate_up_act_pool_u16load", constants: moeConstants)
+        } else {
+            self.phase1PoolU16PSO = nil
+            self.phase1PoolU16SpecializedPSO = nil
+        }
         self.phase2ReduceK8PSO = try context.pipeline(
             phase2Name, constants: weightConstants + ioConstants)
         let phase2KNName = routedWeightBits == 4
@@ -446,6 +460,52 @@ final class MoE {
         // Phase-1 uses 16 rows per threadgroup (threadgroup-staged x).
         encoder.dispatchThreadgroups(
             MTLSize(width: (Int(activeCount * f) + 15) / 16, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// Phase 1 for the GPU-classified hits, addressed in the pooled cache.
+    /// Must follow `encodeResidencyClassification` in the same command
+    /// buffer (or a later one on the same queue).
+    func encodeRoutedPhase1EarlyHits(
+        commandBuffer: MTLCommandBuffer,
+        pool: MTLBuffer,
+        poolSlotStride: UInt64,
+        routedOffsets: MoEExpertOffsets,
+        x: MTLBuffer,
+        acts: MTLBuffer,
+        hitPositions: MTLBuffer,
+        hitCount: MTLBuffer,
+        resolvedSlots: MTLBuffer,
+        d: UInt32,
+        f: UInt32,
+        topK: UInt32
+    ) throws {
+        guard let specialized = phase1PoolU16SpecializedPSO, let generic = phase1PoolU16PSO else {
+            throw MetalError.commandEncoderFailed
+        }
+        var dimension = d
+        var intermediate = f
+        var expertCount = topK
+        var stride = poolSlotStride
+        var offsets = routedOffsets
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalError.commandEncoderFailed
+        }
+        encoder.setComputePipelineState(useRealDecodeConstants(d: d, f: f) ? specialized : generic)
+        encoder.setBuffer(pool, offset: 0, index: 0)
+        encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
+        encoder.setBuffer(x, offset: 0, index: 2)
+        encoder.setBuffer(acts, offset: 0, index: 3)
+        encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
+        encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
+        encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
+        encoder.setBuffer(hitPositions, offset: 0, index: 7)
+        encoder.setBuffer(hitCount, offset: 0, index: 8)
+        encoder.setBuffer(resolvedSlots, offset: 0, index: 9)
+        encoder.setBytes(&stride, length: MemoryLayout<UInt64>.stride, index: 10)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: (Int(topK * f) + 15) / 16, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 512, height: 1, depth: 1))
         encoder.endEncoding()
     }

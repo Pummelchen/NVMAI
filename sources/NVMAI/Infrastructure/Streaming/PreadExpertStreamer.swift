@@ -373,6 +373,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 device: MTLDevice,
                 slotCount: Int,
                 cachePolicy: ExpertCachePolicy = .lfu,
+                cacheLayout requestedCacheLayout: ExpertCacheLayout? = nil,
                 eventCoordinator: ExpertIOEventCoordinator? = nil,
                 metalStagingPool: MetalExpertStagingPool? = nil,
                 metalIOService: MetalExpertIOService? = nil) throws {
@@ -392,7 +393,11 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.metalStagingPool = metalStagingPool
         self.metalIOService = metalIOService
         self.ioBackend = try ExpertIOBackend.environmentValue()
-        self.cacheLayout = try ExpertCacheLayout.environmentValue()
+        // Named apart from the property on purpose: a parameter called
+        // `cacheLayout` shadows it for the rest of init, and the pool
+        // allocation below then compares an Optional against `.pool` and
+        // silently allocates per-slot buffers.
+        self.cacheLayout = try requestedCacheLayout ?? ExpertCacheLayout.environmentValue()
         let pageSize = Int(getpagesize())
 
         let openedFD = open(layout.path, O_RDONLY)

@@ -126,6 +126,9 @@ public struct Model {
         /// Wire each layer as it opens (profile `keepExpertCacheWired` or
         /// NVMAI_KEEP_WIRED=1).
         var keepWired = false
+        /// Cache layout for layers opened from now on; nil takes the
+        /// environment's value (see `ModelProfile.earlyExpertHits`).
+        var cacheLayoutOverride: ExpertCacheLayout?
         /// Diagnostic: time spent waiting to enter the serial queue in
         /// `setExpertCachePinned`.
         var pinQueueWaitNanos: UInt64 = 0
@@ -665,11 +668,13 @@ public struct Model {
             metalStagingPool = nil
             metalIOService = nil
         }
+        let layoutOverride = streamersBox.cacheLayoutOverride
         streamersBox.streamers[L] = try PreadExpertStreamer(
             layout: layout,
             device: device,
             slotCount: effectiveSlotCount,
             cachePolicy: expertCachePolicy,
+            cacheLayout: layoutOverride,
             eventCoordinator: expertIOEventCoordinator,
             metalStagingPool: metalStagingPool,
             metalIOService: metalIOService)
@@ -697,6 +702,12 @@ public struct Model {
     /// wired throughout measurably slowed ANE prefill, which has to place
     /// Core ML arenas alongside it. Called at the phase boundaries; cheap and
     /// idempotent, since each streamer skips a state it is already in.
+    /// Open later layers with this cache layout (see
+    /// `ModelProfile.earlyExpertHits`, which needs the pooled one).
+    public func setExpertCacheLayout(_ layout: ExpertCacheLayout) {
+        streamersQueue.sync { streamersBox.cacheLayoutOverride = layout }
+    }
+
     /// Wire layers as they open from now on (see `ModelProfile.keepExpertCacheWired`).
     public func setKeepExpertCacheWired(_ keep: Bool) {
         streamersQueue.sync { streamersBox.keepWired = keep }

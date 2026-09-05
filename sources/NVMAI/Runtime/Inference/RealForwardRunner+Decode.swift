@@ -304,6 +304,7 @@ extension RealForwardRunner {
                     numExperts: UInt32(cfg.numExperts), d: D,
                     topK: UInt32(cfg.topKExperts))
             }
+            var earlyHitsThisLayer = false
             if let residencyResources {
                 try moe.encodeResidencyClassification(
                     commandBuffer: tailCB,
@@ -318,6 +319,10 @@ extension RealForwardRunner {
                     resolvedGenerations: residencyResolvedGenerations,
                     topK: UInt32(cfg.topKExperts),
                     numExperts: UInt32(cfg.numExperts))
+                if profile.earlyExpertHits, moe.supportsEarlyHits,
+                   residencyResources.expertPool != nil {
+                    earlyHitsThisLayer = true
+                }
             }
             attnCB.commit()
             if let attentionCB = softmaxCB {
@@ -327,6 +332,33 @@ extension RealForwardRunner {
             // Queued before the wait below, not after: the GPU runs the shared
             // MLP while the CPU blocks on tailCB for the routing.
             let overlapCompletionClock = runnerStatsEnabled ? CommandCompletionClock() : nil
+            // Early hits: phase 1 for the GPU-classified resident experts in
+            // its own buffer, queued right behind the tail. The CPU waits on
+            // the tail only, so the plan and the miss reads proceed while the
+            // hits compute -- the same overlap the hit-fixup buffer gives,
+            // minus the CPU round trip before it. Inside the tail buffer it
+            // measured a 13% loss: the wait then covered the hits and the
+            // reads started after them (io_hidden 0%).
+            var earlyHitCB: MTLCommandBuffer?
+            if earlyHitsThisLayer, let residencyResources, let pool = residencyResources.expertPool {
+                guard let cb = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                try moe.encodeRoutedPhase1EarlyHits(
+                    commandBuffer: cb,
+                    pool: pool,
+                    poolSlotStride: residencyResources.poolSlotStride,
+                    routedOffsets: try model.routedExpertOffsets(layer: L),
+                    x: routedX, acts: moeActs,
+                    hitPositions: residencyHitPositions,
+                    hitCount: residencyHitCount,
+                    resolvedSlots: residencyResolvedSlots,
+                    d: D, f: UInt32(cfg.moeIntermediateSize),
+                    topK: UInt32(cfg.topKExperts))
+                overlapCompletionClock?.track(cb)
+                cb.commit()
+                earlyHitCB = cb
+            }
             let sharedCB = try encodeAndCommitSharedExpert(
                 layer: L,
                 completionClock: overlapCompletionClock)
@@ -423,7 +455,9 @@ extension RealForwardRunner {
                 waitMark: tWait, waitNanos: waitNanos,
                 previousRoutedMicros: prevRoutedUs,
                 predictedNextLayer: predictedNextLayer,
-                predictedNextLayerWeights: predictedNextLayerWeights)
+                predictedNextLayerWeights: predictedNextLayerWeights,
+                earlyHits: earlyHitsThisLayer,
+                earlyHitCB: earlyHitCB)
         }
         if let pending = pendingRoutedCommand {
             try finishPendingRoutedCommand(pending, waitIfNeeded: true)
@@ -1172,7 +1206,9 @@ extension RealForwardRunner {
         waitNanos: UInt64,
         previousRoutedMicros prevRoutedUs: Double,
         predictedNextLayer: [Int],
-        predictedNextLayerWeights: [Float] = []
+        predictedNextLayerWeights: [Float] = [],
+        earlyHits: Bool = false,
+        earlyHitCB: MTLCommandBuffer? = nil
     ) async throws {
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
@@ -1226,7 +1262,8 @@ extension RealForwardRunner {
             }
             : nil
         var transferredExpertLease = false
-        var phase1HitCB: MTLCommandBuffer?
+        // With early hits the hit buffer already exists and is committed.
+        var phase1HitCB: MTLCommandBuffer? = earlyHits ? earlyHitCB : nil
         defer {
             if !transferredExpertLease {
                 // A thrown fetch/encode must not make a hit slot evictable
@@ -1303,6 +1340,15 @@ extension RealForwardRunner {
                     missIndices: plan.misses,
                     hits: &decodeHitSlotsScratch,
                     misses: &decodeMissSlotsScratch)
+                if earlyHits {
+                    // The GPU already computed phase 1 for its hit positions
+                    // (a subset of the CPU's hits, by the guard above). The
+                    // fixup covers everything else: the CPU's misses and any
+                    // position the GPU called a miss that the plan adopted.
+                    decodeHitSlotsScratch.removeAll(keepingCapacity: true)
+                    decodeMissSlotsScratch = gpuMisses.map(UInt32.init)
+                    totalEarlyHitLayers &+= 1
+                }
             } else {
                 DecodeExpertPartition.populate(
                     topK: cfg.topKExperts,
@@ -1364,7 +1410,8 @@ extension RealForwardRunner {
 
         if let plan = plannedFetch,
            plan.hits > 0,
-           !plan.misses.isEmpty {
+           !plan.misses.isEmpty,
+           !phase1HitSlots.isEmpty {
             let plannedBlobs = try model.routedExpertBuffers(for: plan)
             for blob in plannedBlobs {
                 decodeHitSplitRoutedBufsScratch.append(blob.buffer)
@@ -1390,7 +1437,7 @@ extension RealForwardRunner {
             }
         }
 
-        if let cb = phase1HitCB {
+        if let cb = phase1HitCB, cb !== earlyHitCB {
             overlapCompletionClock?.track(cb)
             cb.commit()
         }
@@ -1550,6 +1597,20 @@ extension RealForwardRunner {
                 activeCount: UInt32(phase1MissSlots.count),
                 ioStatus: ioStatus?.0,
                 ioStatusOffset: ioStatus?.1 ?? 0)
+        } else if earlyHits {
+            // Hits ran in the tail command buffer; only the remainder here.
+            if !phase1MissSlots.isEmpty {
+                writeActiveSlots(phase1MissSlots, into: moeMissActiveSlots)
+                try encodeRoutedPhase1Subset(
+                    routedCB,
+                    argBuf: argBuf,
+                    routedBufs: routedBufs,
+                    activeSlots: moeMissActiveSlots,
+                    activeSlotIndices: phase1MissSlots,
+                    activeCount: UInt32(phase1MissSlots.count),
+                    ioStatus: ioStatus?.0,
+                    ioStatusOffset: ioStatus?.1 ?? 0)
+            }
         } else {
             try encodeRoutedPhase1Full(routedCB,
                                        argBuf: argBuf,

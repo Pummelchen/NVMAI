@@ -33,6 +33,7 @@ import Testing
         #expect(q38.expertCacheBudgetBytes == 12 << 30)
         #expect(q38.prefetchDepth == 0)
         #expect(q38.keepExpertCacheWired)
+        #expect(!q38.earlyExpertHits)
         let q38b = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash, weightBits: 8, environment: [:])
         #expect(q38b.expertCacheBudgetBytes == Int(9.5 * Double(1 << 30)) && q38b.prefetchIOTier == 0)
         #expect(q38.sampling.temperature == 1.0 && q38.sampling.topP == 0.95)
@@ -40,6 +41,7 @@ import Testing
         let q36 = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 8, environment: [:])
         #expect(q36.expertCacheBudgetBytes == 12 << 30)
         #expect(!q36.keepExpertCacheWired)
+        #expect(!q36.earlyExpertHits)
         let q36four = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 4, environment: [:])
         #expect(q36four.expertCacheBudgetBytes == 10 << 30)
         #expect(q36.prefetchDepth == 0)
@@ -73,6 +75,9 @@ import Testing
         let wired = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 4,
                                          environment: ["NVMAI_KEEP_WIRED": "1"])
         #expect(wired.keepExpertCacheWired)
+        let early = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash,
+                                         weightBits: 4, environment: ["NVMAI_EARLY_HITS": "1"])
+        #expect(early.earlyExpertHits)
     }
 
     @Test func summaryNamesTheKeyAndEveryKnob() {

@@ -47,6 +47,13 @@ public struct ModelProfile: Sendable, Equatable {
     public var hcFused: Bool
     /// GPU-side QSA key selection (sparse-attention families only).
     public var qsaGPUSelect: Bool
+    /// Compute phase 1 for the GPU-classified resident experts in a command
+    /// buffer queued right behind the router, instead of after the CPU's
+    /// cache plan. Needs the GPU residency classifier and the pooled cache
+    /// layout, both of which the runner selects when this is set. Measured
+    /// on Qwen3.8 4-bit: 6.02 / 6.10 tok/s against 5.82 / 5.96, GPU wait
+    /// -3.5 ms/token, output byte-identical.
+    public var earlyExpertHits: Bool
     /// Keep the routed-expert cache wired through prefill instead of
     /// unpinning it at prefill start and re-wiring it on the first decode
     /// token. Measured on Qwen3.8 4-bit: the re-wire faults a swapped-out
@@ -58,7 +65,8 @@ public struct ModelProfile: Sendable, Equatable {
     public static let table: [Key: (budget: Int, prefetch: Int, tier: Int32, chunk: Int?,
                                     sampling: GenerationDefaults.Sampling,
                                     topKSimd: Bool, attnSimd: Bool,
-                                    hcFused: Bool, qsaSelect: Bool, keepWired: Bool)] = [
+                                    hcFused: Bool, qsaSelect: Bool, keepWired: Bool,
+                                    earlyHits: Bool)] = [
         // Prefetch depth is 0 on every row (2026-09-05). The prefetch ring's
         // reclaim rule was changed on 2026-09-04 (commit 2022f58) in a way
         // that left it clogged from the first token, so every 8-bit number
@@ -75,19 +83,19 @@ public struct ModelProfile: Sendable, Equatable {
         // exposed expert reads) and the trace simulation halves the misses
         // at 96. Prefetch one deep still pays at 8-bit; utility-tier depth 2
         // measured a wash at both widths.
-        Key("qwen3.6-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
-        Key("qwen3.6-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
+        Key("qwen3.6-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
+        Key("qwen3.6-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
         // Ornith 1.5, same geometry, measured on its own 2026-09-05: 4-bit
         // 128 slots 19.91 / 20.41 vs 160 20.84 / 21.02; 8-bit 64 slots
         // 8.69 / 9.12 vs 96 10.83 / 10.86, swap flat on every arm.
-        Key("ornith-1.5-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
-        Key("ornith-1.5-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
+        Key("ornith-1.5-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
+        Key("ornith-1.5-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
         // AgentWorld, measured on its own 2026-09-05: 4-bit 128 slots 20.52 /
         // 20.50 vs 160 21.11 / 20.92; 8-bit 64 slots 9.31 / 9.25 vs 96
         // 11.15 / 11.21, swap flat. Residency and barrier execution both
         // lose on it.
-        Key("qwen-agentworld", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
-        Key("qwen-agentworld", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
+        Key("qwen-agentworld", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
+        Key("qwen-agentworld", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
         // Qwen3.8-Flash-Next: 96 slots (12 GiB) still climbing, prefetch one
         // deep +12%; its card specifies temperature 1.0 / top-p 0.95. The
         // fused hyper-connection gates and the GPU key select are measured
@@ -104,13 +112,13 @@ public struct ModelProfile: Sendable, Equatable {
         // prefill (see keepExpertCacheWired).
         Key("qwen3.8-flash-next", 4): (12 << 30, 0, 0, 4_096,
                                        GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
-                                       true, true, false, false, true),
+                                       true, true, false, false, true, false),
         // 8-bit: 32 slots (8 GiB) 2.05 / 2.06 tok/s; 40 slots (9.5 GiB) 2.18 /
         // 2.27 with swap falling; 48 (13 GiB) 2.24-2.33 but ~1 GB of swap
         // growth per run on this 24 GB machine. 40 is the no-paging middle.
         Key("qwen3.8-flash-next", 8): (Int(9.5 * Double(1 << 30)), 0, 0, 4_096,
                                        GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
-                                       true, true, false, false, true),
+                                       true, true, false, false, true, false),
     ]
 
     /// Environment switches applied last. Read once per process.
@@ -127,7 +135,8 @@ public struct ModelProfile: Sendable, Equatable {
             prefillChunkTokens: nil,
             sampling: GenerationDefaults.forFamily(family),
             routerTopKSimd: true, attentionSimdPartial: true,
-            hcFused: false, qsaGPUSelect: false, keepExpertCacheWired: false)
+            hcFused: false, qsaGPUSelect: false, earlyExpertHits: false,
+            keepExpertCacheWired: false)
         if let row = table[profile.key] {
             profile.expertCacheBudgetBytes = row.budget
             profile.prefetchDepth = row.prefetch
@@ -139,12 +148,14 @@ public struct ModelProfile: Sendable, Equatable {
             profile.hcFused = row.hcFused
             profile.qsaGPUSelect = row.qsaSelect
             profile.keepExpertCacheWired = row.keepWired
+            profile.earlyExpertHits = row.earlyHits
         }
         if let v = env["NVMAI_ROUTER_TOPK_SIMD"] { profile.routerTopKSimd = v != "0" }
         if let v = env["NVMAI_ATTN_SIMD_PARTIAL"] { profile.attentionSimdPartial = v != "0" }
         if let v = env["NVMAI_HC_FUSED"] { profile.hcFused = v == "1" }
         if let v = env["NVMAI_QSA_GPU_SELECT"] { profile.qsaGPUSelect = v == "1" || v == "verify" }
         if env["NVMAI_KEEP_WIRED"] == "1" { profile.keepExpertCacheWired = true }
+        if let v = env["NVMAI_EARLY_HITS"] { profile.earlyExpertHits = v == "1" }
         if let v = env["NVMAI_PREDICTIVE_PREFETCH"] {
             profile.prefetchDepth = v == "1" ? max(1, profile.prefetchDepth) : 0
         }
@@ -177,6 +188,6 @@ public struct ModelProfile: Sendable, Equatable {
         + "chunk=\(prefillChunkTokens.map(String.init) ?? "fallback") "
         + "sampling=\(sampling.temperature)/\(sampling.topK)/\(sampling.topP) "
         + "topk_simd=\(routerTopKSimd) attn_simd=\(attentionSimdPartial) "
-        + "hc_fused=\(hcFused) qsa_select=\(qsaGPUSelect) keep_wired=\(keepExpertCacheWired)"
+        + "hc_fused=\(hcFused) qsa_select=\(qsaGPUSelect) keep_wired=\(keepExpertCacheWired) early_hits=\(earlyExpertHits)"
     }
 }

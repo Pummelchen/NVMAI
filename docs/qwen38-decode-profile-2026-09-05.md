@@ -300,3 +300,116 @@ prompt. A longer half-life (32-64 replayed at 0.84 short / 0.73-0.75
 long) is the tuning to try; a policy that switches from LFU to decayed
 once decode has run for a few dozen tokens is the structural version.
 Opt-in: `NVMAI_EXPERT_CACHE_POLICY=decayed`, `NVMAI_CACHE_DECAY_HALFLIFE`.
+
+## 11. Retraction: multi-variable chain arms were the shipped configuration
+
+The zsh chain scripts ran arms as `env $2 ...`; zsh does not word-split a
+variable, so an arm string holding two assignments set one variable to
+`"1 B=2"` and the arm ran the shipped configuration. Invalid, and to be
+read as "shipped vs shipped": the 2026-09-04 Qwen 3.8 "two-layer-ahead"
+and "utility tier depth 2 / 4" arms (so the "+3% utility tier" that went
+into the profile row was noise), the throttle-tier arms with a depth, the
+whole downstream "utility depth 2" pass on the 35B installs (washes,
+trivially), and the phase-3 gate arms in section 7 (the four-digit
+identity was the tell). Valid, single-variable: the throttle-alone loss,
+every slot-count chain, keep-wired, phase 5, both policy chains, and the
+early-hits chain after the fix (`env ${=2}`). A prefetch tier or depth
+setting has therefore never been measured to help Qwen 3.8; prefetch is
+off, which is consistent with everything valid.
+
+## 12. Early hits: the per-layer turnaround lever, shipped
+
+Opportunity C in section 6. Phase 1 for the resident experts no longer
+waits for the CPU's cache plan: the residency classifier already runs on
+the GPU behind the router, so its hit list, hit count and resolved slots
+feed a new `moe_phase1_gate_up_act_pool_u16load` kernel that addresses the
+pooled cache directly. The fixup pass then covers everything the
+classifier called a miss, including any position the CPU plan later
+adopts from a prefetch buffer, so the CPU plan remains the authority over
+what is fetched and what is resident.
+
+Where the buffer goes decides whether it helps:
+
+| variant | tok/s | GPU wait ms/token | I/O hidden |
+| --- | ---: | ---: | ---: |
+| shipped (hit-fixup after the plan) | 5.82 / 5.96 | 75.6 / 74.9 | 17% / 16% |
+| early hits inside the tail buffer | 5.08 / 5.09 | 99.3 / 99.1 | 0% |
+| early hits in their own buffer | 6.02 / 6.10 | 72.4 / 70.9 | 10% / 6% |
+
+Inside the tail buffer the CPU's wait for the router covers the hit work,
+so the miss reads start only after it and nothing overlaps them. In its
+own buffer, committed right behind the tail, the GPU starts the hits
+while the CPU plans and issues reads: +3.4% and +2.4%, GPU wait -3.5
+ms/token, both goldens byte-identical.
+
+Smaller than the ~20 ms the gap table suggested, because the hits still
+have to finish before the fixup can run; what is removed is the CPU round
+trip ahead of them, not the hit work itself.
+
+The story harness then disagreed: early hits on 5.07 / 5.43, off 5.34 /
+5.23, a wash whose within-arm spread (0.36) is larger than the effect.
+Two protocols, opposite signs, four runs each -- not enough to ship a
+default on, and the same shape as the utility-tier result retracted in
+section 11. `earlyExpertHits` therefore ships **off** on every row and is
+opt-in as `NVMAI_EARLY_HITS=1`, which also selects the GPU residency
+classifier and the pooled cache layout (both underlying switches still
+override individually). A five-pair interleaved run is in section 13.
+
+The 35B rows were never in scope: 40 layers of top-8 at a 94% hit rate is
+a different turnaround share and needs its own A/B.
+
+## 13. Early hits, settled: a wash
+
+Five interleaved pairs, 512-token generations, off then on within each
+pair so the machine's drift cancels:
+
+| pair | off | on | diff |
+| --- | ---: | ---: | ---: |
+| 1 | 5.923 | 6.131 | +0.208 |
+| 2 | 6.108 | 6.058 | -0.050 |
+| 3 | 6.078 | 5.848 | -0.230 |
+| 4 | 5.985 | 6.058 | +0.073 |
+| 5 | 6.039 | 5.955 | -0.084 |
+
+Mean difference **-0.017 tok/s (-0.3%)**, sd 0.166, 95% CI [-0.16, +0.13].
+A wash. The +3.4% / +2.4% of section 12 was two unpaired rounds against a
+machine drifting by more than the effect; the harness pair that
+contradicted it was equally uninformative. Five pairs resolve it.
+
+Why the gap table oversold it: the 8-10 ms/token charged to
+`shared_expert -> moe_phase1_hit` is not all CPU turnaround. The shared
+expert's buffer is short and finishes early, so the interval also
+contains the miss reads that the hit buffer is deliberately waiting
+behind. Removing the CPU round trip in front of the hits moves work
+earlier in an interval that is still bounded by the SSD, which is the
+same wall every other lever hit.
+
+The code ships **off by default** on every row: `NVMAI_EARLY_HITS=1`
+selects it (and with it the GPU residency classifier and the pooled cache
+layout), output byte-identical either way. Kept rather than reverted
+because it is the only implementation of "the GPU starts resident-expert
+work before the CPU's plan", and its balance would change on faster
+storage or a model whose hit rate leaves less I/O in the interval.
+
+## 14. Conclusion
+
+The limiting resource for Qwen3.8-Flash-Next 4-bit decode on this machine
+is exposed expert I/O on a saturated SSD inside each layer, roughly 55 ms
+of a 170 ms token, with the GPU busy 105 ms and idle the rest. Nothing
+tried moves it: not prefetch (loses at every setting once the ring works),
+not cache policy (sign depends on the prompt), not speculative decoding
+(loses 59%), not kernel work (already at bandwidth), and not removing the
+per-layer CPU round trip (a wash within +/-0.16 tok/s).
+
+Measured decode today, shipped defaults: **5.8-6.1 tok/s** on a warm
+machine, 4.5-5.4 when memory pressure has swapped part of the 12 GiB
+cache out. The 6+ target is reached on a warm machine at the current
+defaults; it is not reached by any of the levers in this document.
+
+What did change: two real defects were found and fixed (the prefetch ring
+had been clogged since 2026-09-04, and the expert cache was re-wired from
+swap on the first decode token of every request), and a class of A/B
+result was retracted (zsh word-splitting made every multi-variable arm run
+the shipped configuration). What is left, in order of expected value:
+more RAM (the whole spread between 4.5 and 6.1 is swap), faster storage,
+or a model whose expert working set fits.

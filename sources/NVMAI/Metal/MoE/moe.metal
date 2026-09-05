@@ -894,6 +894,62 @@ kernel void moe_phase1_gate_up_act_subset_u16load(
     if (lane == 0) acts[slot * moe_fc_f(F) + f] = half(moe_hidden_activation(gu.x) * gu.y);
 }
 
+// Early hits: phase 1 for the experts the residency classifier found
+// resident, encoded into the same command buffer as the router so the GPU
+// never waits for the CPU's plan before starting them. The hit list, its
+// count and each position's slot come from `moe_classify_expert_residency`
+// on the GPU; the slot's bytes are addressed in the layer's pooled cache
+// (`NVMAI_EXPERT_CACHE_LAYOUT=pool`). Grid is sized for top_k experts and
+// threads past the live count return. Positions the classifier called
+// misses are left for the fixup pass, which also covers any position the
+// CPU plan later adopts.
+kernel void moe_phase1_gate_up_act_pool_u16load(
+    device const uint8_t* pool [[buffer(0)]],
+    constant ExpertOffsets& routed_offsets [[buffer(1)]],
+    device const half* x [[buffer(2)]],
+    device half* acts [[buffer(3)]],
+    constant uint& D [[buffer(4)]],
+    constant uint& F [[buffer(5)]],
+    constant uint& top_k [[buffer(6)]],
+    device const uint* hit_positions [[buffer(7)]],
+    device const uint* hit_count [[buffer(8)]],
+    device const uint* resolved_slots [[buffer(9)]],
+    constant ulong& pool_slot_stride [[buffer(10)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint sg_idx [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    constexpr uint rows_per_tg = 16;
+    threadgroup half xt[kMoEXMaxD];
+    const uint DD = moe_fc_d(D);
+    for (uint i = lane; i < DD; i += 32u) {
+        xt[i] = x[i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint FF = moe_fc_f(F);
+    const uint active = min(hit_count[0], moe_fc_top_k(top_k));
+    const uint rowg = tg_idx * rows_per_tg + sg_idx;
+    if (rowg >= active * FF) return;
+    const uint position = hit_positions[rowg / FF];
+    if (position >= moe_fc_top_k(top_k)) return;
+    const uint slot = resolved_slots[position];
+    if (slot == 0xffffffffu) return;
+    const uint f = rowg % FF;
+
+    device const uint8_t* base = pool + ulong(slot) * pool_slot_stride;
+    const ExpertOffsets re = routed_offsets;
+    const float2 gu = moe_int4_gate_up_rows_simd_tgmem_u16load(
+        xt, base + re.gate_W_off,
+        (device const bfloat*)(base + re.gate_s_off),
+        (device const bfloat*)(base + re.gate_b_off),
+        base + re.up_W_off,
+        (device const bfloat*)(base + re.up_s_off),
+        (device const bfloat*)(base + re.up_b_off),
+        f, DD, lane);
+    if (lane == 0) acts[position * FF + f] = half(moe_hidden_activation(gu.x) * gu.y);
+}
+
 kernel void moe_phase1_gate_up_act_u16load_r16(
     device const RoutedBlobs& routed [[buffer(0)]],
     constant ExpertOffsets& routed_offsets [[buffer(1)]],
