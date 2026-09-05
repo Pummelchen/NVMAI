@@ -296,6 +296,10 @@ public struct ValidatedChatRequest: Sendable {
     /// Set when the request named the "<model>-fast" alias: the CLI-strip
     /// heuristic runs for this request regardless of NVMAI_STRIP_CLI_PROMPT.
     public let stripCLIPrompt: Bool
+    /// Memory workspace named by the X-NVMAI-Workspace header, when the
+    /// server allows a request to choose one. Nil means the workspace the
+    /// server was launched with.
+    public let workspace: String?
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
@@ -303,7 +307,8 @@ public struct ValidatedChatRequest: Sendable {
                 includeUsage: Bool,
                 generationConfig: GenerationConfig,
                 maximumCompletionTokens: Int,
-                stripCLIPrompt: Bool = false) {
+                stripCLIPrompt: Bool = false,
+                workspace: String? = nil) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
@@ -311,6 +316,7 @@ public struct ValidatedChatRequest: Sendable {
         self.generationConfig = generationConfig
         self.maximumCompletionTokens = maximumCompletionTokens
         self.stripCLIPrompt = stripCLIPrompt
+        self.workspace = workspace
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -332,7 +338,23 @@ public struct ValidatedChatRequest: Sendable {
             includeUsage: includeUsage,
             generationConfig: generationConfig,
             maximumCompletionTokens: maximumCompletionTokens,
-            stripCLIPrompt: stripCLIPrompt)
+            stripCLIPrompt: stripCLIPrompt,
+            workspace: workspace)
+    }
+
+    /// The memory workspace this request names, from the X-NVMAI-Workspace
+    /// header. Nil takes the server's launch-time workspace, which is the
+    /// usual case: one server, one checkout.
+    public func withWorkspace(_ workspace: String?) -> ValidatedChatRequest {
+        ValidatedChatRequest(
+            messages: messages,
+            tools: tools,
+            stream: stream,
+            includeUsage: includeUsage,
+            generationConfig: generationConfig,
+            maximumCompletionTokens: maximumCompletionTokens,
+            stripCLIPrompt: stripCLIPrompt,
+            workspace: workspace)
     }
 }
 

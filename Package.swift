@@ -172,6 +172,7 @@ let package = Package(
             name: "NVMAIServerTests",
             dependencies: [
                 "NVMAIServerCore",
+                "NVMAIMemory",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             path: "tests/NVMAIServer",

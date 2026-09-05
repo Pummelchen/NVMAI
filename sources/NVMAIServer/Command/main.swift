@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import NVMAIMemory
 import NVMAIServerCore
 
 let arguments: ServerArguments
@@ -63,10 +64,14 @@ do {
             expertCacheSlots: session.expertCacheSlots)
     }
 
+    // Persistent memory wraps whatever backend was built: one decorator on
+    // the way in, and nothing at all when it is disabled.
+    let servingBackend = ServerMemoryFactory.wrap(backend)
+
     let server = NVMAIHTTPServer(
         modelID: facts.modelID,
         queueLimit: arguments.queueLimit,
-        backend: backend,
+        backend: servingBackend,
         reasoningProfile: try plan.reasoningProfile())
     _ = try await server.start(port: arguments.port)
     let diskCache = facts.promptCacheMode == .off

@@ -61,6 +61,12 @@ enum ServerLog {
         write("model \(transition)")
     }
 
+    /// Memory subsystem events. Operational only: never a memory's contents,
+    /// which can be anything the model chose to write.
+    static func memory(_ detail: String) {
+        write("memory \(detail)")
+    }
+
     private static func format(_ duration: Duration) -> String {
         let seconds = Double(duration.components.seconds)
             + Double(duration.components.attoseconds) / 1e18
