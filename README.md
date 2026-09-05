@@ -7,6 +7,31 @@
 
 NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 
+## Benchmarks
+
+Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
+
+
+| Model | Quantization | Peak decode |
+| --- | --- | ---: |
+| Qwen-AgentWorld 35B-A3B | 4-bit | **21.74 tok/s** |
+| Ornith 1.5 35B-A3B | 4-bit | **21.65 tok/s** |
+| Qwen 3.6 35B-A3B | 4-bit | **21.41 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.46 tok/s** |
+| Qwen 3.6 35B-A3B | 8-bit | **12.37 tok/s** |
+| Qwen-AgentWorld 35B-A3B | 8-bit | **12.28 tok/s** |
+| Ornith 1.5 35B-A3B | 8-bit | **11.93 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.10 tok/s** |
+
+
+### Supported LLMs
+
+- **Qwen3.8-Flash-Next 125B-A6B**
+- **Qwen-AgentWorld 35B-A3B**
+- **Ornith 1.5 35B-A3B**
+- **Qwen 3.6 35B-A3B**
+
+
 ### Core Benefits
 
 - NVMAI streams LLM's faster than any other similar project.
@@ -17,14 +42,6 @@ NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 - Our own Metal kernels, our own engine. Purpose-built for Apple silicon and engineered to use your Mac at the physical limit.
 - No MLX. No GGUF. NVMAI ships its own high-speed model format and a converter that builds it straight from the original weights.
   
-
-### Supported LLMs
-
-- **Qwen3.8-Flash-Next 125B-A6B**
-- **Qwen-AgentWorld 35B-A3B**
-- **Ornith 1.5 35B-A3B**
-- **Qwen 3.6 35B-A3B**
-
 
 ### Special Features
 
@@ -83,22 +100,6 @@ tools/start-qwen3.8-4bit.sh       tools/start-qwen3.8-8bit.sh
   OpenCode against the local server.
 - **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
   generation, streaming responses, and client-authorized function-tool calls.
-
-## Benchmarks
-
-Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
-
-
-| Model | Quantization | Peak decode |
-| --- | --- | ---: |
-| Qwen-AgentWorld 35B-A3B | 4-bit | **21.74 tok/s** |
-| Ornith 1.5 35B-A3B | 4-bit | **21.65 tok/s** |
-| Qwen 3.6 35B-A3B | 4-bit | **21.41 tok/s** |
-| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.46 tok/s** |
-| Qwen 3.6 35B-A3B | 8-bit | **12.37 tok/s** |
-| Qwen-AgentWorld 35B-A3B | 8-bit | **12.28 tok/s** |
-| Ornith 1.5 35B-A3B | 8-bit | **11.93 tok/s** |
-| Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.10 tok/s** |
 
 ## Core Links
 
