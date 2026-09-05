@@ -24,7 +24,7 @@ NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 - **Qwen-AgentWorld 35B-A3B**
 - **Ornith 1.5 35B-A3B**
 - **Qwen 3.6 35B-A3B**
-- 
+
 
 ### Special Features
 
