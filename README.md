@@ -10,11 +10,11 @@ NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 ### Core Benefits
 
 - NVMAI streams LLM's faster than any other similar project.
-- Run large MOE LLM's on low RAM Apple Silicon Macs by keeping the AI model on SSD/NVMe. 
+- Run large MOE AI models on low RAM Apple Silicon Macs by keeping the AI model on SSD/NVMe. 
 - A 125B model on 8 GB of RAM. NVMAI streams experts straight from SSD, so model size is bounded by your disk space, not your memory.
-- You set the RAM budget. NVMAI stays inside it. Give it 4 GB or 16 GB — it holds the line, so your Mac stays responsive while the model runs.
-- Apple Neural Engine acceleration for prompt processing, 2.3× faster than the GPU cores.
-- Our own Metal kernels, our own engine. Purpose-built for Apple silicon and engineered against the hardware's real bandwidth limit, not a portability layer's.
+- You set the RAM budget. NVMAI stays inside it. Give it 4 GB or 8 GB — it holds the line, so your Mac stays responsive while the model runs.
+- Apple Neural Engine acceleration for prompt processing - 2.3× faster than the GPU cores.
+- Our own Metal kernels, our own engine. Purpose-built for Apple silicon and engineered to use your Mac at the physical limit.
 - No MLX. No GGUF. NVMAI ships its own high-speed model format and a converter that builds it straight from the original weights.
   
 
@@ -24,11 +24,7 @@ NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 - **Qwen-AgentWorld 35B-A3B**
 - **Ornith 1.5 35B-A3B**
 - **Qwen 3.6 35B-A3B**
-
-
-Every model id ends in the routed-expert width, read from the manifest rather
-than parsed from the name, so two quantizations of the same weights stay
-distinguishable. Ask `/v1/models` rather than assuming an id.
+- 
 
 ### Special Features
 
@@ -54,7 +50,7 @@ distinguishable. Ask `/v1/models` rather than assuming an id.
   three-stage tiled GPU reduction, cutting per-token sampling cost from
   15.5 ms to 1.4 ms with a token-for-token identical stream — the main
   source of the v4.6 decode gain.
-- **ANE prefill (experimental, opt-in):** `NVMAI_PREFILL_ANE=on` runs
+- **ANE prefill:** `NVMAI_PREFILL_ANE=on` runs
   full-attention prefill blocks on the Neural Engine from a one-time
   exported Core ML sidecar, roughly halving long-prompt time to first
   token; short prompts and decode are untouched.
