@@ -45,6 +45,80 @@ enum ServerMemory {
         return nil
     }
 
+    /// The request that distils a session into facts.
+    ///
+    /// Its own conversation, with no tools and no memory fragment: it is not
+    /// a turn of the session, and it must not open one. The transcript is the
+    /// journal's filtered turns, so tool results and file dumps are already
+    /// gone. Existing keys are shown so an update lands on the address it
+    /// changes rather than beside it.
+    static func consolidationRequest(turns: [JournalTurn],
+                                     existingKeys: [String],
+                                     workspace: String) -> ValidatedChatRequest {
+        var transcript = ""
+        for turn in turns {
+            transcript += "USER: \(turn.prompt)\n\nASSISTANT: \(turn.reply)\n\n---\n\n"
+        }
+        let keys = existingKeys.isEmpty
+            ? "(none yet)"
+            : existingKeys.map { "- \($0)" }.joined(separator: "\n")
+        let system = "You distil a finished working session into durable facts for a memory "
+            + "store scoped to the project `\(workspace)`. Later sessions will see these "
+            + "facts and nothing else from this conversation, so record exactly what a "
+            + "future session must not contradict: decisions and the reasons for them, "
+            + "fixed attributes, rules and constraints, current state, and what changed "
+            + "(a state change replaces the old state; write the new state, not the "
+            + "history). Do not record conversation, reasoning, code, or anything a "
+            + "future session can re-derive.\n\n"
+            + "Output only a JSON array, in a ```json block, of objects with keys "
+            + "\"key\", \"value\" and \"importance\" (0 to 1). Keys are lowercase "
+            + "path-like names such as `characters/marcus`, `decisions/storage`, "
+            + "`state/inn` or `rules/weather`. When a fact updates an existing key, reuse "
+            + "that key exactly. Return [] if nothing durable happened."
+        let user = "Existing keys in memory:\n\(keys)\n\nThe session:\n\n\(transcript)"
+        return ValidatedChatRequest(
+            messages: [GFTokenizer.Message(role: .system, content: system),
+                       GFTokenizer.Message(role: .user, content: user)],
+            tools: [],
+            stream: false,
+            includeUsage: false,
+            generationConfig: GenerationConfig(maxNewTokens: 900),
+            maximumCompletionTokens: 900)
+    }
+
+    /// The facts a consolidation produced, or none if it produced nothing
+    /// usable. A malformed key is skipped rather than failing the batch: one
+    /// bad name must not cost the other twenty facts.
+    static func consolidationRecords(from text: String) -> [MemoryRecord] {
+        var candidates: [String] = []
+        let fenced = try? NSRegularExpression(pattern: "```(?:json)?\\s*(\\[[\\s\\S]*?\\])\\s*```")
+        if let fenced,
+           let match = fenced.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+           let range = Range(match.range(at: 1), in: text) {
+            candidates.append(String(text[range]))
+        }
+        if let open = text.firstIndex(of: "["), let close = text.lastIndex(of: "]"), open < close {
+            candidates.append(String(text[open...close]))
+        }
+        for candidate in candidates {
+            guard let data = candidate.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+            else { continue }
+            var records: [MemoryRecord] = []
+            for entry in parsed {
+                guard let rawKey = entry["key"] as? String,
+                      let key = try? MemoryKey(validating: rawKey.lowercased()),
+                      let value = entry["value"].map({ "\($0)" }), !value.isEmpty
+                else { continue }
+                let importance = (entry["importance"] as? Double)
+                    ?? (entry["importance"] as? Int).map(Double.init)
+                records.append(MemoryRecord(key: key, value: value, importance: importance))
+            }
+            if !records.isEmpty || parsed.isEmpty { return records }
+        }
+        return []
+    }
+
     /// A stable session id for a conversation.
     ///
     /// The API is stateless and clients send the whole history each turn, so

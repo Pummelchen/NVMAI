@@ -48,10 +48,45 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 # control: memory off. minimal: bootstrap plus memory_set/memory_get.
 # full: bootstrap plus all six tools.
-ARMS = ("control", "minimal", "full")
+ARMS = ("control", "auto", "minimal", "full")
 OUT = ROOT / ".build/benchmark-logs/memory-value"
 PORT = int(os.environ.get("NVMAI_PORT", "8096"))
 BASE = f"http://127.0.0.1:{PORT}/v1"
+# Which run of the arm this is; results are kept per run so repeats can be
+# compared and averaged. Repeats only mean something with sampling on:
+# at temperature 0 a repeat is the same output.
+RUN = os.environ.get("NVMAI_MEMVAL_RUN", "1")
+TEMPERATURE = os.environ.get("NVMAI_MEMVAL_TEMPERATURE")  # unset: the server's default
+SERVER_LOG = os.environ.get("NVMAI_MEMVAL_SERVER_LOG")
+
+
+def sampling():
+    return {} if TEMPERATURE is None else {"temperature": float(TEMPERATURE)}
+
+
+def consolidations_logged() -> int:
+    if not SERVER_LOG or not os.path.exists(SERVER_LOG):
+        return -1
+    with open(SERVER_LOG, errors="replace") as handle:
+        return sum(1 for line in handle if "consolidated session=" in line)
+
+
+def wait_for_consolidation(before: int, limit: float = 300) -> float:
+    """Waits for the server to distil the session that just ended.
+
+    A real user pauses between sessions; the idle timer runs in that pause.
+    The harness has no pause, so it waits for the log line instead. Returns
+    the seconds spent waiting, which are reported as part of the arm's cost.
+    """
+    if before < 0:
+        return 0.0
+    started = time.time()
+    while time.time() - started < limit:
+        if consolidations_logged() > before:
+            return time.time() - started
+        time.sleep(2)
+    print("  (no consolidation observed within the wait)")
+    return time.time() - started
 
 # The parameters stage 1 is free to choose and stages 2 and 3 must match if
 # anything carried. The model states them as JSON, by name, so the harness
@@ -103,7 +138,7 @@ def post(messages, model, max_tokens=5200):
             "model": model,
             "messages": messages,
             "max_completion_tokens": max_tokens,
-            "temperature": 0,
+            **sampling(),
         }
     ).encode()
     request = urllib.request.Request(
@@ -133,18 +168,23 @@ def run_arm(arm: str):
     OUT.mkdir(parents=True, exist_ok=True)
     model = model_id()
     results = []
+    memory_on = arm != "control"
     for stage, prompt in STAGES:
         # A fresh conversation each time. Anything that survives came from
         # memory, not from the context window.
+        seen = consolidations_logged()
         result = post([{"role": "user", "content": prompt}], model)
         result["stage"] = stage
-        results.append(result)
-        (OUT / f"{arm}-{stage}.md").write_text(result["content"])
+        (OUT / f"{arm}-r{RUN}-{stage}.md").write_text(result["content"])
         print(f"{arm}/{stage}: {result['completion_tokens']} tokens, "
               f"{result['seconds']:.1f}s, prompt {result['prompt_tokens']}")
         if stage == "swift":
             assert_arm_is_real(arm, result["prompt_tokens"])
-    (OUT / f"{arm}.json").write_text(json.dumps(results, indent=2))
+        # The session is over. With consolidation on, the server distils it
+        # in the pause a person would leave here; the harness waits for it.
+        result["consolidation_wait"] = wait_for_consolidation(seen) if memory_on else 0.0
+        results.append(result)
+    (OUT / f"{arm}-r{RUN}.json").write_text(json.dumps(results, indent=2))
 
 
 def assert_arm_is_real(arm: str, prompt_tokens: int):
@@ -157,8 +197,9 @@ def assert_arm_is_real(arm: str, prompt_tokens: int):
     not been rebuilt, and three arms of numbers were compared before anyone
     noticed they were the same arm.
     """
-    floor = {"control": 0, "minimal": 300, "full": 800}[arm]
-    ceiling = {"control": 250, "minimal": 10_000, "full": 10_000}[arm]
+    # auto: memory on with no tools -- the fragment alone, ~200 tokens.
+    floor = {"control": 0, "auto": 200, "minimal": 300, "full": 800}[arm]
+    ceiling = {"control": 250, "auto": 700, "minimal": 10_000, "full": 10_000}[arm]
     if not floor <= prompt_tokens <= ceiling:
         raise SystemExit(
             f"ABORT: arm '{arm}' saw {prompt_tokens} prompt tokens at stage 1; "
@@ -233,48 +274,52 @@ def compiles(stage: str, code: str) -> bool | None:
 
 
 def report():
-    rows = {}
-    for arm in ARMS:
-        path = OUT / f"{arm}.json"
-        if not path.exists():
-            continue
-        rows[arm] = json.loads(path.read_text())
+    runs = {}
+    for path in sorted(OUT.glob("*-r*.json")):
+        arm, run = path.stem.rsplit("-r", 1)
+        if arm in ARMS:
+            runs.setdefault(arm, {})[run] = json.loads(path.read_text())
 
-    print(f"\n{'arm':8s} {'stage':8s} {'prompt':>7s} {'completion':>11s} "
-          f"{'seconds':>8s} {'builds':>7s}  parameters")
-    baseline = {}
+    print(f"\n{'arm':8s} {'run':>3s} {'stage':8s} {'prompt':>7s} {'completion':>11s} "
+          f"{'seconds':>8s} {'wait':>5s}  parameters")
     carry = {}
-    for arm, results in rows.items():
-        for result in results:
-            stage = result["stage"]
-            values = extract(result["content"])
-            built = compiles(stage, code_block(result["content"]))
-            print(f"{arm:8s} {stage:8s} {result['prompt_tokens']:7d} "
-                  f"{result['completion_tokens']:11d} {result['seconds']:8.1f} "
-                  f"{str(built):>7s}  {values}")
-            if stage == "swift":
-                baseline[arm] = values
-            else:
-                shared = set(values) & set(baseline.get(arm, {}))
-                agreed = [k for k in shared if values[k] == baseline[arm][k]]
-                carry.setdefault(arm, []).append(
-                    (stage, len(agreed), len(shared)))
+    for arm in ARMS:
+        for run, results in sorted(runs.get(arm, {}).items()):
+            baseline = {}
+            for result in results:
+                stage = result["stage"]
+                values = extract(result["content"])
+                print(f"{arm:8s} {run:>3s} {stage:8s} {result['prompt_tokens']:7d} "
+                      f"{result['completion_tokens']:11d} {result['seconds']:8.1f} "
+                      f"{result.get('consolidation_wait', 0):5.0f}  {values}")
+                if stage == "swift":
+                    baseline = values
+                else:
+                    shared = set(values) & set(baseline)
+                    agreed = sum(1 for k in shared if values[k] == baseline[k])
+                    carry.setdefault(arm, {}).setdefault(run, [0, 0])
+                    carry[arm][run][0] += agreed
+                    carry[arm][run][1] += len(shared)
 
-    print("\nCarry-over: parameters fixed in the Swift stage that the later "
+    print("\nCarry-over per run: parameters fixed in the Swift stage that the later "
           "stages reproduce, without the prompt restating them.")
-    for arm, entries in carry.items():
-        total_agreed = sum(a for _, a, _ in entries)
-        total_shared = sum(s for _, _, s in entries)
-        detail = ", ".join(f"{stage} {a}/{s}" for stage, a, s in entries)
-        rate = f"{total_agreed}/{total_shared}" if total_shared else "n/a"
-        print(f"  {arm:8s} {rate:>7s}   ({detail})")
+    for arm in ARMS:
+        per_run = carry.get(arm, {})
+        if not per_run:
+            continue
+        cells = [f"r{run} {a}/{s}" for run, (a, s) in sorted(per_run.items())]
+        total_a = sum(a for a, _ in per_run.values())
+        total_s = sum(s for _, s in per_run.values())
+        mean = f"{100 * total_a / total_s:.0f}%" if total_s else "n/a"
+        print(f"  {arm:8s} {mean:>5s}   {'  '.join(cells)}")
 
-    for arm, results in rows.items():
-        prompt = sum(r["prompt_tokens"] for r in results)
-        completion = sum(r["completion_tokens"] for r in results)
-        seconds = sum(r["seconds"] for r in results)
-        print(f"\n{arm}: {prompt} prompt + {completion} completion tokens, "
-              f"{seconds:.0f}s total")
+    print("\nCost per run (prompt + completion tokens, seconds incl. consolidation waits):")
+    for arm in ARMS:
+        for run, results in sorted(runs.get(arm, {}).items()):
+            prompt = sum(r["prompt_tokens"] for r in results)
+            completion = sum(r["completion_tokens"] for r in results)
+            seconds = sum(r["seconds"] + r.get("consolidation_wait", 0) for r in results)
+            print(f"  {arm:8s} r{run}: {prompt} + {completion}, {seconds:.0f}s")
 
 
 if __name__ == "__main__":

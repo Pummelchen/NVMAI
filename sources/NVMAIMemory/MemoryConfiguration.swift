@@ -103,6 +103,16 @@ public struct MemoryConfiguration: Sendable, Equatable {
     /// Ask the model, at session end, what is worth keeping. Off by default:
     /// it costs a generation the user did not ask for.
     public var sessionConsolidation: Bool
+    /// Seconds of quiet after a turn before the session is consolidated.
+    ///
+    /// Consolidation is a full generation, and this machine is single-tenant,
+    /// so it runs in the pauses -- while the person reads the reply or has
+    /// walked away -- never in the request path. Two minutes is long enough
+    /// that a person still typing is not interrupted and short enough that
+    /// the next session usually finds the last one already distilled.
+    public var consolidationIdleSeconds: Double
+    /// Most recent turns a consolidation reads. Bounds its prompt.
+    public var consolidationMaximumTurns: Int
     /// Serve memory from process-local storage when the journal cannot be written,
     /// so a session still has working memory. It does not survive restart,
     /// and the model is told which one it is talking to.
@@ -120,7 +130,9 @@ public struct MemoryConfiguration: Sendable, Equatable {
                 maximumToolRounds: Int = 4,
                 journalEnabled: Bool = true,
                 journalLimits: JournalLimits = .init(),
-                sessionConsolidation: Bool = false,
+                sessionConsolidation: Bool = true,
+                consolidationIdleSeconds: Double = 120,
+                consolidationMaximumTurns: Int = 40,
                 degradesToLocalStore: Bool = true) {
         self.isEnabled = isEnabled
         self.storage = storage
@@ -135,6 +147,8 @@ public struct MemoryConfiguration: Sendable, Equatable {
         self.journalEnabled = journalEnabled
         self.journalLimits = journalLimits
         self.sessionConsolidation = sessionConsolidation
+        self.consolidationIdleSeconds = max(0, consolidationIdleSeconds)
+        self.consolidationMaximumTurns = max(1, consolidationMaximumTurns)
         self.degradesToLocalStore = degradesToLocalStore
     }
 
@@ -229,7 +243,10 @@ public struct MemoryConfiguration: Sendable, Equatable {
             configuration.journalLimits.sessionsPerWorkspace = max(1, value)
         }
         if let value = environment["NVMAI_MEMORY_CONSOLIDATION"] {
-            configuration.sessionConsolidation = value == "1"
+            configuration.sessionConsolidation = value != "0"
+        }
+        if let value = environment["NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS"].flatMap(Double.init) {
+            configuration.consolidationIdleSeconds = max(0, value)
         }
         if let value = environment["NVMAI_MEMORY_LOCAL_FALLBACK"] {
             configuration.degradesToLocalStore = value != "0"
@@ -310,6 +327,6 @@ public struct MemoryConfiguration: Sendable, Equatable {
             + "journal=\(journalEnabled) "
             + "journal_limits=\(journalLimits.turnsPerSession)/"
             + "\(journalLimits.sessionsPerWorkspace) "
-            + "consolidation=\(sessionConsolidation)"
+            + "consolidation=\(sessionConsolidation) idle=\(Int(consolidationIdleSeconds))s"
     }
 }

@@ -127,9 +127,10 @@ Environment variables, which is how the start scripts pass them:
 | `NVMAI_MEMORY_BOOTSTRAP_LIMIT` | `20` | Bootstrap record cap |
 | `NVMAI_MEMORY_BOOTSTRAP_BYTES` | `8192` | Bootstrap byte cap |
 | `NVMAI_MEMORY_TOOL_ROUNDS` | `4` | Memory rounds serviced per request |
-| `NVMAI_MEMORY_TOOLS` | `1` | `0` advertises no tools |
+| `NVMAI_MEMORY_TOOLS` | `off` | `off`, `minimal` (set, get, list) or `full` (six tools) |
+| `NVMAI_MEMORY_CONSOLIDATION` | `1` | `0` disables the engine writing memory at session boundaries |
+| `NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` | `120` | Quiet time after a turn before a session is distilled |
 | `NVMAI_MEMORY_LOCAL_FALLBACK` | `1` | `0` disables memory instead of degrading |
-| `NVMAI_MEMORY_CONSOLIDATION` | `0` | Session-end consolidation hook |
 
 ### Store sizing
 
@@ -242,6 +243,46 @@ swift run ContinuityDemo inspect ~/.nvmai/memory/nvmai/$USER/<workspace>.ndjson
 ```
 
 That read takes no lock. `jq` works on it as well; it is JSON lines.
+
+## Consolidation: the engine writes
+
+The store is only as good as what gets written into it, and measured on a real
+model the model-initiated write is the unreliable link. Given a novel's bible
+in its prompt, Qwen 3.6 35B made zero writes in that session; in the next it
+found memory empty, invented a bible, and stored that — which memory then
+carried faithfully for eight sessions. A harness that simply forced a 200-word
+summary at every boundary carried twice as much. The forcing is what works.
+
+So the engine forces it. When a session goes quiet for
+`NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` (two minutes by default), or when a
+new conversation starts in the same workspace before that — a rollover, the
+end-of-conversation signal the API never sends — the engine asks the model,
+in a separate tool-free request, what from that session must not be
+contradicted later: decisions, fixed attributes, rules, current state and what
+changed. The answer comes back as addressed facts (`characters/marcus`,
+`state/inn`, `decisions/storage`) and is written to memory, reusing an existing
+key when a fact updates it. That last part is why facts and not a note: a
+later state supersedes the earlier one, where the summary baseline copied
+`Inn: Standing` forward one session after the inn burned.
+
+It costs one generation per session — a few thousand prompt tokens and a few
+hundred out, a minute or so on a 35B model — and it runs only in the pauses:
+never inline with a request, and on a rollover only after the new session's
+first reply has been returned. With memory on it is on; `NVMAI_MEMORY_CONSOLIDATION=0`
+turns it off. It needs no tools at all, which is the point: with
+`NVMAI_MEMORY_TOOLS=off` the model pays ~200 prompt tokens for the fragment
+and bootstrap, reads what the engine wrote, and never has to decide to write.
+
+The server log shows each one: `consolidated session=… turns=… facts=… keys=…`.
+
+### When the tool rounds run out
+
+A model that keeps calling memory tools past `NVMAI_MEMORY_TOOL_ROUNDS` used to
+get its preamble returned as the answer — measured, a 31-token "I need to check
+the existing memories" where ten chapters should have been. Now its last calls
+are answered, it is told the rounds are used up, and it gets one more
+generation to answer with what it has. The tools stay in that request so the
+prompt prefix does not move; any tool call it makes anyway is dropped.
 
 ## Failure behaviour
 

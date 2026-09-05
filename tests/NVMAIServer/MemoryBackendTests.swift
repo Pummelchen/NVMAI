@@ -211,7 +211,10 @@ import Testing
     }
 
     @Test func stopsAtTheRoundLimit() async throws {
-        // A model that only ever calls memory must not loop forever.
+        // A model that only ever calls memory must not loop forever. It gets
+        // its rounds, one generation that overruns them, and one final turn
+        // told the rounds are gone -- and whatever it calls on that turn is
+        // dropped rather than answered.
         let call = memoryCall("memory_list", [:])
         let inner = ScriptedBackend(Array(repeating: completion("...", calls: [call]), count: 10))
         let (service, configuration) = service(rounds: 2)
@@ -219,8 +222,10 @@ import Testing
                                     configuration: configuration)
 
         let completion = try await backend.generate(request(), onEvent: { _ in })
-        #expect(inner.callCount == 3)
-        #expect(completion.finishReason == "length")
+        #expect(inner.callCount == 4)
+        #expect(completion.toolCalls.isEmpty)
+        #expect(completion.finishReason == "stop")
+        #expect(completion.content.isEmpty == false)
     }
 
     @Test func failedMemoryWritesAreReportedToTheModel() async throws {

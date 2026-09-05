@@ -19,9 +19,11 @@ public enum MemoryToolSurface: String, Sendable, CaseIterable {
     /// No tools. The fragment and the bootstrap still work; the model can
     /// read what it was given but cannot write anything back.
     case off
-    /// Write, and read one key by name. Discovery comes from the bootstrap,
-    /// which already lists what exists, so the two tools the model cannot
-    /// do without are the ones that store a fact and fetch its full text.
+    /// Write, read one key by name, and list what exists. The list is not
+    /// optional: without it a model whose bootstrap is empty guesses keys,
+    /// and measured on a 35B model the guessing ate every tool round -- 136
+    /// reads to 2 writes across ten sessions, and three sessions returned no
+    /// answer at all.
     case minimal
     /// Everything: search, list and delete as well.
     case full
@@ -29,7 +31,7 @@ public enum MemoryToolSurface: String, Sendable, CaseIterable {
     public var toolNames: Set<String> {
         switch self {
         case .off: return []
-        case .minimal: return ["memory_set", "memory_get"]
+        case .minimal: return ["memory_set", "memory_get", "memory_list"]
         case .full: return MemoryTools.names
         }
     }

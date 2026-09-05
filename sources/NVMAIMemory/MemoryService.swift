@@ -363,6 +363,14 @@ public actor MemoryService {
         log(.sessionEnded(session: context.session.id, scope: context.scope))
     }
 
+    /// Keys already in a scope, newest first, so a consolidation can update
+    /// an address instead of inventing a near-duplicate beside it.
+    public func recordedKeys(in scope: MemoryScope, limit: Int = 60) async -> [String] {
+        let store = await activeStore(for: scope)
+        let keys = (try? await store.list(prefix: "", limit: limit, in: scope)) ?? []
+        return keys.map(\.rawValue)
+    }
+
     /// Stores a consolidation the engine produced at session end.
     public func storeConsolidation(_ records: [MemoryRecord],
                                    in context: MemorySessionContext) async -> Int {

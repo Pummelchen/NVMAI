@@ -21,11 +21,20 @@ mkdir -p "$LOGS" "$SCRATCH"
 
 case "$BENCH" in
   smoke) SCRIPT="$ROOT/benchmark/memory_smoke.py"; ARMS=(full) ;;
-  pong)  SCRIPT="$ROOT/benchmark/memory_value.py"; ARMS=(control minimal full) ;;
-  book)  SCRIPT="$ROOT/benchmark/memory_book.py";  ARMS=(summary minimal full) ;;
+  pong)  SCRIPT="$ROOT/benchmark/memory_value.py"; ARMS=(control auto minimal full) ;;
+  book)  SCRIPT="$ROOT/benchmark/memory_book.py";  ARMS=(summary auto minimal full) ;;
   *) echo "usage: $0 smoke|pong|book [arm]" >&2; exit 2 ;;
 esac
 [[ -n "$ONLY" ]] && ARMS=("$ONLY")
+# Repeats. Only meaningful with sampling on: at temperature 0 a repeat is the
+# same output, so the default leaves temperature to the server, which is what
+# a real client does. NVMAI_MEMVAL_TEMPERATURE=0 pins it for a determinism
+# check.
+RUNS="${NVMAI_MEMVAL_RUNS:-3}"
+[[ "$BENCH" == smoke ]] && RUNS=1
+# The server distils a session after this much quiet. Two minutes in
+# production; here the harness waits for the log line, so keep it short.
+IDLE="${NVMAI_MEMVAL_CONSOLIDATION_IDLE:-5}"
 
 BINARY="$ROOT/.build/arm64-apple-macosx/release/NVMAIServer"
 if [[ ! -x "$BINARY" ]]; then
@@ -96,18 +105,20 @@ wait_ready() {
 
 trap stop_server EXIT
 
+for RUN in $(seq 1 "$RUNS"); do
 for ARM in "${ARMS[@]}"; do
   case "$ARM" in
     control|summary) MEMORY=0; TOOLS=off ;;
+    auto)            MEMORY=1; TOOLS=off ;;      # memory on, no tools: the engine writes
     minimal)         MEMORY=1; TOOLS=minimal ;;
     full)            MEMORY=1; TOOLS=full ;;
     *) echo "unknown arm $ARM" >&2; exit 2 ;;
   esac
-  MEMDIR="$SCRATCH/$BENCH-$ARM"
+  MEMDIR="$SCRATCH/$BENCH-$ARM-r$RUN"
   rm -rf "$MEMDIR"; mkdir -p "$MEMDIR"
-  SERVER_LOG="$LOGS/server-$ARM.log"
+  SERVER_LOG="$LOGS/server-$ARM-r$RUN.log"
 
-  echo "=== $BENCH / $ARM  (memory=$MEMORY tools=$TOOLS dir=$MEMDIR port=$PORT)"
+  echo "=== $BENCH / $ARM / run $RUN  (memory=$MEMORY tools=$TOOLS consolidation_idle=${IDLE}s dir=$MEMDIR port=$PORT)"
   # Never let the launcher find a server to "stop": that path races the
   # readiness poll. The port is free before every arm, or the arm does not
   # start.
@@ -119,15 +130,19 @@ for ARM in "${ARMS[@]}"; do
     cd "$ROOT"
     NVMAI_PORT="$PORT" NVMAI_MEMORY="$MEMORY" NVMAI_MEMORY_TOOLS="$TOOLS" \
     NVMAI_MEMORY_DIR="$MEMDIR" NVMAI_MEMORY_JOURNAL=1 \
+    NVMAI_MEMORY_CONSOLIDATION=1 NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS="$IDLE" \
       exec tools/start-qwen3.6-4bit.sh codex full default off
   ) >"$SERVER_LOG" 2>&1 &
   LAUNCHER_PID=$!
   wait_ready
   grep -m1 "memory enabled" "$SERVER_LOG" || echo "(memory line: none, as expected for $ARM)"
 
-  NVMAI_PORT="$PORT" NVMAI_MEMVAL_MEMDIR="$MEMDIR" python3 "$SCRIPT" "$ARM" 2>&1 | tee "$LOGS/run-$ARM.log"
+  NVMAI_PORT="$PORT" NVMAI_MEMVAL_MEMDIR="$MEMDIR" NVMAI_MEMVAL_RUN="$RUN" \
+  NVMAI_MEMVAL_SERVER_LOG="$SERVER_LOG" \
+    python3 "$SCRIPT" "$ARM" 2>&1 | tee "$LOGS/run-$ARM-r$RUN.log"
   stop_server
-  echo "--- journal files for $ARM:"; find "$MEMDIR" -name '*.ndjson' -exec ls -la {} \; 2>/dev/null || true
+  echo "--- consolidations for $ARM run $RUN:"; grep -c "consolidated session=" "$SERVER_LOG" || true
+done
 done
 
 [[ "$BENCH" == smoke ]] || { echo; echo "=== report"; python3 "$SCRIPT" report; }

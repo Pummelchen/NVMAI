@@ -42,6 +42,15 @@ public actor MemoryBackend: ServerInferenceBackend {
     private let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
     /// Declared directories already refused, so each is logged once.
     private var refusedDirectories: Set<String> = []
+    /// Sessions with turns not yet distilled into memory, by scope. One per
+    /// scope: a new session in a scope replaces the pending one, and the
+    /// replaced one is consolidated on the rollover it just caused.
+    private var unconsolidated: [MemoryScope: MemorySessionContext] = [:]
+    /// The idle timer per scope. Reset on every turn; fires consolidation.
+    private var idleTimers: [MemoryScope: Task<Void, Never>] = [:]
+    /// A session that rolled over before its idle timer fired. Consolidated
+    /// as soon as the current request has returned, never before.
+    private var pendingAfterTurn: [MemoryScope: MemorySessionContext] = [:]
 
     public init(wrapping inner: any ServerInferenceBackend,
                 service: MemoryService,
@@ -97,20 +106,51 @@ public actor MemoryBackend: ServerInferenceBackend {
             // Stop when the model is done with memory. A turn that also calls
             // a client tool ends here as well: the client has to run that one,
             // and continuing would strand its result.
-            guard !memoryCalls.isEmpty, otherCalls.isEmpty, rounds < configuration.maximumToolRounds
-            else {
+            guard !memoryCalls.isEmpty, otherCalls.isEmpty else {
+                let finished = ServerCompletion(content: transcript,
+                                                toolCalls: otherCalls,
+                                                finishReason: completion.finishReason,
+                                                usage: completion.usage)
+                await journal(request: request, completion: finished, context: context,
+                              conversation: conversation, startedAt: startedAt)
+                return finished
+            }
+
+            // Rounds exhausted and the model still wants memory. Returning
+            // here would hand back whatever preamble preceded the last call --
+            // measured, that was a 31-token "I need to check the existing
+            // memories" where ten chapters should have been. Instead the last
+            // calls are answered, the model is told the rounds are gone, and
+            // it gets one more generation to answer with what it has. The
+            // tools stay in the request so the prompt prefix does not move;
+            // any tool call it makes anyway is dropped.
+            if rounds >= configuration.maximumToolRounds {
+                var messages = current.messages
+                messages.append(ServerMemory.assistantMessage(content: completion.content,
+                                                              calls: memoryCalls))
+                for call in memoryCalls {
+                    let result = await service.execute(
+                        name: call.name,
+                        arguments: ServerMemory.arguments(from: call.arguments),
+                        in: context)
+                    messages.append(ServerMemory.toolResultMessage(call: call, result: result))
+                }
+                messages.append(GFTokenizer.Message(
+                    role: .user,
+                    content: "Your memory tool rounds for this turn are used up. Answer the "
+                        + "original request now, in full, without calling any tools."))
+                current = current.replacingMessages(messages, tools: current.tools)
+                let last = try await inner.generate(current, onEvent: filteredEvents)
+                transcript += last.content
                 let finished = ServerCompletion(
                     content: transcript,
-                    toolCalls: otherCalls,
-                    finishReason: memoryCalls.isEmpty
-                        ? completion.finishReason
-                        : roundLimitReason(completion, memoryCalls, rounds),
-                    usage: completion.usage)
-                await journal(request: request,
-                              completion: finished,
-                              context: context,
-                              conversation: conversation,
-                              startedAt: startedAt)
+                    toolCalls: last.toolCalls.filter { !MemoryTools.isMemoryTool($0.name) },
+                    finishReason: transcript.isEmpty ? "length" : last.finishReason,
+                    usage: last.usage)
+                ServerLog.memory("tool rounds exhausted; answered without tools "
+                                 + "session=\(context.session.id)")
+                await journal(request: request, completion: finished, context: context,
+                              conversation: conversation, startedAt: startedAt)
                 return finished
             }
 
@@ -161,6 +201,77 @@ public actor MemoryBackend: ServerInferenceBackend {
             completionTokens: completion.usage.completionTokens,
             latencyMilliseconds: Int(Date().timeIntervalSince(startedAt) * 1_000),
             stopReason: completion.finishReason)
+        scheduleConsolidation(after: context)
+    }
+
+    // MARK: - Consolidation
+
+    /// Arms the idle timer for a session that just gained a turn, and fires
+    /// the consolidation of a session that rolled over during this request.
+    ///
+    /// The turn is recorded and the reply has been returned by the time this
+    /// runs, so the person is reading. That is the pause a consolidation is
+    /// allowed to use.
+    private func scheduleConsolidation(after context: MemorySessionContext) {
+        guard configuration.sessionConsolidation else { return }
+        let scope = context.scope
+        unconsolidated[scope] = context
+        idleTimers[scope]?.cancel()
+        let delay = configuration.consolidationIdleSeconds
+        idleTimers[scope] = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            guard !Task.isCancelled, let self else { return }
+            await self.consolidateIfPending(scope: scope, expecting: context.session.id)
+        }
+        if let previous = pendingAfterTurn.removeValue(forKey: scope) {
+            Task { [weak self] in await self?.consolidate(previous) }
+        }
+    }
+
+    private func consolidateIfPending(scope: MemoryScope, expecting sessionID: String) async {
+        guard let pending = unconsolidated[scope], pending.session.id == sessionID else { return }
+        await consolidate(pending)
+    }
+
+    /// Distils a finished session into memory.
+    ///
+    /// This is the engine writing, not the model choosing to. Measured on a
+    /// hundred-chapter novel, a model given the bible in its prompt made zero
+    /// writes in that session, then found memory empty in the next and
+    /// stored a bible it had invented; a harness that simply forced a
+    /// summary at each boundary carried twice as much. The forcing is what
+    /// works. Writing the result as addressed facts rather than a note is
+    /// what lets a later change supersede an earlier state instead of the
+    /// note copying the old state forward, which is how the summary lost
+    /// every plot event one session after it happened.
+    private func consolidate(_ context: MemorySessionContext) async {
+        let scope = context.scope
+        if unconsolidated[scope]?.session.id == context.session.id {
+            unconsolidated[scope] = nil
+        }
+        guard let journal = await service.journalStore(for: scope) else { return }
+        let turns = await journal.turns(session: context.session.id,
+                                        limit: configuration.consolidationMaximumTurns,
+                                        in: scope)
+        guard !turns.isEmpty else { return }
+        let existing = await service.recordedKeys(in: scope)
+        let request = ServerMemory.consolidationRequest(
+            turns: Array(turns.reversed()), existingKeys: existing, workspace: scope.workspace)
+        let started = Date()
+        let completion: ServerCompletion
+        do {
+            completion = try await inner.generate(request, onEvent: { _ in })
+        } catch {
+            ServerLog.memory("consolidation failed session=\(context.session.id): \(error)")
+            return
+        }
+        let records = ServerMemory.consolidationRecords(from: completion.content)
+        let written = await service.storeConsolidation(records, in: context)
+        ServerLog.memory("consolidated session=\(context.session.id) turns=\(turns.count) "
+                         + "facts=\(written) keys=\(records.map(\.key.rawValue).joined(separator: ","))"
+                         + " prompt=\(completion.usage.promptTokens) "
+                         + "completion=\(completion.usage.completionTokens) "
+                         + "seconds=\(Int(Date().timeIntervalSince(started)))")
     }
 
     /// Identifies a conversation for the purpose of freezing its prompt and
@@ -192,6 +303,17 @@ public actor MemoryBackend: ServerInferenceBackend {
             modelID: nil,
             tag: placement.tag) else { return nil }
         contexts[id] = context
+        // A new session in a scope whose last session still has undistilled
+        // turns is a rollover: the end-of-conversation signal the API never
+        // sends. The previous session is consolidated once this request has
+        // returned, so the person waiting on it does not pay for it.
+        if configuration.sessionConsolidation,
+           let previous = unconsolidated[context.scope],
+           previous.session.id != context.session.id {
+            idleTimers[context.scope]?.cancel()
+            pendingAfterTurn[context.scope] = previous
+            unconsolidated[context.scope] = nil
+        }
         ServerLog.memory("session=\(context.session.id) scope=\(context.scope.workspace) "
                          + "tag=\(placement.tag ?? "-") via=\(placement.source) "
                          + "bootstrap=\(context.bootstrap.records.count) "
@@ -250,11 +372,6 @@ public actor MemoryBackend: ServerInferenceBackend {
 
     /// When the round limit stops a conversation mid-memory, say so in the
     /// finish reason rather than presenting a truncated answer as complete.
-    private func roundLimitReason(_ completion: ServerCompletion,
-                                  _ calls: [ParsedToolCall],
-                                  _ rounds: Int) -> String {
-        rounds >= configuration.maximumToolRounds ? "length" : completion.finishReason
-    }
 }
 
 public extension MemoryBackend {
@@ -265,6 +382,8 @@ public extension MemoryBackend {
     /// has records that have not reached a barrier yet, and those are the
     /// ones a person would most notice losing.
     func shutDown() async {
+        for timer in idleTimers.values { timer.cancel() }
+        idleTimers.removeAll()
         await service.shutDown()
     }
 }

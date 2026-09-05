@@ -32,9 +32,11 @@ import Testing
         #expect(surface("0") == .off)
         // Minimal is the write plus the targeted read; discovery comes from
         // the bootstrap, which already lists what exists.
-        #expect(MemoryToolSurface.minimal.toolNames == ["memory_set", "memory_get"])
+        // List is in minimal: without it a model with an empty bootstrap
+        // guesses keys, and measured, the guessing ate every tool round.
+        #expect(MemoryToolSurface.minimal.toolNames == ["memory_set", "memory_get", "memory_list"])
         #expect(MemoryToolSurface.full.toolNames == MemoryTools.names)
-        #expect(MemoryTools.definitions(surface: .minimal).count == 2)
+        #expect(MemoryTools.definitions(surface: .minimal).count == 3)
         #expect(MemoryTools.definitions(surface: .off).isEmpty)
     }
 

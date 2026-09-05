@@ -38,10 +38,45 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ARMS = ("summary", "minimal", "full")
+ARMS = ("summary", "auto", "minimal", "full")
 OUT = ROOT / ".build/benchmark-logs/memory-book"
 PORT = int(os.environ.get("NVMAI_PORT", "8096"))
 BASE = f"http://127.0.0.1:{PORT}/v1"
+# Which run of the arm this is; results are kept per run so repeats can be
+# compared and averaged. Repeats only mean something with sampling on:
+# at temperature 0 a repeat is the same output.
+RUN = os.environ.get("NVMAI_MEMVAL_RUN", "1")
+TEMPERATURE = os.environ.get("NVMAI_MEMVAL_TEMPERATURE")  # unset: the server's default
+SERVER_LOG = os.environ.get("NVMAI_MEMVAL_SERVER_LOG")
+
+
+def sampling():
+    return {} if TEMPERATURE is None else {"temperature": float(TEMPERATURE)}
+
+
+def consolidations_logged() -> int:
+    if not SERVER_LOG or not os.path.exists(SERVER_LOG):
+        return -1
+    with open(SERVER_LOG, errors="replace") as handle:
+        return sum(1 for line in handle if "consolidated session=" in line)
+
+
+def wait_for_consolidation(before: int, limit: float = 300) -> float:
+    """Waits for the server to distil the session that just ended.
+
+    A real user pauses between sessions; the idle timer runs in that pause.
+    The harness has no pause, so it waits for the log line instead. Returns
+    the seconds spent waiting, which are reported as part of the arm's cost.
+    """
+    if before < 0:
+        return 0.0
+    started = time.time()
+    while time.time() - started < limit:
+        if consolidations_logged() > before:
+            return time.time() - started
+        time.sleep(2)
+    print("  (no consolidation observed within the wait)")
+    return time.time() - started
 
 BIBLE = """\
 You are writing THE PHOTOGRAPH, a novel of exactly 100 chapters, over many
@@ -139,7 +174,7 @@ SUMMARY_PROMPT = (
 def post(messages, model, max_tokens=2500):
     body = json.dumps({"model": model, "messages": messages,
                        "max_completion_tokens": max_tokens,
-                       "temperature": 0}).encode()
+                       **sampling()}).encode()
     request = urllib.request.Request(f"{BASE}/chat/completions", data=body,
                                      headers={"Content-Type": "application/json"})
     started = time.time()
@@ -160,8 +195,8 @@ def model_id():
 
 def assert_arm_is_real(arm: str, prompt_tokens: int):
     """The bible session is ~500 tokens bare; memory arms must show more."""
-    floor = {"summary": 0, "minimal": 700, "full": 1200}[arm]
-    ceiling = {"summary": 700, "minimal": 20_000, "full": 20_000}[arm]
+    floor = {"summary": 0, "auto": 600, "minimal": 700, "full": 1200}[arm]
+    ceiling = {"summary": 700, "auto": 1200, "minimal": 20_000, "full": 20_000}[arm]
     if not floor <= prompt_tokens <= ceiling:
         raise SystemExit(
             f"ABORT: arm '{arm}' saw {prompt_tokens} prompt tokens in session 1; "
@@ -225,15 +260,17 @@ def run_arm(arm: str):
     model = model_id()
     results = []
     carried = None
+    memory_on = arm != "summary"
     for session in range(1, 11):
         prompt = session_prompt(session, carried if arm == "summary" else None)
         # A fresh conversation every session. Anything that survives came
         # from memory or from the summary, never from the context window.
+        seen = consolidations_logged()
         result = post([{"role": "user", "content": prompt}], model)
         answers = extract_quiz(result["content"])
         correct, total = score(session, answers)
         result.update(session=session, answers=answers, correct=correct, total=total)
-        (OUT / f"{arm}-{session:02d}.md").write_text(result["content"])
+        (OUT / f"{arm}-r{RUN}-{session:02d}.md").write_text(result["content"])
         print(f"{arm}/session {session:2d}: {result['completion_tokens']} tokens, "
               f"{result['seconds']:.0f}s, prompt {result['prompt_tokens']}, "
               f"quiz {correct}/{total}")
@@ -248,46 +285,64 @@ def run_arm(arm: str):
             result["summary_prompt_tokens"] = summary["prompt_tokens"]
             result["summary_completion_tokens"] = summary["completion_tokens"]
             result["summary_seconds"] = summary["seconds"]
-            (OUT / f"{arm}-{session:02d}-summary.md").write_text(carried)
+            (OUT / f"{arm}-r{RUN}-{session:02d}-summary.md").write_text(carried)
+        # The session is over; with consolidation on the server distils it in
+        # the pause a person would leave here, and the harness waits for it.
+        result["consolidation_wait"] = wait_for_consolidation(seen) if memory_on else 0.0
         results.append(result)
-        (OUT / f"{arm}.json").write_text(json.dumps(results, indent=2))
+        (OUT / f"{arm}-r{RUN}.json").write_text(json.dumps(results, indent=2))
 
 
 def report():
-    print(f"\n{'arm':8s} {'session':>7s} {'prompt':>7s} {'completion':>11s} "
-          f"{'seconds':>8s} {'quiz':>6s}  wrong")
+    runs = {}
+    for path in sorted(OUT.glob("*-r*.json")):
+        arm, run = path.stem.rsplit("-r", 1)
+        if arm in ARMS:
+            runs.setdefault(arm, {})[run] = json.loads(path.read_text())
+
+    print(f"\n{'arm':8s} {'run':>3s} {'session':>7s} {'prompt':>7s} {'completion':>11s} "
+          f"{'seconds':>8s} {'wait':>5s} {'quiz':>6s}  wrong")
+    summary_rows = []
     for arm in ARMS:
-        path = OUT / f"{arm}.json"
-        if not path.exists():
+        for run, results in sorted(runs.get(arm, {}).items()):
+            carried_correct = carried_total = 0
+            prompt = completion = seconds = 0
+            for result in results:
+                session = result["session"]
+                expected = truth(session)
+                if not result["answers"]:
+                    detail = "(no quiz answered)"
+                else:
+                    detail = ", ".join(k for k in QUIZ_KEYS
+                                       if normalise(k, result["answers"].get(k)) != expected[k])
+                print(f"{arm:8s} {run:>3s} {session:7d} {result['prompt_tokens']:7d} "
+                      f"{result['completion_tokens']:11d} {result['seconds']:8.0f} "
+                      f"{result.get('consolidation_wait', 0):5.0f} "
+                      f"{result['correct']:3d}/{result['total']:<2d}  {detail}")
+                if session > 1:
+                    carried_correct += result["correct"]
+                    carried_total += result["total"]
+                prompt += result["prompt_tokens"] + result.get("summary_prompt_tokens", 0)
+                completion += (result["completion_tokens"]
+                               + result.get("summary_completion_tokens", 0))
+                seconds += (result["seconds"] + result.get("summary_seconds", 0)
+                            + result.get("consolidation_wait", 0))
+            summary_rows.append((arm, run, carried_correct, carried_total,
+                                 prompt, completion, seconds))
+
+    print("\nCarried over sessions 2-10, per run, and the mean:")
+    for arm in ARMS:
+        rows = [r for r in summary_rows if r[0] == arm]
+        if not rows:
             continue
-        results = json.loads(path.read_text())
-        carried_correct = carried_total = 0
-        prompt = completion = seconds = 0
-        for result in results:
-            session = result["session"]
-            expected = truth(session)
-            # An unanswered quiz is a different failure from a wrong one: the
-            # model did not comply, rather than did not remember. It still
-            # counts as zero, because the reader of the book got no answer
-            # either, but it is labelled so nobody reads it as amnesia.
-            if not result["answers"]:
-                detail = "(no quiz answered)"
-            else:
-                detail = ", ".join(k for k in QUIZ_KEYS
-                                   if normalise(k, result["answers"].get(k)) != expected[k])
-            print(f"{arm:8s} {session:7d} {result['prompt_tokens']:7d} "
-                  f"{result['completion_tokens']:11d} {result['seconds']:8.0f} "
-                  f"{result['correct']:3d}/{result['total']:<2d}  {detail}")
-            if session > 1:
-                carried_correct += result["correct"]
-                carried_total += result["total"]
-            prompt += result["prompt_tokens"] + result.get("summary_prompt_tokens", 0)
-            completion += (result["completion_tokens"]
-                           + result.get("summary_completion_tokens", 0))
-            seconds += result["seconds"] + result.get("summary_seconds", 0)
-        rate = f"{carried_correct}/{carried_total}" if carried_total else "n/a"
-        print(f"{arm}: carried {rate} over sessions 2-10; {prompt} prompt + "
-              f"{completion} completion tokens, {seconds:.0f}s\n")
+        cells = [f"r{run} {c}/{t}" for _, run, c, t, *_ in rows]
+        total_c = sum(r[2] for r in rows)
+        total_t = sum(r[3] for r in rows)
+        mean = f"{100 * total_c / total_t:.0f}%" if total_t else "n/a"
+        print(f"  {arm:8s} {mean:>5s}   {'  '.join(cells)}")
+    print("\nCost per run (prompt + completion tokens, seconds incl. summaries and waits):")
+    for arm, run, _, _, prompt, completion, seconds in summary_rows:
+        print(f"  {arm:8s} r{run}: {prompt} + {completion}, {seconds:.0f}s")
 
 
 if __name__ == "__main__":
