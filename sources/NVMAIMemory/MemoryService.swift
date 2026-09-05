@@ -27,6 +27,9 @@ public actor MemoryService {
     /// memory is not persisting instead of the model assuming it is.
     private var isDegraded = false
     private var engineStarted = false
+    /// False when the engine is running without a journal, so writes last
+    /// only as long as the process.
+    private var enginePersists = true
     private var log: @Sendable (MemoryLogEvent) -> Void
 
     public init(configuration: MemoryConfiguration,
@@ -43,10 +46,11 @@ public actor MemoryService {
         } else if configuration.isEnabled {
             // One engine for both stores: the same file, the same restart,
             // and a session that means the same thing to each of them.
-            let engine = Self.makeEngine(configuration: configuration, log: log)
+            let (engine, persists) = Self.makeEngine(configuration: configuration, log: log)
             let store = ContinuityStore(engine: engine, limits: configuration.limits)
             self.engine = engine
             self.durableStore = store
+            self.enginePersists = persists
         } else {
             self.engine = nil
             self.durableStore = nil
@@ -69,8 +73,15 @@ public actor MemoryService {
     /// in memory for the session. It is logged, and `isDurable` reports false,
     /// so the prompt tells the model its writes will not outlive the session
     /// rather than letting it assume they will.
-    private static func makeEngine(configuration: MemoryConfiguration,
-                                   log: @Sendable (MemoryLogEvent) -> Void) -> ContinuityEngine {
+    ///
+    /// - Returns: the engine, and whether it is actually writing to a file.
+    ///   The flag is not cosmetic: without it a session whose journal could
+    ///   not be opened would tell the model its writes persist, which is the
+    ///   one thing memory must never get wrong.
+    private static func makeEngine(
+        configuration: MemoryConfiguration,
+        log: @Sendable (MemoryLogEvent) -> Void
+    ) -> (engine: ContinuityEngine, persists: Bool) {
         let limits = ContinuityCore.MemoryLimits(
             maxValueBytes: configuration.limits.maximumValueBytes,
             maxItemsPerTask: itemCeiling(for: configuration))
@@ -78,16 +89,16 @@ public actor MemoryService {
             memoryLimits: limits,
             journalsSessionContent: configuration.journalEnabled)
         guard let scope = configuration.scope() else {
-            return ContinuityEngine(configuration: engineConfiguration)
+            return (ContinuityEngine(configuration: engineConfiguration), false)
         }
         do {
             let journal = try FileJournal(
                 url: configuration.storage.journalURL(for: scope),
                 synchronizesEveryWrite: configuration.storage.synchronizesEveryWrite)
-            return ContinuityEngine(configuration: engineConfiguration, journal: journal)
+            return (ContinuityEngine(configuration: engineConfiguration, journal: journal), true)
         } catch {
             log(.degraded(operation: "openJournal", detail: "\(error)"))
-            return ContinuityEngine(configuration: engineConfiguration)
+            return (ContinuityEngine(configuration: engineConfiguration), false)
         }
     }
 
@@ -141,7 +152,7 @@ public actor MemoryService {
 
     /// Whether writes are currently reaching durable storage. False once a
     /// durable operation has failed and the local fallback took over.
-    public var isDurable: Bool { durableStore != nil && !isDegraded }
+    public var isDurable: Bool { durableStore != nil && !isDegraded && enginePersists }
 
     /// Starts a session and returns what the engine needs to install.
     ///

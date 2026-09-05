@@ -342,3 +342,92 @@ import ContinuityCore
         #expect(stored.last?.prompt == "ask 7")
     }
 }
+
+/// The path the server actually takes: a `MemoryService` built from a
+/// configuration, with no store injected.
+///
+/// Every other service test injects a double, so this is the only thing that
+/// proves the default wiring reaches disk at all.
+@Suite struct MemoryServiceDefaultWiringTests {
+    private func configuration(directory: URL) -> MemoryConfiguration {
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "wiring-test"
+        configuration.user = "local"
+        configuration.namespace = "nvmai"
+        configuration.storage.directory = directory
+        return configuration
+    }
+
+    @Test func factsWrittenThroughTheServiceOutliveIt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmai-wiring-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configuration = configuration(directory: directory)
+
+        do {
+            let service = MemoryService(configuration: configuration)
+            let context = try #require(await service.beginSession(id: "s1",
+                                                                  modelID: "qwen35b"))
+            #expect(await service.isDurable)
+            let result = await service.execute(
+                name: "memory_set",
+                arguments: ["key": .string("decisions/storage"),
+                            "value": .string("native swift, same process"),
+                            "importance": .number(0.9)],
+                in: context)
+            guard case .ok = result else {
+                Issue.record("the write failed: \(result)")
+                return
+            }
+        }
+
+        // A second service over the same directory is a restart.
+        let service = MemoryService(configuration: configuration)
+        let context = try #require(await service.beginSession(id: "s2"))
+        #expect(context.bootstrap.records.count == 1)
+        #expect(context.bootstrap.records.first?.key.rawValue == "decisions/storage")
+        #expect(context.bootstrap.records.first?.value == "native swift, same process")
+        // And the fragment tells the model what it already knows.
+        #expect(await service.instructions(for: context).contains("decisions/storage"))
+    }
+
+    @Test func theJournalCapturesTurnsAndSurvivesARestart() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmai-wiring-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configuration = configuration(directory: directory)
+
+        do {
+            let service = MemoryService(configuration: configuration)
+            let context = try #require(await service.beginSession(id: "s1",
+                                                                  modelID: "qwen35b"))
+            await service.recordTurn(session: context, index: 0,
+                                     prompt: "write pong in swift",
+                                     reply: "done, 800 by 600",
+                                     model: "qwen35b", promptTokens: 12,
+                                     completionTokens: 40, latencyMilliseconds: 900,
+                                     stopReason: "stop")
+        }
+
+        let service = MemoryService(configuration: configuration)
+        _ = await service.beginSession(id: "s2")
+        let journal = try #require(await service.journalStore())
+        let scope = try #require(configuration.scope())
+        let sessions = await journal.sessions(limit: 10, in: scope)
+        #expect(sessions.contains { $0.session == "s1" })
+        let turns = await journal.turns(session: "s1", limit: 10, in: scope)
+        #expect(turns.first?.prompt == "write pong in swift")
+        #expect(turns.first?.completionTokens == 40)
+    }
+
+    @Test func aDirectoryThatCannotBeWrittenDegradesInsteadOfFailing() async throws {
+        var configuration = configuration(directory: URL(fileURLWithPath: "/dev/null/nope"))
+        configuration.degradesToLocalStore = true
+        let service = MemoryService(configuration: configuration)
+        // The session still starts; the model is told its writes will not last.
+        let context = try #require(await service.beginSession(id: "s1"))
+        #expect(context.isDurable == false)
+        #expect(await service.instructions(for: context).contains("lasts only for this session"))
+    }
+}
