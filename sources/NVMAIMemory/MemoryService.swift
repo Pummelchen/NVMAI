@@ -14,6 +14,11 @@ public actor MemoryService {
     public private(set) var configuration: MemoryConfiguration
     private let durableStore: (any MemoryStore)?
     private let localStore: InMemoryStore
+    /// The engine-authored journal. Separate store, separate key space,
+    /// separate trim policy: a busy week of sessions must never evict the
+    /// facts the model wrote deliberately.
+    private let journal: (any SessionJournal)?
+    private let journalFilter: JournalFilter
     /// Set once a durable operation has failed, so the session prompt can say
     /// memory is not persisting instead of the model assuming it is.
     private var isDegraded = false
@@ -21,9 +26,11 @@ public actor MemoryService {
 
     public init(configuration: MemoryConfiguration,
                 durableStore: (any MemoryStore)? = nil,
+                journal: (any SessionJournal)? = nil,
                 log: @escaping @Sendable (MemoryLogEvent) -> Void = { _ in }) {
         self.configuration = configuration
         self.localStore = InMemoryStore(limits: configuration.limits)
+        self.journalFilter = configuration.journalLimits.filter
         self.log = log
         if let durableStore {
             self.durableStore = durableStore
@@ -36,7 +43,53 @@ public actor MemoryService {
         } else {
             self.durableStore = nil
         }
+        if let journal {
+            self.journal = journal
+        } else if configuration.isEnabled, configuration.journalEnabled {
+            // Its own connection: journal writes happen after a completion has
+            // already been returned, and must never queue behind a read the
+            // model is waiting on.
+            self.journal = ValkeyJournal(connection: ValkeyConnection(
+                configuration: configuration.valkey),
+                                         prefix: "nvmai:mem",
+                                         limits: configuration.journalLimits)
+        } else {
+            self.journal = nil
+        }
     }
+
+    /// Records a completed turn. Content is filtered to substance here, so no
+    /// caller can accidentally journal a tool result or a file dump.
+    public func recordTurn(session: MemorySessionContext,
+                           index: Int,
+                           prompt: String,
+                           reply: String,
+                           model: String?,
+                           promptTokens: Int,
+                           completionTokens: Int,
+                           latencyMilliseconds: Int,
+                           stopReason: String?) async {
+        guard let journal else { return }
+        let filteredPrompt = journalFilter.filter(prompt)
+        let filteredReply = journalFilter.filter(reply)
+        let turn = JournalTurn(session: session.session.id,
+                               workspace: session.scope.workspace,
+                               index: index,
+                               prompt: filteredPrompt.kept,
+                               reply: filteredReply.kept,
+                               model: model,
+                               promptTokens: promptTokens,
+                               completionTokens: completionTokens,
+                               latencyMilliseconds: latencyMilliseconds,
+                               stopReason: stopReason,
+                               droppedBytes: filteredPrompt.dropped + filteredReply.dropped)
+        await journal.record(turn, in: session.scope)
+        log(.journaled(session: session.session.id, index: index, bytes: turn.byteCount))
+    }
+
+    /// The journal, for a caller that wants to read it back. Never used to
+    /// build a prompt.
+    public func journalStore() -> (any SessionJournal)? { journal }
 
     public var isEnabled: Bool { configuration.isEnabled }
 
@@ -195,6 +248,7 @@ public enum MemoryLogEvent: Sendable, Equatable {
     case degraded(operation: String, detail: String)
     case rejectedScope(String)
     case consolidated(session: String, records: Int)
+    case journaled(session: String, index: Int, bytes: Int)
 
     /// One log line. Never contains a memory's contents or a credential: the
     /// log is operational, and memory can hold anything the model wrote.
@@ -215,6 +269,8 @@ public enum MemoryLogEvent: Sendable, Equatable {
             return "memory disabled for this session: unusable workspace '\(workspace)'"
         case .consolidated(let session, let records):
             return "memory session=\(session) consolidated \(records) records"
+        case .journaled(let session, let index, let bytes):
+            return "journal session=\(session) turn=\(index) \(bytes)B"
         }
     }
 }

@@ -8,12 +8,14 @@ import Testing
 @Suite struct MemoryServiceTests {
     private func configuration(enabled: Bool = true,
                               workspace: String = "repo-a",
-                              degrades: Bool = true) -> MemoryConfiguration {
+                              degrades: Bool = true,
+                              tools: Bool = true) -> MemoryConfiguration {
         var configuration = MemoryConfiguration()
         configuration.isEnabled = enabled
         configuration.workspace = workspace
         configuration.user = "local"
         configuration.degradesToLocalStore = degrades
+        configuration.exposesTools = tools
         return configuration
     }
 
@@ -162,15 +164,18 @@ import Testing
         #expect(!messages.contains { $0.contains("SUPER-SECRET-VALUE") })
     }
 
-    @Test func toolDefinitionsCoverTheDocumentedSurface() async {
-        let service = MemoryService(configuration: configuration(), durableStore: InMemoryStore())
-        let names = Set(await service.toolDefinitions().map(\.name))
-        #expect(names == MemoryTools.names)
-
-        var withoutTools = configuration()
-        withoutTools.exposesTools = false
-        let quiet = MemoryService(configuration: withoutTools, durableStore: InMemoryStore())
+    @Test func toolsAreOffUnlessTurnedOn() async {
+        // The loop ships off: it is where the request-lifecycle risk sits,
+        // and whether a 3B-active model uses six tools well is a measurement
+        // rather than a claim. The prompt and the bootstrap work without it.
+        let quiet = MemoryService(configuration: configuration(tools: false),
+                                  durableStore: InMemoryStore())
         #expect(await quiet.toolDefinitions().isEmpty)
+
+        var withTools = configuration()
+        withTools.exposesTools = true
+        let service = MemoryService(configuration: withTools, durableStore: InMemoryStore())
+        #expect(Set(await service.toolDefinitions().map(\.name)) == MemoryTools.names)
     }
 
     @Test func searchAndListRoundTripThroughTheService() async throws {

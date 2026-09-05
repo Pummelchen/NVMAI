@@ -22,6 +22,21 @@ public actor MemoryBackend: ServerInferenceBackend {
     /// Session contexts by conversation, so a multi-turn conversation keeps
     /// one session and bootstraps once.
     private var contexts: [String: MemorySessionContext] = [:]
+    /// The exact instruction text installed for a conversation, kept for the
+    /// life of that conversation.
+    ///
+    /// This is the constraint the whole design turns on. The fragment sits at
+    /// the head of the prompt, so if it changed between turns the prefix
+    /// would change and every cached KV block after it would be invalid.
+    /// NVMAI prefills at roughly twice its decode rate rather than the
+    /// hundredfold of a GPU server, so a needless cache miss costs minutes,
+    /// not milliseconds. The bootstrap is therefore computed once per
+    /// conversation and frozen, even though memory keeps changing underneath
+    /// it: a stale bootstrap is cheap, and the model can always call a tool
+    /// or read the journal for what is current.
+    private var installedInstructions: [String: String] = [:]
+    /// Turn counter per conversation, for the journal.
+    private var turnIndex: [String: Int] = [:]
 
     public init(wrapping inner: any ServerInferenceBackend,
                 service: MemoryService,
@@ -41,12 +56,22 @@ public actor MemoryBackend: ServerInferenceBackend {
         guard let context = await sessionContext(for: request) else {
             return try await inner.generate(request, onEvent: onEvent)
         }
-        let instructions = await service.instructions(for: context)
+        let conversation = conversationKey(for: request)
+        // Frozen on the first turn and reused verbatim thereafter, so the
+        // prompt prefix is stable for the life of the conversation.
+        let instructions: String
+        if let existing = installedInstructions[conversation] {
+            instructions = existing
+        } else {
+            instructions = await service.instructions(for: context)
+            installedInstructions[conversation] = instructions
+        }
         let memoryTools = ServerMemory.functionDefinitions(await service.toolDefinitions())
 
         var current = request.replacingMessages(
             ConcisePrompt.appendingSystemPrompt(instructions, to: request.messages),
             tools: ServerMemory.merging(tools: request.tools, memory: memoryTools))
+        let startedAt = Date()
 
         // Memory tool calls are ours to answer, so the client never sees
         // them; anything else, including the client's own tools, passes
@@ -69,12 +94,19 @@ public actor MemoryBackend: ServerInferenceBackend {
             // and continuing would strand its result.
             guard !memoryCalls.isEmpty, otherCalls.isEmpty, rounds < configuration.maximumToolRounds
             else {
-                return ServerCompletion(content: transcript,
-                                        toolCalls: otherCalls,
-                                        finishReason: memoryCalls.isEmpty
-                                            ? completion.finishReason
-                                            : roundLimitReason(completion, memoryCalls, rounds),
-                                        usage: completion.usage)
+                let finished = ServerCompletion(
+                    content: transcript,
+                    toolCalls: otherCalls,
+                    finishReason: memoryCalls.isEmpty
+                        ? completion.finishReason
+                        : roundLimitReason(completion, memoryCalls, rounds),
+                    usage: completion.usage)
+                await journal(request: request,
+                              completion: finished,
+                              context: context,
+                              conversation: conversation,
+                              startedAt: startedAt)
+                return finished
             }
 
             rounds += 1
@@ -93,6 +125,40 @@ public actor MemoryBackend: ServerInferenceBackend {
             }
             current = current.replacingMessages(messages, tools: current.tools)
         }
+    }
+
+    /// Writes the turn to the journal after the completion is settled.
+    ///
+    /// Off the critical path by construction: this runs once the answer is
+    /// ready, and the journal swallows its own failures, so nothing here can
+    /// fail or slow a completion. Only the user's prompt and the assistant's
+    /// reply text go in; tool definitions, tool calls and tool results never
+    /// reach it, which is what keeps a turn at a few kilobytes.
+    private func journal(request: ValidatedChatRequest,
+                         completion: ServerCompletion,
+                         context: MemorySessionContext,
+                         conversation: String,
+                         startedAt: Date) async {
+        let index = (turnIndex[conversation] ?? 0)
+        turnIndex[conversation] = index + 1
+        let prompt = request.messages.last { $0.role == .user }?.content ?? ""
+        await service.recordTurn(
+            session: context,
+            index: index,
+            prompt: prompt,
+            reply: completion.content,
+            model: nil,
+            promptTokens: completion.usage.promptTokens,
+            completionTokens: completion.usage.completionTokens,
+            latencyMilliseconds: Int(Date().timeIntervalSince(startedAt) * 1_000),
+            stopReason: completion.finishReason)
+    }
+
+    /// Identifies a conversation for the purpose of freezing its prompt and
+    /// counting its turns.
+    private func conversationKey(for request: ValidatedChatRequest) -> String {
+        let workspace = request.workspace ?? configuration.workspace
+        return ServerMemory.sessionIdentifier(messages: request.messages, workspace: workspace)
     }
 
     /// Runs the session-end hook, if consolidation is on. The engine calls

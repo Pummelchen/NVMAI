@@ -70,10 +70,22 @@ public struct MemoryConfiguration: Sendable, Equatable {
     /// a search on a large store; nothing ever reads the whole database.
     public var maximumIndexScan: Int
     /// Whether the engine offers the model memory tools at all.
+    ///
+    /// Off by default. The tool loop is where the request-lifecycle risk and
+    /// the dependence on the model's tool discipline concentrate, and whether
+    /// a 3B-active model uses six memory tools well is a measurement rather
+    /// than a claim. Bootstrap injection and the session journal carry the
+    /// feature's value without it.
     public var exposesTools: Bool
     /// Rounds of memory tool calls the engine will service inside one
     /// request before it stops and answers.
     public var maximumToolRounds: Int
+    /// Whether the engine writes a session journal. On when memory is on:
+    /// it costs no tokens and no latency on the critical path, and it is the
+    /// component whose value does not depend on the model's tool discipline.
+    public var journalEnabled: Bool
+    /// The journal's own limits, budgeted apart from curated memory.
+    public var journalLimits: JournalLimits
     /// Ask the model, at session end, what is worth keeping. Off by default:
     /// it costs a generation the user did not ask for.
     public var sessionConsolidation: Bool
@@ -90,8 +102,10 @@ public struct MemoryConfiguration: Sendable, Equatable {
                 allowsPerRequestWorkspace: Bool = true,
                 limits: MemoryLimits = .init(),
                 maximumIndexScan: Int = 2_000,
-                exposesTools: Bool = true,
+                exposesTools: Bool = false,
                 maximumToolRounds: Int = 4,
+                journalEnabled: Bool = true,
+                journalLimits: JournalLimits = .init(),
                 sessionConsolidation: Bool = false,
                 degradesToLocalStore: Bool = true) {
         self.isEnabled = isEnabled
@@ -104,6 +118,8 @@ public struct MemoryConfiguration: Sendable, Equatable {
         self.maximumIndexScan = maximumIndexScan
         self.exposesTools = exposesTools
         self.maximumToolRounds = maximumToolRounds
+        self.journalEnabled = journalEnabled
+        self.journalLimits = journalLimits
         self.sessionConsolidation = sessionConsolidation
         self.degradesToLocalStore = degradesToLocalStore
     }
@@ -179,7 +195,16 @@ public struct MemoryConfiguration: Sendable, Equatable {
         if let value = environment["NVMAI_MEMORY_TOOL_ROUNDS"].flatMap(Int.init) {
             configuration.maximumToolRounds = max(0, min(value, 16))
         }
-        if let value = environment["NVMAI_MEMORY_TOOLS"] { configuration.exposesTools = value != "0" }
+        if let value = environment["NVMAI_MEMORY_TOOLS"] { configuration.exposesTools = value == "1" }
+        if let value = environment["NVMAI_MEMORY_JOURNAL"] {
+            configuration.journalEnabled = value != "0"
+        }
+        if let value = environment["NVMAI_MEMORY_JOURNAL_TURNS"].flatMap(Int.init) {
+            configuration.journalLimits.turnsPerSession = max(1, value)
+        }
+        if let value = environment["NVMAI_MEMORY_JOURNAL_SESSIONS"].flatMap(Int.init) {
+            configuration.journalLimits.sessionsPerWorkspace = max(1, value)
+        }
         if let value = environment["NVMAI_MEMORY_CONSOLIDATION"] {
             configuration.sessionConsolidation = value == "1"
         }
@@ -229,6 +254,9 @@ public struct MemoryConfiguration: Sendable, Equatable {
             + "tools=\(exposesTools) rounds=\(maximumToolRounds) "
             + "bootstrap=\(limits.bootstrapRecords)/\(limits.bootstrapBytes)B "
             + "timeout=\(valkey.operationTimeoutMilliseconds)ms "
+            + "journal=\(journalEnabled) "
+            + "journal_limits=\(journalLimits.turnsPerSession)/"
+            + "\(journalLimits.sessionsPerWorkspace) "
             + "consolidation=\(sessionConsolidation)"
     }
 }

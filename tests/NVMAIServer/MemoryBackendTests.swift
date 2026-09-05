@@ -73,20 +73,24 @@ import Testing
                              maximumCompletionTokens: 32)
     }
 
+    /// Tools ship off, so a suite exercising the loop turns them on
+    /// explicitly, which is also how a deployment would.
     private func service(store: any MemoryStore = InMemoryStore(),
                         workspace: String = "repo-a",
-                        rounds: Int = 4) -> (MemoryService, MemoryConfiguration) {
+                        rounds: Int = 4,
+                        tools: Bool = true) -> (MemoryService, MemoryConfiguration) {
         var configuration = MemoryConfiguration()
         configuration.isEnabled = true
         configuration.workspace = workspace
         configuration.user = "local"
         configuration.maximumToolRounds = rounds
+        configuration.exposesTools = tools
         return (MemoryService(configuration: configuration, durableStore: store), configuration)
     }
 
     @Test func installsInstructionsAndToolsWithoutTouchingTheUserMessage() async throws {
         let inner = ScriptedBackend([completion("hi")])
-        let (service, configuration) = service()
+        let (service, configuration) = service(tools: false)
         let backend = MemoryBackend(wrapping: inner, service: service,
                                     configuration: configuration)
 
@@ -100,7 +104,26 @@ import Testing
         #expect(system.contains("memory_search"))
         #expect(seen.messages.last?.role == .user)
         #expect(seen.messages.last?.content == "hello")
-        #expect(Set(seen.tools.map(\.name)) == MemoryTools.names)
+        // Tools ship off: the fragment tells the model memory exists, and the
+        // bootstrap carries the value, without the request-lifecycle risk of
+        // a tool loop whose usefulness depends on the model's discipline.
+        #expect(seen.tools.isEmpty)
+    }
+
+    @Test func toolsAreAdvertisedOnlyWhenTurnedOn() async throws {
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "repo-a"
+        configuration.user = "local"
+        configuration.exposesTools = true
+        let inner = ScriptedBackend([completion("hi")])
+        let backend = MemoryBackend(
+            wrapping: inner,
+            service: MemoryService(configuration: configuration, durableStore: InMemoryStore()),
+            configuration: configuration)
+
+        _ = try await backend.generate(request(), onEvent: { _ in })
+        #expect(Set(inner.requests.first?.tools.map(\.name) ?? []) == MemoryTools.names)
     }
 
     @Test func bootstrapNeverCarriesTheWholeStore() async throws {
@@ -261,6 +284,110 @@ import Testing
         let seen = try #require(inner.requests.first)
         #expect(!seen.messages.contains { $0.role == .system })
         #expect(seen.tools.isEmpty)
+    }
+
+    @Test func theInstalledPromptIsIdenticalAcrossTurnsOfAConversation() async throws {
+        // The constraint the design turns on: the fragment sits at the head
+        // of the prompt, so a change between turns invalidates every cached
+        // KV block after it. On this engine prefill runs at about twice
+        // decode, so a needless miss costs minutes.
+        let store = InMemoryStore()
+        let inner = ScriptedBackend([completion("one"), completion("two"), completion("three")])
+        let (service, configuration) = service(store: store)
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+
+        let opening = request("stable opening question")
+        _ = try await backend.generate(opening, onEvent: { _ in })
+
+        // Memory changes underneath the conversation between turns.
+        let scope = try MemoryScope(namespace: "nvmai", user: "local", workspace: "repo-a")
+        for index in 0..<5 {
+            try await store.set(MemoryRecord(key: try MemoryKey(validating: "facts/new\(index)"),
+                                             value: "written mid-conversation",
+                                             importance: 1.0), in: scope)
+        }
+
+        var messages = opening.messages
+        messages.append(GFTokenizer.Message(role: .assistant, content: "one"))
+        messages.append(GFTokenizer.Message(role: .user, content: "second turn"))
+        _ = try await backend.generate(opening.replacingMessages(messages, tools: []),
+                                       onEvent: { _ in })
+        messages.append(GFTokenizer.Message(role: .assistant, content: "two"))
+        messages.append(GFTokenizer.Message(role: .user, content: "third turn"))
+        _ = try await backend.generate(opening.replacingMessages(messages, tools: []),
+                                       onEvent: { _ in })
+
+        let installed = inner.requests.compactMap { seen in
+            seen.messages.first { $0.role == .system }?.content
+        }
+        #expect(installed.count == 3)
+        // Byte-identical, despite five new high-importance records landing
+        // between turns. A stale bootstrap is cheap; a broken prefix is not.
+        #expect(Set(installed).count == 1)
+    }
+
+    @Test func journalsEachTurnWithSubstanceOnly() async throws {
+        let journal = InMemoryJournal()
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "repo-a"
+        configuration.user = "local"
+        let inner = ScriptedBackend([completion("The race is in the sync layer.")])
+        let backend = MemoryBackend(
+            wrapping: inner,
+            service: MemoryService(configuration: configuration,
+                                   durableStore: InMemoryStore(),
+                                   journal: journal),
+            configuration: configuration)
+
+        let dump = (0..<300).map { "line \($0) of output" }.joined(separator: "\n")
+        let prompt = "Why does this fail?\n```\n\(dump)\n```"
+        _ = try await backend.generate(request(prompt), onEvent: { _ in })
+
+        let scope = try MemoryScope(namespace: "nvmai", user: "local", workspace: "repo-a")
+        let turns = await journal.turns(session: "", limit: 10, in: scope)
+        let recorded = turns.isEmpty
+            ? await journal.allTurns(in: scope)
+            : turns
+        let turn = try #require(recorded.first)
+        #expect(turn.reply == "The race is in the sync layer.")
+        #expect(turn.prompt.contains("Why does this fail?"))
+        // The command output is not in the journal; its size is.
+        #expect(!turn.prompt.contains("line 200 of output"))
+        #expect(turn.droppedBytes > 1_000)
+        #expect(turn.byteCount < 5_120)
+        #expect(turn.stopReason == "stop")
+    }
+
+    @Test func journalNeverReachesThePrompt() async throws {
+        // The journal is written for every turn and read by nobody
+        // automatically; if it ever leaked into context it would undo both
+        // the token budget and the prefix stability.
+        let journal = InMemoryJournal()
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "repo-a"
+        configuration.user = "local"
+        let scope = try MemoryScope(namespace: "nvmai", user: "local", workspace: "repo-a")
+        for index in 0..<20 {
+            await journal.record(JournalTurn(session: "old", workspace: "repo-a", index: index,
+                                             prompt: "UNIQUE-JOURNAL-MARKER-\(index)",
+                                             reply: "answer"), in: scope)
+        }
+        let inner = ScriptedBackend([completion("hi")])
+        let backend = MemoryBackend(
+            wrapping: inner,
+            service: MemoryService(configuration: configuration,
+                                   durableStore: InMemoryStore(),
+                                   journal: journal),
+            configuration: configuration)
+
+        _ = try await backend.generate(request(), onEvent: { _ in })
+
+        let rendered = (inner.requests.first?.messages ?? [])
+            .compactMap(\.content).joined(separator: "\n")
+        #expect(!rendered.contains("UNIQUE-JOURNAL-MARKER"))
     }
 
     @Test func oneConversationBootstrapsOnceAcrossTurns() async throws {
