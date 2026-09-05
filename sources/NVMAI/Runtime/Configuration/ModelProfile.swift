@@ -64,13 +64,17 @@ public struct ModelProfile: Sendable, Equatable {
         // measured a wash at both widths.
         Key("qwen3.6-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
         Key("qwen3.6-35b-a3b", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        // Ornith 1.5: same geometry, measured the same as Qwen 3.6 in August.
-        Key("ornith-1.5-35b-a3b", 4): (8 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("ornith-1.5-35b-a3b", 8): (8 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        // AgentWorld: ~91% hit rate at 128 slots against a 93% ceiling, so
-        // no budget lever; residency and barrier execution both lose on it.
-        Key("qwen-agentworld", 4): (8 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("qwen-agentworld", 8): (8 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        // Ornith 1.5, same geometry, measured on its own 2026-09-05: 4-bit
+        // 128 slots 19.91 / 20.41 vs 160 20.84 / 21.02; 8-bit 64 slots
+        // 8.69 / 9.12 vs 96 10.83 / 10.86, swap flat on every arm.
+        Key("ornith-1.5-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("ornith-1.5-35b-a3b", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        // AgentWorld, measured on its own 2026-09-05: 4-bit 128 slots 20.52 /
+        // 20.50 vs 160 21.11 / 20.92; 8-bit 64 slots 9.31 / 9.25 vs 96
+        // 11.15 / 11.21, swap flat. Residency and barrier execution both
+        // lose on it.
+        Key("qwen-agentworld", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen-agentworld", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
         // Qwen3.8-Flash-Next: 96 slots (12 GiB) still climbing, prefetch one
         // deep +12%; its card specifies temperature 1.0 / top-p 0.95. The
         // fused hyper-connection gates and the GPU key select are measured
