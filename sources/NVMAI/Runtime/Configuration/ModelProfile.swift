@@ -67,13 +67,26 @@ public struct ModelProfile: Sendable, Equatable {
                                     topKSimd: Bool, attnSimd: Bool,
                                     hcFused: Bool, qsaSelect: Bool, keepWired: Bool,
                                     earlyHits: Bool)] = [
-        // Prefetch depth is 0 on every row (2026-09-05). The prefetch ring's
-        // reclaim rule was changed on 2026-09-04 (commit 2022f58) in a way
-        // that left it clogged from the first token, so every 8-bit number
-        // in the README table was measured with prefetch effectively off;
-        // repaired, the ring loses on Qwen3.8 4-bit at every setting. Depth 1
-        // on the 35B 8-bit rows is unmeasured on the repaired ring and stays
-        // off until an A/B says otherwise.
+        // The 35B rows take prefetch depth 1 and hold the expert cache wired
+        // through prefill (2026-09-05, on the repaired ring). Measured per
+        // install, five interleaved pairs on Qwen 3.6 and three on the other
+        // two, 512-token generations:
+        //
+        //   prefetch depth 1   4-bit            8-bit
+        //     Qwen 3.6         +1.8%            +11.3% (+9.8% on a rerun)
+        //     Ornith 1.5       +1.8%            +12.6%
+        //     AgentWorld       +1.4%            +11.4%
+        //
+        // Every interval excludes zero. Depth 2 gives only +2.7% where depth 1
+        // gives +9.8%, so the ring stays one read deep, as it was at 4.7.
+        // The 8-bit gain is the one the clogged ring had been hiding since
+        // 2026-09-04: those rows asked for depth 1 and got nothing.
+        //
+        // Keeping the cache wired is worth +0.9% / +1.6% on 512-token
+        // generations and +7.1% / +5.1% on 48-token ones (Qwen 3.6 4/8-bit),
+        // where the first decode token no longer faults a swapped-out 10-12
+        // GiB cache back in. Measured on Qwen 3.6; the other two installs
+        // have identical geometry and cache sizes and take it by inference.
         // Qwen 3.6 35B-A3B, slot A/B 2026-09-05 (essay, interleaved, swap
         // sampled): 4-bit 128 slots 19.50 / 20.45, 160 (10 GiB) 20.55 / 21.04
         // with swap flat, 192 (12 GiB) 21.61 / 21.60 but 1.5 GB pushed to swap
@@ -83,19 +96,19 @@ public struct ModelProfile: Sendable, Equatable {
         // exposed expert reads) and the trace simulation halves the misses
         // at 96. Prefetch one deep still pays at 8-bit; utility-tier depth 2
         // measured a wash at both widths.
-        Key("qwen3.6-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
-        Key("qwen3.6-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
+        Key("qwen3.6-35b-a3b", 4): (10 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false, true, false),
+        Key("qwen3.6-35b-a3b", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false, true, false),
         // Ornith 1.5, same geometry, measured on its own 2026-09-05: 4-bit
         // 128 slots 19.91 / 20.41 vs 160 20.84 / 21.02; 8-bit 64 slots
         // 8.69 / 9.12 vs 96 10.83 / 10.86, swap flat on every arm.
-        Key("ornith-1.5-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
-        Key("ornith-1.5-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
+        Key("ornith-1.5-35b-a3b", 4): (10 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false, true, false),
+        Key("ornith-1.5-35b-a3b", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false, true, false),
         // AgentWorld, measured on its own 2026-09-05: 4-bit 128 slots 20.52 /
         // 20.50 vs 160 21.11 / 20.92; 8-bit 64 slots 9.31 / 9.25 vs 96
         // 11.15 / 11.21, swap flat. Residency and barrier execution both
         // lose on it.
-        Key("qwen-agentworld", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
-        Key("qwen-agentworld", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false, false),
+        Key("qwen-agentworld", 4): (10 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false, true, false),
+        Key("qwen-agentworld", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false, true, false),
         // Qwen3.8-Flash-Next: 96 slots (12 GiB) still climbing, prefetch one
         // deep +12%; its card specifies temperature 1.0 / top-p 0.95. The
         // fused hyper-connection gates and the GPU key select are measured

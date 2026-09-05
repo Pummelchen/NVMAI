@@ -40,11 +40,11 @@ import Testing
         #expect(!q38.hcFused && !q38.qsaGPUSelect)
         let q36 = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 8, environment: [:])
         #expect(q36.expertCacheBudgetBytes == 12 << 30)
-        #expect(!q36.keepExpertCacheWired)
+        #expect(q36.keepExpertCacheWired)
         #expect(!q36.earlyExpertHits)
         let q36four = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 4, environment: [:])
         #expect(q36four.expertCacheBudgetBytes == 10 << 30)
-        #expect(q36.prefetchDepth == 0)
+        #expect(q36.prefetchDepth == 1)
         #expect(q36.prefillChunkTokens == 4_096)
         #expect(q36.sampling == GenerationDefaults.house)
     }
@@ -82,8 +82,8 @@ import Testing
 
     @Test func summaryNamesTheKeyAndEveryKnob() {
         let p = ModelProfile.resolve(modelID: "qwen-agentworld", family: .qwen36, weightBits: 8, environment: [:])
-        for needle in ["model=qwen-agentworld", "bits=8", "tabled", "budget=", "prefetch=0",
-                       "chunk=4096", "topk_simd=true", "hc_fused=false"] {
+        for needle in ["model=qwen-agentworld", "bits=8", "tabled", "budget=", "prefetch=1",
+                       "chunk=4096", "topk_simd=true", "hc_fused=false", "keep_wired=true"] {
             #expect(p.summary.contains(needle), Comment(rawValue: needle))
         }
     }
