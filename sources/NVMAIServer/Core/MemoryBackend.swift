@@ -195,6 +195,18 @@ public actor MemoryBackend: ServerInferenceBackend {
     }
 }
 
+public extension MemoryBackend {
+    /// Flush memory to disk and release the workspace locks.
+    ///
+    /// Called on the way out of a graceful shutdown. Session boundaries are
+    /// the usual durability point, but a server told to stop mid-conversation
+    /// has records that have not reached a barrier yet, and those are the
+    /// ones a person would most notice losing.
+    func shutDown() async {
+        await service.shutDown()
+    }
+}
+
 /// Builds the memory decorator, or returns the backend unchanged.
 ///
 /// The command target calls this so it never has to know how the service is

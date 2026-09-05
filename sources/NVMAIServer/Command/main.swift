@@ -93,6 +93,11 @@ do {
 
     _ = await signals.wait()
     try await server.shutdown()
+    // After the server, so nothing is still writing: this flushes memory that
+    // has not reached a session boundary and releases the workspace lock.
+    if let memory = servingBackend as? MemoryBackend {
+        await memory.shutDown()
+    }
     // After the server, so the reaper cannot outlive it.
     await managed?.shutdown()
     await signals.cancel()
