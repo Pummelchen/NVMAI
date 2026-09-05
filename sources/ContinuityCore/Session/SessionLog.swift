@@ -79,11 +79,12 @@ public actor SessionLog {
     public func beginSession(taskID: UUID,
                              model: String? = nil,
                              externalID: String? = nil,
+                             tag: String? = nil,
                              id: UUID = UUID(),
                              now: Date = Date()) async throws -> Session {
         guard tasks[taskID] != nil else { throw ContinuityError.unknownTask(taskID) }
         let session = Session(id: id, taskID: taskID, startedAt: now, model: model,
-                              externalID: externalID)
+                              externalID: externalID, tag: tag)
         sessions[session.id] = session
         sessionsByTask[taskID, default: []].append(session.id)
         events[session.id] = []

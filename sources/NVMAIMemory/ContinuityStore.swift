@@ -172,7 +172,8 @@ public actor ContinuityStore: MemoryStore {
         } else {
             let continuity = try await engine.beginSession(taskID: taskID,
                                                            model: session.modelID,
-                                                           externalID: session.id)
+                                                           externalID: session.id,
+                                                           tag: session.tag)
             sessionIDs[session.id] = continuity.id
         }
         // Bounded at the engine, not after the fact: the bootstrap runs on

@@ -186,11 +186,17 @@ public struct MemorySession: Sendable, Equatable, Codable {
     public let id: String
     public let startedAt: Date
     public let modelID: String?
+    /// What the session is about, when the server could tell: the project
+    /// the client declared. Recorded on the session so a reader can keep a
+    /// book session and a coding session apart at a glance.
+    public let tag: String?
 
-    public init(id: String, startedAt: Date = Date(), modelID: String? = nil) {
+    public init(id: String, startedAt: Date = Date(), modelID: String? = nil,
+                tag: String? = nil) {
         self.id = id
         self.startedAt = startedAt
         self.modelID = modelID
+        self.tag = tag
     }
 }
 

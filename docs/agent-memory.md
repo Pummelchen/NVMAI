@@ -208,6 +208,26 @@ project's memory is deleting its file, and backing it up is copying it.
 A workspace named per request gets its own file too, so one project's memory
 can never be written into another's.
 
+### Which project a session belongs to
+
+Every session is placed in a workspace, and tagged with it, in this order:
+
+1. The `X-NVMAI-Workspace` header, when the client sent one.
+2. **The working directory the client declared in its system prompt.** Claude
+   Code writes a `Working directory:` line and Codex a `<cwd>` element on every
+   request, and where they are running is the project. So one server serves a
+   novel in `~/novels/photograph` and a codebase in `~/src/nvmai` with two
+   separate fact stores and no configuration at all: each conversation's memory
+   lands in the project the client is standing in. Only absolute paths in
+   *system* messages count, so a user pasting a transcript cannot move their
+   memory, and a declared home directory or root falls back to the launch
+   workspace rather than becoming one.
+3. The launch directory.
+
+The startup log shows the placement per session: `scope=photograph-3f2a9c1e
+tag=photograph via=declared-cwd`. `swift run ContinuityDemo inspect` lists
+each project's sessions with their tags.
+
 The home directory, its parent and the filesystem root are refused as
 workspaces. A server launched from `~` and used for everything would collect a
 novel and a codebase into one fact store, and the bootstrap for the codebase

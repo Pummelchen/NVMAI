@@ -101,9 +101,10 @@ public actor ContinuityEngine {
     @discardableResult
     public func beginSession(taskID: UUID,
                              model: String? = nil,
-                             externalID: String? = nil) async throws -> Session {
+                             externalID: String? = nil,
+                             tag: String? = nil) async throws -> Session {
         let session = try await sessionLog.beginSession(taskID: taskID, model: model,
-                                                        externalID: externalID)
+                                                        externalID: externalID, tag: tag)
         try await record(.session(session))
         return session
     }

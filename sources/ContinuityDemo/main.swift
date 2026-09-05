@@ -307,6 +307,14 @@ struct ContinuityDemo {
             print("")
             print("  \(task.title)  [\(task.id)]")
             if !task.objective.isEmpty { print("    objective: \(task.objective)") }
+            let taskSessions = sessions.values.filter { $0.taskID == task.id }
+                .sorted { $0.startedAt < $1.startedAt }
+            for session in taskSessions.suffix(10) {
+                let label = session.tag ?? session.externalID ?? "-"
+                let state = session.endedAt == nil ? "open" : "ended"
+                print("    session \(label) [\(state)] \(session.model ?? "")")
+            }
+            if taskSessions.count > 10 { print("    ...and \(taskSessions.count - 10) earlier sessions") }
             let mine = items.values.filter { $0.taskID == task.id }
             for item in mine.sorted(by: { $0.address < $1.address }).prefix(40) {
                 let marker = item.status == .active ? " " : "\(item.status.rawValue.prefix(1))"

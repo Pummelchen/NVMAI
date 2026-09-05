@@ -20,19 +20,27 @@ public struct Session: Identifiable, Codable, Sendable, Equatable {
     /// it, every such caller has to keep a side table that the journal cannot
     /// rebuild.
     public let externalID: String?
+    /// A short human label for what this session was about, when the
+    /// caller could tell: a project name, a client's working directory.
+    /// It is a label, not the isolation boundary -- that is the task -- but
+    /// it is what a person reading the log later uses to tell a book
+    /// session from a coding session at a glance.
+    public let tag: String?
 
     public init(id: UUID = UUID(),
                 taskID: UUID,
                 startedAt: Date = Date(),
                 endedAt: Date? = nil,
                 model: String? = nil,
-                externalID: String? = nil) {
+                externalID: String? = nil,
+                tag: String? = nil) {
         self.id = id
         self.taskID = taskID
         self.startedAt = startedAt
         self.endedAt = endedAt
         self.model = model
         self.externalID = externalID
+        self.tag = tag
     }
 
     public var isOpen: Bool { endedAt == nil }

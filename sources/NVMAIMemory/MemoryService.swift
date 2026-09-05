@@ -263,15 +263,18 @@ public actor MemoryService {
     ///
     /// A failure here degrades rather than propagates: the session continues
     /// with local memory when that is allowed, and with none when it is not.
+    /// - Parameter tag: what the session is about, when the caller could
+    ///   tell. Recorded on the session, shown in the log; not a scope.
     public func beginSession(id: String,
                              workspaceOverride: String? = nil,
-                             modelID: String? = nil) async -> MemorySessionContext? {
+                             modelID: String? = nil,
+                             tag: String? = nil) async -> MemorySessionContext? {
         guard configuration.isEnabled else { return nil }
         guard let scope = configuration.scope(workspaceOverride: workspaceOverride) else {
             log(.rejectedScope(workspaceOverride ?? configuration.workspace))
             return nil
         }
-        let session = MemorySession(id: id, modelID: modelID)
+        let session = MemorySession(id: id, modelID: modelID, tag: tag)
         var bootstrap = MemoryBootstrap.empty
         if let workspace = await workspace(for: scope) {
             do {

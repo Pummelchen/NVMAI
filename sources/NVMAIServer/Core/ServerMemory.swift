@@ -11,6 +11,40 @@ import NVMAIMemory
 /// definitions, and turning a model's tool call into a memory operation and
 /// its result back into a message.
 enum ServerMemory {
+    /// The working directory a client declared in its system prompt, if any.
+    ///
+    /// Claude Code and Codex both tell the model where they are running:
+    /// Claude Code as a "Working directory:" line, Codex as a `<cwd>` element
+    /// in its environment block. That is exactly the project the session is
+    /// about, and it arrives on every request without anyone configuring a
+    /// header. Only absolute paths count, and only in system messages: a
+    /// user pasting a transcript must not be able to move their own memory.
+    static func declaredWorkingDirectory(in messages: [GFTokenizer.Message]) -> String? {
+        // Built here rather than held statically: `Regex` is not Sendable,
+        // and a literal costs nothing worth caching against a request that
+        // is about to run a model.
+        let patterns: [Regex<(Substring, Substring)>] = [
+            // Codex: <environment_context><cwd>/path</cwd>
+            /<cwd>\s*(\/[^<\n]+?)\s*<\/cwd>/,
+            // Claude Code: "Working directory: /path", "Primary working
+            // directory: /path", usually as a bulleted line in an
+            // environment block.
+            /(?im)^[ \t]*[-*]?[ \t]*(?:primary[ \t]+)?working[ \t]+directory:[ \t]*(\/\S+)/,
+            // A plain "cwd: /path" line, which some tools emit.
+            /(?im)^[ \t]*[-*]?[ \t]*cwd:[ \t]*(\/\S+)/,
+        ]
+        for message in messages where message.role == .system {
+            guard let content = message.content, !content.isEmpty else { continue }
+            for pattern in patterns {
+                if let range = content.firstMatch(of: pattern)?.1 {
+                    let path = String(range).trimmingCharacters(in: .whitespaces)
+                    if path.hasPrefix("/") { return path }
+                }
+            }
+        }
+        return nil
+    }
+
     /// A stable session id for a conversation.
     ///
     /// The API is stateless and clients send the whole history each turn, so

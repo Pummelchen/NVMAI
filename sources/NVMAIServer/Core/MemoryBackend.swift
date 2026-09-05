@@ -37,6 +37,11 @@ public actor MemoryBackend: ServerInferenceBackend {
     private var installedInstructions: [String: String] = [:]
     /// Turn counter per conversation, for the journal.
     private var turnIndex: [String: Int] = [:]
+    /// Read once. The workspace guard needs it per request, and reading the
+    /// environment per request is the pattern that once cost 40% of a token.
+    private let homeDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+    /// Declared directories already refused, so each is logged once.
+    private var refusedDirectories: Set<String> = []
 
     public init(wrapping inner: any ServerInferenceBackend,
                 service: MemoryService,
@@ -161,8 +166,9 @@ public actor MemoryBackend: ServerInferenceBackend {
     /// Identifies a conversation for the purpose of freezing its prompt and
     /// counting its turns.
     private func conversationKey(for request: ValidatedChatRequest) -> String {
-        let workspace = request.workspace ?? configuration.workspace
-        return ServerMemory.sessionIdentifier(messages: request.messages, workspace: workspace)
+        let placement = resolvePlacement(for: request)
+        return ServerMemory.sessionIdentifier(messages: request.messages,
+                                              workspace: placement.workspace)
     }
 
     /// Runs the session-end hook, if consolidation is on. The engine calls
@@ -176,18 +182,70 @@ public actor MemoryBackend: ServerInferenceBackend {
     /// Resolves, and caches, the memory session for this conversation.
     private func sessionContext(for request: ValidatedChatRequest) async
         -> MemorySessionContext? {
-        let workspace = request.workspace ?? configuration.workspace
-        let id = ServerMemory.sessionIdentifier(messages: request.messages, workspace: workspace)
+        let placement = resolvePlacement(for: request)
+        let id = ServerMemory.sessionIdentifier(messages: request.messages,
+                                                workspace: placement.workspace)
         if let existing = contexts[id] { return existing }
         guard let context = await service.beginSession(
             id: id,
-            workspaceOverride: request.workspace,
-            modelID: nil) else { return nil }
+            workspaceOverride: placement.override,
+            modelID: nil,
+            tag: placement.tag) else { return nil }
         contexts[id] = context
         ServerLog.memory("session=\(context.session.id) scope=\(context.scope.workspace) "
+                         + "tag=\(placement.tag ?? "-") via=\(placement.source) "
                          + "bootstrap=\(context.bootstrap.records.count) "
                          + "durable=\(context.isDurable)")
         return context
+    }
+
+    /// Where a conversation's memory lives, and why.
+    private struct Placement {
+        /// The workspace the session is placed in.
+        let workspace: String
+        /// The override handed to the service; nil means the launch workspace.
+        let override: String?
+        /// The label recorded on the session.
+        let tag: String?
+        /// For the log: "header", "declared-cwd" or "launch".
+        let source: String
+    }
+
+    /// Decides the workspace for a request, in this order:
+    ///
+    /// 1. The `X-NVMAI-Workspace` header, when the client sent one.
+    /// 2. The working directory the client declared in its system prompt.
+    ///    This is the one that keeps a novel and a codebase apart with no
+    ///    configuration at all: the coding CLIs already say where they are
+    ///    on every request, and where they are is the project.
+    /// 3. The launch directory.
+    ///
+    /// A declared directory that is not a project -- the home directory,
+    /// the root -- falls through to the launch workspace and is logged once,
+    /// rather than being refused: refusing a request over a client's cwd
+    /// would turn a memory nicety into a serving failure.
+    private func resolvePlacement(for request: ValidatedChatRequest) -> Placement {
+        if let header = request.workspace {
+            return Placement(workspace: header, override: header, tag: header, source: "header")
+        }
+        guard configuration.allowsPerRequestWorkspace,
+              let declared = ServerMemory.declaredWorkingDirectory(in: request.messages)
+        else {
+            return Placement(workspace: configuration.workspace, override: nil,
+                             tag: nil, source: "launch")
+        }
+        if let reason = MemoryConfiguration.junkDrawerReason(
+            forPath: declared, environment: ["HOME": homeDirectory]) {
+            if refusedDirectories.insert(declared).inserted {
+                ServerLog.memory("declared working directory ignored: \(reason)")
+            }
+            return Placement(workspace: configuration.workspace, override: nil,
+                             tag: nil, source: "launch")
+        }
+        let workspace = MemoryConfiguration.workspaceIdentifier(forPath: declared)
+        let tag = URL(fileURLWithPath: declared).lastPathComponent
+        return Placement(workspace: workspace, override: workspace, tag: tag,
+                         source: "declared-cwd")
     }
 
     /// When the round limit stops a conversation mid-memory, say so in the
