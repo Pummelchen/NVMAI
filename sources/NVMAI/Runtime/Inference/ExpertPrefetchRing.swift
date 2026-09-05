@@ -48,10 +48,34 @@ final class ExpertPrefetchRing: @unchecked Sendable {
     /// planned; slots for it and earlier layers are stale and reclaimed.
     /// Slots for later layers (a two-layer-ahead read still waiting for its
     /// layer) are kept, which is what lets more than one layer be in flight.
+    /// Reads issued by every `begin`, for the runner's per-token stats.
+    private(set) var issuedReads = 0
+    /// Slot states observed at each `begin`, summed: why the ring had no
+    /// free slot. `held` = completed but its layer has not been planned yet.
+    private(set) var observedSubmitted = 0
+    private(set) var observedInFlight = 0
+    private(set) var observedHeld = 0
+    private(set) var observedFree = 0
+    private(set) var begins = 0
+    /// Queue wait and load time of every speculative operation reclaimed or
+    /// consumed, summed, with the count.
+    private(set) var reclaimedOps = 0
+    private(set) var reclaimedQueueNanos: UInt64 = 0
+    private(set) var reclaimedLoadNanos: UInt64 = 0
+
     func begin(model: Model, layer: Int, experts: [Int], resident: Set<Int>,
                currentLayer: Int) throws {
         lock.lock()
         reclaimTerminalSlotsUnlocked(through: currentLayer)
+        begins &+= 1
+        for slot in slots {
+            if slot.expert < 0 { observedFree &+= 1; continue }
+            switch slot.operation?.state {
+            case .submitted: observedSubmitted &+= 1
+            case .inFlight: observedInFlight &+= 1
+            default: observedHeld &+= 1
+            }
+        }
         let active = Set(slots.compactMap { slot in
             slot.layer == layer && slot.expert >= 0 ? slot.expert : nil
         })
@@ -80,6 +104,7 @@ final class ExpertPrefetchRing: @unchecked Sendable {
                 layer: layer, experts: selectedExperts, into: buffers, ioPolicy: ioPolicy)
             lock.lock()
             for slot in selectedSlots { slots[slot].operation = operation }
+            issuedReads &+= selectedSlots.count
             lock.unlock()
         } catch {
             lock.lock()
@@ -95,6 +120,28 @@ final class ExpertPrefetchRing: @unchecked Sendable {
 
     /// Completed raw bytes for one exact route. In-flight reads are not
     /// awaited: a demand miss remains authoritative and may start immediately.
+    /// Marks a token boundary: every finished read in the ring belongs to
+    /// the token that just ended, so its slot is free. Without this, a
+    /// wrong prediction for one of the last layers kept its slot until the
+    /// next token's layer index caught up -- which for layer 47 is never --
+    /// and the ring ran with ~0.2 free slots (measured: 1.78 of 2 held).
+    func beginToken() {
+        lock.lock()
+        reclaimTerminalSlotsUnlocked(through: Int.max)
+        lock.unlock()
+    }
+
+    /// One line for the stats footer.
+    var summary: String {
+        let b = Double(max(1, begins))
+        let n = Double(max(1, reclaimedOps))
+        return String(format: "prefetch_ring begins=%d free=%.2f submitted=%.2f inflight=%.2f held=%.2f "
+                      + "spec_ops=%d spec_queue_ms=%.2f spec_load_ms=%.2f",
+                      begins, Double(observedFree) / b, Double(observedSubmitted) / b,
+                      Double(observedInFlight) / b, Double(observedHeld) / b,
+                      reclaimedOps, Double(reclaimedQueueNanos) / n / 1e6, Double(reclaimedLoadNanos) / n / 1e6)
+    }
+
     func readyBuffers(layer: Int, experts: [Int]) -> [Int: MTLBuffer] {
         let requested = Set(experts)
         lock.lock()
@@ -113,6 +160,11 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         defer { lock.unlock() }
         for index in slots.indices where slots[index].layer == layer
             && experts.contains(slots[index].expert) {
+            if let op = slots[index].operation {
+                reclaimedOps &+= 1
+                reclaimedQueueNanos &+= op.submissionToStartNanos
+                reclaimedLoadNanos &+= op.loadNanos
+            }
             slots[index].layer = -1
             slots[index].expert = -1
             slots[index].operation = nil
@@ -123,6 +175,11 @@ final class ExpertPrefetchRing: @unchecked Sendable {
         for index in slots.indices where slots[index].layer <= passedLayer {
             switch slots[index].operation?.state {
             case .completed, .failed, .none:
+                if let op = slots[index].operation {
+                    reclaimedOps &+= 1
+                    reclaimedQueueNanos &+= op.submissionToStartNanos
+                    reclaimedLoadNanos &+= op.loadNanos
+                }
                 slots[index].layer = -1
                 slots[index].expert = -1
                 slots[index].operation = nil

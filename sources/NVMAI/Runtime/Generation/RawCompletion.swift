@@ -216,11 +216,13 @@ public func runRawCompletion(producer: any LogitProducer,
     var generated = 0
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
+    var loopMark = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
 
     while true {
         try Task.checkCancellation()
 
         let tokenID: Int32
+        let tSample = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         if generated == 0, let seed = prefillSeed {
             switch seed {
             case .greedyToken(let token):
@@ -237,6 +239,7 @@ public func runRawCompletion(producer: any LogitProducer,
                                  history: history, config: config, position: generated,
                                  timing: fusedRunner)
         }
+        fusedRunner?.totalLoopSampleNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tSample
         generated += 1
         uncommittedBoundaryTokenIDs = [tokenID]
 
@@ -255,7 +258,9 @@ public func runRawCompletion(producer: any LogitProducer,
 
         let delta = try detok.push(tokenID)
         let visible = stopMatcher.push(delta)
+        let tProgress = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         onProgress(.token(index: generated - 1, id: tokenID, delta: visible))
+        fusedRunner?.totalLoopProgressNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tProgress
 
         let hitStopString = stopMatcher.isStopped || shouldStop()
         let hitMax = generated >= config.maxNewTokens
@@ -273,7 +278,14 @@ public func runRawCompletion(producer: any LogitProducer,
         }
 
         history.append(tokenID)
+        // Everything since the previous produce returned that is neither the
+        // sampler nor the callback: stop matching, detokenizing, bookkeeping.
+        if let fusedRunner {
+            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            fusedRunner.totalLoopOtherNanos &+= now - loopMark
+        }
         try await producer.produce(token: tokenID, position: position, into: scratch.logits)
+        loopMark = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         position += 1
         uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
     }

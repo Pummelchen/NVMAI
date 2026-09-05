@@ -159,6 +159,18 @@ public enum ExpertCachePolicy: String, Sendable {
     case lru
     case lfu
     case agingLFU = "aging-lfu"
+    /// Exponentially decayed use count: each use adds one, and the score
+    /// halves every `decayHalfLifeTokens` plans of this layer's streamer
+    /// (one plan per decoded token). LFU with the prefill's counts forgotten
+    /// at a controlled rate. Replayed on Qwen3.8 route traces at 96 slots:
+    /// long-prompt hit rate 0.703 (LFU) -> 0.760 (half-life 16), short prompt
+    /// 0.845 -> 0.837, oracle 0.863 / 0.897.
+    case decayed
+
+    /// NVMAI_CACHE_DECAY_HALFLIFE, in tokens; read once.
+    public static let decayHalfLifeTokens: Double = {
+        Double(ProcessInfo.processInfo.environment["NVMAI_CACHE_DECAY_HALFLIFE"] ?? "") ?? 16
+    }()
 }
 
 public enum ExpertIOBackend: String, Sendable {
@@ -237,10 +249,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// Best-effort in both directions: a refused `mlock` (the wire limit is
     /// finite) must degrade to unpinned behaviour, never fail a request.
     /// `NVMAI_NO_PIN=1` disables wiring entirely.
+    /// NVMAI_NO_PIN=1 leaves the slot cache unwired (measured: decode falls
+    /// to 1.8 tok/s on Qwen3.8 4-bit as the budget is reclaimed). Read once:
+    /// this is called once per layer per token, and a per-call
+    /// `ProcessInfo.environment` rebuild is the same regression the decode
+    /// flags had ([[env-reads]]).
+    static let pinningDisabled = ProcessInfo.processInfo.environment["NVMAI_NO_PIN"] != nil
+
+    /// Whether the last wire attempt covered every region, so a caller can
+    /// skip the per-layer walk once the whole cache is wired.
+    var isPinned: Bool { slotsPinned }
+
     func setSlotsPinned(_ wanted: Bool) {
-        guard ProcessInfo.processInfo.environment["NVMAI_NO_PIN"] == nil else {
-            return
-        }
+        guard !Self.pinningDisabled else { return }
         guard wanted != slotsPinned else { return }
         let started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         var achieved = 0
@@ -250,6 +271,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 ? mlock(region.pointer, region.bytes)
                 : munlock(region.pointer, region.bytes)
             if rc == 0 { achieved += 1; bytes += region.bytes }
+            else if Self.wireTraceEnabled {
+                FileHandle.standardError.write(Data(
+                    "[wire] \(wanted ? "mlock" : "munlock") failed errno=\(errno) bytes=\(region.bytes)\n".utf8))
+            }
         }
         // Treat a partial wire as unpinned so the next call retries rather
         // than believing a half-applied state.
@@ -324,6 +349,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var slotPinCount: [Int]
     private var expertUseCount: [Int]
     private var expertLoadCount: [Int]
+    /// `.decayed` bookkeeping: the score as of `expertScoreClock`, decayed
+    /// lazily when read.
+    private var expertScore: [Float]
+    private var expertScoreClock: [Int]
     private var useClock = 0
     private var statisticsPlans: UInt64 = 0
     private var statisticsRequestedExperts: UInt64 = 0
@@ -524,6 +553,8 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotPinCount = [Int](repeating: 0, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
         self.expertLoadCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
+        self.expertScore = [Float](repeating: 0, count: max(1, layout.expertsPerLayer))
+        self.expertScoreClock = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
     }
 
     deinit {
@@ -698,6 +729,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         useClock = clock
         for expert in experts where expert >= 0 && expert < expertUseCount.count {
             expertUseCount[expert] &+= 1
+            if cachePolicy == .decayed {
+                expertScore[expert] = decayedScoreUnlocked(expert) + 1
+                expertScoreClock[expert] = clock
+            }
         }
         for slot in assignedSlots where slot >= 0 {
             slotLastUse[slot] = clock
@@ -1150,6 +1185,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for i in expertUseCount.indices { expertUseCount[i] = 0 }
     }
 
+    /// The `.decayed` score of an expert as of the current clock.
+    private func decayedScoreUnlocked(_ expert: Int) -> Float {
+        let age = Double(useClock - expertScoreClock[expert])
+        guard age > 0, expertScore[expert] > 0 else { return expertScore[expert] }
+        return expertScore[expert] * Float(pow(0.5, age / ExpertCachePolicy.decayHalfLifeTokens))
+    }
+
     private func shouldEvictSlot(_ lhs: Int, before rhs: Int) -> Bool {
         if cachePolicy == .lru {
             return slotLastUse[lhs] < slotLastUse[rhs]
@@ -1158,6 +1200,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         let rhsExpert = slotExpert[rhs]
         if lhsExpert < 0 || rhsExpert < 0 {
             return lhsExpert < rhsExpert
+        }
+        if cachePolicy == .decayed {
+            let lhsScore = decayedScoreUnlocked(lhsExpert)
+            let rhsScore = decayedScoreUnlocked(rhsExpert)
+            if lhsScore != rhsScore { return lhsScore < rhsScore }
+            return slotLastUse[lhs] < slotLastUse[rhs]
         }
         let lhsCount = lhsExpert < expertUseCount.count ? expertUseCount[lhsExpert] : 0
         let rhsCount = rhsExpert < expertUseCount.count ? expertUseCount[rhsExpert] : 0

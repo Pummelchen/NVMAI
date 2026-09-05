@@ -23,6 +23,7 @@ extension RealForwardRunner {
                               into logits: MTLBuffer,
                               emitHead: Bool,
                               outputMode: PrefillOutputMode) async throws {
+        let tPreamble = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         let kvPosition = kv?.position ?? 0
         guard kvPosition == position else {
             throw PrefillError.prefillCursorMismatch(
@@ -33,7 +34,9 @@ extension RealForwardRunner {
         // last model still resident. No-op when ANE prefill is off or empty.
         let handoverStart = PreadExpertStreamer.wireTraceEnabled
             ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0
+        let tRelease = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         anePrefill?.releaseModels()
+        totalPreambleReleaseNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tRelease
         if PreadExpertStreamer.wireTraceEnabled, handoverStart != 0 {
             let ms = Double(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
                             - handoverStart) / 1e6
@@ -61,8 +64,19 @@ extension RealForwardRunner {
         // 4.2 GiB across 40 layers, so it is not itself a decode cost --
         // wiring at allocation instead measured identically (-28.5% against
         // -27.9% for 4-bit ANE decode), which is why no wiring policy ships.
+        let tPin = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        // Wire once per generation, retrying only while a wire was partial.
+        // Calling into the model every token measured 21-125 ms per token
+        // on Qwen3.8 4-bit under memory pressure (pre_pin_ms), with no
+        // mlock and no queue wait inside it.
+        // The model returns early once every opened layer is wired; the walk
+        // only runs after an unpin, a partial wire, or a newly opened layer.
         model.setExpertCachePinned(true)
+        let tReserve = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        totalPreamblePinNanos &+= tReserve - tPin
+        totalPreambleReleaseNanos = model.expertCachePinQueueWaitNanos
         try kv?.reserve(tokens: position + 1)
+        totalPreambleReserveNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tReserve
         guard position < maxContext else {
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
@@ -85,6 +99,8 @@ extension RealForwardRunner {
         /// drain) makes NVMAI_KERNEL_STATS cover every layer instead of just
         /// the final layer of each token.
 
+        totalPreambleNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tPreamble
+        let tEmbed = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         // Embed lookup + sqrt(H) fused.
         let emb = try model.embedding()
         let embedCB = try runSync { cb in
@@ -122,9 +138,13 @@ extension RealForwardRunner {
             }
         }
         if let embedCB { recordKernelGPU(role: "embed", embedCB) }
+        totalEmbedNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tEmbed
         // The n-gram rows depend only on this token and its predecessors, so
         // the gather can run here, before any layer needs it.
+        predictivePrefetch?.beginToken()
+        let tGather = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         try gatherPLERows(token: token)
+        totalGatherNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tGather
         if activationDumpActive(position: position) {
             dumpActivationToken(token, position: position)
             dumpActivation("embed", hidden, count: residualWidth, position: position)
@@ -354,11 +374,25 @@ extension RealForwardRunner {
             }
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
             let predictedNextLayer: [Int]
+            var predictedNextLayerWeights: [Float] = []
             if nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
                 let ptr = prefetchPredictionIndices.contents().bindMemory(
                     to: UInt32.self, capacity: cfg.topKExperts)
                 predictedNextLayer = (0..<cfg.topKExperts).map {
                     min(Int(ptr[$0]), cfg.numExperts - 1)
+                }
+                if prefetchTraceFD >= 0 || Self.prefetchMinMargin > 0 {
+                    // The probe's routing weights: the prefetch gate reads
+                    // them, and the trace records them. Width follows the
+                    // buffer: fp32 at 4 bytes per entry, fp16 otherwise.
+                    let k = cfg.topKExperts
+                    if prefetchPredictionWeights.length >= k * MemoryLayout<Float>.stride {
+                        let w = prefetchPredictionWeights.contents().bindMemory(to: Float.self, capacity: k)
+                        predictedNextLayerWeights = (0..<k).map { w[$0] }
+                    } else {
+                        let w = prefetchPredictionWeights.contents().bindMemory(to: Float16.self, capacity: k)
+                        predictedNextLayerWeights = (0..<k).map { Float(w[$0]) }
+                    }
                 }
             } else {
                 predictedNextLayer = []
@@ -388,7 +422,8 @@ extension RealForwardRunner {
                 bodyStart: tBodyStart, cb1Start: tCb1Start,
                 waitMark: tWait, waitNanos: waitNanos,
                 previousRoutedMicros: prevRoutedUs,
-                predictedNextLayer: predictedNextLayer)
+                predictedNextLayer: predictedNextLayer,
+                predictedNextLayerWeights: predictedNextLayerWeights)
         }
         if let pending = pendingRoutedCommand {
             try finishPendingRoutedCommand(pending, waitIfNeeded: true)
@@ -1136,7 +1171,8 @@ extension RealForwardRunner {
         waitMark tWait: UInt64,
         waitNanos: UInt64,
         previousRoutedMicros prevRoutedUs: Double,
-        predictedNextLayer: [Int]
+        predictedNextLayer: [Int],
+        predictedNextLayerWeights: [Float] = []
     ) async throws {
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
@@ -1166,6 +1202,7 @@ extension RealForwardRunner {
         totalCachePlanNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - cachePlanStarted
         if !readyPrefetches.isEmpty {
             predictivePrefetch?.consume(layer: L, experts: Set(readyPrefetches.keys))
+            totalPrefetchAdopted &+= UInt64(readyPrefetches.count)
         }
         let missesForTrace = plannedFetch.map { plan in
             plan.misses.map { experts[$0] }
@@ -1173,7 +1210,8 @@ extension RealForwardRunner {
         recordPrefetchTrace(layer: L, position: position, experts: experts,
                             misses: missesForTrace, resident: residentBeforePlan,
                             nextLayerPrediction: predictedNextLayer,
-                            next2LayerPrediction: lastPredictedNext2Layer)
+                            next2LayerPrediction: lastPredictedNext2Layer,
+                            nextLayerWeights: predictedNextLayerWeights)
         let expertLease = try plannedFetch.map { try model.pinRoutedExperts(for: $0) }
         // v4.2 Phase B: once slots and generations are reserved and pinned,
         // submit real storage immediately. Hit partitioning, argument binding,
@@ -1433,7 +1471,20 @@ extension RealForwardRunner {
         }
         if let predictivePrefetch, L + Self.prefetchAhead < cfg.numLayers {
             let target = L + Self.prefetchAhead
-            let prediction = Self.prefetchAhead == 2 ? lastPredictedNext2Layer : predictedNextLayer
+            var prediction = Self.prefetchAhead == 2 ? lastPredictedNext2Layer : predictedNextLayer
+            // Expected-value gate (NVMAI_PREFETCH_MIN_MARGIN): keep only the
+            // predictions whose probe weight clears the 10th-ranked weight by
+            // the margin. On a weighted trace the probe's non-resident
+            // predictions are 38% precise taken in rank order and 59% at a
+            // margin of 0.02, 67% at 0.03 -- and every wrong read costs SSD
+            // time the demand reads of the next layer are waiting on.
+            if Self.prefetchMinMargin > 0, Self.prefetchAhead == 1,
+               predictedNextLayerWeights.count == prediction.count,
+               let floor = predictedNextLayerWeights.last {
+                prediction = zip(prediction, predictedNextLayerWeights)
+                    .filter { $0.1 - floor >= Self.prefetchMinMargin }
+                    .map(\.0)
+            }
             let resident = Set(try model.routedExpertResidentIDs(layer: target))
             // The whole ranked prediction goes in; `begin` drops the experts
             // that are already resident or already in flight and then fills

@@ -31,17 +31,18 @@ import Testing
     @Test func tabledValuesMatchWhatWasMeasured() {
         let q38 = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash, weightBits: 4, environment: [:])
         #expect(q38.expertCacheBudgetBytes == 12 << 30)
-        #expect(q38.prefetchDepth == 2)
-        #expect(q38.prefetchIOTier == IOPOL_UTILITY)
+        #expect(q38.prefetchDepth == 0)
+        #expect(q38.keepExpertCacheWired)
         let q38b = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash, weightBits: 8, environment: [:])
         #expect(q38b.expertCacheBudgetBytes == Int(9.5 * Double(1 << 30)) && q38b.prefetchIOTier == 0)
         #expect(q38.sampling.temperature == 1.0 && q38.sampling.topP == 0.95)
         #expect(!q38.hcFused && !q38.qsaGPUSelect)
         let q36 = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 8, environment: [:])
         #expect(q36.expertCacheBudgetBytes == 12 << 30)
+        #expect(!q36.keepExpertCacheWired)
         let q36four = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 4, environment: [:])
         #expect(q36four.expertCacheBudgetBytes == 10 << 30)
-        #expect(q36.prefetchDepth == 1)
+        #expect(q36.prefetchDepth == 0)
         #expect(q36.prefillChunkTokens == 4_096)
         #expect(q36.sampling == GenerationDefaults.house)
     }
@@ -69,11 +70,14 @@ import Testing
         let off = ModelProfile.resolve(modelID: "qwen3.8-flash-next", family: .qwen38flash, weightBits: 4,
                                        environment: ["NVMAI_PREDICTIVE_PREFETCH": "0"])
         #expect(off.prefetchDepth == 0)
+        let wired = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b", family: .qwen36, weightBits: 4,
+                                         environment: ["NVMAI_KEEP_WIRED": "1"])
+        #expect(wired.keepExpertCacheWired)
     }
 
     @Test func summaryNamesTheKeyAndEveryKnob() {
         let p = ModelProfile.resolve(modelID: "qwen-agentworld", family: .qwen36, weightBits: 8, environment: [:])
-        for needle in ["model=qwen-agentworld", "bits=8", "tabled", "budget=", "prefetch=1",
+        for needle in ["model=qwen-agentworld", "bits=8", "tabled", "budget=", "prefetch=0",
                        "chunk=4096", "topk_simd=true", "hc_fused=false"] {
             #expect(p.summary.contains(needle), Comment(rawValue: needle))
         }

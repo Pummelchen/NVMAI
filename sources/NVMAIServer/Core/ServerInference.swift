@@ -441,6 +441,17 @@ private struct RunnerCounterSnapshot {
     let rdadviseBytes: UInt64
     let wait: UInt64
     let body: UInt64
+    let prefetchIssued: UInt64
+    let prefetchAdopted: UInt64
+    let preamble: UInt64
+    let preambleRelease: UInt64
+    let preamblePin: UInt64
+    let preambleReserve: UInt64
+    let embed: UInt64
+    let gather: UInt64
+    let loopSample: UInt64
+    let loopProgress: UInt64
+    let loopOther: UInt64
     let missIo: UInt64
     let exposedIo: UInt64
     let hitFixupLayers: UInt64
@@ -965,6 +976,17 @@ public actor ServerModelSession: ServerInferenceBackend {
             rdadviseBytes: runner.totalRDAdviseBytes,
             wait: runner.totalWaitNanos,
             body: runner.totalBodyNanos,
+            prefetchIssued: runner.totalPrefetchIssued,
+            prefetchAdopted: runner.totalPrefetchAdopted,
+            preamble: runner.totalPreambleNanos,
+            preambleRelease: runner.totalPreambleReleaseNanos,
+            preamblePin: runner.totalPreamblePinNanos,
+            preambleReserve: runner.totalPreambleReserveNanos,
+            embed: runner.totalEmbedNanos,
+            gather: runner.totalGatherNanos,
+            loopSample: runner.totalLoopSampleNanos,
+            loopProgress: runner.totalLoopProgressNanos,
+            loopOther: runner.totalLoopOtherNanos,
             missIo: runner.totalMissIoNanos,
             exposedIo: runner.totalExposedIoNanos,
             hitFixupLayers: runner.totalHitFixupLayers,
@@ -1362,7 +1384,11 @@ public actor ServerModelSession: ServerInferenceBackend {
                 + "router_readback_ms=%.4f cache_plan_ms=%.4f io_queue_ms=%.4f "
                 + "io_completion_to_fixup_ms=%.4f io_host_waits=%llu "
                 + "io_host_waits_avoided=%llu gpu_classified_hits=%llu "
-                + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu",
+                + "gpu_classified_misses=%llu gpu_all_hit_layers=%llu "
+                + "prefetch_issued_per_token=%.2f prefetch_adopted_per_token=%.2f "
+                + "pre_ms=%.3f pre_release_ms=%.3f pre_pin_ms=%.3f pre_reserve_ms=%.3f "
+                + "embed_ms=%.3f gather_ms=%.3f loop_sample_ms=%.3f "
+                + "loop_progress_ms=%.3f loop_other_ms=%.3f",
             ms(runner.totalCb1Nanos, snapshot.cb1),
             ms(runner.totalIoNanos, snapshot.io),
             ms(runner.totalCb2Nanos, snapshot.cb2),
@@ -1385,7 +1411,19 @@ public actor ServerModelSession: ServerInferenceBackend {
             ms(runner.totalIOCompletionToFixupSubmitNanos, snapshot.ioCompletionToFixup),
             runner.totalExpertIOHostWaits - snapshot.ioHostWaits,
             runner.totalExpertIOHostWaitsAvoided - snapshot.ioHostWaitsAvoided,
-            gpuHits, gpuMisses, gpuAllHit))
+            gpuHits, gpuMisses, gpuAllHit,
+            Double(runner.totalPrefetchIssued &- snapshot.prefetchIssued) / Double(tokens),
+            Double(runner.totalPrefetchAdopted &- snapshot.prefetchAdopted) / Double(tokens),
+            ms(runner.totalPreambleNanos, snapshot.preamble),
+            ms(runner.totalPreambleReleaseNanos, snapshot.preambleRelease),
+            ms(runner.totalPreamblePinNanos, snapshot.preamblePin),
+            ms(runner.totalPreambleReserveNanos, snapshot.preambleReserve),
+            ms(runner.totalEmbedNanos, snapshot.embed),
+            ms(runner.totalGatherNanos, snapshot.gather),
+            ms(runner.totalLoopSampleNanos, snapshot.loopSample),
+            ms(runner.totalLoopProgressNanos, snapshot.loopProgress),
+            ms(runner.totalLoopOtherNanos, snapshot.loopOther)))
+        if let ring = runner.prefetchRingSummary { print("NVMAI \(ring)") }
     }
 
     private func emitKernelDiagnostics(result: RawDecodeResult) {

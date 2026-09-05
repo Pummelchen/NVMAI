@@ -136,9 +136,11 @@ extension RealForwardRunner {
                                      misses: [Int],
                                      resident: [Int],
                                      nextLayerPrediction: [Int],
-                                     next2LayerPrediction: [Int] = []) {
+                                     next2LayerPrediction: [Int] = [],
+                                     nextLayerWeights: [Float] = []) {
         guard prefetchTraceFD >= 0 else { return }
-        let line = "{\"position\":\(position),\"layer\":\(layer),\"experts\":\(experts),\"misses\":\(misses),\"resident\":\(resident),\"next_layer_prediction\":\(nextLayerPrediction),\"next2_layer_prediction\":\(next2LayerPrediction)}\n"
+        let weights = nextLayerWeights.map { String(format: "%.4f", $0) }.joined(separator: ",")
+        let line = "{\"position\":\(position),\"layer\":\(layer),\"experts\":\(experts),\"misses\":\(misses),\"resident\":\(resident),\"next_layer_prediction\":\(nextLayerPrediction),\"next2_layer_prediction\":\(next2LayerPrediction),\"next_weights\":[\(weights)]}\n"
         let bytes = Array(line.utf8)
         var written = 0
         while written < bytes.count {

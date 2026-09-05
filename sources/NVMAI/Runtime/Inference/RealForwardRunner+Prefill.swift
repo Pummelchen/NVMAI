@@ -69,7 +69,7 @@ extension RealForwardRunner {
     /// then releasing here is self-defeating, and cost me one wrong
     /// conclusion already.
     private func releasePrefillCacheWiring() {
-        if !Self.keepExpertCacheWired {
+        if !Self.keepExpertCacheWired && !profile.keepExpertCacheWired {
             model.setExpertCachePinned(false)
         }
     }

@@ -408,7 +408,14 @@ public struct RuntimeConfiguration: Sendable, Equatable {
             return .production(chunkTokens: prefillChunkTokens)
         }
     }
+    /// NVMAI_EXPERT_CACHE_POLICY = lru | lfu | aging-lfu | decayed overrides
+    /// the configured policy for every front end; read once.
+    public static let expertCachePolicyOverride: ExpertCachePolicy? =
+        ProcessInfo.processInfo.environment["NVMAI_EXPERT_CACHE_POLICY"]
+            .flatMap(ExpertCachePolicy.init(rawValue:))
+
     public var modelExpertCachePolicy: ExpertCachePolicy {
-        expertCachePolicy == .lru ? .lru : .lfu
+        if let override = Self.expertCachePolicyOverride { return override }
+        return expertCachePolicy == .lru ? .lru : .lfu
     }
 }

@@ -240,6 +240,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// probe instead of the next-layer one, so each speculative read gets a
     /// whole extra layer of compute to land in. Measured accuracy of the
     /// second probe on Qwen 3.8: top-1 85.6% against the first's 90.8%.
+    /// NVMAI_PREFETCH_MIN_MARGIN: minimum probe-weight margin over the
+    /// lowest-ranked prediction for a prefetch read to be issued; 0 (default)
+    /// issues in rank order as before. Read once.
+    static let prefetchMinMargin: Float =
+        Float(ProcessInfo.processInfo.environment["NVMAI_PREFETCH_MIN_MARGIN"] ?? "") ?? 0
     static let prefetchAhead: Int = ProcessInfo.processInfo.environment["NVMAI_PREFETCH_AHEAD"] == "2" ? 2 : 1
     let prefetchPrediction2Indices: MTLBuffer
     let prefetchPrediction2Weights: MTLBuffer
@@ -811,7 +816,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                  count: cfg.numLayers)
         self.onesPerExpertScale = try bf16OnesBuffer(count: cfg.numExperts,
                                                      label: "per_expert_scale.ones")
-        if Self.keepExpertCacheWired { model.setExpertCachePinned(true) }
+        if Self.keepExpertCacheWired || profile.keepExpertCacheWired {
+            model.setKeepExpertCacheWired(true)
+            model.setExpertCachePinned(true)
+        }
     }
 
     /// The window in which dense attention is exact for this model, or nil
@@ -1028,6 +1036,26 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     // loop-body wall. body = cb1 + wait + readback/plan + rdadvise + io + cb2.
     public internal(set) var totalWaitNanos: UInt64 = 0
     public internal(set) var totalBodyNanos: UInt64 = 0
+    // Between-token segments (NVMAI_RUNNER_STATS): what a decode step spends
+    // before its layer loop starts -- the produce preamble (cache pin, KV
+    // reserve, QSA check), the embed dispatches, the n-gram gather -- and,
+    // filled in by the completion loop, the sampler wait, the progress
+    // callback and the loop's own remainder. Together with `body` and `head`
+    // these account for the whole token, so a GPU gap can be placed.
+    /// Prefetch accounting (NVMAI_RUNNER_STATS): ring reads issued, and
+    /// prefetched experts the cache plan adopted (each one a miss avoided).
+    public var totalPrefetchIssued: UInt64 { UInt64(predictivePrefetch?.issuedReads ?? 0) }
+    public var prefetchRingSummary: String? { predictivePrefetch?.summary }
+    public internal(set) var totalPrefetchAdopted: UInt64 = 0
+    public internal(set) var totalPreambleNanos: UInt64 = 0
+    public internal(set) var totalPreambleReleaseNanos: UInt64 = 0
+    public internal(set) var totalPreamblePinNanos: UInt64 = 0
+    public internal(set) var totalPreambleReserveNanos: UInt64 = 0
+    public internal(set) var totalEmbedNanos: UInt64 = 0
+    public internal(set) var totalGatherNanos: UInt64 = 0
+    public var totalLoopSampleNanos: UInt64 = 0
+    public var totalLoopProgressNanos: UInt64 = 0
+    public var totalLoopOtherNanos: UInt64 = 0
     public internal(set) var totalMissIoNanos: UInt64 = 0
     public internal(set) var totalExposedIoNanos: UInt64 = 0
     public internal(set) var totalHitFixupLayers: UInt64 = 0

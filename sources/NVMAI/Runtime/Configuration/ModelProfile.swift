@@ -47,12 +47,25 @@ public struct ModelProfile: Sendable, Equatable {
     public var hcFused: Bool
     /// GPU-side QSA key selection (sparse-attention families only).
     public var qsaGPUSelect: Bool
+    /// Keep the routed-expert cache wired through prefill instead of
+    /// unpinning it at prefill start and re-wiring it on the first decode
+    /// token. Measured on Qwen3.8 4-bit: the re-wire faults a swapped-out
+    /// 12 GiB cache back in, 1.6-4.7 s per request; holding it is a wash on
+    /// decode throughput and prefill time. NVMAI_KEEP_WIRED=1 forces it on.
+    public var keepExpertCacheWired: Bool
 
     /// The shipped entries. Measured values, each on its own install.
     public static let table: [Key: (budget: Int, prefetch: Int, tier: Int32, chunk: Int?,
                                     sampling: GenerationDefaults.Sampling,
                                     topKSimd: Bool, attnSimd: Bool,
-                                    hcFused: Bool, qsaSelect: Bool)] = [
+                                    hcFused: Bool, qsaSelect: Bool, keepWired: Bool)] = [
+        // Prefetch depth is 0 on every row (2026-09-05). The prefetch ring's
+        // reclaim rule was changed on 2026-09-04 (commit 2022f58) in a way
+        // that left it clogged from the first token, so every 8-bit number
+        // in the README table was measured with prefetch effectively off;
+        // repaired, the ring loses on Qwen3.8 4-bit at every setting. Depth 1
+        // on the 35B 8-bit rows is unmeasured on the repaired ring and stays
+        // off until an A/B says otherwise.
         // Qwen 3.6 35B-A3B, slot A/B 2026-09-05 (essay, interleaved, swap
         // sampled): 4-bit 128 slots 19.50 / 20.45, 160 (10 GiB) 20.55 / 21.04
         // with swap flat, 192 (12 GiB) 21.61 / 21.60 but 1.5 GB pushed to swap
@@ -62,35 +75,42 @@ public struct ModelProfile: Sendable, Equatable {
         // exposed expert reads) and the trace simulation halves the misses
         // at 96. Prefetch one deep still pays at 8-bit; utility-tier depth 2
         // measured a wash at both widths.
-        Key("qwen3.6-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("qwen3.6-35b-a3b", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen3.6-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
+        Key("qwen3.6-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
         // Ornith 1.5, same geometry, measured on its own 2026-09-05: 4-bit
         // 128 slots 19.91 / 20.41 vs 160 20.84 / 21.02; 8-bit 64 slots
         // 8.69 / 9.12 vs 96 10.83 / 10.86, swap flat on every arm.
-        Key("ornith-1.5-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("ornith-1.5-35b-a3b", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("ornith-1.5-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
+        Key("ornith-1.5-35b-a3b", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
         // AgentWorld, measured on its own 2026-09-05: 4-bit 128 slots 20.52 /
         // 20.50 vs 160 21.11 / 20.92; 8-bit 64 slots 9.31 / 9.25 vs 96
         // 11.15 / 11.21, swap flat. Residency and barrier execution both
         // lose on it.
-        Key("qwen-agentworld", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("qwen-agentworld", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen-agentworld", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
+        Key("qwen-agentworld", 8): (12 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false, false),
         // Qwen3.8-Flash-Next: 96 slots (12 GiB) still climbing, prefetch one
         // deep +12%; its card specifies temperature 1.0 / top-p 0.95. The
         // fused hyper-connection gates and the GPU key select are measured
         // washes and stay off.
-        // 4-bit: prefetch two deep on the utility disk tier, +3% over one deep
-        // on the default tier (5.46 / 5.40 vs 5.21 / 5.33, interleaved);
-        // two-layer-ahead prefetch and depth 4 measured washes.
-        Key("qwen3.8-flash-next", 4): (12 << 30, 2, IOPOL_UTILITY, 4_096,
+        // 4-bit, 2026-09-05 profile: prefetch OFF. Per-token counters showed
+        // the ring had been clogged since its first token (a wrong prediction
+        // for layer 47 was never reclaimed), so every earlier prefetch
+        // measurement compared variants of a mechanism that issued ~5 reads
+        // per token. Repaired and running as designed it loses on this SSD at
+        // every setting (512-token story runs, prefetch off 5.81 / 5.83; rank
+        // order 4.70 / 4.66; probe-margin gate 0.03 4.95 / 5.26; 0.06 5.10 /
+        // 5.41): a one-layer-ahead read lands after the next plan and takes
+        // SSD time from the demand reads. The cache stays wired through
+        // prefill (see keepExpertCacheWired).
+        Key("qwen3.8-flash-next", 4): (12 << 30, 0, 0, 4_096,
                                        GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
-                                       true, true, false, false),
+                                       true, true, false, false, true),
         // 8-bit: 32 slots (8 GiB) 2.05 / 2.06 tok/s; 40 slots (9.5 GiB) 2.18 /
         // 2.27 with swap falling; 48 (13 GiB) 2.24-2.33 but ~1 GB of swap
         // growth per run on this 24 GB machine. 40 is the no-paging middle.
-        Key("qwen3.8-flash-next", 8): (Int(9.5 * Double(1 << 30)), 1, 0, 4_096,
+        Key("qwen3.8-flash-next", 8): (Int(9.5 * Double(1 << 30)), 0, 0, 4_096,
                                        GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
-                                       true, true, false, false),
+                                       true, true, false, false, true),
     ]
 
     /// Environment switches applied last. Read once per process.
@@ -107,7 +127,7 @@ public struct ModelProfile: Sendable, Equatable {
             prefillChunkTokens: nil,
             sampling: GenerationDefaults.forFamily(family),
             routerTopKSimd: true, attentionSimdPartial: true,
-            hcFused: false, qsaGPUSelect: false)
+            hcFused: false, qsaGPUSelect: false, keepExpertCacheWired: false)
         if let row = table[profile.key] {
             profile.expertCacheBudgetBytes = row.budget
             profile.prefetchDepth = row.prefetch
@@ -118,11 +138,13 @@ public struct ModelProfile: Sendable, Equatable {
             profile.attentionSimdPartial = row.attnSimd
             profile.hcFused = row.hcFused
             profile.qsaGPUSelect = row.qsaSelect
+            profile.keepExpertCacheWired = row.keepWired
         }
         if let v = env["NVMAI_ROUTER_TOPK_SIMD"] { profile.routerTopKSimd = v != "0" }
         if let v = env["NVMAI_ATTN_SIMD_PARTIAL"] { profile.attentionSimdPartial = v != "0" }
         if let v = env["NVMAI_HC_FUSED"] { profile.hcFused = v == "1" }
         if let v = env["NVMAI_QSA_GPU_SELECT"] { profile.qsaGPUSelect = v == "1" || v == "verify" }
+        if env["NVMAI_KEEP_WIRED"] == "1" { profile.keepExpertCacheWired = true }
         if let v = env["NVMAI_PREDICTIVE_PREFETCH"] {
             profile.prefetchDepth = v == "1" ? max(1, profile.prefetchDepth) : 0
         }
@@ -155,6 +177,6 @@ public struct ModelProfile: Sendable, Equatable {
         + "chunk=\(prefillChunkTokens.map(String.init) ?? "fallback") "
         + "sampling=\(sampling.temperature)/\(sampling.topK)/\(sampling.topP) "
         + "topk_simd=\(routerTopKSimd) attn_simd=\(attentionSimdPartial) "
-        + "hc_fused=\(hcFused) qsa_select=\(qsaGPUSelect)"
+        + "hc_fused=\(hcFused) qsa_select=\(qsaGPUSelect) keep_wired=\(keepExpertCacheWired)"
     }
 }

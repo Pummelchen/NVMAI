@@ -109,11 +109,26 @@ public struct Model {
     /// unchecked-invariant: every access goes through `streamersQueue`, the
     /// serial queue on the owning Model. The box exists so Model can stay a
     /// struct while still mutating per-layer streamer state.
+    /// Mirrors `RealForwardRunner.keepExpertCacheWired` (NVMAI_KEEP_WIRED=1).
+    static let keepExpertCacheWired = ProcessInfo.processInfo.environment["NVMAI_KEEP_WIRED"] == "1"
+
+    /// unchecked-invariant: every member, including the wiring flags and
+    /// the pin diagnostics added in 5.0.3, is read and written only inside
+    /// `streamersQueue.sync` / `.async` blocks; the queue is the lock.
     final class StreamersBox: @unchecked Sendable {
         /// Overrides the configured slot count for layers opened while set.
         var concentratedSlotCount: Int?
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
+        /// True once every opened streamer's slots are wired (see
+        /// `setExpertCachePinned`); cleared by any unpin or partial wire.
+        var pinnedComplete = false
+        /// Wire each layer as it opens (profile `keepExpertCacheWired` or
+        /// NVMAI_KEEP_WIRED=1).
+        var keepWired = false
+        /// Diagnostic: time spent waiting to enter the serial queue in
+        /// `setExpertCachePinned`.
+        var pinQueueWaitNanos: UInt64 = 0
         /// One staging ring is shared by every lazy layer streamer. Allocating
         /// one per layer would turn a small event bridge into hundreds of MiB
         /// of undeclared working set.
@@ -658,6 +673,14 @@ public struct Model {
             eventCoordinator: expertIOEventCoordinator,
             metalStagingPool: metalStagingPool,
             metalIOService: metalIOService)
+        // A newly opened layer is not wired yet; the next pin walks again.
+        // With NVMAI_KEEP_WIRED=1 it is wired here, so a cache that is never
+        // unpinned is never swapped out and the first decode token does not
+        // pay to fault it back (measured 1.6-4.7 s per request on Qwen3.8).
+        streamersBox.pinnedComplete = false
+        if Self.keepExpertCacheWired || streamersBox.keepWired {
+            streamersBox.streamers[L]?.setSlotsPinned(true)
+        }
     }
 
     /// Test hook: how many layer files have been opened so far.
@@ -674,12 +697,48 @@ public struct Model {
     /// wired throughout measurably slowed ANE prefill, which has to place
     /// Core ML arenas alongside it. Called at the phase boundaries; cheap and
     /// idempotent, since each streamer skips a state it is already in.
-    public func setExpertCachePinned(_ pinned: Bool) {
+    /// Wire layers as they open from now on (see `ModelProfile.keepExpertCacheWired`).
+    public func setKeepExpertCacheWired(_ keep: Bool) {
+        streamersQueue.sync { streamersBox.keepWired = keep }
+    }
+
+    public var expertCachePinQueueWaitNanos: UInt64 {
+        streamersQueue.sync { streamersBox.pinQueueWaitNanos }
+    }
+
+    /// Returns true when every opened streamer is in the requested state.
+    @discardableResult
+    public func setExpertCachePinned(_ pinned: Bool) -> Bool {
+        // Every decode step asks for the cache to be wired. Once every
+        // streamer reports it is, there is nothing to do, and walking all of
+        // them under the serial queue per token measured 73-91 ms on a
+        // 48-layer model (NVMAI_RUNNER_STATS pre_pin_ms). The walk only runs
+        // again after an unpin or a partial wire.
+        let tEnter = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        var walked = 0
+        var unpinnedAfter = 0
+        var earlyReturn = false
+        var walkNanos: UInt64 = 0
         streamersQueue.sync {
+            streamersBox.pinQueueWaitNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tEnter
+            if pinned, streamersBox.pinnedComplete { earlyReturn = true; return }
+            let tWalk = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            var complete = pinned
             for streamer in streamersBox.streamers {
-                streamer?.setSlotsPinned(pinned)
+                guard let streamer else { continue }
+                walked += 1
+                streamer.setSlotsPinned(pinned)
+                if pinned, !streamer.isPinned { complete = false; unpinnedAfter += 1 }
             }
+            walkNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWalk
+            streamersBox.pinnedComplete = complete
         }
+        let total = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tEnter
+        if PreadExpertStreamer.wireTraceEnabled, total > 2_000_000 {
+            FileHandle.standardError.write(Data(
+                "[wire] setExpertCachePinned(\(pinned)) \(Double(total) / 1e6) ms early=\(earlyReturn) walked=\(walked) walk_ms=\(Double(walkNanos) / 1e6) unpinned_after=\(unpinnedAfter)\n".utf8))
+        }
+        return streamersQueue.sync { streamersBox.pinnedComplete } == pinned
     }
 
 }
