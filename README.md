@@ -1,11 +1,7 @@
 <img width="1774" height="887" alt="image" src="https://github.com/user-attachments/assets/dc91bc31-0cd4-42e6-bc7a-67ffb277efe0" />
 
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/slogan-dark.svg">
-  <img alt="NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6"
-       src="assets/slogan-light.svg" width="660">
-</picture>
+
 
 # NVMAI
 
