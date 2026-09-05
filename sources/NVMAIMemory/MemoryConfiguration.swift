@@ -64,6 +64,10 @@ public struct ContinuityStorageConfiguration: Sendable, Equatable {
 /// The memory subsystem's whole configuration surface.
 public struct MemoryConfiguration: Sendable, Equatable {
     public var isEnabled: Bool
+    /// Why memory was asked for and not enabled, when that happened. Nil
+    /// otherwise. The factory logs it, so a refusal is visible at start
+    /// rather than discovered as facts from two projects in one bootstrap.
+    public var disabledReason: String?
     public var storage: ContinuityStorageConfiguration
     /// Separates deployments sharing one machine.
     public var namespace: String
@@ -180,7 +184,19 @@ public struct MemoryConfiguration: Sendable, Equatable {
         if let workspace = environment["NVMAI_MEMORY_WORKSPACE"] {
             configuration.workspace = workspace
         } else if let directory = environment["NVMAI_WORKSPACE_DIR"] {
-            configuration.workspace = workspaceIdentifier(forPath: directory)
+            // Only a refusal when memory was actually asked for. Off is off,
+            // and a reason that begins "NVMAI_MEMORY=1 but" must never be
+            // logged for someone who never set it.
+            if configuration.isEnabled,
+               let reason = junkDrawerReason(forPath: directory, environment: environment) {
+                // A server launched from the home directory and used for
+                // everything would put a novel and a codebase in one fact
+                // store. Refusing is the only outcome that is visible.
+                configuration.isEnabled = false
+                configuration.disabledReason = reason
+            } else {
+                configuration.workspace = workspaceIdentifier(forPath: directory)
+            }
         }
         if let value = environment["NVMAI_MEMORY_MAX_VALUE_BYTES"].flatMap(Int.init) {
             configuration.limits.maximumValueBytes = max(256, value)
@@ -219,6 +235,32 @@ public struct MemoryConfiguration: Sendable, Equatable {
             configuration.degradesToLocalStore = value != "0"
         }
         return configuration
+    }
+
+    /// Why a launch directory cannot be a workspace, or nil when it can.
+    ///
+    /// The home directory, its parent and the root are not projects; they
+    /// are where someone happens to have a terminal open. A workspace named
+    /// after one of them collects every project that person ever works on,
+    /// and the bootstrap for a codebase then opens with the plot of a novel.
+    public static func junkDrawerReason(forPath path: String,
+                                        environment: [String: String]) -> String? {
+        let candidate = URL(fileURLWithPath: path).standardizedFileURL.path
+        let home = (environment["HOME"]
+                    ?? FileManager.default.homeDirectoryForCurrentUser.path)
+        let homePath = URL(fileURLWithPath: home).standardizedFileURL.path
+        let refused: [(String, String)] = [
+            (homePath, "the home directory"),
+            (URL(fileURLWithPath: homePath).deletingLastPathComponent().path,
+             "the parent of the home directory"),
+            ("/", "the filesystem root"),
+        ]
+        for (refusedPath, label) in refused where candidate == refusedPath {
+            return "NVMAI_MEMORY=1 but the launch directory is \(label) (\(candidate)), "
+                + "which is not a project; memory stays off. Launch from the project "
+                + "directory, or set NVMAI_MEMORY_WORKSPACE=<name>."
+        }
+        return nil
     }
 
     /// A stable workspace id from a filesystem path: the directory name, plus

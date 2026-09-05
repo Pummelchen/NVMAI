@@ -88,6 +88,43 @@ import Testing
         #expect(configuration.sessionConsolidation)
     }
 
+    /// A server launched from the home directory and used for everything
+    /// would put a novel and a codebase in one fact store. It has to refuse
+    /// visibly rather than mix quietly.
+    @Test func theHomeDirectoryIsNotAWorkspace() {
+        let base = ["NVMAI_MEMORY": "1", "HOME": "/Users/ada"]
+        for (directory, label) in [("/Users/ada", "home"),
+                                   ("/Users/ada/", "home with slash"),
+                                   ("/Users", "parent of home"),
+                                   ("/", "root")] {
+            let configuration = MemoryConfiguration.fromEnvironment(
+                base.merging(["NVMAI_WORKSPACE_DIR": directory]) { $1 })
+            #expect(!configuration.isEnabled, "\(label) should be refused")
+            #expect(configuration.disabledReason?.contains("not a project") == true, "\(label)")
+            #expect(configuration.disabledReason?.contains("NVMAI_MEMORY_WORKSPACE") == true,
+                    "the refusal names the fix")
+        }
+
+        // A project directory is fine, and so is the home directory once the
+        // workspace is named explicitly: naming it is the person saying
+        // they mean it.
+        let project = MemoryConfiguration.fromEnvironment(
+            base.merging(["NVMAI_WORKSPACE_DIR": "/Users/ada/src/novel"]) { $1 })
+        #expect(project.isEnabled)
+        #expect(project.disabledReason == nil)
+        let named = MemoryConfiguration.fromEnvironment(
+            base.merging(["NVMAI_WORKSPACE_DIR": "/Users/ada",
+                          "NVMAI_MEMORY_WORKSPACE": "novel"]) { $1 })
+        #expect(named.isEnabled)
+        #expect(named.workspace == "novel")
+
+        // Off stays off, with no reason to report: nothing was refused.
+        let off = MemoryConfiguration.fromEnvironment(
+            ["HOME": "/Users/ada", "NVMAI_WORKSPACE_DIR": "/Users/ada"])
+        #expect(!off.isEnabled)
+        #expect(off.disabledReason == nil)
+    }
+
     @Test func workspaceComesFromTheLaunchDirectoryWhenNotNamed() {
         let configuration = MemoryConfiguration.fromEnvironment([
             "NVMAI_MEMORY": "1",

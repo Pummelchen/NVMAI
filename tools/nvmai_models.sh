@@ -97,6 +97,24 @@ nvmai_export_memory_environment() {
   local workspace_dir="${1:-$PWD}"
   export NVMAI_MEMORY="${NVMAI_MEMORY:-0}"
   [[ "$NVMAI_MEMORY" == "1" ]] || return 0
+  # The home directory, its parent and the root are not projects. A server
+  # launched from one and used for everything would put a novel and a
+  # codebase in one fact store, so this refuses to start rather than mix.
+  # The server applies the same rule on its own; this just says it earlier
+  # and in the terminal the person is looking at.
+  if [[ -z "${NVMAI_MEMORY_WORKSPACE:-}" ]]; then
+    local resolved home_dir
+    resolved="$(cd "$workspace_dir" 2>/dev/null && pwd -P)"
+    home_dir="$(cd "$HOME" 2>/dev/null && pwd -P)"
+    if [[ "$resolved" == "$home_dir" || "$resolved" == "$(dirname "$home_dir")" || "$resolved" == "/" ]]; then
+      echo "ERROR: NVMAI_MEMORY=1 but this is launched from $resolved, which is not a project directory." >&2
+      echo "       Memory would collect every project into one store. Either:" >&2
+      echo "         cd <your project>   and run the start script again" >&2
+      echo "       or name the workspace explicitly:" >&2
+      echo "         NVMAI_MEMORY_WORKSPACE=my-project <start script>" >&2
+      exit 2
+    fi
+  fi
   export NVMAI_MEMORY_CACHE_MIB="${NVMAI_MEMORY_CACHE_MIB:-$(nvmai_default_cache_mib)}"
   export NVMAI_WORKSPACE_DIR="${NVMAI_WORKSPACE_DIR:-$workspace_dir}"
   export NVMAI_MEMORY_NAMESPACE="${NVMAI_MEMORY_NAMESPACE:-nvmai}"

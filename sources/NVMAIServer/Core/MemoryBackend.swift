@@ -220,7 +220,10 @@ public enum ServerMemoryFactory {
     public static func wrap(_ backend: any ServerInferenceBackend,
                             configuration: MemoryConfiguration = .fromEnvironment())
         -> any ServerInferenceBackend {
-        guard configuration.isEnabled else { return backend }
+        guard configuration.isEnabled else {
+            if let reason = configuration.disabledReason { ServerLog.memory(reason) }
+            return backend
+        }
         let service = MemoryService(configuration: configuration) { event in
             ServerLog.memory(event.message)
         }

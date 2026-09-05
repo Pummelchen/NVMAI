@@ -208,6 +208,13 @@ project's memory is deleting its file, and backing it up is copying it.
 A workspace named per request gets its own file too, so one project's memory
 can never be written into another's.
 
+The home directory, its parent and the filesystem root are refused as
+workspaces. A server launched from `~` and used for everything would collect a
+novel and a codebase into one fact store, and the bootstrap for the codebase
+would open with the plot of the novel. With `NVMAI_MEMORY=1` the start script
+stops and says so; the server applies the same rule on its own and logs it.
+Launch from the project, or name the workspace with `NVMAI_MEMORY_WORKSPACE`.
+
 To look inside one, including while a server is running:
 
 ```bash
