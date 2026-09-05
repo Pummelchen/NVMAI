@@ -67,6 +67,18 @@ NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 - **OpenAI-compatible server:** A loopback Chat Completions and Responses API
   includes launch scripts for starting NVMAI and connecting supported coding
   clients.
+- **One start script per model and quantization:** `tools/start-<model>-<bits>.sh`
+  starts the server for that install with no questions asked, each on its own
+  port, with the model's own tuning applied. `tools/server_launcher.sh` asks
+  instead, and `tools/cli_launcher.sh` also wires up a coding CLI.
+
+```bash
+tools/start-ornith-4bit.sh        tools/start-ornith-8bit.sh
+tools/start-qwen3.6-4bit.sh       tools/start-qwen3.6-8bit.sh
+tools/start-agentworld-4bit.sh    tools/start-agentworld-8bit.sh
+tools/start-qwen3.8-4bit.sh       tools/start-qwen3.8-8bit.sh
+```
+
 - **Tested coding CLIs:** The launch workflow supports Codex, Qwen Code, and
   OpenCode against the local server.
 - **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
@@ -79,14 +91,14 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 
 | Model | Quantization | Peak decode |
 | --- | --- | ---: |
-| Qwen-AgentWorld 35B-A3B | 4-bit | **21.28 tok/s** |
-| Ornith 1.5 35B-A3B | 4-bit | **20.99 tok/s** |
-| Qwen 3.6 35B-A3B | 4-bit | **20.95 tok/s** |
-| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.40 tok/s** |
-| Qwen 3.6 35B-A3B | 8-bit | **11.23 tok/s** |
-| Qwen-AgentWorld 35B-A3B | 8-bit | **11.16 tok/s** |
-| Ornith 1.5 35B-A3B | 8-bit | **10.89 tok/s** |
-| Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.06 tok/s** |
+| Qwen-AgentWorld 35B-A3B | 4-bit | **21.74 tok/s** |
+| Ornith 1.5 35B-A3B | 4-bit | **21.65 tok/s** |
+| Qwen 3.6 35B-A3B | 4-bit | **21.41 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.46 tok/s** |
+| Qwen 3.6 35B-A3B | 8-bit | **12.37 tok/s** |
+| Qwen-AgentWorld 35B-A3B | 8-bit | **12.28 tok/s** |
+| Ornith 1.5 35B-A3B | 8-bit | **11.93 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.10 tok/s** |
 
 ## Core Links
 

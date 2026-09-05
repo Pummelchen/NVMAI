@@ -95,7 +95,8 @@ import Testing
             approximateDownloadBytes: 100,
             installedBytes: 100,
             rangeStagingBytes: 0,
-            reserveBytes: 0)
+            reserveBytes: 0,
+            installDirectoryName: "owner_model")
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("checkpoint-bytes-\(UUID().uuidString).gturbo")
         let paths = try RemoteInstallPaths(outputDirectory: output.path)

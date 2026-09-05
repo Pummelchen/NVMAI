@@ -31,6 +31,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
 BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
+# One catalogue for the model list, the install paths and the ports.
+# shellcheck source=tools/nvmai_models.sh
+source "$SCRIPT_DIR/nvmai_models.sh"
 
 # Old five-argument form (no AI model): insert the default so the positions
 # below line up.
@@ -99,13 +102,9 @@ if [[ -z "$ai_model" ]]; then
     *) echo "invalid choice: $ai_choice" >&2; exit 2 ;;
   esac
 fi
-case "$ai_model" in
-  ornith|ornith15) ai_model=ornith ; MODEL_STEM="ornith-1.5_35B_A3B" ;;
-  qwen36|qwen3.6) ai_model=qwen36 ; MODEL_STEM="qwen3.6_35B_A3B" ;;
-  agentworld) MODEL_STEM="qwen-agentworld_35B_A3B" ;;
-  qwen38|qwen3.8) ai_model=qwen38 ; MODEL_STEM="qwen3.8-flash-next_125B_A6B" ;;
-  *) echo "unknown AI model: $ai_model (ornith|qwen36|agentworld|qwen38)" >&2; exit 2 ;;
-esac
+nvmai_resolve_model "$ai_model" || exit 2
+ai_model="$NVMAI_MODEL_KEY"
+MODEL_STEM="$NVMAI_MODEL_STEM"
 
 # --- 4) quantization: 8-bit (default) / 4-bit ---  (6-bit withdrawn)
 quant="${4:-}"
@@ -122,11 +121,8 @@ if [[ -z "$quant" ]]; then
     *) echo "invalid choice: $quant_choice" >&2; exit 2 ;;
   esac
 fi
-case "$quant" in
-  4|4bit) quant=4bit ;;
-  8|8bit) quant=8bit ;;
-  *) echo "unknown quantization: $quant (4|8)" >&2; exit 2 ;;
-esac
+nvmai_resolve_quant "$quant" || exit 2
+quant="$NVMAI_QUANT"
 
 # --- 5) NVMAI mode: standard (default) or concise ---
 if [[ -n "${5:-}" ]]; then
@@ -177,10 +173,9 @@ else
 fi
 
 # --- resolve model + quantization -> model directory / port ---
-case "$quant" in
-  4bit) MODEL_DIR="$BASE_DIR/models/${MODEL_STEM}_4Bit"; PORT="${NVMAI_PORT:-8081}" ;;
-  8bit) MODEL_DIR="$BASE_DIR/models/${MODEL_STEM}_8Bit"; PORT="${NVMAI_PORT:-8083}" ;;
-esac
+# Each (model, quantization) has its own port, so two can run at once.
+MODEL_DIR="$BASE_DIR/models/${MODEL_STEM}_${NVMAI_QUANT_DIR}"
+PORT="${NVMAI_PORT:-$(nvmai_model_port)}"
 
 if [[ "$mode_suffix" == "_concise" ]]; then
   export NVMAI_CONCISE_MODE=1

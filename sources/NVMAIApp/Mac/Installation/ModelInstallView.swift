@@ -46,6 +46,18 @@ struct ModelInstallView: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if !model.installDescriptor.isInstallable {
+                // The app repacks an MLX checkpoint; this build is quantized
+                // from the model's own bf16 release by a converter the app
+                // does not carry. Offering a download here would install a
+                // different build than the one this descriptor attests.
+                Text("This build is installed from the command line:\n"
+                     + "tools/install_models.sh \(model.installDescriptor.installerTarget)")
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+            }
         }
     }
 
@@ -177,10 +189,12 @@ struct ModelInstallView: View {
                 .buttonStyle(.bordered)
                 .disabled(model.isInstallingModel)
 
-                Button(model.hasPartialModelDownload ? "Resume" : "Download",
-                       action: model.installModel)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canInstallModel)
+                if model.installDescriptor.isInstallable {
+                    Button(model.hasPartialModelDownload ? "Resume" : "Download",
+                           action: model.installModel)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canInstallModel)
+                }
             }
         }
         .controlSize(.large)

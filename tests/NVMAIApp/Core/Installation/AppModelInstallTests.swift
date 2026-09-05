@@ -112,11 +112,45 @@ import NVMAIRepackCore
             == "83c641a791aa957df7d280eef1b0c8faf7a2ec9b19dd3355fb13abae8ae0ed15")
     #expect(fourBit.requiredFreeBytes > fourBit.installedBytes)
     #expect(eightBit.requiredFreeBytes > eightBit.installedBytes)
-    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15") == fourBit)
-    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15-8bit") == eightBit)
-    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36") == .qwen36)
-    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36-6bit") == eightBit)
-    #expect(AppModelInstallDescriptor.selectedDescriptor(for: nil) == eightBit)
+    // The MLX repacks stay reachable, under -mlx selectors, so an install
+    // made before the converter is still identified and can still be
+    // downloaded by the app.
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15-mlx") == fourBit)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "ornith15-8bit-mlx") == eightBit)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36-mlx") == .qwen36)
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: "qwen36-6bit") == .qwen36_6bit)
+    #expect(fourBit.isInstallable && eightBit.isInstallable)
+  }
+
+  /// The plain selectors name the eight builds `tools/install_models.sh`
+  /// produces, which are what is on disk; the app recognizes and runs them
+  /// but cannot download them (they need the converter it does not carry).
+  @Test func everyInstalledBuildIsSelectableAndRecognized() {
+    let expected: [(String, String)] = [
+      ("ornith15", "ornith-1.5_35B_A3B_4Bit"),
+      ("ornith15-8bit", "ornith-1.5_35B_A3B_8Bit"),
+      ("qwen36", "qwen3.6_35B_A3B_4Bit"),
+      ("qwen36-8bit", "qwen3.6_35B_A3B_8Bit"),
+      ("agentworld", "qwen-agentworld_35B_A3B_4Bit"),
+      ("agentworld-8bit", "qwen-agentworld_35B_A3B_8Bit"),
+      ("qwen38", "qwen3.8-flash-next_125B_A6B_4Bit"),
+      ("qwen38-8bit", "qwen3.8-flash-next_125B_A6B_8Bit"),
+    ]
+    for (selector, directory) in expected {
+      let descriptor = AppModelInstallDescriptor.selectedDescriptor(for: selector)
+      #expect(descriptor.installDirectoryName == directory, Comment(rawValue: selector))
+      #expect(!descriptor.isInstallable, Comment(rawValue: selector))
+      #expect(descriptor.sourceIndexSHA256.count == 64, Comment(rawValue: selector))
+      let recognized = AppModelInstallDescriptor.all.contains { $0 == descriptor }
+      #expect(recognized, Comment(rawValue: selector))
+      // The instruction the install screen prints has to name a real target.
+      #expect(!descriptor.installerTarget.hasPrefix("--"), Comment(rawValue: selector))
+    }
+    // Unset preference gives the model the launchers default to.
+    #expect(AppModelInstallDescriptor.selectedDescriptor(for: nil).installDirectoryName
+            == "ornith-1.5_35B_A3B_8Bit")
+    let installableOnly = AppModelInstallDescriptor.installable.allSatisfy { $0.isInstallable }
+    #expect(installableOnly)
   }
 
   @MainActor

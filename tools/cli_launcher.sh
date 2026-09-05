@@ -28,6 +28,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
+# Same catalogue the server launcher uses, so the port this wires into the
+# coding CLI's config is the port the server actually binds.
+# shellcheck source=tools/nvmai_models.sh
+source "$SCRIPT_DIR/nvmai_models.sh"
 
 # Old five-argument form (no AI model): insert the default so the positions
 # below line up.
@@ -96,13 +100,8 @@ if [[ -z "$ai_model" ]]; then
     *) echo "invalid choice: $ai_choice" >&2; exit 2 ;;
   esac
 fi
-case "$ai_model" in
-  ornith|ornith15) ai_model=ornith ;;
-  qwen36|qwen3.6) ai_model=qwen36 ;;
-  agentworld) : ;;
-  qwen38|qwen3.8) ai_model=qwen38 ;;
-  *) echo "unknown AI model: $ai_model (ornith|qwen36|agentworld|qwen38)" >&2; exit 2 ;;
-esac
+nvmai_resolve_model "$ai_model" || exit 2
+ai_model="$NVMAI_MODEL_KEY"
 
 # --- 4) quantization: 8-bit (default) / 4-bit ---  (6-bit withdrawn)
 quant="${4:-}"
@@ -119,11 +118,8 @@ if [[ -z "$quant" ]]; then
     *) echo "invalid choice: $quant_choice" >&2; exit 2 ;;
   esac
 fi
-case "$quant" in
-  4|4bit) quant=4bit ;;
-  8|8bit) quant=8bit ;;
-  *) echo "unknown quantization: $quant (4|8)" >&2; exit 2 ;;
-esac
+nvmai_resolve_quant "$quant" || exit 2
+quant="$NVMAI_QUANT"
 
 # --- 5) NVMAI mode: standard (default) or concise ---
 if [[ -n "${5:-}" ]]; then
@@ -173,11 +169,8 @@ else
   esac
 fi
 
-# --- resolve quantization -> port (server_launcher.sh picks the same) ---
-case "$quant" in
-  4bit) PORT="${NVMAI_PORT:-8081}" ;;
-  8bit) PORT="${NVMAI_PORT:-8083}" ;;
-esac
+# --- resolve model + quantization -> port (server_launcher.sh picks the same) ---
+PORT="${NVMAI_PORT:-$(nvmai_model_port)}"
 BASE_URL="http://127.0.0.1:${PORT}/v1"
 
 # --- clean slate: stop any running NVMAIServer, then start fresh ---

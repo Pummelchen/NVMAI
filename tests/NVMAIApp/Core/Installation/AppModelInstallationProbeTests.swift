@@ -58,7 +58,8 @@ import Testing
             approximateDownloadBytes: 1,
             installedBytes: 1,
             rangeStagingBytes: 1,
-            reserveBytes: 1)
+            reserveBytes: 1,
+            installDirectoryName: "example_different")
         guard case .partial = AppModelInstallationProbe.status(at: url, descriptor: descriptor) else {
             Issue.record("expected checkpoint mismatch to be partial")
             return
