@@ -53,6 +53,23 @@ OUT = ROOT / ".build/benchmark-logs/memory-value"
 PORT = int(os.environ.get("NVMAI_PORT", "8096"))
 BASE = f"http://127.0.0.1:{PORT}/v1"
 
+# The parameters stage 1 is free to choose and stages 2 and 3 must match if
+# anything carried. The model states them as JSON, by name, so the harness
+# never has to guess what a number in prose refers to. The first version of
+# this harness read the prose with regular expressions and made "clamped to
+# ±70°" register as a field height; the second was tightened until it
+# matched nothing. A named field is the only thing that measures.
+PARAMETERS = (
+    "field_width", "field_height", "win_score",
+    "ball_start_speed", "ball_speed_increment", "ball_max_speed",
+    "paddle_speed",
+)
+
+RULES_JSON = (
+    "a JSON object, in a ```json block, with exactly these keys and numeric "
+    "values: " + ", ".join(PARAMETERS)
+)
+
 # Stage 1 fixes the design. Stages 2 and 3 say "the same rules" and nothing
 # more: that phrase is the whole experiment, because only memory can supply
 # what it refers to.
@@ -62,38 +79,22 @@ STAGES = [
         "Write a complete Pong game in Swift with two computer players that play "
         "each other automatically. No human input at all. You decide the field "
         "size, the winning score, how each paddle's AI tracks the ball, and how "
-        "ball speed changes over a rally. First state those decisions as a short "
-        "list, then give the full code in one Swift file.",
+        f"ball speed changes over a rally. First state those decisions as {RULES_JSON}, "
+        "then give the full code in one Swift file.",
     ),
     (
         "python",
         "Port that Pong game to Python. Keep exactly the same game rules and "
-        "behaviour. State the rules you are implementing as a short list first, "
+        f"behaviour. First state the rules you are implementing as {RULES_JSON}, "
         "then give the full code in one file.",
     ),
     (
         "c99",
         "Now port the same Pong game to C99. Keep exactly the same game rules and "
-        "behaviour. State the rules you are implementing as a short list first, "
+        f"behaviour. First state the rules you are implementing as {RULES_JSON}, "
         "then give the full code in one file.",
     ),
 ]
-
-# The parameters stage 1 is free to choose and stages 2 and 3 must match if
-# anything carried.
-#
-# Read from the model's stated rule list, not from the whole answer: scanning
-# everything made "clamped to ±70°" register as a field height, which is the
-# kind of error that turns a measurement into a number that merely looks like
-# one. The rules are what the prompt asks for first, so the list is where the
-# claim lives and the code is only its consequence.
-PARAMETERS = {
-    "field": r"(\d{3,4})\s*(?:x|×|by)\s*(\d{3,4})",
-    "win_score": r"(?:first\s+to|winning\s+score|win(?:s)?\s+at)\D{0,12}?(\d{1,2})",
-    "ball_start_speed": r"(?:ball).{0,40}?start\w*\D{0,12}?([\d.]+)",
-    "ball_increment": r"(?:\+|increase[sd]?\s+by|increment\w*\D{0,8})\s*([\d.]+)\s*(?:per|each|every)",
-    "paddle_speed": r"(?:max(?:imum)?\s+speed|paddle\s+speed)\D{0,12}?([\d.]+)",
-}
 
 
 def post(messages, model, max_tokens=5200):
@@ -141,30 +142,59 @@ def run_arm(arm: str):
         (OUT / f"{arm}-{stage}.md").write_text(result["content"])
         print(f"{arm}/{stage}: {result['completion_tokens']} tokens, "
               f"{result['seconds']:.1f}s, prompt {result['prompt_tokens']}")
+        if stage == "swift":
+            assert_arm_is_real(arm, result["prompt_tokens"])
     (OUT / f"{arm}.json").write_text(json.dumps(results, indent=2))
 
 
-def rules_section(text: str) -> str:
-    """The stated rules, which is everything before the first code block.
+def assert_arm_is_real(arm: str, prompt_tokens: int):
+    """Refuses to measure an arm that is not what it claims to be.
 
-    The prompt asks for the list first and the code second, so this is the
-    model's own claim about what it is implementing, uncontaminated by
-    constants that happen to appear in the source.
+    The bare stage-1 prompt is under 150 tokens. The memory fragment alone
+    adds about 200; the tool schemas add hundreds more. A memory arm whose
+    prompt is the size of the control's is a server that was started without
+    memory -- the last time that happened it was a release binary that had
+    not been rebuilt, and three arms of numbers were compared before anyone
+    noticed they were the same arm.
     """
-    head = text.split("```", 1)[0]
-    return head if head.strip() else text[:2000]
+    floor = {"control": 0, "minimal": 300, "full": 800}[arm]
+    ceiling = {"control": 250, "minimal": 10_000, "full": 10_000}[arm]
+    if not floor <= prompt_tokens <= ceiling:
+        raise SystemExit(
+            f"ABORT: arm '{arm}' saw {prompt_tokens} prompt tokens at stage 1; "
+            f"expected {floor}..{ceiling}. The server is not running the "
+            f"configuration this arm claims. Rebuild the release binary and "
+            f"check NVMAI_MEMORY / NVMAI_MEMORY_TOOLS.")
 
 
 def extract(text: str) -> dict:
-    """Reads the parameters out of a stage's stated rules."""
-    found = {}
-    lowered = rules_section(text).lower().replace(",", "")
-    for name, pattern in PARAMETERS.items():
-        match = re.search(pattern, lowered)
-        if not match:
+    """Reads the parameters out of the stage's JSON rules block.
+
+    The first JSON object that carries any of the named keys wins. Values are
+    normalised to numbers so "5" and 5.0 agree, because the question is
+    whether the rule carried, not how it was spelled.
+    """
+    candidates = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    candidates += re.findall(r"(\{[^{}]*\})", text, re.S)
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
             continue
-        found[name] = "x".join(match.groups()) if name == "field" else match.group(1)
-    return found
+        if not isinstance(parsed, dict):
+            continue
+        found = {}
+        for name in PARAMETERS:
+            value = parsed.get(name)
+            if isinstance(value, bool) or value is None:
+                continue
+            try:
+                found[name] = float(value)
+            except (TypeError, ValueError):
+                continue
+        if found:
+            return found
+    return {}
 
 
 def code_block(text: str) -> str:
