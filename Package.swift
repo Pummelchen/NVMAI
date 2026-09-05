@@ -89,10 +89,22 @@ let package = Package(
             dependencies: ["NVMAIAppCore", "NVMAIDecodeProtocol"],
             path: "sources/NVMAIDecodeService"
         ),
+        // Agent memory: a store abstraction plus its backends. Depends on
+        // nothing in the engine, so the serving path can use it without the
+        // memory subsystem being able to reach back into inference.
+        .target(
+            name: "NVMAIMemory",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ],
+            path: "sources/NVMAIMemory"
+        ),
         .target(
             name: "NVMAIServerCore",
             dependencies: [
                 "NVMAI",
+                "NVMAIMemory",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -150,6 +162,11 @@ let package = Package(
             name: "NVMAIMacPresentationTests",
             dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
             path: "tests/NVMAIApp/MacPresentation"
+        ),
+        .testTarget(
+            name: "NVMAIMemoryTests",
+            dependencies: ["NVMAIMemory"],
+            path: "tests/NVMAIMemory"
         ),
         .testTarget(
             name: "NVMAIServerTests",
