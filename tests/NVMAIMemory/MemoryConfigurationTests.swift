@@ -141,15 +141,14 @@ import Testing
         var configuration = MemoryConfiguration()
         configuration.storage.maximumMemoryBytes = 256 << 20
         let split = configuration.storage.budget
-        #expect(split.factBytes == 64 << 20)
-        #expect(split.logBytes == 192 << 20)
+        #expect(split.factBytes == 192 << 20)
+        #expect(split.logBytes == 64 << 20)
         #expect(split.factBytes + split.logBytes == 256 << 20)
 
-        // Facts get the protected quarter at every size, because a fact is a
-        // sentence the model chose to write and a turn is prose it captured
-        // for free.
+        // Facts take three quarters at every size: they are the half that
+        // must be resident. The journal is on disk regardless.
         configuration.storage.maximumMemoryBytes = 1 << 30
-        #expect(configuration.storage.budget.factBytes == 256 << 20)
+        #expect(configuration.storage.budget.factBytes == 768 << 20)
 
         // A budget too small to split still leaves both stores usable rather
         // than yielding a zero that refuses every write.

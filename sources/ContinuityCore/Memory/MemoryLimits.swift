@@ -31,7 +31,7 @@ public struct MemoryLimits: Sendable, Equatable {
     public var maxKeyLength: Int
 
     public init(maxValueBytes: Int = 16 * 1024,
-                maxBytesPerTask: Int = 64 << 20,
+                maxBytesPerTask: Int = 192 << 20,
                 maxItemsPerTask: Int = 65_536,
                 maxVersionsPerAddress: Int = 32,
                 maxNamespaceLength: Int = 128,

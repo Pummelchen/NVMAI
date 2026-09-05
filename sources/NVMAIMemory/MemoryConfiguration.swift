@@ -37,17 +37,18 @@ public struct ContinuityStorageConfiguration: Sendable, Equatable {
 
     /// How the ceiling is divided between the two stores.
     ///
-    /// Facts and turns compete for one budget and are not comparable: a fact
-    /// is a sentence that took a model deliberate effort to write, a turn is
-    /// kilobytes of prose the engine captured for free. Turns are also the
-    /// side that grows without limit. So the split is deliberately lopsided
-    /// and the facts' share is the protected one.
+    /// Facts get three quarters, the journal one. Facts are the half that has
+    /// to be resident: they are what a session searches and what goes into a
+    /// prompt. The journal never enters a prompt and every byte of it is
+    /// already in the file, so resident transcript on a low-memory Mac buys
+    /// nothing but faster reads of history nobody reads. Its quarter is a
+    /// window over recent sessions, not a home for them.
     public var budget: (factBytes: Int, logBytes: Int) {
         guard let total = maximumMemoryBytes, total > 0 else {
-            return (factBytes: 64 << 20, logBytes: 192 << 20)
+            return (factBytes: 192 << 20, logBytes: 64 << 20)
         }
-        let facts = max(1 << 20, total / 4)
-        return (factBytes: facts, logBytes: max(1 << 20, total - facts))
+        let log = max(1 << 20, total / 4)
+        return (factBytes: max(1 << 20, total - log), logBytes: log)
     }
 
     /// The journal file for a scope. One file per workspace, so deleting a

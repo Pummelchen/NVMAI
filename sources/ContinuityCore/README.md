@@ -175,8 +175,8 @@ Both stores are bounded by counted bytes, not by an item count multiplied by a
 worst case:
 
 ```swift
-MemoryLimits(maxValueBytes: 16 << 10, maxBytesPerTask: 64 << 20)
-SessionLogOptions(maxBytesPerTask: 192 << 20)
+MemoryLimits(maxValueBytes: 16 << 10, maxBytesPerTask: 192 << 20)
+SessionLogOptions(maxBytesPerTask: 64 << 20)
 ```
 
 They behave differently at the limit, on purpose. Facts **refuse** a write with
@@ -185,6 +185,11 @@ wrote is worse than declining to add one, and the caller can archive to make
 room. The log **evicts**, dropping the oldest whole sessions from memory —
 they stay in the journal file, so this bounds what the process holds rather
 than what was recorded. The session currently in progress is never evicted.
+
+The defaults lean toward facts because facts are the half that has to be
+resident: they are what gets searched and put in a prompt. The log never enters
+a prompt and is on disk regardless, so its share is a window over recent
+sessions, not a home for them.
 
 `memory.utilization(taskID:)` and `statistics()` report where a task stands.
 

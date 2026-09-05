@@ -157,15 +157,17 @@ actual bytes, and within a workspace it is split between the two stores:
 
 | Store | Share | At the limit |
 | --- | ---: | --- |
-| Curated facts | 1/4 | Refuses the write |
-| Session journal | 3/4 | Drops the oldest sessions from memory |
+| Curated facts | 3/4 | Refuses the write |
+| Session journal | 1/4 | Drops the oldest sessions from memory |
 
-The split is lopsided on purpose. A fact is a sentence the model chose to
-write; a turn is kilobytes of prose the engine captured for free, and it is the
-side that grows without limit. The behaviours differ for the same reason:
-silently dropping a fact the model relies on is the worse failure, so facts
-refuse and the caller archives to make room. The journal evicts from memory
-only — the dropped sessions remain in the file.
+Facts get the larger share because they are the half that has to be resident:
+they are what a session searches and what goes into a prompt. The journal never
+enters a prompt and every byte of it is already in the file, so on an 8 GB Mac
+resident transcript buys nothing but faster reads of history nobody reads; its
+quarter is a window over recent sessions, not a home for them. The behaviours
+at the limit differ too: silently dropping a fact the model relies on is the
+worse failure, so facts refuse and the caller archives to make room, while the
+journal evicts from memory only — the dropped sessions remain in the file.
 
 ### One writer per workspace
 

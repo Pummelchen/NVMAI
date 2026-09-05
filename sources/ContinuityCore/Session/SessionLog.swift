@@ -508,7 +508,7 @@ public struct SessionLogOptions: Sendable, Equatable {
     public var persistsChunks: Bool
 
     public init(persistsChunks: Bool = false,
-                maxBytesPerTask: Int = 192 << 20) {
+                maxBytesPerTask: Int = 64 << 20) {
         self.persistsChunks = persistsChunks
         self.maxBytesPerTask = maxBytesPerTask
     }
