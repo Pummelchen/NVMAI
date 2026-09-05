@@ -55,6 +55,11 @@ struct NVMAIBench {
             return
         }
 
+        if kernelName.hasPrefix("head") {
+            try runHead(kernelName: kernelName, iterations: iterations, context: context)
+            return
+        }
+
         // Gated QKV shape (the dominant decode GEMV): qRows = 2*qDim = 8192,
         // kvRows = 2048, n = 2816.
         let qRows: UInt32 = 8192
@@ -600,5 +605,76 @@ struct NVMAIBench {
         print("bytes/launch=\(bytes) "
             + "achieved=\(String(format: "%.1f", gbPerSec)) GB/s "
             + "efficiency=\(String(format: "%.0f", gbPerSec / theoretical * 100))% of ~100 GB/s peak")
+    }
+
+    /// The vocabulary head GEMV at the 35B family's shape (248,320 x 2048),
+    /// the one GEMV every install runs at 8-bit. head_affine8 is the shipped
+    /// generic affine kernel at bits=8 (measured 89.9 GB/s, at the ceiling;
+    /// an 8-byte-per-lane specialization measured 91.7, noise, and was not
+    /// kept), head_affine4 the same kernel at bits=4 (51.8 GB/s), head_int4
+    /// the int4 head kernel (91.5). NVMAI_BENCH_HEAD_SHAPE=qwen38 takes
+    /// 248,320 x 2560.
+    private static func runHead(kernelName: String,
+                                iterations: Int,
+                                context: MetalContext) throws {
+        let device = context.device
+        let qwen38 = ProcessInfo.processInfo.environment["NVMAI_BENCH_HEAD_SHAPE"] == "qwen38"
+        let rows: UInt32 = 248_320
+        let n: UInt32 = qwen38 ? 2560 : 2048
+        let groupCount = Int(n) / 64
+        let bits: Int
+        let kernel: String
+        switch kernelName {
+        case "head_affine4": bits = 4; kernel = "affine_quant_gemv_simd"
+        case "head_int4": bits = 4; kernel = "dequant_int4_gemv_simd"
+        default: bits = 8; kernel = "affine_quant_gemv_simd"
+        }
+        let rowBytes = Int(n) * bits / 8
+        func makeBuffer(_ bytes: Int, _ value: UInt8) -> MTLBuffer {
+            let buf = device.makeBuffer(length: bytes, options: .storageModeShared)!
+            memset(buf.contents(), Int32(value), bytes)
+            return buf
+        }
+        let w = makeBuffer(Int(rows) * rowBytes, 0x5A)
+        let s = makeBuffer(Int(rows) * groupCount * 2, 0x3C)
+        let bb = makeBuffer(Int(rows) * groupCount * 2, 0x00)
+        let x = device.makeBuffer(length: Int(n) * 2, options: .storageModeShared)!
+        let xPtr = x.contents().assumingMemoryBound(to: UInt16.self)
+        for i in 0..<Int(n) { xPtr[i] = Float16(Float(i % 97 + 1) * 0.001).bitPattern }
+        let y = makeBuffer(Int(rows) * 2, 0)
+        let constants = kernel.hasPrefix("affine")
+            ? [MetalFunctionConstant(index: 100, value: .uint32(UInt32(bits)))] : []
+        let pso = try context.pipeline(kernel, constants: constants,
+                                       maxTotalThreadsPerThreadgroup: 256)
+        var rowsVar = rows
+        var nVar = n
+        let threadgroups = (Int(rows) + 7) / 8
+        let cb = context.queue.makeCommandBuffer()!
+        let enc = cb.makeComputeCommandEncoder()!
+        enc.setComputePipelineState(pso)
+        enc.setBuffer(w, offset: 0, index: 0)
+        enc.setBuffer(s, offset: 0, index: 1)
+        enc.setBuffer(bb, offset: 0, index: 2)
+        enc.setBuffer(x, offset: 0, index: 3)
+        enc.setBuffer(y, offset: 0, index: 4)
+        enc.setBytes(&rowsVar, length: 4, index: 5)
+        enc.setBytes(&nVar, length: 4, index: 6)
+        for _ in 0..<iterations {
+            enc.dispatchThreadgroups(MTLSize(width: threadgroups, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        }
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        let total = cb.gpuEndTime - cb.gpuStartTime
+        let per = total / Double(iterations)
+        let bytes = UInt64(rows) * UInt64(rowBytes + groupCount * 4)
+        let yPtr = y.contents().assumingMemoryBound(to: UInt16.self)
+        let y0 = Float(Float16(bitPattern: yPtr[0]))
+        let yLast = Float(Float16(bitPattern: yPtr[Int(rows) - 1]))
+        print("kernel=\(kernel) bits=\(bits) n=\(n) iterations=\(iterations) "
+            + "per_launch=\(String(format: "%.1f", per * 1_000_000))us "
+            + "achieved=\(String(format: "%.1f", Double(bytes) / per / 1e9)) GB/s "
+            + "y0=\(y0) yLast=\(yLast)")
     }
 }

@@ -53,10 +53,17 @@ public struct ModelProfile: Sendable, Equatable {
                                     sampling: GenerationDefaults.Sampling,
                                     topKSimd: Bool, attnSimd: Bool,
                                     hcFused: Bool, qsaSelect: Bool)] = [
-        // Qwen 3.6 35B-A3B: 128 slots at 4-bit hold the working set; the
-        // 8-bit cache is budget-capped to 64 and prefetch one deep pays there.
-        Key("qwen3.6-35b-a3b", 4): (8 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
-        Key("qwen3.6-35b-a3b", 8): (8 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        // Qwen 3.6 35B-A3B, slot A/B 2026-09-05 (essay, interleaved, swap
+        // sampled): 4-bit 128 slots 19.50 / 20.45, 160 (10 GiB) 20.55 / 21.04
+        // with swap flat, 192 (12 GiB) 21.61 / 21.60 but 1.5 GB pushed to swap
+        // on first contact -- 160 is the 24 GB default, 192 is one budget
+        // setting away. 8-bit 64 slots 9.85 / 9.72, 96 (12 GiB) 11.13 / 11.19,
+        // swap flat: the 8-bit hit rate was 79% at 64 (37% of the token in
+        // exposed expert reads) and the trace simulation halves the misses
+        // at 96. Prefetch one deep still pays at 8-bit; utility-tier depth 2
+        // measured a wash at both widths.
+        Key("qwen3.6-35b-a3b", 4): (10 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
+        Key("qwen3.6-35b-a3b", 8): (12 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),
         // Ornith 1.5: same geometry, measured the same as Qwen 3.6 in August.
         Key("ornith-1.5-35b-a3b", 4): (8 << 30, 0, 0, 4_096, GenerationDefaults.house, true, true, false, false),
         Key("ornith-1.5-35b-a3b", 8): (8 << 30, 1, 0, 4_096, GenerationDefaults.house, true, true, false, false),

@@ -139,7 +139,13 @@ public struct RuntimeConfiguration: Sendable, Equatable {
     // machine: 96 measured an 85.4% hit rate, 128 reaches 89.8% but needs
     // ~17 GB of cache and swaps, costing 68%. Without a value in between
     // there was no way to ask whether the extra hit rate is reachable.
-    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 40, 48, 64, 96, 112, 128]
+    //
+    // 160, 192 and 256 (2026-09-05): the 35B family at 128 slots per layer
+    // still spent a fifth of its 4-bit token in exposed expert reads (87.7%
+    // hit rate); its route traces put the ceiling at 192 (95.5%, the rest
+    // compulsory). 160 at 4-bit is 10 GiB and measured +4% with swap flat;
+    // 192 is 12 GiB, +8%, and pushed 1.5 GB to swap on a 24 GB machine.
+    public static let allowedExpertCacheSlots = [8, 16, 24, 32, 40, 48, 64, 96, 112, 128, 160, 192, 256]
 
     /// Target bytes for the routed-expert slot cache when no count is given.
     ///
