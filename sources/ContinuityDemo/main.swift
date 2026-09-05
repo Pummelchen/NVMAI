@@ -19,7 +19,16 @@ struct ContinuityDemo {
             switch argument {
             case "coding": try await coding()
             case "novel": try await novel()
-            case "diagnose": try await diagnose()
+            case "diagnose":
+                try await diagnose(keepingAt: CommandLine.arguments.dropFirst(2).first
+                                    .map { URL(fileURLWithPath: $0) })
+            case "inspect":
+                let path = CommandLine.arguments.dropFirst(2).first
+                guard let path else {
+                    print("usage: ContinuityDemo inspect <journal.ndjson>")
+                    exit(2)
+                }
+                try inspect(URL(fileURLWithPath: path))
             case nil, "all":
                 try await coding()
                 print("")
@@ -27,7 +36,7 @@ struct ContinuityDemo {
                 print("")
                 try await diagnose()
             default:
-                print("usage: ContinuityDemo [coding|novel|diagnose|all]")
+                print("usage: ContinuityDemo [coding|novel|diagnose|inspect <file>|all]")
                 exit(2)
             }
         } catch {
@@ -177,13 +186,18 @@ struct ContinuityDemo {
     // MARK: - Diagnostics
 
     /// What the stores cost, on a task the size of a real one.
-    static func diagnose() async throws {
+    /// - Parameter keepingAt: write the journal here and leave it behind, so
+    ///   it can be handed to `inspect`.
+    static func diagnose(keepingAt destination: URL? = nil) async throws {
         heading("Diagnostics")
 
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("continuity-demo-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("journal.ndjson")
+        let directory = destination?.deletingLastPathComponent()
+            ?? FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuity-demo-\(UUID().uuidString)")
+        if destination == nil {
+            defer { try? FileManager.default.removeItem(at: directory) }
+        }
+        let url = destination ?? directory.appendingPathComponent("journal.ndjson")
 
         let engine = ContinuityEngine(journal: try FileJournal(url: url))
         try await engine.start()
@@ -219,7 +233,10 @@ struct ContinuityDemo {
         row("memory items", "\(statistics.memoryItemCount)")
         row("journal records", "\(statistics.journaledRecords)")
         row("journal bytes", "\(bytes)")
+        row("memory bytes", "\(statistics.memoryBytes)")
+        row("log bytes resident", "\(statistics.logBytes)")
         row("100 sessions in", String(format: "%.0f ms", elapsed * 1000))
+        row("per session", String(format: "%.1f ms", elapsed * 10))
         row("assembled context", "\(context.estimatedTokenCount) tokens, "
             + "\(context.memoryItemIDs.count) of \(statistics.memoryItemCount) facts")
 
@@ -227,8 +244,82 @@ struct ContinuityDemo {
         let compacted = (try? FileManager.default
             .attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         row("after compaction", "\(compacted) bytes")
-        note("the context stays inside its budget while the log grows without bound; "
+        await engine.shutDown()
+        if let destination {
+            note("journal kept at \(destination.path)")
+        }
+        note("the context stays inside its budget while the record keeps everything; "
              + "that separation is the whole design")
+        note("per-session cost is dominated by the durability barrier taken at each "
+             + "session boundary, which is the point of taking it there and not per write")
+    }
+
+    // MARK: - Inspecting a journal
+
+    /// Read a journal file without opening it for writing.
+    ///
+    /// A store that only its own process can look at is a store nobody can
+    /// debug. This is deliberately read-only: it takes no lock, so it is safe
+    /// to point at the file of a server that is running.
+    static func inspect(_ url: URL) throws {
+        guard let contents = FileManager.default.contents(atPath: url.path) else {
+            print("no journal at \(url.path)")
+            exit(1)
+        }
+        let records = try FileJournal.read(contentsOf: url)
+
+        heading("Journal at \(url.lastPathComponent)")
+        var tasks: [UUID: ContinuityTask] = [:]
+        var sessions: [UUID: Session] = [:]
+        var items: [String: MemoryItem] = [:]
+        var versions = 0
+        var events = 0
+        var checkpoints = 0
+        for record in records {
+            switch record {
+            case .task(let task): tasks[task.id] = task
+            case .session(let session): sessions[session.id] = session
+            case .event: events += 1
+            case .memory(let item): items["\(item.taskID)/\(item.address)"] = item
+            case .memoryVersion: versions += 1
+            case .checkpoint(let log, let memory):
+                checkpoints += 1
+                for task in log.tasks { tasks[task.id] = task }
+                for session in log.sessions { sessions[session.id] = session }
+                for item in memory.items { items["\(item.taskID)/\(item.address)"] = item }
+                events += log.events.count
+                versions += memory.versions.count
+            }
+        }
+
+        row("file bytes", "\(contents.count)")
+        row("records", "\(records.count)")
+        row("checkpoints", "\(checkpoints)")
+        row("tasks", "\(tasks.count)")
+        row("sessions", "\(sessions.count)")
+        row("events", "\(events)")
+        row("memory items", "\(items.count)")
+        row("retained versions", "\(versions)")
+        let bytes = items.values.reduce(0) { $0 + $1.storageBytes }
+        row("memory bytes", "\(bytes)")
+
+        for task in tasks.values.sorted(by: { $0.createdAt < $1.createdAt }) {
+            print("")
+            print("  \(task.title)  [\(task.id)]")
+            if !task.objective.isEmpty { print("    objective: \(task.objective)") }
+            let mine = items.values.filter { $0.taskID == task.id }
+            for item in mine.sorted(by: { $0.address < $1.address }).prefix(40) {
+                let marker = item.status == .active ? " " : "\(item.status.rawValue.prefix(1))"
+                print("    \(marker) \(item.address) (v\(item.version)): "
+                      + "\(summarize(item.value))")
+            }
+            if mine.count > 40 { print("    ...and \(mine.count - 40) more") }
+        }
+    }
+
+    static func summarize(_ value: String, limit: Int = 90) -> String {
+        let flat = value.replacingOccurrences(of: "\n", with: " ")
+        return flat.count > limit ? String(flat.prefix(limit)) + "..." : flat
     }
 
     // MARK: - Output

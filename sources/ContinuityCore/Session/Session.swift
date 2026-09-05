@@ -76,6 +76,11 @@ public enum ContinuityError: Error, Equatable, CustomStringConvertible {
     case invalidNamespace(String, reason: String)
     case invalidKey(String, reason: String)
     case valueTooLarge(bytes: Int, limit: Int)
+    /// The task's store is at its budget. Distinct from `valueTooLarge`
+    /// because the caller can fix that one by writing less and cannot fix
+    /// this one at all: something has to be archived or forgotten first.
+    case storeFull(bytes: Int, limit: Int)
+    case tooManyItems(count: Int, limit: Int)
     case unknownMemoryItem(namespace: String, key: String)
     case versionConflict(namespace: String, key: String, expected: Int, actual: Int)
 
@@ -91,6 +96,11 @@ public enum ContinuityError: Error, Equatable, CustomStringConvertible {
         case .invalidKey(let value, let reason): return "invalid key '\(value)': \(reason)"
         case .valueTooLarge(let bytes, let limit):
             return "value is \(bytes) bytes; the limit is \(limit)"
+        case .storeFull(let bytes, let limit):
+            return "the store holds \(bytes) bytes and the budget is \(limit); "
+                + "archive or forget something first"
+        case .tooManyItems(let count, let limit):
+            return "the store holds \(count) items and the limit is \(limit)"
         case .unknownMemoryItem(let namespace, let key):
             return "no memory at \(namespace).\(key)"
         case .versionConflict(let namespace, let key, let expected, let actual):

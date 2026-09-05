@@ -13,6 +13,10 @@ import Foundation
 public actor TaskMemory {
     private var items: [UUID: [String: MemoryItem]] = [:]
     private var versions: [UUID: [String: [MemoryVersion]]] = [:]
+    /// Bytes held per task, kept incrementally. Recomputing it on every write
+    /// would make a write cost O(store), which is the shape of bug that only
+    /// shows up once someone has a large store.
+    private var bytes: [UUID: Int] = [:]
     private let limits: MemoryLimits
     /// Notified after every mutation so the engine can journal it without
     /// this actor knowing that persistence exists.
@@ -41,6 +45,7 @@ public actor TaskMemory {
                       value: String,
                       provenance: Provenance? = nil,
                       importance: Double? = nil,
+                      confidence: Double? = nil,
                       tags: [String]? = nil,
                       dependencies: [String]? = nil,
                       expectedVersion: Int? = nil,
@@ -66,41 +71,68 @@ public actor TaskMemory {
         }
 
         if existing == nil && taskItems.count >= limits.maxItemsPerTask {
-            throw ContinuityError.valueTooLarge(bytes: taskItems.count,
-                                                limit: limits.maxItemsPerTask)
+            throw ContinuityError.tooManyItems(count: taskItems.count,
+                                               limit: limits.maxItemsPerTask)
         }
 
-        let result: MemoryWriteResult
-        var archived: MemoryVersion?
+        // Build the new item first so the budget is checked against what the
+        // write would actually cost, then commit. A check against an estimate
+        // followed by a commit of something larger is how a budget is
+        // overshot.
+        let updated: MemoryItem
         if var item = existing {
-            archived = archiveVersion(of: item, taskID: taskID, status: .superseded)
             item.value = value
             item.version += 1
             item.updatedAt = now
             item.status = .active
             item.provenance = provenance ?? item.provenance
             if let importance { item.importance = min(max(importance, 0), 1) }
+            if let confidence { item.confidence = min(max(confidence, 0), 1) }
             if let tags { item.tags = tags }
             if let dependencies { item.dependencies = dependencies }
-            taskItems[address] = item
-            result = MemoryWriteResult(item: item, previousVersion: item.version - 1)
+            updated = item
         } else {
-            let item = MemoryItem(taskID: taskID,
-                                  namespace: namespace,
-                                  key: key,
-                                  value: value,
-                                  version: 1,
-                                  createdAt: now,
-                                  updatedAt: now,
-                                  provenance: provenance,
-                                  status: .active,
-                                  importance: importance,
-                                  tags: tags ?? [],
-                                  dependencies: dependencies ?? [])
-            taskItems[address] = item
-            result = MemoryWriteResult(item: item, previousVersion: nil)
+            updated = MemoryItem(taskID: taskID,
+                                 namespace: namespace,
+                                 key: key,
+                                 value: value,
+                                 version: 1,
+                                 createdAt: now,
+                                 updatedAt: now,
+                                 provenance: provenance,
+                                 status: .active,
+                                 importance: importance,
+                                 confidence: confidence,
+                                 tags: tags ?? [],
+                                 dependencies: dependencies ?? [])
         }
+
+        // The old value does not leave: it becomes a retained version, so a
+        // rewrite costs the new item plus an archived copy of the old one.
+        // The check does not predict the refund from a full version chain
+        // dropping its oldest entry, so it errs high, which is the safe
+        // direction for a budget.
+        let archivedCost = existing.map {
+            MemoryItem.overheadBytes + $0.namespace.utf8.count + $0.key.utf8.count
+                + $0.value.utf8.count
+        } ?? 0
+        let delta = updated.storageBytes - (existing?.storageBytes ?? 0) + archivedCost
+        let held = bytes[taskID] ?? 0
+        if delta > 0 && held + delta > limits.maxBytesPerTask {
+            throw ContinuityError.storeFull(bytes: held + delta,
+                                            limit: limits.maxBytesPerTask)
+        }
+
+        var archived: MemoryVersion?
+        if let item = existing {
+            archived = archiveVersion(of: item, taskID: taskID, status: .superseded)
+        }
+        taskItems[address] = updated
         items[taskID] = taskItems
+        bytes[taskID] = (bytes[taskID] ?? 0) + updated.storageBytes
+            - (existing?.storageBytes ?? 0)
+        let result = MemoryWriteResult(item: updated,
+                                       previousVersion: existing.map { $0.version })
         if let archived { await notify(.versioned(archived)) }
         await notify(.written(result))
         return result
@@ -231,6 +263,16 @@ public actor TaskMemory {
 
     public func count(taskID: UUID) -> Int { items[taskID]?.count ?? 0 }
 
+    /// Bytes this task's memory holds, live items and retained versions.
+    public func byteCount(taskID: UUID) -> Int { bytes[taskID] ?? 0 }
+
+    /// How full the task is, 0...1. Above about 0.9 a caller should be
+    /// archiving rather than waiting for the first refused write.
+    public func utilization(taskID: UUID) -> Double {
+        guard limits.maxBytesPerTask > 0 else { return 0 }
+        return min(1, Double(bytes[taskID] ?? 0) / Double(limits.maxBytesPerTask))
+    }
+
     // MARK: - Snapshot and restore
 
     /// The whole store, for persistence. Values are already `Sendable` and
@@ -252,6 +294,22 @@ public actor TaskMemory {
             let address = "\(version.namespace).\(version.key)"
             versions[version.taskID, default: [:]][address, default: []].append(version)
         }
+        recomputeBytes()
+    }
+
+    /// Rebuilds the byte counters from scratch. Only on restore, where there
+    /// is no incremental history to follow.
+    private func recomputeBytes() {
+        bytes = [:]
+        for (taskID, taskItems) in items {
+            bytes[taskID] = taskItems.values.reduce(0) { $0 + $1.storageBytes }
+        }
+        for (taskID, chains) in versions {
+            let total = chains.values.reduce(0) { running, chain in
+                running + chain.reduce(0) { $0 + $1.storageBytes }
+            }
+            bytes[taskID] = (bytes[taskID] ?? 0) + total
+        }
     }
 
     /// Drop a task entirely. The one true delete in the API, because a user
@@ -259,6 +317,7 @@ public actor TaskMemory {
     public func forget(taskID: UUID) {
         items[taskID] = nil
         versions[taskID] = nil
+        bytes[taskID] = nil
     }
 
     // MARK: - Internals
@@ -277,10 +336,14 @@ public actor TaskMemory {
                                     status: status)
         var chain = versions[taskID]?[item.address] ?? []
         chain.append(version)
+        var delta = version.storageBytes
         if chain.count > limits.maxVersionsPerAddress {
+            let dropped = chain.prefix(chain.count - limits.maxVersionsPerAddress)
+            delta -= dropped.reduce(0) { $0 + $1.storageBytes }
             chain.removeFirst(chain.count - limits.maxVersionsPerAddress)
         }
         versions[taskID, default: [:]][item.address] = chain
+        bytes[taskID] = (bytes[taskID] ?? 0) + delta
         return version
     }
 

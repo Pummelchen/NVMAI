@@ -142,11 +142,32 @@ thousand short facts and does not grow with the host:
 | Up to 16 GB | 512 MiB |
 | More than 16 GB | 1 GiB |
 
-Override with `NVMAI_MEMORY_CACHE_MIB`. The budget becomes a worst-case item
-bound: the ceiling divided by the largest permitted value, so the store cannot
-exceed what the machine was sized for even if every fact the model writes is
-enormous. Reaching the bound refuses writes rather than evicting, because
-silently dropping a fact the model relies on is the worse failure.
+Override with `NVMAI_MEMORY_CACHE_MIB`. The ceiling is enforced by counting
+actual bytes, and is split between the two stores:
+
+| Store | Share | At the limit |
+| --- | ---: | --- |
+| Curated facts | 1/4 | Refuses the write |
+| Session journal | 3/4 | Drops the oldest sessions from memory |
+
+The split is lopsided on purpose. A fact is a sentence the model chose to
+write; a turn is kilobytes of prose the engine captured for free, and it is the
+side that grows without limit. The behaviours differ for the same reason:
+silently dropping a fact the model relies on is the worse failure, so facts
+refuse and the caller archives to make room. The journal evicts from memory
+only — the dropped sessions remain in the file.
+
+### One writer per workspace
+
+A workspace's journal is held under an exclusive lock for as long as a server
+has it open. Start a second server on the same workspace and it runs *without*
+persistence rather than writing into the first one's file: two processes each
+holding their own copy of the state would see none of each other's writes and
+interleave their appends into something that replays as two braided histories.
+
+The second server logs the refusal, and the session prompt tells the model its
+writes will not outlive the session. The lock is released when the process
+exits, however it exits, so a crash never strands a workspace.
 
 ## Setup
 
@@ -167,8 +188,21 @@ NVMAI_MEMORY=1 NVMAI_MEMORY_DIR=/var/lib/nvmai \
   NVMAI_MEMORY_WORKSPACE=my-project tools/start-ornith-8bit.sh
 ```
 
-State lives in one file per workspace, `<dir>/<namespace>/<user>/<workspace>.ndjson`,
-created owner-readable only. Deleting a project's memory is deleting its file.
+State lives in one file per workspace,
+`<dir>/<namespace>/<user>/<workspace>.ndjson`, created owner-readable only
+inside an owner-only directory, with a `.lock` sidecar beside it. Deleting a
+project's memory is deleting its file, and backing it up is copying it.
+
+A workspace named per request gets its own file too, so one project's memory
+can never be written into another's.
+
+To look inside one, including while a server is running:
+
+```bash
+swift run ContinuityDemo inspect ~/.nvmai/memory/nvmai/$USER/<workspace>.ndjson
+```
+
+That read takes no lock. `jq` works on it as well; it is JSON lines.
 
 ## Failure behaviour
 
@@ -183,6 +217,12 @@ Memory never fails a completion.
   worse than one with no memory.
 - A torn final line in a journal, the normal result of a crash, is dropped on
   replay rather than stranding every good record behind it.
+- Writes are made durable at each session boundary and every 64 records, with a
+  full barrier rather than a plain `fsync`, which on Darwin only promises the
+  write reached the drive's cache. `NVMAI_MEMORY_FSYNC=1` makes every write
+  durable at about 5 ms each.
+- A workspace already held by another server means this one runs without
+  persistence and says so, rather than writing into a file someone else owns.
 
 ## Security
 
@@ -253,12 +293,18 @@ it retrieved memory is evidence rather than truth.
 - **Streaming shows memory rounds as text.** Content the model produces before
   a memory call is streamed as it happens. The tool calls are hidden; the
   words around them are not.
-- **The store is RAM-primary.** Everything for a workspace is held in memory
-  and journalled to a file; there is no partial load. That is right for a few
-  thousand short facts and would be wrong for a million.
-- **Search is linear.** Every query walks the workspace's records. At the
-  sizes the item ceiling permits this is not worth indexing, but it is a
-  linear scan, not a lookup.
+- **The store is RAM-primary.** A workspace's facts are held in memory and
+  journalled to a file; there is no partial load. That is right for a few
+  thousand short facts and would be wrong for a million. The session journal
+  is different: memory holds a bounded window and the file holds everything,
+  so reading further back means reading the file.
+- **Search is a bounded scan, not an index.** A query filters by namespace in
+  the engine and then ranks at most 2,000 records. That keeps one workspace's
+  cost from growing with how much it has stored, which is what the sorted-set
+  index did before, but it is still a scan.
+- **One process per workspace.** Enforced rather than assumed, but it is a
+  real constraint: several servers cannot share one memory the way they could
+  share a database.
 
 ## A future semantic layer
 

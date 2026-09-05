@@ -12,24 +12,24 @@ import ContinuityCore
 /// A scope maps to one continuity task, and a `MemoryKey` maps to one
 /// address. Keys are normalized on the way in, and the normalized form is
 /// what comes back out, so a key the model reads is always a key it can use.
+///
+/// The record is stored in the engine's own fields, not as a JSON blob in the
+/// value. That is what lets a text search be answered by the engine instead of
+/// by decoding every record in the workspace, keeps the value readable in the
+/// journal file, and stops importance and tags being written twice.
 public actor ContinuityStore: MemoryStore {
     private let engine: ContinuityEngine
     private let limits: MemoryLimits
     private var taskIDs: [MemoryScope: UUID] = [:]
     private var sessionIDs: [String: UUID] = [:]
-    private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
+    /// Continuity session to the caller's own session name, so a record can
+    /// report who wrote it without a lookup per read.
+    private var sessionLabels: [UUID: String] = [:]
+    private var labelsLoadedFor: Set<UUID> = []
 
     public init(engine: ContinuityEngine, limits: MemoryLimits = .init()) {
         self.engine = engine
         self.limits = limits
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
-        self.encoder = encoder
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        self.decoder = decoder
     }
 
     // MARK: - MemoryStore
@@ -41,6 +41,7 @@ public actor ContinuityStore: MemoryStore {
                                              namespace: address.namespace,
                                              key: address.key),
               item.status.isEligibleForContext else { return nil }
+        await loadLabels(taskID: taskID)
         return try record(from: item)
     }
 
@@ -49,15 +50,31 @@ public actor ContinuityStore: MemoryStore {
         let taskID = try await task(for: scope)
         let normalized = Self.normalize(record)
         let address = Self.address(for: normalized.key)
-        let payload = String(decoding: try encoder.encode(normalized), as: UTF8.self)
+        // The writing session, when the caller named one and a continuity
+        // session has been opened for it. That is what makes a record
+        // explainable later, so it is carried as provenance rather than
+        // duplicated into the value.
+        let sessionID = normalized.sourceSession.flatMap { sessionIDs[$0] }
         do {
-            try await engine.remember(taskID: taskID,
-                                      namespace: address.namespace,
-                                      key: address.key,
-                                      value: payload,
-                                      author: .model,
-                                      importance: normalized.importance,
-                                      tags: normalized.tags)
+            if let sessionID {
+                try await engine.remember(sessionID: sessionID,
+                                          namespace: address.namespace,
+                                          key: address.key,
+                                          value: normalized.value,
+                                          author: .model,
+                                          importance: normalized.importance,
+                                          confidence: normalized.confidence,
+                                          tags: normalized.tags)
+            } else {
+                try await engine.remember(taskID: taskID,
+                                          namespace: address.namespace,
+                                          key: address.key,
+                                          value: normalized.value,
+                                          author: .model,
+                                          importance: normalized.importance,
+                                          confidence: normalized.confidence,
+                                          tags: normalized.tags)
+            }
         } catch let error as ContinuityError {
             throw Self.translate(error)
         }
@@ -84,24 +101,51 @@ public actor ContinuityStore: MemoryStore {
     }
 
     public func list(prefix: String, limit: Int, in scope: MemoryScope) async throws -> [MemoryKey] {
-        let records = try await allRecords(in: scope)
-        let normalizedPrefix = Self.normalizeKeyText(prefix)
-        return records
-            .filter { normalizedPrefix.isEmpty || $0.key.rawValue.hasPrefix(normalizedPrefix) }
-            .sorted { $0.updatedAt > $1.updatedAt }
-            .prefix(min(limit, limits.maximumListResults))
-            .map(\.key)
+        let taskID = try await task(for: scope)
+        let bound = max(0, min(limit, limits.maximumListResults))
+        // The prefix is pushed into the engine as a namespace filter, so a
+        // list of one category does not walk the whole workspace. Only the
+        // last segment cannot be pushed down, because it is a key prefix
+        // rather than a namespace, and that residue is filtered here.
+        let plan = Self.pushDown(prefix: prefix)
+        var query = ContinuityCore.MemoryQuery(namespacePrefix: plan.namespace,
+                                               order: .recency)
+        if plan.isExact { query.limit = bound }
+        let items = await engine.recall(taskID: taskID, query)
+        return items
+            .filter { plan.matches(Self.keyText(for: $0)) }
+            .prefix(bound)
+            .compactMap { try? MemoryKey(validating: Self.keyText(for: $0)) }
     }
 
     public func search(_ query: MemoryQuery, in scope: MemoryScope) async throws -> [MemoryRecord] {
-        // Ranking happens here rather than in the engine because the engine
-        // stores the record as JSON, and a raw substring match over that would
-        // hit field names as readily as content.
-        let records = try await allRecords(in: scope)
+        let taskID = try await task(for: scope)
+        // Filtering is pushed into the engine; ranking stays here because it
+        // is the memory layer's own policy, shared with the reference store so
+        // the two cannot drift.
+        let plan = Self.pushDown(prefix: query.prefix ?? "")
+        let engineQuery = ContinuityCore.MemoryQuery(namespacePrefix: plan.namespace,
+                                                     text: query.text,
+                                                     tags: query.tags,
+                                                     minimumImportance: query.minimumImportance,
+                                                     limit: maximumScan,
+                                                     order: .recency)
+        let items = await engine.recall(taskID: taskID, engineQuery)
+            .filter { plan.matches(Self.keyText(for: $0)) }
+        await loadLabels(taskID: taskID)
+        let records = items.compactMap { try? record(from: $0) }
         var bounded = query
         bounded.limit = min(query.limit, limits.maximumSearchResults)
         return MemoryRanking.rank(records, for: bounded)
     }
+
+    /// Ceiling on how many records one query may consider.
+    ///
+    /// The Valkey backend read a bounded slice of a sorted-set index for the
+    /// same reason: one scope's cost must not grow with how much it has
+    /// stored. Ranking a few thousand short facts is cheap; ranking every
+    /// fact of a two-year project on every search is not.
+    private let maximumScan = 2_000
 
     @discardableResult
     public func append(_ text: String, to key: MemoryKey, in scope: MemoryScope) async throws
@@ -131,7 +175,17 @@ public actor ContinuityStore: MemoryStore {
                                                            externalID: session.id)
             sessionIDs[session.id] = continuity.id
         }
-        let records = try await allRecords(in: scope)
+        // Bounded at the engine, not after the fact: the bootstrap runs on
+        // every session start, and reading a whole workspace to then keep
+        // twenty records is the read that quietly gets slower for two years.
+        let candidates = max(limits.bootstrapRecords * 5, limits.bootstrapRecords)
+        let items = await engine.recall(
+            taskID: taskID,
+            ContinuityCore.MemoryQuery(statuses: [.active, .disputed],
+                                       limit: max(1, candidates),
+                                       order: .relevance))
+        await loadLabels(taskID: taskID)
+        let records = items.compactMap { try? record(from: $0) }
         return MemoryBootstrap.build(from: records, limits: limits)
     }
 
@@ -148,29 +202,72 @@ public actor ContinuityStore: MemoryStore {
 
     // MARK: - Internals
 
-    private func allRecords(in scope: MemoryScope) async throws -> [MemoryRecord] {
-        let taskID = try await task(for: scope)
-        let items = await engine.recall(taskID: taskID,
-                                        ContinuityCore.MemoryQuery(statuses: [.active, .disputed],
-                                                                   order: .recency))
-        return items.compactMap { try? record(from: $0) }
-    }
-
     private func record(from item: ContinuityCore.MemoryItem) throws -> MemoryRecord {
-        guard let data = item.value.data(using: .utf8) else {
-            throw MemoryError.backendUnavailable("stored value is not UTF-8")
-        }
-        if let decoded = try? decoder.decode(MemoryRecord.self, from: data) { return decoded }
-        // A value written by something other than this adapter is still worth
-        // returning; losing it because it is not in our envelope would be the
-        // worse failure.
         let key = try MemoryKey(validating: Self.keyText(for: item))
         return MemoryRecord(key: key,
                             value: item.value,
                             importance: item.importance,
+                            confidence: item.confidence,
                             tags: item.tags,
+                            sourceSession: item.provenance?.sessionID
+                                .flatMap { sessionLabels[$0] },
                             createdAt: item.createdAt,
                             updatedAt: item.updatedAt)
+    }
+
+    /// Fills the session-name map for a task, once.
+    ///
+    /// After a restart the map is empty but the sessions themselves carry
+    /// their external names, so one pass rebuilds it. Without this a record
+    /// written last week would come back saying nobody wrote it.
+    private func loadLabels(taskID: UUID) async {
+        guard !labelsLoadedFor.contains(taskID) else { return }
+        labelsLoadedFor.insert(taskID)
+        for session in await engine.sessions(taskID: taskID) {
+            if let external = session.externalID { sessionLabels[session.id] = external }
+        }
+    }
+
+    /// How a memory-key prefix is answered.
+    ///
+    /// The namespace filter is only ever an optimization: the residual check
+    /// runs against the reconstructed key and decides the result on its own.
+    /// Keeping it that way means a prefix that lands mid-segment, like `dec`
+    /// for `decisions/sync`, cannot silently be matched against the wrong
+    /// part of the address.
+    struct PrefixPlan: Equatable {
+        /// Namespace prefix the engine can filter on, when the prefix names
+        /// whole segments. Nil when it does not.
+        let namespace: String?
+        /// The normalized prefix, matched against the whole key.
+        let residual: String
+        /// True when the namespace filter alone is exactly the answer, so the
+        /// engine may apply the limit itself.
+        var isExact: Bool { namespace != nil && residual.hasSuffix("/") }
+
+        func matches(_ keyText: String) -> Bool {
+            residual.isEmpty || keyText.hasPrefix(residual)
+        }
+    }
+
+    static func pushDown(prefix: String) -> PrefixPlan {
+        let normalized = normalizeKeyText(prefix)
+        guard !normalized.isEmpty else { return PrefixPlan(namespace: nil, residual: "") }
+        let segments = normalized.split(separator: "/").map(String.init)
+        guard !segments.isEmpty else { return PrefixPlan(namespace: nil, residual: "") }
+        if normalized.hasSuffix("/") {
+            // Whole segments: "decisions/" is exactly the namespace k.decisions.
+            return PrefixPlan(namespace: (["k"] + segments).joined(separator: "."),
+                              residual: normalized)
+        }
+        guard segments.count >= 2 else {
+            // One partial segment. It could be a namespace or a bare key, so
+            // nothing can be pushed down without risking a wrong answer.
+            return PrefixPlan(namespace: nil, residual: normalized)
+        }
+        let leading = segments.dropLast()
+        return PrefixPlan(namespace: (["k"] + leading).joined(separator: "."),
+                          residual: normalized)
     }
 
     private func task(for scope: MemoryScope) async throws -> UUID {

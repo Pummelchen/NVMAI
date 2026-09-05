@@ -13,24 +13,39 @@ import ContinuityCore
 /// when it was not.
 public actor MemoryService {
     public private(set) var configuration: MemoryConfiguration
-    private let durableStore: (any MemoryStore)?
-    /// The in-process engine, when this service built one. Nil when a caller
-    /// injected its own store, which is how the tests drive it.
-    private let engine: ContinuityEngine?
+    /// A store supplied by the caller, used for every scope. Nil in normal
+    /// operation; this is how the tests drive the service.
+    private let injectedStore: (any MemoryStore)?
+    private let injectedJournal: (any SessionJournal)?
+    /// One engine, one journal file and one workspace lock per scope.
+    ///
+    /// Not one engine for the whole service: a request that names another
+    /// workspace would otherwise have its facts written into the default
+    /// workspace's file, so deleting one project's memory would delete
+    /// another's, and the "one file per workspace" the documentation promises
+    /// would be false.
+    private var workspaces: [MemoryScope: Workspace] = [:]
     private let localStore: InMemoryStore
     /// The engine-authored journal. Separate store, separate key space,
     /// separate trim policy: a busy week of sessions must never evict the
     /// facts the model wrote deliberately.
-    private let journal: (any SessionJournal)?
     private let journalFilter: JournalFilter
     /// Set once a durable operation has failed, so the session prompt can say
     /// memory is not persisting instead of the model assuming it is.
     private var isDegraded = false
-    private var engineStarted = false
-    /// False when the engine is running without a journal, so writes last
-    /// only as long as the process.
-    private var enginePersists = true
     private var log: @Sendable (MemoryLogEvent) -> Void
+
+    /// Everything one scope needs, created on first use.
+    private struct Workspace {
+        let store: any MemoryStore
+        let journal: (any SessionJournal)?
+        /// Nil when the caller injected its own store, in which case this
+        /// service owns no engine to close.
+        let engine: ContinuityEngine?
+        /// False when the engine has no journal behind it, so writes last
+        /// only as long as the process.
+        let persists: Bool
+    }
 
     public init(configuration: MemoryConfiguration,
                 durableStore: (any MemoryStore)? = nil,
@@ -40,31 +55,46 @@ public actor MemoryService {
         self.localStore = InMemoryStore(limits: configuration.limits)
         self.journalFilter = configuration.journalLimits.filter
         self.log = log
-        if let durableStore {
-            self.durableStore = durableStore
-            self.engine = nil
-        } else if configuration.isEnabled {
-            // One engine for both stores: the same file, the same restart,
-            // and a session that means the same thing to each of them.
-            let (engine, persists) = Self.makeEngine(configuration: configuration, log: log)
-            let store = ContinuityStore(engine: engine, limits: configuration.limits)
-            self.engine = engine
-            self.durableStore = store
-            self.enginePersists = persists
-        } else {
-            self.engine = nil
-            self.durableStore = nil
+        self.injectedStore = durableStore
+        self.injectedJournal = journal
+    }
+
+    /// The engine, store and journal for a scope, built on first use.
+    ///
+    /// Deferred rather than done in `init` because opening a journal is I/O
+    /// that can fail, and an initializer cannot report that to the caller who
+    /// will actually be affected by it.
+    private func workspace(for scope: MemoryScope) async -> Workspace? {
+        if let existing = workspaces[scope] { return existing }
+        guard configuration.isEnabled else { return nil }
+
+        if let injectedStore {
+            let workspace = Workspace(store: injectedStore, journal: injectedJournal,
+                                      engine: nil, persists: true)
+            workspaces[scope] = workspace
+            return workspace
         }
-        if let journal {
-            self.journal = journal
-        } else if configuration.isEnabled, configuration.journalEnabled,
-                  let engine = self.engine,
-                  let store = self.durableStore as? ContinuityStore {
-            self.journal = ContinuityJournalStore(engine: engine, store: store,
-                                                  limits: configuration.journalLimits)
-        } else {
-            self.journal = nil
+
+        let (engine, persists) = Self.makeEngine(configuration: configuration,
+                                                 scope: scope, log: log)
+        do {
+            try await engine.start()
+        } catch {
+            isDegraded = true
+            log(.degraded(operation: "start", detail: "\(error)"))
         }
+        let store = ContinuityStore(engine: engine, limits: configuration.limits)
+        var journal: (any SessionJournal)?
+        if let injectedJournal {
+            journal = injectedJournal
+        } else if configuration.journalEnabled {
+            journal = ContinuityJournalStore(engine: engine, store: store,
+                                             limits: configuration.journalLimits)
+        }
+        let workspace = Workspace(store: store, journal: journal, engine: engine,
+                                  persists: persists)
+        workspaces[scope] = workspace
+        return workspace
     }
 
     /// Builds the engine, with a journal file when one can be opened.
@@ -80,39 +110,30 @@ public actor MemoryService {
     ///   one thing memory must never get wrong.
     private static func makeEngine(
         configuration: MemoryConfiguration,
+        scope: MemoryScope,
         log: @Sendable (MemoryLogEvent) -> Void
     ) -> (engine: ContinuityEngine, persists: Bool) {
+        let budget = configuration.storage.budget
         let limits = ContinuityCore.MemoryLimits(
             maxValueBytes: configuration.limits.maximumValueBytes,
-            maxItemsPerTask: itemCeiling(for: configuration))
+            maxBytesPerTask: budget.factBytes)
         let engineConfiguration = ContinuityConfiguration(
             memoryLimits: limits,
+            sessionLogOptions: SessionLogOptions(maxBytesPerTask: budget.logBytes),
             journalsSessionContent: configuration.journalEnabled)
-        guard let scope = configuration.scope() else {
-            return (ContinuityEngine(configuration: engineConfiguration), false)
-        }
         do {
             let journal = try FileJournal(
                 url: configuration.storage.journalURL(for: scope),
                 synchronizesEveryWrite: configuration.storage.synchronizesEveryWrite)
             return (ContinuityEngine(configuration: engineConfiguration, journal: journal), true)
         } catch {
+            // A journal held by another server is the expected case here, not
+            // a broken install. Either way the session runs without
+            // persistence and says so rather than writing into a file someone
+            // else is also writing.
             log(.degraded(operation: "openJournal", detail: "\(error)"))
             return (ContinuityEngine(configuration: engineConfiguration), false)
         }
-    }
-
-    /// Turns the byte budget into an item ceiling.
-    ///
-    /// The bound is the worst case, every record at the maximum value size,
-    /// so the store cannot exceed the budget the machine was sized for even
-    /// when every fact the model writes is enormous.
-    static func itemCeiling(for configuration: MemoryConfiguration) -> Int {
-        guard let budget = configuration.storage.maximumMemoryBytes, budget > 0 else {
-            return 8192
-        }
-        let perItem = max(1, configuration.limits.maximumValueBytes)
-        return max(64, budget / perItem)
     }
 
     /// Records a completed turn. Content is filtered to substance here, so no
@@ -126,7 +147,7 @@ public actor MemoryService {
                            completionTokens: Int,
                            latencyMilliseconds: Int,
                            stopReason: String?) async {
-        guard let journal else { return }
+        guard let journal = await workspace(for: session.scope)?.journal else { return }
         let filteredPrompt = journalFilter.filter(prompt)
         let filteredReply = journalFilter.filter(reply)
         let turn = JournalTurn(session: session.session.id,
@@ -144,15 +165,43 @@ public actor MemoryService {
         log(.journaled(session: session.session.id, index: index, bytes: turn.byteCount))
     }
 
+    /// Close every workspace, flushing and releasing the workspace locks.
+    ///
+    /// A workspace's journal holds an exclusive lock for as long as it is
+    /// open, so a process that is finished with a workspace has to say so.
+    /// Leaving it to deallocation would make the moment another server can
+    /// take over depend on when ARC happens to release an actor.
+    public func shutDown() async {
+        for workspace in workspaces.values {
+            await workspace.engine?.shutDown()
+        }
+        workspaces.removeAll()
+    }
+
     /// The journal, for a caller that wants to read it back. Never used to
     /// build a prompt.
-    public func journalStore() -> (any SessionJournal)? { journal }
+    public func journalStore(for scope: MemoryScope? = nil) async -> (any SessionJournal)? {
+        guard let resolved = scope ?? configuration.scope() else { return nil }
+        return await workspace(for: resolved)?.journal
+    }
 
     public var isEnabled: Bool { configuration.isEnabled }
 
-    /// Whether writes are currently reaching durable storage. False once a
-    /// durable operation has failed and the local fallback took over.
-    public var isDurable: Bool { durableStore != nil && !isDegraded && enginePersists }
+    /// Whether writes reach durable storage in a scope. False once a durable
+    /// operation has failed, and false when the journal could not be opened
+    /// at all.
+    public func isDurable(in scope: MemoryScope) async -> Bool {
+        guard !isDegraded else { return false }
+        return await workspace(for: scope)?.persists ?? false
+    }
+
+    /// Whether the configuration's own scope is persisting.
+    public var isDurable: Bool {
+        get async {
+            guard let scope = configuration.scope() else { return false }
+            return await isDurable(in: scope)
+        }
+    }
 
     /// Starts a session and returns what the engine needs to install.
     ///
@@ -162,16 +211,15 @@ public actor MemoryService {
                              workspaceOverride: String? = nil,
                              modelID: String? = nil) async -> MemorySessionContext? {
         guard configuration.isEnabled else { return nil }
-        await startEngineIfNeeded()
         guard let scope = configuration.scope(workspaceOverride: workspaceOverride) else {
             log(.rejectedScope(workspaceOverride ?? configuration.workspace))
             return nil
         }
         let session = MemorySession(id: id, modelID: modelID)
         var bootstrap = MemoryBootstrap.empty
-        if let durableStore {
+        if let workspace = await workspace(for: scope) {
             do {
-                bootstrap = try await durableStore.sessionInit(session, in: scope)
+                bootstrap = try await workspace.store.sessionInit(session, in: scope)
                 isDegraded = false
             } catch {
                 isDegraded = true
@@ -182,29 +230,14 @@ public actor MemoryService {
         } else {
             bootstrap = (try? await localStore.sessionInit(session, in: scope)) ?? .empty
         }
+        let durable = await isDurable(in: scope)
         log(.sessionStarted(session: session.id, scope: scope,
                             bootstrapRecords: bootstrap.records.count,
                             bootstrapBytes: bootstrap.totalBytes))
         return MemorySessionContext(session: session,
                                     scope: scope,
                                     bootstrap: bootstrap,
-                                    isDurable: isDurable)
-    }
-
-    /// Replays the journal once, before the first session.
-    ///
-    /// Deferred rather than done in `init` because a replay is I/O and an
-    /// initializer that reads a file cannot report a failure to the caller
-    /// that will actually be affected by it.
-    private func startEngineIfNeeded() async {
-        guard let engine, !engineStarted else { return }
-        engineStarted = true
-        do {
-            try await engine.start()
-        } catch {
-            isDegraded = true
-            log(.degraded(operation: "start", detail: "\(error)"))
-        }
+                                    isDurable: durable)
     }
 
     /// The system-prompt fragment for a session.
@@ -230,7 +263,7 @@ public actor MemoryService {
                         arguments: [String: MemoryToolValue],
                         in context: MemorySessionContext) async -> MemoryToolResult {
         guard configuration.isEnabled else { return .failure("memory is disabled") }
-        let store = activeStore()
+        let store = await activeStore(for: context.scope)
         let result = await MemoryTools.execute(name: name,
                                                arguments: arguments,
                                                store: store,
@@ -241,7 +274,7 @@ public actor MemoryService {
             log(.toolFailed(tool: name, detail: message))
             // A durable backend that failed sends later work to the local
             // store, and marks the session as no longer persisting.
-            if durableStore != nil, !isDegraded, message.contains("unavailable")
+            if !isDegraded, message.contains("unavailable")
                 || message.contains("timed out") {
                 isDegraded = true
                 log(.degraded(operation: name, detail: message))
@@ -270,7 +303,7 @@ public actor MemoryService {
     /// Stores a consolidation the engine produced at session end.
     public func storeConsolidation(_ records: [MemoryRecord],
                                    in context: MemorySessionContext) async -> Int {
-        let store = activeStore()
+        let store = await activeStore(for: context.scope)
         var written = 0
         for record in records {
             var stamped = record
@@ -286,9 +319,9 @@ public actor MemoryService {
         return written
     }
 
-    private func activeStore() -> any MemoryStore {
-        guard let durableStore, !isDegraded else { return localStore }
-        return durableStore
+    private func activeStore(for scope: MemoryScope) async -> any MemoryStore {
+        guard !isDegraded, let workspace = await workspace(for: scope) else { return localStore }
+        return workspace.store
     }
 }
 

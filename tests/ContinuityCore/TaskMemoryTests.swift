@@ -272,3 +272,127 @@ actor MutationCollector {
     }
     func add(_ mutation: MemoryMutation) { mutations.append(mutation) }
 }
+
+/// The store's byte budget.
+///
+/// This replaced a bound derived from the largest permitted value, which at a
+/// 64 KiB cap and 200-byte facts refused writes at about a third of a percent
+/// of the memory it claimed to allow.
+@Suite struct MemoryBudgetTests {
+    @Test func bytesAreCountedNotEstimated() async throws {
+        let memory = TaskMemory()
+        let task = UUID()
+        #expect(await memory.byteCount(taskID: task) == 0)
+
+        let value = String(repeating: "x", count: 1000)
+        try await memory.write(taskID: task, namespace: "n", key: "k", value: value)
+        let held = await memory.byteCount(taskID: task)
+        // The value plus a bounded, honest overhead, not a multiple of the
+        // value cap.
+        #expect(held >= 1000)
+        #expect(held < 1000 + 512)
+    }
+
+    @Test func aRewriteChargesForTheRetainedVersion() async throws {
+        let memory = TaskMemory()
+        let task = UUID()
+        try await memory.write(taskID: task, namespace: "n", key: "k",
+                               value: String(repeating: "a", count: 500))
+        let afterFirst = await memory.byteCount(taskID: task)
+        try await memory.write(taskID: task, namespace: "n", key: "k",
+                               value: String(repeating: "b", count: 500))
+        let afterSecond = await memory.byteCount(taskID: task)
+        // History is not free, and a budget that pretended it was would be
+        // overrun by exactly the amount of history kept.
+        #expect(afterSecond > afterFirst)
+        #expect(afterSecond >= 1000)
+    }
+
+    @Test func theBudgetRefusesRatherThanEvicts() async throws {
+        let memory = TaskMemory(limits: MemoryLimits(maxValueBytes: 4096,
+                                                     maxBytesPerTask: 8192))
+        let task = UUID()
+        let chunk = String(repeating: "x", count: 1000)
+        var written = 0
+        var refused = false
+        for index in 0..<20 {
+            do {
+                try await memory.write(taskID: task, namespace: "n", key: "k\(index)",
+                                       value: chunk)
+                written += 1
+            } catch let error as ContinuityError {
+                guard case .storeFull = error else {
+                    Issue.record("expected storeFull, got \(error)")
+                    return
+                }
+                refused = true
+                break
+            }
+        }
+        #expect(refused)
+        #expect(written > 0)
+        #expect(await memory.byteCount(taskID: task) <= 8192)
+        // Nothing already written was dropped to make room. Silently losing a
+        // fact the model deliberately wrote is worse than refusing a new one.
+        #expect(await memory.count(taskID: task) == written)
+        #expect(await memory.value(taskID: task, namespace: "n", key: "k0") == chunk)
+    }
+
+    @Test func archivingAndForgettingReleaseTheirBytes() async throws {
+        let memory = TaskMemory()
+        let task = UUID()
+        try await memory.write(taskID: task, namespace: "n", key: "k",
+                               value: String(repeating: "x", count: 2000))
+        #expect(await memory.byteCount(taskID: task) > 2000)
+        // Archiving keeps the value on purpose, so it keeps costing.
+        try await memory.archive(taskID: task, namespace: "n", key: "k")
+        #expect(await memory.byteCount(taskID: task) > 2000)
+        // Forgetting the task is the delete, and it returns the bytes.
+        await memory.forget(taskID: task)
+        #expect(await memory.byteCount(taskID: task) == 0)
+    }
+
+    @Test func aTrimmedVersionChainReturnsItsBytes() async throws {
+        let memory = TaskMemory(limits: MemoryLimits(maxVersionsPerAddress: 2))
+        let task = UUID()
+        let chunk = String(repeating: "x", count: 1000)
+        for _ in 0..<10 {
+            try await memory.write(taskID: task, namespace: "n", key: "k", value: chunk)
+        }
+        // Two retained versions plus the live item, not ten.
+        let held = await memory.byteCount(taskID: task)
+        #expect(held < 4000)
+        #expect(await memory.history(taskID: task, namespace: "n", key: "k").count == 3)
+    }
+
+    @Test func restoringRecomputesTheCounters() async throws {
+        let memory = TaskMemory()
+        let task = UUID()
+        try await memory.write(taskID: task, namespace: "n", key: "k", value: "one")
+        try await memory.write(taskID: task, namespace: "n", key: "k", value: "two")
+        let snapshot = await memory.snapshot()
+        let expected = await memory.byteCount(taskID: task)
+
+        let restored = TaskMemory()
+        await restored.restore(snapshot)
+        #expect(await restored.byteCount(taskID: task) == expected)
+        // And the budget keeps working after a restore rather than starting
+        // from zero and allowing double the memory.
+        #expect(await restored.utilization(taskID: task) > 0)
+    }
+
+    @Test func theItemCountIsStillABackstop() async throws {
+        let memory = TaskMemory(limits: MemoryLimits(maxBytesPerTask: 1 << 30,
+                                                     maxItemsPerTask: 3))
+        let task = UUID()
+        for index in 0..<3 {
+            try await memory.write(taskID: task, namespace: "n", key: "k\(index)", value: "v")
+        }
+        await #expect(throws: ContinuityError.self) {
+            try await memory.write(taskID: task, namespace: "n", key: "k4", value: "v")
+        }
+        // An existing address can still be corrected at the ceiling; only new
+        // ones are refused.
+        try await memory.write(taskID: task, namespace: "n", key: "k0", value: "corrected")
+    }
+}

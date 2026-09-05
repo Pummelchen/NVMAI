@@ -143,12 +143,56 @@ completion exists.
 
 `FileJournal` writes JSON lines, owner-readable only, and replays on `start()`.
 A torn final line is dropped rather than stranding every good record behind it.
-`compactJournal()` collapses the file to a single checkpoint.
+`compactJournal()` collapses the file to a single checkpoint, written to a
+temporary file and renamed into place, so a crash during compaction leaves the
+old journal intact.
+
+**One writer per workspace.** A journal takes an exclusive advisory lock for as
+long as it is open. Without it, two processes on one file would each hold their
+own copy of the state, see none of the other's writes, and interleave their
+appends into something that replays as a braid of two histories. Opening a
+locked journal throws `JournalError.locked`; the right response is to run
+without persistence and say so, never to write anyway.
+
+The lock lives on a `.lock` sidecar so compaction can replace the journal
+without giving it up, and the kernel releases it however the process exits, so
+a crash never leaves a workspace that cannot be reopened. To hand a workspace
+over deliberately, call `await engine.shutDown()` — waiting for deallocation is
+not a contract anyone can rely on.
+
+Durability is a barrier at each session boundary plus every 64 records, using
+`F_FULLFSYNC` rather than `fsync`, which on Darwin only promises the write
+reached the drive's cache. `synchronizesEveryWrite` makes every append durable
+for callers who want that, and `flush()` takes the barrier on demand. A session
+boundary costs about 5 ms.
+
+To read a journal without disturbing a running server, `FileJournal.read(contentsOf:)`
+takes no lock. `swift run ContinuityDemo inspect <file>` prints what is in one.
+
+## Storage budgets
+
+Both stores are bounded by counted bytes, not by an item count multiplied by a
+worst case:
+
+```swift
+MemoryLimits(maxValueBytes: 16 << 10, maxBytesPerTask: 64 << 20)
+SessionLogOptions(maxBytesPerTask: 192 << 20)
+```
+
+They behave differently at the limit, on purpose. Facts **refuse** a write with
+`ContinuityError.storeFull`: silently dropping something the model deliberately
+wrote is worse than declining to add one, and the caller can archive to make
+room. The log **evicts**, dropping the oldest whole sessions from memory —
+they stay in the journal file, so this bounds what the process holds rather
+than what was recorded. The session currently in progress is never evicted.
+
+`memory.utilization(taskID:)` and `statistics()` report where a task stands.
 
 The session log holds complete prompts and replies. Treat it as sensitive
 application data:
 
 - Nothing in this package opens a socket. There is no telemetry and no upload.
+- The journal and its lock are created `0600`, inside a `0700` directory.
 - `ContinuityConfiguration.journalsSessionContent = false` keeps prompts and
   replies out of the file while still persisting memory.
 - `forget(taskID:)` deletes a task, its sessions, its log and its memory, then

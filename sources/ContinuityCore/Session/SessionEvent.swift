@@ -33,6 +33,35 @@ public struct SessionEvent: Identifiable, Codable, Sendable, Equatable {
         self.payload = payload
         self.responseID = responseID
     }
+
+    /// What this event occupies in the log's byte budget.
+    ///
+    /// The log is the part that actually grows: a fact is a sentence, a turn
+    /// is kilobytes of prose. Charging events by their real size is what lets
+    /// the two stores share one budget without the transcript quietly
+    /// crowding out the facts.
+    public var storageBytes: Int {
+        SessionEvent.overheadBytes + (payload.storageBytes)
+    }
+
+    /// Three UUIDs, a date, two enums and the array slot. Rounded up.
+    public static let overheadBytes = 128
+}
+
+extension SessionEventPayload {
+    var storageBytes: Int {
+        switch self {
+        case .none: return 0
+        case .text(let value): return value.utf8.count
+        case .response(let record):
+            return record.text.utf8.count + (record.model?.utf8.count ?? 0)
+                + (record.requestID?.utf8.count ?? 0) + (record.responseID?.utf8.count ?? 0)
+                + (record.finishReason?.utf8.count ?? 0) + 48
+        case .memory(let namespace, let key, _, _):
+            return namespace.utf8.count + key.utf8.count + 24
+        case .context: return 32
+        }
+    }
 }
 
 public enum SessionEventKind: String, Codable, Sendable, CaseIterable {

@@ -103,6 +103,7 @@ import Testing
             _ = try await engine.endSession(session.id)
             taskID = task.id
             sessionID = session.id
+            await engine.shutDown()
         }
 
         let reopened = ContinuityEngine(journal: try FileJournal(url: url))
@@ -146,6 +147,7 @@ import Testing
             try await engine.remember(sessionID: session.id, namespace: "n", key: "k",
                                       value: "survived")
             taskID = task.id
+            await engine.shutDown()
         }
 
         var raw = try Data(contentsOf: url)
@@ -177,6 +179,7 @@ import Testing
         let after = try await journal.replay()
         #expect(before > after.count)
         #expect(after.count == 1)
+        await engine.shutDown()
 
         let reopened = ContinuityEngine(journal: try FileJournal(url: url))
         try await reopened.start()
@@ -197,6 +200,7 @@ import Testing
 
         let contents = String(data: try Data(contentsOf: url), encoding: .utf8) ?? ""
         #expect(contents.contains("must not survive") == false)
+        await engine.shutDown()
 
         let reopened = ContinuityEngine(journal: try FileJournal(url: url))
         try await reopened.start()
@@ -224,6 +228,7 @@ import Testing
         #expect(contents.contains("a private sentence") == false)
         #expect(contents.contains("a private reply") == false)
         #expect(contents.contains("a durable fact"))
+        await engine.shutDown()
 
         let reopened = ContinuityEngine(journal: try FileJournal(url: url))
         try await reopened.start()

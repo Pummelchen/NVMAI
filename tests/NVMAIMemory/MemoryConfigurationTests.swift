@@ -134,18 +134,26 @@ import Testing
     }
 
     /// The byte budget the machine is sized for has to become a real bound,
-    /// or it is decoration. It becomes a worst-case item ceiling.
-    @Test func theCacheBudgetBecomesAnItemCeiling() {
+    /// or it is decoration. It is now counted, not derived from a worst case.
+    @Test func theCacheBudgetIsSplitBetweenTheTwoStores() {
         var configuration = MemoryConfiguration()
         configuration.storage.maximumMemoryBytes = 256 << 20
-        configuration.limits.maximumValueBytes = 64 << 10
-        #expect(MemoryService.itemCeiling(for: configuration) == 4096)
+        let split = configuration.storage.budget
+        #expect(split.factBytes == 64 << 20)
+        #expect(split.logBytes == 192 << 20)
+        #expect(split.factBytes + split.logBytes == 256 << 20)
 
+        // Facts get the protected quarter at every size, because a fact is a
+        // sentence the model chose to write and a turn is prose it captured
+        // for free.
         configuration.storage.maximumMemoryBytes = 1 << 30
-        #expect(MemoryService.itemCeiling(for: configuration) == 16384)
+        #expect(configuration.storage.budget.factBytes == 256 << 20)
 
-        // A tiny budget still leaves room to be useful.
+        // A budget too small to split still leaves both stores usable rather
+        // than yielding a zero that refuses every write.
         configuration.storage.maximumMemoryBytes = 1024
-        #expect(MemoryService.itemCeiling(for: configuration) == 64)
+        let tiny = configuration.storage.budget
+        #expect(tiny.factBytes >= 1 << 20)
+        #expect(tiny.logBytes >= 1 << 20)
     }
 }

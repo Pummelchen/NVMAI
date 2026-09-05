@@ -20,6 +20,11 @@ public actor SessionLog {
     private var sessionsByTask: [UUID: [UUID]] = [:]
     /// Streaming replies still open, keyed by response identifier.
     private var openResponses: [UUID: OpenResponse] = [:]
+    /// Bytes held per task, kept incrementally.
+    private var bytes: [UUID: Int] = [:]
+    /// Bytes held per session, so pruning one can be subtracted exactly
+    /// instead of triggering a full recount.
+    private var sessionBytes: [UUID: Int] = [:]
     private let options: SessionLogOptions
     private var observer: (@Sendable (SessionEvent) async -> Void)?
 
@@ -343,6 +348,21 @@ public actor SessionLog {
         for event in snapshot.events {
             events[event.sessionID, default: []].append(event)
         }
+        bytes = [:]
+        sessionBytes = [:]
+        for (sessionID, list) in events {
+            let cost = list.reduce(0) { $0 + $1.storageBytes }
+            sessionBytes[sessionID] = cost
+            if let taskID = sessions[sessionID]?.taskID {
+                bytes[taskID] = (bytes[taskID] ?? 0) + cost
+            }
+        }
+        // A journal that grew past the budget while a smaller one was
+        // configured is trimmed on the way in, not left to be discovered
+        // later by an allocation failure.
+        for taskID in Set(sessions.values.map(\.taskID)) {
+            enforceByteBudget(taskID: taskID)
+        }
     }
 
     /// Drop all but the newest `keeping` sessions of a task, oldest first.
@@ -357,11 +377,7 @@ public actor SessionLog {
         let ordered = (sessionsByTask[taskID] ?? [])
         guard ordered.count > keeping else { return [] }
         let doomed = Array(ordered.prefix(ordered.count - keeping))
-        for id in doomed {
-            events[id] = nil
-            sessions[id] = nil
-        }
-        sessionsByTask[taskID] = Array(ordered.suffix(keeping))
+        for id in doomed { drop(sessionID: id, taskID: taskID) }
         return doomed
     }
 
@@ -387,6 +403,12 @@ public actor SessionLog {
         }
         let removed = folded.count - kept.count
         events[sessionID] = kept
+        let retained = kept.reduce(0) { $0 + $1.storageBytes }
+        let previous = sessionBytes[sessionID] ?? 0
+        sessionBytes[sessionID] = retained
+        if let taskID = sessions[sessionID]?.taskID {
+            bytes[taskID] = max(0, (bytes[taskID] ?? 0) - previous + retained)
+        }
         return removed
     }
 
@@ -394,16 +416,54 @@ public actor SessionLog {
         for sessionID in sessionsByTask[taskID] ?? [] {
             events[sessionID] = nil
             sessions[sessionID] = nil
+            sessionBytes[sessionID] = nil
         }
         sessionsByTask[taskID] = nil
+        bytes[taskID] = nil
         tasks[taskID] = nil
     }
+
+    /// Bytes this task's log holds in memory.
+    public func byteCount(taskID: UUID) -> Int { bytes[taskID] ?? 0 }
 
     // MARK: - Internals
 
     private func append(_ event: SessionEvent) async {
         events[event.sessionID, default: []].append(event)
+        let cost = event.storageBytes
+        bytes[event.taskID] = (bytes[event.taskID] ?? 0) + cost
+        sessionBytes[event.sessionID] = (sessionBytes[event.sessionID] ?? 0) + cost
+        enforceByteBudget(taskID: event.taskID)
         if let observer { await observer(event) }
+    }
+
+    /// Drops the oldest sessions of a task until it is inside its budget.
+    ///
+    /// The log is RAM-primary and lives in the same process as a model that
+    /// wants every byte, so it cannot be allowed to grow with the length of a
+    /// project. Dropping the oldest whole session is the right unit: half a
+    /// session in memory is worse than none, and the journal file still has
+    /// everything for anyone reading back offline.
+    ///
+    /// The newest session is never dropped, even when a single session
+    /// exceeds the budget on its own. Evicting the conversation that is
+    /// currently happening would be the one eviction nobody could tolerate.
+    private func enforceByteBudget(taskID: UUID) {
+        guard options.maxBytesPerTask > 0 else { return }
+        while (bytes[taskID] ?? 0) > options.maxBytesPerTask,
+              let ordered = sessionsByTask[taskID], ordered.count > 1 {
+            drop(sessionID: ordered[0], taskID: taskID)
+        }
+    }
+
+    private func drop(sessionID: UUID, taskID: UUID) {
+        let cost = sessionBytes[sessionID] ?? 0
+        bytes[taskID] = max(0, (bytes[taskID] ?? 0) - cost)
+        sessionBytes[sessionID] = nil
+        events[sessionID] = nil
+        sessions[sessionID] = nil
+        sessionsByTask[taskID]?.removeAll { $0 == sessionID }
+        openResponses = openResponses.filter { $0.value.sessionID != sessionID }
     }
 
     private func requireSession(_ id: UUID) throws -> Session {
@@ -429,6 +489,13 @@ public actor SessionLog {
 }
 
 public struct SessionLogOptions: Sendable, Equatable {
+    /// Bytes of log a task may hold in memory. Zero disables the bound.
+    ///
+    /// The oldest whole sessions are dropped from memory when it is exceeded.
+    /// They remain in the journal file: this bounds what the process holds,
+    /// not what was recorded.
+    public var maxBytesPerTask: Int
+
     /// Write one event per streamed chunk in addition to the completed reply.
     ///
     /// Off by default. It exists for callers who need a partial reply to
@@ -436,8 +503,10 @@ public struct SessionLogOptions: Sendable, Equatable {
     /// must fold, which `transcript` and `turns` already do.
     public var persistsChunks: Bool
 
-    public init(persistsChunks: Bool = false) {
+    public init(persistsChunks: Bool = false,
+                maxBytesPerTask: Int = 192 << 20) {
         self.persistsChunks = persistsChunks
+        self.maxBytesPerTask = maxBytesPerTask
     }
 }
 

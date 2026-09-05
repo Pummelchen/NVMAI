@@ -32,6 +32,10 @@ import ContinuityCore
     @Test func setThenGetPreservesEveryField() async throws {
         let store = makeStore()
         let scope = try scope()
+        // A session first: the writing session is carried as provenance now,
+        // not copied into the value, so it can only be reported for a session
+        // the store has actually seen.
+        _ = try await store.sessionInit(MemorySession(id: "session-1"), in: scope)
         let record = MemoryRecord(key: try key("decisions/sync"),
                                   value: "FooManager stays; it prevents a sync race.",
                                   importance: 0.9,
@@ -43,9 +47,6 @@ import ContinuityCore
         let loaded = try #require(try await store.get(try key("decisions/sync"), in: scope))
         #expect(loaded.value == record.value)
         #expect(loaded.importance == 0.9)
-        // Confidence and the writing session have no home in the engine's own
-        // model, so the record is stored whole. If that ever regresses the
-        // fields come back nil rather than wrong.
         #expect(loaded.confidence == 0.6)
         #expect(loaded.sourceSession == "session-1")
         #expect(loaded.tags == ["sync", "concurrency"])
@@ -208,6 +209,7 @@ import ContinuityCore
                                              importance: 0.95,
                                              tags: ["architecture"]),
                                 in: scope)
+            await engine.shutDown()
         }
 
         let engine = ContinuityEngine(journal: try FileJournal(url: url))
@@ -234,6 +236,7 @@ import ContinuityCore
             let store = ContinuityStore(engine: engine)
             try await store.set(MemoryRecord(key: try key("temp/thing"), value: "x"), in: scope)
             #expect(try await store.delete(try key("temp/thing"), in: scope))
+            await engine.shutDown()
         }
 
         let engine = ContinuityEngine(journal: try FileJournal(url: url))
@@ -429,5 +432,229 @@ import ContinuityCore
         let context = try #require(await service.beginSession(id: "s1"))
         #expect(context.isDurable == false)
         #expect(await service.instructions(for: context).contains("lasts only for this session"))
+    }
+}
+
+/// Reads have to stay bounded and prefixes have to mean what they say.
+@Suite struct ContinuityStoreReadTests {
+    private func scope(_ workspace: String = "repo-a") throws -> MemoryScope {
+        try MemoryScope(namespace: "nvmai", user: "local", workspace: workspace)
+    }
+
+    private func key(_ raw: String) throws -> MemoryKey { try MemoryKey(validating: raw) }
+
+    @Test func prefixesArePushedDownOnlyWhenThatIsSafe() {
+        // Whole segments: the engine can answer it exactly.
+        let whole = ContinuityStore.pushDown(prefix: "decisions/")
+        #expect(whole.namespace == "k.decisions")
+        #expect(whole.isExact)
+
+        // A partial last segment: the namespace narrows the scan, the residual
+        // decides the answer.
+        let partial = ContinuityStore.pushDown(prefix: "decisions/sy")
+        #expect(partial.namespace == "k.decisions")
+        #expect(partial.isExact == false)
+        #expect(partial.matches("decisions/sync"))
+        #expect(partial.matches("decisions/other") == false)
+
+        // A partial first segment cannot be pushed down at all: "dec" could
+        // be the head of a namespace or of a bare key, and guessing wrong
+        // would silently return nothing.
+        let head = ContinuityStore.pushDown(prefix: "dec")
+        #expect(head.namespace == nil)
+        #expect(head.matches("decisions/sync"))
+
+        let empty = ContinuityStore.pushDown(prefix: "")
+        #expect(empty.namespace == nil)
+        #expect(empty.matches("anything"))
+    }
+
+    @Test func listMatchesPartialSegmentsCorrectly() async throws {
+        let store = ContinuityStore(engine: ContinuityEngine())
+        let scope = try scope()
+        for name in ["decisions/sync", "decisions/storage", "deploy/steps", "gotchas/build"] {
+            try await store.set(MemoryRecord(key: try key(name), value: name), in: scope)
+        }
+
+        let byCategory = try await store.list(prefix: "decisions/", limit: 10, in: scope)
+        #expect(Set(byCategory.map(\.rawValue)) == ["decisions/sync", "decisions/storage"])
+
+        // The case the naive push-down got wrong: a prefix that stops in the
+        // middle of the first segment.
+        let byHead = try await store.list(prefix: "de", limit: 10, in: scope)
+        #expect(Set(byHead.map(\.rawValue))
+                == ["decisions/sync", "decisions/storage", "deploy/steps"])
+
+        let byPartialKey = try await store.list(prefix: "decisions/st", limit: 10, in: scope)
+        #expect(byPartialKey.map(\.rawValue) == ["decisions/storage"])
+
+        #expect(try await store.list(prefix: "nothing", limit: 10, in: scope).isEmpty)
+    }
+
+    /// The record used to be stored as a JSON envelope, so a search for a
+    /// word that appears in the metadata would match every record in the
+    /// workspace.
+    @Test func searchDoesNotMatchTheStorageFormat() async throws {
+        let store = ContinuityStore(engine: ContinuityEngine())
+        let scope = try scope()
+        try await store.set(MemoryRecord(key: try key("notes/a"), value: "the palette is warm",
+                                         importance: 0.5, tags: ["colour"]),
+                            in: scope)
+        try await store.set(MemoryRecord(key: try key("notes/b"), value: "the sync race",
+                                         importance: 0.5),
+                            in: scope)
+
+        for term in ["importance", "createdAt", "updatedAt", "tags", "value"] {
+            let hits = try await store.search(MemoryQuery(text: term, limit: 10), in: scope)
+            #expect(hits.isEmpty, "'\(term)' is a field name, not content")
+        }
+        #expect(try await store.search(MemoryQuery(text: "palette", limit: 10), in: scope)
+                    .count == 1)
+    }
+
+    @Test func theBootstrapReadsABoundedSlice() async throws {
+        let limits = NVMAIMemory.MemoryLimits(bootstrapRecords: 5, bootstrapBytes: 1 << 20)
+        let store = ContinuityStore(engine: ContinuityEngine(), limits: limits)
+        let scope = try scope()
+        for index in 0..<200 {
+            try await store.set(MemoryRecord(key: try key("k\(index)"),
+                                             value: "value \(index)",
+                                             importance: Double(index) / 200),
+                                in: scope)
+        }
+        let bootstrap = try await store.sessionInit(MemorySession(id: "s1"), in: scope)
+        #expect(bootstrap.records.count == 5)
+        // Ranked by importance, so the slice that is read is the one worth
+        // reading rather than whatever sorted first.
+        #expect(bootstrap.records.first?.key.rawValue == "k199")
+    }
+
+    @Test func theValueIsStoredAsWrittenNotWrapped() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("plain-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("journal.ndjson")
+        let engine = ContinuityEngine(journal: try FileJournal(url: url))
+        try await engine.start()
+        let store = ContinuityStore(engine: engine)
+        try await store.set(MemoryRecord(key: try key("decisions/sync"),
+                                         value: "FooManager prevents a race"),
+                            in: try scope())
+        await engine.shutDown()
+
+        // Readable in the file, which is what makes a journal inspectable
+        // with ordinary tools.
+        let contents = String(data: try Data(contentsOf: url), encoding: .utf8) ?? ""
+        #expect(contents.contains("FooManager prevents a race"))
+        #expect(contents.contains("\\\"value\\\"") == false)
+    }
+}
+
+/// One workspace, one file, one writer.
+@Suite struct MemoryWorkspaceIsolationTests {
+    private func configuration(directory: URL,
+                               workspace: String = "repo-a") -> MemoryConfiguration {
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = workspace
+        configuration.user = "local"
+        configuration.namespace = "nvmai"
+        configuration.storage.directory = directory
+        return configuration
+    }
+
+    private func temporaryDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvmai-ws-\(UUID().uuidString)")
+    }
+
+    /// A request that names another workspace used to have its facts written
+    /// into the default workspace's file, so deleting one project's memory
+    /// would have deleted another's.
+    @Test func perRequestWorkspacesGetTheirOwnFile() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var configuration = configuration(directory: directory)
+        configuration.allowsPerRequestWorkspace = true
+
+        let service = MemoryService(configuration: configuration)
+        let home = try #require(await service.beginSession(id: "s1"))
+        let other = try #require(await service.beginSession(id: "s2",
+                                                            workspaceOverride: "repo-b"))
+        #expect(home.scope.workspace == "repo-a")
+        #expect(other.scope.workspace == "repo-b")
+
+        _ = await service.execute(name: "memory_set",
+                                  arguments: ["key": .string("here"),
+                                              "value": .string("belongs to repo-a")],
+                                  in: home)
+        _ = await service.execute(name: "memory_set",
+                                  arguments: ["key": .string("here"),
+                                              "value": .string("belongs to repo-b")],
+                                  in: other)
+        await service.shutDown()
+
+        let first = directory.appendingPathComponent("nvmai/local/repo-a.ndjson")
+        let second = directory.appendingPathComponent("nvmai/local/repo-b.ndjson")
+        #expect(FileManager.default.fileExists(atPath: first.path))
+        #expect(FileManager.default.fileExists(atPath: second.path))
+
+        let a = String(data: try Data(contentsOf: first), encoding: .utf8) ?? ""
+        let b = String(data: try Data(contentsOf: second), encoding: .utf8) ?? ""
+        #expect(a.contains("belongs to repo-a"))
+        #expect(a.contains("belongs to repo-b") == false)
+        #expect(b.contains("belongs to repo-b"))
+        #expect(b.contains("belongs to repo-a") == false)
+    }
+
+    /// Two servers launched from one directory. The second must not write
+    /// into the first's file, and must not claim its writes will last.
+    @Test func aSecondServerOnOneWorkspaceRunsWithoutPersistence() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configuration = configuration(directory: directory)
+
+        let first = MemoryService(configuration: configuration)
+        let firstContext = try #require(await first.beginSession(id: "s1"))
+        #expect(firstContext.isDurable)
+        _ = await first.execute(name: "memory_set",
+                                arguments: ["key": .string("k"), "value": .string("from first")],
+                                in: firstContext)
+
+        let second = MemoryService(configuration: configuration)
+        let secondContext = try #require(await second.beginSession(id: "s2"))
+        #expect(secondContext.isDurable == false)
+        // And it says so where the model will read it.
+        let instructions = await second.instructions(for: secondContext)
+        #expect(instructions.contains("lasts only for this session"))
+
+        // Its writes work for the session and do not reach the other's file.
+        _ = await second.execute(name: "memory_set",
+                                 arguments: ["key": .string("k2"),
+                                             "value": .string("from second")],
+                                 in: secondContext)
+        await first.shutDown()
+        await second.shutDown()
+
+        let file = directory.appendingPathComponent("nvmai/local/repo-a.ndjson")
+        let contents = String(data: try Data(contentsOf: file), encoding: .utf8) ?? ""
+        #expect(contents.contains("from first"))
+        #expect(contents.contains("from second") == false)
+    }
+
+    @Test func shuttingDownHandsTheWorkspaceOver() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configuration = configuration(directory: directory)
+
+        let first = MemoryService(configuration: configuration)
+        let context = try #require(await first.beginSession(id: "s1"))
+        #expect(context.isDurable)
+        await first.shutDown()
+
+        let second = MemoryService(configuration: configuration)
+        let handedOver = try #require(await second.beginSession(id: "s2"))
+        #expect(handedOver.isDurable)
+        await second.shutDown()
     }
 }

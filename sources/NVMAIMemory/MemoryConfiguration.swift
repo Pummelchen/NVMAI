@@ -30,6 +30,21 @@ public struct ContinuityStorageConfiguration: Sendable, Equatable {
             .appendingPathComponent("memory", isDirectory: true)
     }
 
+    /// How the ceiling is divided between the two stores.
+    ///
+    /// Facts and turns compete for one budget and are not comparable: a fact
+    /// is a sentence that took a model deliberate effort to write, a turn is
+    /// kilobytes of prose the engine captured for free. Turns are also the
+    /// side that grows without limit. So the split is deliberately lopsided
+    /// and the facts' share is the protected one.
+    public var budget: (factBytes: Int, logBytes: Int) {
+        guard let total = maximumMemoryBytes, total > 0 else {
+            return (factBytes: 64 << 20, logBytes: 192 << 20)
+        }
+        let facts = max(1 << 20, total / 4)
+        return (factBytes: facts, logBytes: max(1 << 20, total - facts))
+    }
+
     /// The journal file for a scope. One file per workspace, so deleting a
     /// project's memory is deleting a file rather than editing a shared one.
     public func journalURL(for scope: MemoryScope) -> URL {

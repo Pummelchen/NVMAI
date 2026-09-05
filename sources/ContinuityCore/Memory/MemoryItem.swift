@@ -20,6 +20,9 @@ public struct MemoryItem: Identifiable, Codable, Sendable, Equatable {
     public var status: MemoryStatus
     /// Assembler ranking hint, 0...1. Absent means ordinary.
     public var importance: Double?
+    /// How sure the writer was, 0...1. Reported on retrieval; nothing filters
+    /// on it, because a low-confidence memory is still evidence.
+    public var confidence: Double?
     public var tags: [String]
     /// Other addresses this one depends on, as "namespace.key". The assembler
     /// pulls these in with the item so a decision never arrives without the
@@ -37,6 +40,7 @@ public struct MemoryItem: Identifiable, Codable, Sendable, Equatable {
                 provenance: Provenance? = nil,
                 status: MemoryStatus = .active,
                 importance: Double? = nil,
+                confidence: Double? = nil,
                 tags: [String] = [],
                 dependencies: [String] = []) {
         self.id = id
@@ -50,6 +54,7 @@ public struct MemoryItem: Identifiable, Codable, Sendable, Equatable {
         self.provenance = provenance
         self.status = status
         self.importance = importance.map { min(max($0, 0), 1) }
+        self.confidence = confidence.map { min(max($0, 0), 1) }
         self.tags = tags
         self.dependencies = dependencies
     }
@@ -62,6 +67,37 @@ public struct MemoryItem: Identifiable, Codable, Sendable, Equatable {
     /// assembler needs a bound, not a tokenizer.
     public var estimatedTokens: Int {
         max(1, (address.count + value.count) / 4 + 2)
+    }
+
+    /// What this occupies, for the store's byte budget.
+    ///
+    /// Counted rather than estimated from a worst case, because a budget
+    /// derived from the largest permitted value is not a budget: with a 64 KiB
+    /// value cap and 200-byte facts it would refuse writes at a fraction of a
+    /// percent of the memory it claims to allow.
+    ///
+    /// `MemoryItem.overheadBytes` covers the identifiers, dates, status and
+    /// the dictionary entry holding it. It does not have to be exact; it has
+    /// to be an honest constant rather than a multiplier hiding a guess.
+    public var storageBytes: Int {
+        var total = MemoryItem.overheadBytes
+        total += namespace.utf8.count + key.utf8.count + value.utf8.count
+        for tag in tags { total += tag.utf8.count + 8 }
+        for dependency in dependencies { total += dependency.utf8.count + 8 }
+        return total
+    }
+
+    /// Two UUIDs, three dates, a version, two optional doubles, a status, and
+    /// the dictionary slot. Rounded up.
+    public static let overheadBytes = 160
+}
+
+public extension MemoryVersion {
+    /// What a retained version occupies. Versions are charged to the same
+    /// budget as live items: history that is never accounted for is history
+    /// that grows until something else fails.
+    var storageBytes: Int {
+        MemoryItem.overheadBytes + namespace.utf8.count + key.utf8.count + value.utf8.count
     }
 }
 

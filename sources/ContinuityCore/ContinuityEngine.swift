@@ -112,7 +112,31 @@ public actor ContinuityEngine {
     public func endSession(_ id: UUID) async throws -> Session {
         let session = try await sessionLog.endSession(id)
         try await record(.session(session))
+        // A session boundary is the natural durability point: it is the
+        // moment where losing the last few records would actually cost
+        // something, and it is rare enough that the barrier is free.
+        try? await flush()
         return session
+    }
+
+    /// Force everything written so far to disk.
+    public func flush() async throws {
+        guard let journal = journal as? FileJournal else { return }
+        try await journal.sync()
+    }
+
+    /// Flush, close the journal and release the workspace lock.
+    ///
+    /// A `FileJournal` holds an exclusive lock on its workspace for as long
+    /// as it exists, so a caller that wants to hand the workspace to another
+    /// engine — or to another process — has to say when it is finished.
+    /// Waiting for deallocation is not a contract anyone can rely on.
+    ///
+    /// The engine keeps working afterwards; it simply stops persisting.
+    public func shutDown() async {
+        try? await flush()
+        guard let journal = journal as? FileJournal else { return }
+        try? await journal.shutDown()
     }
 
     // MARK: - Recording
@@ -176,6 +200,7 @@ public actor ContinuityEngine {
                          author: ProvenanceAuthor = .model,
                          eventID: UUID? = nil,
                          importance: Double? = nil,
+                         confidence: Double? = nil,
                          tags: [String]? = nil,
                          dependencies: [String]? = nil,
                          expectedVersion: Int? = nil) async throws -> MemoryWriteResult {
@@ -189,6 +214,7 @@ public actor ContinuityEngine {
                                             value: value,
                                             provenance: provenance,
                                             importance: importance,
+                                            confidence: confidence,
                                             tags: tags,
                                             dependencies: dependencies,
                                             expectedVersion: expectedVersion)
@@ -204,6 +230,7 @@ public actor ContinuityEngine {
                          value: String,
                          author: ProvenanceAuthor = .engine,
                          importance: Double? = nil,
+                         confidence: Double? = nil,
                          tags: [String]? = nil,
                          dependencies: [String]? = nil) async throws -> MemoryWriteResult {
         guard await sessionLog.task(taskID) != nil else {
@@ -215,6 +242,7 @@ public actor ContinuityEngine {
                                       value: value,
                                       provenance: Provenance(author: author),
                                       importance: importance,
+                                      confidence: confidence,
                                       tags: tags,
                                       dependencies: dependencies)
     }
@@ -332,16 +360,22 @@ public actor ContinuityEngine {
         var sessionCount = 0
         var eventCount = 0
         var itemCount = 0
+        var memoryBytes = 0
+        var logBytes = 0
         for task in tasks {
             let sessions = await sessionLog.sessions(taskID: task.id)
             sessionCount += sessions.count
             eventCount += await sessionLog.events(taskID: task.id).count
             itemCount += await memory.count(taskID: task.id)
+            memoryBytes += await memory.byteCount(taskID: task.id)
+            logBytes += await sessionLog.byteCount(taskID: task.id)
         }
         return ContinuityStatistics(taskCount: tasks.count,
                                     sessionCount: sessionCount,
                                     eventCount: eventCount,
                                     memoryItemCount: itemCount,
+                                    memoryBytes: memoryBytes,
+                                    logBytes: logBytes,
                                     journaledRecords: journaledRecords)
     }
 
@@ -459,5 +493,10 @@ public struct ContinuityStatistics: Sendable, Equatable {
     public let sessionCount: Int
     public let eventCount: Int
     public let memoryItemCount: Int
+    /// Bytes of task memory held in this process.
+    public let memoryBytes: Int
+    /// Bytes of session log held in this process. The journal file may hold
+    /// more; this is what is resident.
+    public let logBytes: Int
     public let journaledRecords: Int
 }

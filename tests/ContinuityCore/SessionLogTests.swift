@@ -183,3 +183,127 @@ actor EventCollector {
     var kinds: [SessionEventKind] { events.map(\.kind) }
     func add(_ event: SessionEvent) { events.append(event) }
 }
+
+/// The log's memory bound.
+///
+/// The log is the half that actually grows: a fact is a sentence, a turn is
+/// kilobytes of prose. In this process that memory is competing with model
+/// weights, so it cannot be allowed to grow with the length of a project.
+@Suite struct SessionLogBudgetTests {
+    private func turnBytes(_ size: Int) -> String { String(repeating: "x", count: size) }
+
+    @Test func bytesAreTrackedPerTask() async throws {
+        let log = SessionLog()
+        let task = await log.createTask(title: "T")
+        let session = try await log.beginSession(taskID: task.id)
+        #expect(await log.byteCount(taskID: task.id) > 0)
+        let before = await log.byteCount(taskID: task.id)
+        _ = try await log.recordUserPrompt(sessionID: session.id, text: turnBytes(4000))
+        let after = await log.byteCount(taskID: task.id)
+        #expect(after - before >= 4000)
+    }
+
+    @Test func theOldestSessionsAreDroppedWhenTheBudgetIsExceeded() async throws {
+        let log = SessionLog(options: SessionLogOptions(maxBytesPerTask: 40_000))
+        let task = await log.createTask(title: "Long project")
+        var sessions: [UUID] = []
+        for index in 0..<20 {
+            let session = try await log.beginSession(taskID: task.id)
+            sessions.append(session.id)
+            _ = try await log.recordUserPrompt(sessionID: session.id, text: "prompt \(index)")
+            _ = try await log.recordAssistantResponse(
+                sessionID: session.id, ResponseRecord(text: turnBytes(4000)))
+            _ = try await log.endSession(session.id)
+        }
+
+        #expect(await log.byteCount(taskID: task.id) <= 40_000)
+        let live = await log.sessions(taskID: task.id)
+        #expect(live.count < 20)
+        #expect(live.isEmpty == false)
+        // The newest survive: dropping the recent past to keep the distant
+        // past would be the wrong direction.
+        #expect(live.last?.id == sessions.last)
+        #expect(await log.session(sessions[0]) == nil)
+        #expect(await log.events(sessionID: sessions[0]).isEmpty)
+    }
+
+    /// Evicting the conversation that is currently happening is the one
+    /// eviction nobody could tolerate, so a single oversized session is kept
+    /// even when it exceeds the budget on its own.
+    @Test func theNewestSessionIsNeverDropped() async throws {
+        let log = SessionLog(options: SessionLogOptions(maxBytesPerTask: 1000))
+        let task = await log.createTask(title: "T")
+        let session = try await log.beginSession(taskID: task.id)
+        for index in 0..<10 {
+            _ = try await log.recordUserPrompt(sessionID: session.id, text: turnBytes(2000))
+            _ = try await log.recordAssistantResponse(
+                sessionID: session.id, ResponseRecord(text: "reply \(index)"))
+        }
+        #expect(await log.sessions(taskID: task.id).count == 1)
+        #expect(await log.turns(taskID: task.id).count == 10)
+        #expect(await log.byteCount(taskID: task.id) > 1000)
+    }
+
+    @Test func trimmingTurnsReturnsTheirBytes() async throws {
+        let log = SessionLog()
+        let task = await log.createTask(title: "T")
+        let session = try await log.beginSession(taskID: task.id)
+        for index in 0..<10 {
+            _ = try await log.recordUserPrompt(sessionID: session.id, text: turnBytes(1000))
+            _ = try await log.recordAssistantResponse(
+                sessionID: session.id, ResponseRecord(text: "reply \(index)"))
+        }
+        let before = await log.byteCount(taskID: task.id)
+        _ = await log.pruneTurns(sessionID: session.id, keeping: 2)
+        let after = await log.byteCount(taskID: task.id)
+        #expect(after < before)
+        #expect(await log.turns(taskID: task.id).count == 2)
+    }
+
+    @Test func prunedSessionsReturnTheirBytes() async throws {
+        let log = SessionLog()
+        let task = await log.createTask(title: "T")
+        for index in 0..<5 {
+            let session = try await log.beginSession(taskID: task.id)
+            _ = try await log.recordUserPrompt(sessionID: session.id, text: turnBytes(1000))
+            _ = try await log.endSession(session.id)
+            _ = index
+        }
+        let before = await log.byteCount(taskID: task.id)
+        _ = await log.pruneSessions(taskID: task.id, keeping: 2)
+        let after = await log.byteCount(taskID: task.id)
+        #expect(after < before)
+        #expect(await log.sessions(taskID: task.id).count == 2)
+    }
+
+    /// A journal written under a larger budget must not be able to blow past
+    /// a smaller one just by being replayed into it.
+    @Test func restoringTrimsToTheConfiguredBudget() async throws {
+        let generous = SessionLog(options: SessionLogOptions(maxBytesPerTask: 0))
+        let task = await generous.createTask(title: "T")
+        for index in 0..<20 {
+            let session = try await generous.beginSession(taskID: task.id)
+            _ = try await generous.recordUserPrompt(sessionID: session.id,
+                                                    text: turnBytes(4000))
+            _ = try await generous.endSession(session.id)
+            _ = index
+        }
+        let snapshot = await generous.snapshot()
+
+        let bounded = SessionLog(options: SessionLogOptions(maxBytesPerTask: 20_000))
+        await bounded.restore(snapshot)
+        #expect(await bounded.byteCount(taskID: task.id) <= 20_000)
+        #expect(await bounded.sessions(taskID: task.id).count < 20)
+    }
+
+    @Test func zeroDisablesTheBound() async throws {
+        let log = SessionLog(options: SessionLogOptions(maxBytesPerTask: 0))
+        let task = await log.createTask(title: "T")
+        for _ in 0..<10 {
+            let session = try await log.beginSession(taskID: task.id)
+            _ = try await log.recordUserPrompt(sessionID: session.id, text: turnBytes(4000))
+            _ = try await log.endSession(session.id)
+        }
+        #expect(await log.sessions(taskID: task.id).count == 10)
+    }
+}
