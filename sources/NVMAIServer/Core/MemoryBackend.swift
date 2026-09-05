@@ -51,6 +51,16 @@ public actor MemoryBackend: ServerInferenceBackend {
     /// A session that rolled over before its idle timer fired. Consolidated
     /// as soon as the current request has returned, never before.
     private var pendingAfterTurn: [MemoryScope: MemorySessionContext] = [:]
+    /// One generation at a time through this backend.
+    ///
+    /// The HTTP layer admits one request at a time, but a consolidation is
+    /// not an HTTP request: it enters below that gate, and the first smoke
+    /// test with it on returned 500s to the user request it overlapped. So
+    /// every call into the inner backend, a person's turn or the engine's
+    /// own, takes this gate first. A person never waits behind more than one
+    /// consolidation, and a consolidation only starts in a pause.
+    private var innerBusy = false
+    private var innerWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(wrapping inner: any ServerInferenceBackend,
                 service: MemoryService,
@@ -68,7 +78,7 @@ public actor MemoryBackend: ServerInferenceBackend {
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         guard let context = await sessionContext(for: request) else {
-            return try await inner.generate(request, onEvent: onEvent)
+            return try await gated(request, onEvent: onEvent)
         }
         let conversation = conversationKey(for: request)
         // Frozen on the first turn and reused verbatim thereafter, so the
@@ -98,7 +108,7 @@ public actor MemoryBackend: ServerInferenceBackend {
         var transcript = ""
         var rounds = 0
         while true {
-            let completion = try await inner.generate(current, onEvent: filteredEvents)
+            let completion = try await gated(current, onEvent: filteredEvents)
             let memoryCalls = completion.toolCalls.filter { MemoryTools.isMemoryTool($0.name) }
             let otherCalls = completion.toolCalls.filter { !MemoryTools.isMemoryTool($0.name) }
             transcript += completion.content
@@ -140,7 +150,7 @@ public actor MemoryBackend: ServerInferenceBackend {
                     content: "Your memory tool rounds for this turn are used up. Answer the "
                         + "original request now, in full, without calling any tools."))
                 current = current.replacingMessages(messages, tools: current.tools)
-                let last = try await inner.generate(current, onEvent: filteredEvents)
+                let last = try await gated(current, onEvent: filteredEvents)
                 transcript += last.content
                 let finished = ServerCompletion(
                     content: transcript,
@@ -204,6 +214,31 @@ public actor MemoryBackend: ServerInferenceBackend {
         scheduleConsolidation(after: context)
     }
 
+    // MARK: - The generation gate
+
+    private func acquireInner() async {
+        while innerBusy {
+            await withCheckedContinuation { innerWaiters.append($0) }
+        }
+        innerBusy = true
+    }
+
+    private func releaseInner() {
+        innerBusy = false
+        let waiting = innerWaiters
+        innerWaiters.removeAll()
+        for waiter in waiting { waiter.resume() }
+    }
+
+    /// Runs one inner generation under the gate.
+    private func gated(_ request: ValidatedChatRequest,
+                       onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void)
+        async throws -> ServerCompletion {
+        await acquireInner()
+        defer { releaseInner() }
+        return try await inner.generate(request, onEvent: onEvent)
+    }
+
     // MARK: - Consolidation
 
     /// Arms the idle timer for a session that just gained a turn, and fires
@@ -254,13 +289,19 @@ public actor MemoryBackend: ServerInferenceBackend {
                                         limit: configuration.consolidationMaximumTurns,
                                         in: scope)
         guard !turns.isEmpty else { return }
+        let characters = turns.reduce(0) { $0 + $1.prompt.count + $1.reply.count }
+        guard characters >= configuration.consolidationMinimumCharacters else {
+            ServerLog.memory("consolidation skipped session=\(context.session.id): "
+                             + "\(characters) characters, nothing to distil")
+            return
+        }
         let existing = await service.recordedKeys(in: scope)
         let request = ServerMemory.consolidationRequest(
             turns: Array(turns.reversed()), existingKeys: existing, workspace: scope.workspace)
         let started = Date()
         let completion: ServerCompletion
         do {
-            completion = try await inner.generate(request, onEvent: { _ in })
+            completion = try await gated(request, onEvent: { _ in })
         } catch {
             ServerLog.memory("consolidation failed session=\(context.session.id): \(error)")
             return

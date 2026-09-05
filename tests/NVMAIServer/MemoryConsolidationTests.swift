@@ -60,6 +60,9 @@ import NVMAIMemory
         configuration.toolSurface = tools
         configuration.sessionConsolidation = consolidation
         configuration.consolidationIdleSeconds = idleSeconds
+        // These sessions are a line each; the trivial-session guard has its
+        // own test and would otherwise skip every one of them.
+        configuration.consolidationMinimumCharacters = 0
         return configuration
     }
 
@@ -245,5 +248,91 @@ import NVMAIMemory
         let quick = MemoryConfiguration.fromEnvironment(
             ["NVMAI_MEMORY": "1", "NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS": "5"])
         #expect(quick.consolidationIdleSeconds == 5)
+    }
+}
+
+/// The generation gate: a consolidation may never overlap a person's turn.
+@Suite struct MemoryGenerationGateTests {
+    /// A backend that fails the test if it is ever entered twice at once.
+    /// unchecked-invariant: `active`, `peak` and `calls` are only touched
+    /// under `lock`.
+    private final class OverlapDetector: ServerInferenceBackend, @unchecked Sendable {
+        private let lock = NSLock()
+        private var active = 0
+        private(set) var peak = 0
+        private(set) var calls = 0
+        private let reply: @Sendable (Int) -> String
+        init(reply: @escaping @Sendable (Int) -> String) { self.reply = reply }
+        func generate(_ request: ValidatedChatRequest,
+                      onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws
+            -> ServerCompletion {
+            let index: Int = lock.withLock {
+                active += 1; peak = max(peak, active); calls += 1; return calls
+            }
+            try await Task.sleep(for: .milliseconds(60))
+            lock.withLock { active -= 1 }
+            return ServerCompletion(content: reply(index), toolCalls: [], finishReason: "stop",
+                                    usage: OpenAIUsage(promptTokens: 1, completionTokens: 1,
+                                                       totalTokens: 2))
+        }
+        var maximumConcurrency: Int { lock.withLock { peak } }
+        var callCount: Int { lock.withLock { calls } }
+    }
+
+    private func request(_ text: String) -> ValidatedChatRequest {
+        ValidatedChatRequest(messages: [GFTokenizer.Message(role: .user, content: text)],
+                             tools: [], stream: false, includeUsage: false,
+                             generationConfig: GenerationConfig(maxNewTokens: 32),
+                             maximumCompletionTokens: 32)
+    }
+
+    @Test func consolidationNeverOverlapsATurn() async throws {
+        let extraction = "```json\n[{\"key\": \"a/b\", \"value\": \"c\", \"importance\": 0.5}]\n```"
+        let long = String(repeating: "a substantial reply. ", count: 40)
+        // Turns get long replies (so the session is worth distilling);
+        // consolidations get the extraction.
+        let inner = OverlapDetector { index in index % 2 == 1 ? long : extraction }
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "repo-a"
+        configuration.user = "local"
+        configuration.toolSurface = .off
+        configuration.sessionConsolidation = true
+        configuration.consolidationIdleSeconds = 0.01
+        let service = MemoryService(configuration: configuration, durableStore: InMemoryStore(),
+                                    journal: InMemoryJournal())
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+
+        // Fire turns fast enough that each idle timer lands while the next
+        // turn is running.
+        for index in 0..<6 {
+            _ = try await backend.generate(request("turn \(index) " + long), onEvent: { _ in })
+            try await Task.sleep(for: .milliseconds(15))
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(inner.maximumConcurrency == 1, "a consolidation overlapped a turn")
+        #expect(inner.callCount > 6, "no consolidation ever ran")
+        await backend.shutDown()
+    }
+
+    @Test func trivialSessionsAreNotDistilled() async throws {
+        let inner = OverlapDetector { _ in "OK" }
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "repo-a"
+        configuration.user = "local"
+        configuration.toolSurface = .off
+        configuration.sessionConsolidation = true
+        configuration.consolidationIdleSeconds = 0.01
+        let service = MemoryService(configuration: configuration, durableStore: InMemoryStore(),
+                                    journal: InMemoryJournal())
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+        _ = try await backend.generate(request("Say OK."), onEvent: { _ in })
+        try await Task.sleep(for: .milliseconds(300))
+        // One generation: the turn. A "say OK" session buys no second one.
+        #expect(inner.callCount == 1)
+        await backend.shutDown()
     }
 }

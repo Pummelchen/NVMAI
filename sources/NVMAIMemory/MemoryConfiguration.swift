@@ -113,6 +113,13 @@ public struct MemoryConfiguration: Sendable, Equatable {
     public var consolidationIdleSeconds: Double
     /// Most recent turns a consolidation reads. Bounds its prompt.
     public var consolidationMaximumTurns: Int
+    /// Sessions whose whole transcript is shorter than this are not
+    /// consolidated. A "say OK" probe or a one-line question has nothing
+    /// durable in it, and measured, distilling one still cost eleven seconds
+    /// of a 35B model to produce "[]". Set low: a person saying "remember
+    /// that the town is Ashgrove" and a one-line confirmation is about two
+    /// hundred characters and is exactly what must be kept.
+    public var consolidationMinimumCharacters: Int
     /// Serve memory from process-local storage when the journal cannot be written,
     /// so a session still has working memory. It does not survive restart,
     /// and the model is told which one it is talking to.
@@ -133,6 +140,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
                 sessionConsolidation: Bool = true,
                 consolidationIdleSeconds: Double = 120,
                 consolidationMaximumTurns: Int = 40,
+                consolidationMinimumCharacters: Int = 150,
                 degradesToLocalStore: Bool = true) {
         self.isEnabled = isEnabled
         self.storage = storage
@@ -149,6 +157,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
         self.sessionConsolidation = sessionConsolidation
         self.consolidationIdleSeconds = max(0, consolidationIdleSeconds)
         self.consolidationMaximumTurns = max(1, consolidationMaximumTurns)
+        self.consolidationMinimumCharacters = max(0, consolidationMinimumCharacters)
         self.degradesToLocalStore = degradesToLocalStore
     }
 

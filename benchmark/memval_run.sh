@@ -20,7 +20,7 @@ LOGS="$ROOT/.build/benchmark-logs/memory-$( [[ "$BENCH" == pong ]] && echo value
 mkdir -p "$LOGS" "$SCRATCH"
 
 case "$BENCH" in
-  smoke) SCRIPT="$ROOT/benchmark/memory_smoke.py"; ARMS=(full) ;;
+  smoke) SCRIPT="$ROOT/benchmark/memory_smoke.py"; ARMS=(auto) ;;   # no tools: consolidation is the only writer
   pong)  SCRIPT="$ROOT/benchmark/memory_value.py"; ARMS=(control auto minimal full) ;;
   book)  SCRIPT="$ROOT/benchmark/memory_book.py";  ARMS=(summary auto minimal full) ;;
   *) echo "usage: $0 smoke|pong|book [arm]" >&2; exit 2 ;;

@@ -6,7 +6,7 @@ a codebase session must not see it, a second novel session must. Placement
 is by the working directory the client declares, exactly as Claude Code
 and Codex declare it, so this is the book-versus-git case end to end.
 
-    python3 benchmark/memory_smoke.py full     # via benchmark/memval_run.sh smoke
+    benchmark/memval_run.sh smoke      # memory on, no tools: the engine must do the writing
 """
 from __future__ import annotations
 
@@ -20,6 +20,14 @@ from pathlib import Path
 PORT = int(os.environ.get("NVMAI_PORT", "8096"))
 BASE = f"http://127.0.0.1:{PORT}/v1"
 MEMDIR = Path(os.environ.get("NVMAI_MEMVAL_MEMDIR", ""))
+SERVER_LOG = os.environ.get("NVMAI_MEMVAL_SERVER_LOG")
+
+
+def consolidation_lines():
+    if not SERVER_LOG or not os.path.exists(SERVER_LOG):
+        return []
+    with open(SERVER_LOG, errors="replace") as handle:
+        return [line.strip() for line in handle if "consolidated session=" in line]
 
 NOVEL = ("You are a coding assistant.\n\n# Environment\n"
          " - Primary working directory: /Users/ada/novels/photograph\n")
@@ -65,9 +73,26 @@ def main():
         "Ashgrove and it never rains there. Then confirm in one sentence.", "novel-1")
     if status != 200:
         failures.append("novel-1 did not answer")
-    if (usage.get("prompt_tokens") or 0) < 800:
+    # Memory on with no tools: the fragment is ~90 tokens on top of the
+    # ~60-token request (measured 149). Under 120, memory is not in the
+    # prompt at all.
+    if (usage.get("prompt_tokens") or 0) < 120:
         failures.append(f"novel-1 prompt was {usage.get('prompt_tokens')} tokens: "
-                        "memory tools are not in the prompt")
+                        "the memory fragment is not in the prompt")
+
+    # The novel session is over. With the runner's short idle, the engine
+    # should distil it before the next request; a real person's pause does
+    # the same. This is the write the model was measured not making.
+    for _ in range(90):
+        if consolidation_lines():
+            break
+        time.sleep(2)
+    lines = consolidation_lines()
+    print("consolidation:", lines[-1] if lines else "(none within 180s)")
+    if not lines:
+        failures.append("no consolidation of the novel session")
+    elif "facts=0" in lines[-1]:
+        failures.append("consolidation ran but wrote no facts")
 
     status, reply, _ = ask(
         model, CODE,
