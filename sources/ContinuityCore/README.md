@@ -160,11 +160,20 @@ a crash never leaves a workspace that cannot be reopened. To hand a workspace
 over deliberately, call `await engine.shutDown()` — waiting for deallocation is
 not a contract anyone can rely on.
 
-Durability is a barrier at each session boundary plus every 64 records, using
-`F_FULLFSYNC` rather than `fsync`, which on Darwin only promises the write
-reached the drive's cache. `synchronizesEveryWrite` makes every append durable
-for callers who want that, and `flush()` takes the barrier on demand. A session
-boundary costs about 5 ms.
+Appends are a `write(2)` into the page cache — microseconds, and all a request
+ever pays. The durability barrier (`F_FULLFSYNC`, because on Darwin `fsync`
+only promises the write reached the drive's cache) is taken **when appends
+stop**: two seconds after the last one by default, forced after thirty seconds
+if they never stop, and at session end, compaction and `shutDown()`. It runs on
+a utility queue, never on the cooperative pool.
+
+That timing is the point. An append happens while a model is answering; the
+moment after the answer is the one moment the drive is not being asked for
+expert weights, and a barrier is tens of milliseconds of the drive doing
+nothing else. `synchronizesEveryWrite` makes every append durable inline for
+callers who want that, and `flush()` takes the barrier on demand. A process
+crash loses nothing either way; a power cut loses at most what arrived since
+the last idle moment.
 
 To read a journal without disturbing a running server, `FileJournal.read(contentsOf:)`
 takes no lock. `swift run ContinuityDemo inspect <file>` prints what is in one.

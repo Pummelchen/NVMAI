@@ -208,6 +208,18 @@ public actor MemoryService {
         await enforceResidencyBudget(keeping: session.scope)
     }
 
+    /// Open the configured workspace now, so its journal is replayed at boot
+    /// rather than on the first request.
+    ///
+    /// Replay is the one bulk read the store ever does. Paying it at start,
+    /// while nothing is being generated, keeps it off the same disk the
+    /// expert streamer is about to saturate and off the first user's
+    /// latency. Safe to call more than once and safe with memory disabled.
+    public func warmUp() async {
+        guard let scope = configuration.scope() else { return }
+        _ = await workspace(for: scope)
+    }
+
     /// Close every workspace, flushing and releasing the workspace locks.
     ///
     /// A workspace's journal holds an exclusive lock for as long as it is

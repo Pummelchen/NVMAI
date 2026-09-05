@@ -229,10 +229,14 @@ Memory never fails a completion.
   worse than one with no memory.
 - A torn final line in a journal, the normal result of a crash, is dropped on
   replay rather than stranding every good record behind it.
-- Writes are made durable at each session boundary and every 64 records, with a
-  full barrier rather than a plain `fsync`, which on Darwin only promises the
-  write reached the drive's cache. `NVMAI_MEMORY_FSYNC=1` makes every write
-  durable at about 5 ms each.
+- Writes go to the page cache in microseconds; the durability barrier is taken
+  a couple of seconds after the last write, once the drive is idle, and forced
+  within thirty seconds if writes never stop. Never inline with a request, and
+  never on the same moment the expert streamer needs the disk. A process crash
+  loses nothing; a power cut loses at most what arrived since the last idle
+  moment. `NVMAI_MEMORY_FSYNC=1` makes every write durable inline instead, at
+  about 5 ms each.
+- The workspace journal is replayed at boot, not on the first request.
 - A workspace already held by another server means this one runs without
   persistence and says so, rather than writing into a file someone else owns.
 

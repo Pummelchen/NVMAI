@@ -209,3 +209,111 @@ import Testing
         try await reopened.shutDown()
     }
 }
+
+/// When the durability barrier happens.
+///
+/// It must never be inline with an append: an append happens while a model
+/// is answering, and a barrier is tens of milliseconds of the drive doing
+/// nothing else, on the same drive the expert streamer is reading from.
+@Suite struct JournalBarrierTests {
+    private func temporaryURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("barrier-\(UUID().uuidString)")
+            .appendingPathComponent("journal.ndjson")
+    }
+
+    @Test func appendsDoNotTakeTheBarrierInline() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let journal = try FileJournal(url: url, idleDelay: .seconds(60))
+        for index in 0..<200 {
+            try await journal.append(.task(ContinuityTask(title: "t\(index)")))
+        }
+        // Two hundred appends and not one barrier: they are all still
+        // pending, waiting for the drive to go idle.
+        #expect(await journal.pendingRecords == 200)
+        try await journal.shutDown()
+    }
+
+    @Test func theBarrierLandsOnceAppendsStop() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let journal = try FileJournal(url: url, idleDelay: .milliseconds(50))
+        try await journal.append(.task(ContinuityTask(title: "a")))
+        try await journal.append(.task(ContinuityTask(title: "b")))
+        #expect(await journal.pendingRecords == 2)
+
+        var settled = false
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(25))
+            if await journal.pendingRecords == 0 { settled = true; break }
+        }
+        #expect(settled, "the idle barrier never ran")
+        try await journal.shutDown()
+    }
+
+    @Test func aBusyWriterCannotPostponeDurabilityForever() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // Appends every 10 ms with a 1 s idle delay would never go idle. The
+        // maximum latency forces a barrier anyway.
+        let journal = try FileJournal(url: url, idleDelay: .seconds(1),
+                                      maximumLatency: .milliseconds(100))
+        var sawSettle = false
+        for index in 0..<40 {
+            try await journal.append(.task(ContinuityTask(title: "t\(index)")))
+            try await Task.sleep(for: .milliseconds(10))
+            if await journal.pendingRecords == 0 { sawSettle = true }
+        }
+        #expect(sawSettle, "records waited past the maximum latency")
+        try await journal.shutDown()
+    }
+
+    @Test func explicitSyncIsImmediate() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let journal = try FileJournal(url: url, idleDelay: .seconds(60))
+        try await journal.append(.task(ContinuityTask(title: "a")))
+        #expect(await journal.pendingRecords == 1)
+        try await journal.sync()
+        #expect(await journal.pendingRecords == 0)
+        try await journal.shutDown()
+    }
+
+    @Test func shutdownTakesTheBarrierBeforeReleasing() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let journal = try FileJournal(url: url, idleDelay: .seconds(60))
+        try await journal.append(.task(ContinuityTask(title: "last words")))
+        try await journal.shutDown()
+        #expect(await journal.pendingRecords == 0)
+        // And the record is there for the next holder.
+        let next = try FileJournal(url: url)
+        #expect(try await next.replay().count == 1)
+        try await next.shutDown()
+    }
+
+    @Test func compactionWaitsForAnInFlightBarrier() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let journal = try FileJournal(url: url, idleDelay: .milliseconds(1))
+        for index in 0..<50 {
+            try await journal.append(.task(ContinuityTask(title: "t\(index)")))
+        }
+        // A barrier is about to fire; compaction must not swap the
+        // descriptor underneath it.
+        try await journal.compact(sessionLog: SessionLogSnapshot(), memory: MemorySnapshot())
+        try await journal.append(.task(ContinuityTask(title: "after")))
+        #expect(try await journal.replay().count == 2)
+        try await journal.shutDown()
+    }
+
+    @Test func synchronizingEveryWriteIsStillAvailable() async throws {
+        let url = temporaryURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let journal = try FileJournal(url: url, synchronizesEveryWrite: true)
+        try await journal.append(.task(ContinuityTask(title: "now")))
+        #expect(await journal.pendingRecords == 0)
+        try await journal.shutDown()
+    }
+}

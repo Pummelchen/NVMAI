@@ -129,11 +129,15 @@ public actor MemoryBackend: ServerInferenceBackend {
 
     /// Writes the turn to the journal after the completion is settled.
     ///
-    /// Off the critical path by construction: this runs once the answer is
-    /// ready, and the journal swallows its own failures, so nothing here can
-    /// fail or slow a completion. Only the user's prompt and the assistant's
-    /// reply text go in; tool definitions, tool calls and tool results never
-    /// reach it, which is what keeps a turn at a few kilobytes.
+    /// This runs after generation and before the completion is returned, so
+    /// it is on the request path -- but only for a `write(2)` into the page
+    /// cache, which is microseconds. The durability barrier is deliberately
+    /// not here: the journal takes it a couple of seconds after the last
+    /// append, once the drive is idle, so nothing this does can hold the
+    /// answer or contend with the expert streamer. The journal swallows its
+    /// own failures. Only the user's prompt and the assistant's reply text
+    /// go in; tool definitions, tool calls and tool results never reach it,
+    /// which is what keeps a turn at a few kilobytes.
     private func journal(request: ValidatedChatRequest,
                          completion: ServerCompletion,
                          context: MemorySessionContext,
@@ -221,6 +225,9 @@ public enum ServerMemoryFactory {
             ServerLog.memory(event.message)
         }
         ServerLog.memory(configuration.summary)
+        // Replay the workspace journal now, at boot, rather than when the
+        // first request arrives and the model is about to need the disk.
+        Task(priority: .utility) { await service.warmUp() }
         return MemoryBackend(wrapping: backend,
                              service: service,
                              configuration: configuration)
