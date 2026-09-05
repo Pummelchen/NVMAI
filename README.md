@@ -32,6 +32,29 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 - **Qwen 3.6 35B-A3B**
 
 
+### Usage
+
+- **OpenAI-compatible server:** A loopback Chat Completions and Responses API
+  includes launch scripts for starting NVMAI and connecting supported coding
+  clients.
+- **One start script per model and quantization:** `tools/start-<model>-<bits>.sh`
+  starts the server for that install with no questions asked, each on its own
+  port, with the model's own tuning applied. `tools/server_launcher.sh` asks
+  instead, and `tools/cli_launcher.sh` also wires up a coding CLI.
+
+```bash
+tools/start-ornith-4bit.sh        tools/start-ornith-8bit.sh
+tools/start-qwen3.6-4bit.sh       tools/start-qwen3.6-8bit.sh
+tools/start-agentworld-4bit.sh    tools/start-agentworld-8bit.sh
+tools/start-qwen3.8-4bit.sh       tools/start-qwen3.8-8bit.sh
+```
+
+- **Tested coding CLIs:** The launch workflow supports Codex, Qwen Code, and
+  OpenCode against the local server.
+- **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
+  generation, streaming responses, and client-authorized function-tool calls.
+
+
 ### Core Benefits
 
 - NVMAI streams LLM's faster than any other similar project.
@@ -79,27 +102,6 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
   boilerplate before prefill for quicker direct answers, while the base alias
   preserves tools and agent loops.
 
-### Usage
-
-- **OpenAI-compatible server:** A loopback Chat Completions and Responses API
-  includes launch scripts for starting NVMAI and connecting supported coding
-  clients.
-- **One start script per model and quantization:** `tools/start-<model>-<bits>.sh`
-  starts the server for that install with no questions asked, each on its own
-  port, with the model's own tuning applied. `tools/server_launcher.sh` asks
-  instead, and `tools/cli_launcher.sh` also wires up a coding CLI.
-
-```bash
-tools/start-ornith-4bit.sh        tools/start-ornith-8bit.sh
-tools/start-qwen3.6-4bit.sh       tools/start-qwen3.6-8bit.sh
-tools/start-agentworld-4bit.sh    tools/start-agentworld-8bit.sh
-tools/start-qwen3.8-4bit.sh       tools/start-qwen3.8-8bit.sh
-```
-
-- **Tested coding CLIs:** The launch workflow supports Codex, Qwen Code, and
-  OpenCode against the local server.
-- **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI
-  generation, streaming responses, and client-authorized function-tool calls.
 
 ## Core Links
 
