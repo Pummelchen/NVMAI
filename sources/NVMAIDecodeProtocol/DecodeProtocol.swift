@@ -1,6 +1,7 @@
 import Foundation
 
 public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
+    /// 0 sizes the cache from the model's tuning profile at load.
     public var expertCacheSlots: Int
     public var expertCachePolicy: String
     public var prefillEnabled: Bool
@@ -12,7 +13,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var kvCacheBits: Int
     public var ropeScalingMode: String
 
-    public init(expertCacheSlots: Int = 32,
+    public init(expertCacheSlots: Int = 0,
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = 128,

@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Start the NVMAIServer for the chosen quantization and mode (interactive
-# TUI or positional). Asks the same five question blocks as
-# tools/cli_launcher.sh — CLI, model, quantization, mode, thinking — so the
-# two launchers behave identically. Quantization/mode/thinking drive the
-# server; the CLI/model answers pick the cli_launcher.sh command to connect
-# a coding CLI afterwards.
+# Start the NVMAIServer for the chosen model, quantization and mode
+# (interactive TUI or positional). Asks the same six question blocks as
+# tools/cli_launcher.sh — CLI, mode, AI model, quantization, NVMAI mode,
+# thinking — so the two launchers behave identically. Model, quantization,
+# mode and thinking drive the server; the CLI/fast answers pick the
+# cli_launcher.sh command to connect a coding CLI afterwards.
 #
-#   tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [4|8] [default|concise] [off|on]
+#   tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [ornith|qwen36|agentworld|qwen38] [4|8] [default|concise] [off|on]
 #
-# With no arguments, prompts 1-2-3-4-5 for the CLI, then the model
-# (fast/full), then the quantization, then default/concise mode, then
-# thinking off/on. Every choice has a default (codex / full / 8-bit /
-# standard / thinking off), so pressing Enter through the prompts launches
-# that configuration. The server runtime is pinned to native 262,144-token
-# context, a 256 MiB multi-prefix prompt cache, 8-bit KV, and MTP off.
-# The routed-expert cache is left to the runtime, which sizes it from the
-# model's family and expert stride and clamps it to the machine's RAM. Stops any stale
-# NVMAIServer on the port and starts a
-# fresh one in the foreground (Ctrl-C to stop). Once the server is up it
+# With no arguments, prompts for each in turn. Every choice has a default
+# (codex / full / ornith / 8-bit / standard / thinking off), so pressing
+# Enter through the prompts launches that configuration. The old five-
+# argument form without the AI model still works and means Ornith.
+#
+# The server runtime is pinned to native 262,144-token context, a 256 MiB
+# multi-prefix prompt cache, 8-bit KV, and MTP off. Everything tuned per
+# model and quantization -- the routed-expert cache budget, expert prefetch
+# and its disk I/O tier, the prefill chunk and the sampling defaults -- is
+# deliberately NOT set here: the runtime resolves it from the install's
+# tuning profile (ModelProfile, one row per model and width, clamped to
+# this machine's RAM), so the launcher never overrides a measured optimum.
+# Stops any stale NVMAIServer on the port and starts a fresh one in the
+# foreground (Ctrl-C to stop). Once the server is up it
 # prints the OpenAI API setup (base URL, API key, the chosen model ID) so
 # any OpenAI-compatible client can be pointed at it. The server binds to
 # 127.0.0.1.
@@ -27,11 +31,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASE_DIR="${SCRIPT_DIR}/.."
 BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
-MODEL="ornith-1.5-35b-a3b"
-# The "<model>-fast" alias is served alongside the base model name by the
-# same server; the fast alias applies the CLI-strip heuristic per request
-# (chat-only speed) instead of the base model's agentic tool loop.
-FAST_MODEL="${MODEL}-fast"
+
+# Old five-argument form (no AI model): insert the default so the positions
+# below line up.
+case "${3:-}" in
+  4|8|4bit|8bit) set -- "${1:-}" "${2:-}" ornith "$3" "${4:-}" "${5:-}" ;;
+esac
 
 # --- 1) coding CLI: codex (default) / qwen / opencode ---
 cli="${1:-}"
@@ -75,8 +80,35 @@ else
   esac
 fi
 
-# --- 3) quantization: 8-bit (default) / 4-bit ---  (6-bit withdrawn)
-quant="${3:-}"
+# --- 3) AI model: ornith (default) / qwen36 / agentworld / qwen38 ---
+ai_model="${3:-}"
+if [[ -z "$ai_model" ]]; then
+  echo ""
+  echo "Which AI model?"
+  echo "  1) Ornith 1.5 35B-A3B (default)"
+  echo "  2) Qwen 3.6 35B-A3B"
+  echo "  3) Qwen-AgentWorld 35B-A3B"
+  echo "  4) Qwen3.8-Flash-Next 125B-A6B"
+  printf "Choice [1-4] (default 1): "
+  read -r ai_choice || exit 1
+  case "${ai_choice:-1}" in
+    1) ai_model=ornith ;;
+    2) ai_model=qwen36 ;;
+    3) ai_model=agentworld ;;
+    4) ai_model=qwen38 ;;
+    *) echo "invalid choice: $ai_choice" >&2; exit 2 ;;
+  esac
+fi
+case "$ai_model" in
+  ornith|ornith15) ai_model=ornith ; MODEL_STEM="ornith-1.5_35B_A3B" ;;
+  qwen36|qwen3.6) ai_model=qwen36 ; MODEL_STEM="qwen3.6_35B_A3B" ;;
+  agentworld) MODEL_STEM="qwen-agentworld_35B_A3B" ;;
+  qwen38|qwen3.8) ai_model=qwen38 ; MODEL_STEM="qwen3.8-flash-next_125B_A6B" ;;
+  *) echo "unknown AI model: $ai_model (ornith|qwen36|agentworld|qwen38)" >&2; exit 2 ;;
+esac
+
+# --- 4) quantization: 8-bit (default) / 4-bit ---  (6-bit withdrawn)
+quant="${4:-}"
 if [[ -z "$quant" ]]; then
   echo ""
   echo "Which quantization?"
@@ -96,12 +128,12 @@ case "$quant" in
   *) echo "unknown quantization: $quant (4|8)" >&2; exit 2 ;;
 esac
 
-# --- 4) NVMAI mode: standard (default) or concise ---
-if [[ -n "${4:-}" ]]; then
-  case "$4" in
+# --- 5) NVMAI mode: standard (default) or concise ---
+if [[ -n "${5:-}" ]]; then
+  case "$5" in
     default|1) mode_suffix="" ; mode_word=default ;;
     concise|2) mode_suffix="_concise" ; mode_word=concise ;;
-    *) echo "unknown mode: $4 (default|concise)" >&2; exit 2 ;;
+    *) echo "unknown mode: $5 (default|concise)" >&2; exit 2 ;;
   esac
 else
   echo ""
@@ -117,18 +149,18 @@ else
   esac
 fi
 
-# --- 5) thinking: off (default) or on ---
+# --- 6) thinking: off (default) or on ---
 thinking_default="${NVMAI_THINKING_MODE:-off}"
 case "$thinking_default" in
   0|off|false|no) thinking_default=off ; default_think_choice=1 ;;
   1|on|true|yes) thinking_default=on ; default_think_choice=2 ;;
   *) echo "invalid NVMAI_THINKING_MODE: $thinking_default (off|on)" >&2; exit 2 ;;
 esac
-if [[ -n "${5:-}" ]]; then
-  case "$5" in
+if [[ -n "${6:-}" ]]; then
+  case "$6" in
     nothink|0|off) thinking_mode=off ; think_word=off ;;
     think|1|on) thinking_mode=on ; think_word=on ;;
-    *) echo "unknown thinking mode: $5 (off|on)" >&2; exit 2 ;;
+    *) echo "unknown thinking mode: $6 (off|on)" >&2; exit 2 ;;
   esac
 else
   echo ""
@@ -144,10 +176,10 @@ else
   esac
 fi
 
-# --- resolve quantization -> model directory / port ---
+# --- resolve model + quantization -> model directory / port ---
 case "$quant" in
-  4bit) MODEL_DIR="$BASE_DIR/models/ornith-1.5_35B_A3B_4Bit"; PORT="${NVMAI_PORT:-8081}" ;;
-  8bit) MODEL_DIR="$BASE_DIR/models/ornith-1.5_35B_A3B_8Bit"; PORT="${NVMAI_PORT:-8083}" ;;
+  4bit) MODEL_DIR="$BASE_DIR/models/${MODEL_STEM}_4Bit"; PORT="${NVMAI_PORT:-8081}" ;;
+  8bit) MODEL_DIR="$BASE_DIR/models/${MODEL_STEM}_8Bit"; PORT="${NVMAI_PORT:-8083}" ;;
 esac
 
 if [[ "$mode_suffix" == "_concise" ]]; then
@@ -168,7 +200,8 @@ if [[ ! -f "$BINARY" ]]; then
   exit 1
 fi
 if [[ ! -d "$MODEL_DIR" ]]; then
-  echo "ERROR: $quant model not found at $MODEL_DIR" >&2
+  echo "ERROR: $ai_model $quant model not found at $MODEL_DIR" >&2
+  echo "Install it first: tools/install_models.sh (see --help for the target names)" >&2
   exit 1
 fi
 
@@ -196,7 +229,10 @@ if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   fi
 fi
 
-echo "Starting NVMAIServer ($quant, $mode_word, $think_word)..."
+echo "Starting NVMAIServer ($ai_model $quant, $mode_word, $think_word)..."
+# No RAM-budget, expert-slot, prefill-chunk or sampling flags here:
+# the runtime takes them from the install's tuning profile (logged at load
+# under NVMAI_RUNNER_STATS=1 as "NVMAI profile ...").
 "$BINARY" \
   --model "$MODEL_DIR" \
   --port "$PORT" \
@@ -218,8 +254,19 @@ if ! curl -s --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; 
   exit 1
 fi
 
-# The API setup advertises the model chosen in the question flow — the fast
-# alias for chat-only speed, or the base model for the agentic tool loop.
+# The API id is whatever the server advertises for this install (it ends
+# in the routed-expert width, e.g. ornith-1.5-35b-a3b_8-Bit; the bare name
+# is not accepted). The "<id>-fast" alias serves the same weights with the
+# CLI-strip heuristic (chat-only speed) instead of the agentic tool loop.
+MODEL="$(curl -s --max-time 5 "http://127.0.0.1:${PORT}/v1/models" \
+  | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' \
+  | grep -v -- '-fast$' | head -1)"
+if [[ -z "$MODEL" ]]; then
+  echo "ERROR: could not read the model id from /v1/models" >&2
+  kill "$server_pid" 2>/dev/null || true
+  exit 1
+fi
+FAST_MODEL="${MODEL}-fast"
 if [[ "$model_word" == fast ]]; then
   api_model="$FAST_MODEL"
   api_model_note="(fast alias, seconds-per-answer chat)"
@@ -230,7 +277,7 @@ fi
 
 echo ""
 echo "============================================================"
-echo " NVMAIServer ready — $quant + ${concise_label}cache ON + MTP OFF"
+echo " NVMAIServer ready — $ai_model $quant + ${concise_label}cache ON + MTP OFF"
 echo "============================================================"
 echo ""
 echo "OpenAI API setup — point any OpenAI-compatible client at this:"
@@ -238,10 +285,10 @@ echo "  Base URL:   http://127.0.0.1:${PORT}/v1"
 echo "  API key:    any value (the server does not authenticate)"
 echo "  Model:      $api_model $api_model_note"
 echo "  Endpoints:  POST /v1/chat/completions, POST /v1/responses"
-echo "  Runtime:    context 262144 | KV 8-bit | cache on | MTP off"
+echo "  Runtime:    context 262144 | KV 8-bit | cache on | MTP off | expert cache, prefetch, sampling from the model profile"
 echo ""
 echo "Or let the CLI launcher wire Codex / Qwen Code / OpenCode for you:"
-echo "  tools/cli_launcher.sh $cli $model_word $quant $mode_word $think_word"
+echo "  tools/cli_launcher.sh $cli $model_word $ai_model $quant $mode_word $think_word"
 echo ""
 echo "Model: $MODEL_DIR | Thinking: $think_word | Ctrl-C to stop"
 echo "============================================================"

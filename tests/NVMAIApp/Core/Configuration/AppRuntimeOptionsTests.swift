@@ -6,7 +6,7 @@ import NVMAI
 @Suite struct AppRuntimeOptionsTests {
     @Test func defaultsMatchProduction() throws {
         let options = AppRuntimeOptions()
-        #expect(options.expertCacheSlots == 64)
+        #expect(options.expertCacheSlots == AppRuntimeOptions.automaticSlotCount)
         #expect(options.expertCachePolicy == .lfu)
         #expect(options.prefillEnabled)
         #expect(options.prefillChunkTokens == 4096)
@@ -23,7 +23,24 @@ import NVMAI
         #expect(runtime.rdadvisePolicy == RuntimeConfiguration.production.rdadvisePolicy)
         #expect(runtime.headPath == RuntimeConfiguration.production.headPath)
         #expect(options.resultSummary ==
-            "Cache 64 LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, RDADVISE default, full SHA-256")
+            "Cache auto LFU, prefill 4096, 8-bit KV, native RoPE, thinking off, RDADVISE default, full SHA-256")
+    }
+
+    @Test func automaticSlotsResolveFromTheModelDirectory() throws {
+        // No readable manifest: the production default, never a crash.
+        let missing = URL(fileURLWithPath: "/nonexistent/model.gturbo")
+        #expect(AppRuntimeOptions.recommendedSlots(forModelAt: missing)
+            == RuntimeConfiguration.production.expertCacheSlots)
+        let auto = AppRuntimeOptions()
+        #expect(auto.effectiveSlots(forModelAt: missing)
+            == RuntimeConfiguration.production.expertCacheSlots)
+        #expect(auto.effectiveSlots(forModelAt: nil)
+            == RuntimeConfiguration.production.expertCacheSlots)
+        // An explicit count is never second-guessed.
+        #expect(AppRuntimeOptions(expertCacheSlots: 96).effectiveSlots(forModelAt: missing) == 96)
+        #expect(AppRuntimeOptions.slotsLabel(for: AppRuntimeOptions.automaticSlotCount)
+            .hasPrefix("Auto"))
+        try AppRuntimeOptions().validate()
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {

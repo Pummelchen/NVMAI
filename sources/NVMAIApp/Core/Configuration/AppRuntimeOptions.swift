@@ -51,6 +51,11 @@ public enum AppModelVerification: String, CaseIterable, Sendable, Identifiable {
 
 public struct AppRuntimeOptions: Equatable, Sendable {
     public static let allowedSlotCounts = RuntimeConfiguration.allowedExpertCacheSlots
+    /// `expertCacheSlots` value meaning "size the cache from the model's
+    /// tuning profile at load": the same budget-to-slots resolution the
+    /// server and the CLI perform, so the app runs every install at its
+    /// measured optimum instead of a flat count. The default.
+    public static let automaticSlotCount = 0
     public static let allowedPrefillChunkTokens =
         RuntimeConfiguration.allowedPrefillChunkTokens
 
@@ -65,7 +70,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var kvCachePrecision: KVCachePrecision
     public var ropeScalingMode: RuntimeRoPEScalingMode
 
-    public init(expertCacheSlots: Int = 64,
+    public init(expertCacheSlots: Int = automaticSlotCount,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
                 prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
@@ -88,7 +93,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     }
 
     public func validate() throws {
-        guard Self.allowedSlotCounts.contains(expertCacheSlots) else {
+        guard expertCacheSlots == Self.automaticSlotCount
+                || Self.allowedSlotCounts.contains(expertCacheSlots) else {
             throw AppInferenceError.invalidRequest(
                 "expert cache slots must be one of \(Self.allowedSlotCounts)")
         }
@@ -106,23 +112,52 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
         let scaling = ropeScalingMode == .yarn ? "YaRN" : "native RoPE"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), thinking \(thinkingMode.rawValue), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        let cache = expertCacheSlots == Self.automaticSlotCount ? "auto" : "\(expertCacheSlots)"
+        return "Cache \(cache) \(expertCachePolicy.label), \(prefill), \(kvCachePrecision.label) KV, \(scaling), thinking \(thinkingMode.rawValue), RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
         // D21: the per-slot memory deltas were hardcoded and drifted from the
         // real pack layout, so the picker shows names only; the memory
         // implications are described in the UI text next to the picker.
-        "\(slots)"
+        slots == automaticSlotCount ? "Auto (model profile)" : "\(slots)"
+    }
+
+    /// The slot count the model's tuning profile recommends on this machine:
+    /// the (model, width) row's budget, clamped to half of physical memory,
+    /// turned into slots from the manifest's expert stride -- exactly what
+    /// NVMAIServer and NVMAICLI do without `--ram-budget`. Falls back to the
+    /// production default when the manifest cannot be read; the load that
+    /// follows reports the real error.
+    public static func recommendedSlots(forModelAt directory: URL) -> Int {
+        guard let identity = try? ManifestReader.peekIdentity(directoryURL: directory),
+              let arch = ArchConfig.knownArchitectures[identity.family],
+              let manifest = try? ManifestReader.load(directoryURL: directory, expecting: arch)
+        else { return RuntimeConfiguration.production.expertCacheSlots }
+        let budget = RuntimeConfiguration.affordableExpertCacheBudget(
+            ModelProfile.resolve(identity: identity).expertCacheBudgetBytes)
+        return RuntimeConfiguration.expertCacheSlots(
+            expertStrideBytes: manifest.expertStride,
+            layers: manifest.arch.numLayers,
+            budgetBytes: budget)
+    }
+
+    /// The slot count this configuration loads with: the explicit choice, or
+    /// the profile's recommendation for the model at `modelDirectory`.
+    public func effectiveSlots(forModelAt modelDirectory: URL?) -> Int {
+        guard expertCacheSlots == Self.automaticSlotCount else { return expertCacheSlots }
+        guard let modelDirectory else { return RuntimeConfiguration.production.expertCacheSlots }
+        return Self.recommendedSlots(forModelAt: modelDirectory)
     }
 
     public func resolvedRuntimeConfiguration(
         forceLogitsHead: Bool,
-        maxContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens
+        maxContextTokens: Int = RuntimeConfiguration.defaultYaRNContextTokens,
+        modelDirectory: URL? = nil
     ) throws -> RuntimeConfiguration {
         try validate()
         return try RuntimeConfiguration(
-            expertCacheSlots: expertCacheSlots,
+            expertCacheSlots: effectiveSlots(forModelAt: modelDirectory),
             expertCachePolicy: expertCachePolicy == .lru ? .lru : .lfu,
             rdadvisePolicy: rdadvisePolicy.runtimeValue,
             prefillEnabled: prefillEnabled,

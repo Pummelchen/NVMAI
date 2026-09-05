@@ -111,7 +111,8 @@ struct InspectorView: View {
             }
             LabeledContent("Slots") {
                 Picker("Slots", selection: $model.runtimeOptions.expertCacheSlots) {
-                    ForEach(AppRuntimeOptions.allowedSlotCounts, id: \.self) { slots in
+                    ForEach([AppRuntimeOptions.automaticSlotCount] + AppRuntimeOptions.allowedSlotCounts,
+                            id: \.self) { slots in
                         Text(AppRuntimeOptions.slotsLabel(for: slots)).tag(slots)
                     }
                 }
@@ -119,7 +120,7 @@ struct InspectorView: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("Quantized KV reduces long-context memory. YaRN extends the model beyond its native 256K context; 1M is selected by default when enabled. These settings apply after reloading the model.")
+            Text("Auto sizes the expert cache from the model's tuning profile (the measured optimum for this model and quantization on this Mac). Quantized KV reduces long-context memory. YaRN extends the model beyond its native 256K context; 1M is selected by default when enabled. These settings apply after reloading the model.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -144,6 +145,11 @@ struct InspectorView: View {
                 .fixedSize()
             }
             Text("Ornith and Qwen expose a binary thinking switch; they do not define Low, Medium, or High effort levels. This setting applies after reloading the model.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Model's sampling defaults", isOn: $model.samplingFollowsModel)
+                .toggleStyle(.switch)
+            Text("Temperature, Top-K and Top-P from the model's tuning profile. Switch off to set your own; editing a value below switches it off too.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             LabeledContent("Temperature") {

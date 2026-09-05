@@ -174,6 +174,7 @@ public struct ModelSessionPlan: Sendable {
         // and anything else takes the runtime default. Family is the only
         // input, and family comes from the manifest.
         let resolvedChunk = prefillChunkTokens
+            ?? ModelProfile.resolve(identity: identity).prefillChunkTokens
             ?? (family == .qwen36
                 ? RuntimeConfiguration.qwenLongPrefillChunkTokens
                 : RuntimeConfiguration.production.prefillChunkTokens)

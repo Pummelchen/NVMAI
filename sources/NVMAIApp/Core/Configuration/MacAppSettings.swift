@@ -3,11 +3,16 @@ import NVMAI
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 1
+    /// 2 (5.0.3): `expertCacheSlots` 0 means "from the model's profile" and
+    /// is the default; `samplingFollowsModel` added. A version-1 file whose
+    /// slot count is the old flat default (64) migrates to automatic, and its
+    /// sampling follows the model only if it still held the house values.
+    static let currentVersion = 2
 
     var version: Int = currentVersion
     var contextTokens: Int = AppContextLengthOption.fourK.tokens
-    var expertCacheSlots: Int = 64
+    var expertCacheSlots: Int = AppRuntimeOptions.automaticSlotCount
+    var samplingFollowsModel: Bool = true
     var temperature: Double = 0.6
     var topKEnabled: Bool = true
     var topK: Int = GenerationDefaults.topK
@@ -25,6 +30,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case version
         case contextTokens
         case expertCacheSlots
+        case samplingFollowsModel
         case temperature
         case topKEnabled
         case topK
@@ -41,7 +47,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     init(version: Int = currentVersion,
          contextTokens: Int = AppContextLengthOption.fourK.tokens,
-         expertCacheSlots: Int = 64,
+         expertCacheSlots: Int = AppRuntimeOptions.automaticSlotCount,
+         // nil: follow the model unless the sampling given here is already
+         // a choice of its own (anything but the house values).
+         samplingFollowsModel: Bool? = nil,
          temperature: Double = 0.6,
          topKEnabled: Bool = true,
          topK: Int = GenerationDefaults.topK,
@@ -57,6 +66,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.version = version
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
+        self.samplingFollowsModel = samplingFollowsModel
+            ?? Self.isHouseSampling(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                                    topPEnabled: topPEnabled, topP: topP)
         self.temperature = temperature
         self.topKEnabled = topKEnabled
         self.topK = topK
@@ -73,7 +85,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        version = try container.decode(Int.self, forKey: .version)
+        let fileVersion = try container.decode(Int.self, forKey: .version)
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
         temperature = try container.decode(Double.self, forKey: .temperature)
@@ -81,6 +93,14 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         topK = try container.decode(Int.self, forKey: .topK)
         topPEnabled = try container.decode(Bool.self, forKey: .topPEnabled)
         topP = try container.decode(Double.self, forKey: .topP)
+        samplingFollowsModel = try container.decodeIfPresent(
+            Bool.self, forKey: .samplingFollowsModel)
+            ?? Self.isHouseSampling(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
+                                    topPEnabled: topPEnabled, topP: topP)
+        if fileVersion < 2 && expertCacheSlots == 64 {
+            expertCacheSlots = AppRuntimeOptions.automaticSlotCount
+        }
+        version = fileVersion < 2 ? Self.currentVersion : fileVersion
         prefillEnabled = try container.decode(Bool.self, forKey: .prefillEnabled)
         newlineShortcut = try container.decodeIfPresent(
             AppNewlineShortcut.self,
@@ -99,6 +119,13 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             String.self, forKey: .ropeScalingMode) ?? "none"
     }
 
+    /// The pre-profile defaults every settings file used to start from.
+    static func isHouseSampling(temperature: Double, topKEnabled: Bool, topK: Int,
+                                topPEnabled: Bool, topP: Double) -> Bool {
+        temperature == 0.6 && topKEnabled && topK == GenerationDefaults.topK
+            && topPEnabled && topP == 0.95
+    }
+
     func isValid() -> Bool {
         version == Self.currentVersion
             && AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
@@ -108,7 +135,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             && (ropeScalingMode == "yarn"
                 ? RuntimeConfiguration.supportedYaRNContextTokens.contains(contextTokens)
                 : contextTokens <= RuntimeConfiguration.nativeMaximumContextTokens)
-            && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
+            && (expertCacheSlots == AppRuntimeOptions.automaticSlotCount
+                || AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots))
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)

@@ -20,11 +20,24 @@ public final class AppModel {
     public var runtimeOptions = AppRuntimeOptions()
     public var maxNewTokensOverride: Int?
     public var maxContextTokens: Int = 4096
-    public var temperature: Double = 0.6
-    public var topKEnabled: Bool = true
-    public var topK: Int = GenerationDefaults.topK
-    public var topPEnabled: Bool = true
-    public var topP: Double = 0.95
+    /// While true, temperature / top-k / top-p track the model's tuning
+    /// profile (`ModelProfile.sampling`: the card's values for Qwen 3.8, the
+    /// house values for the 35B family) and are re-applied whenever the
+    /// model directory changes. Editing any of them switches this off;
+    /// switching it back on re-applies the profile. Persisted per model.
+    public var samplingFollowsModel: Bool = true {
+        didSet {
+            guard samplingFollowsModel != oldValue else { return }
+            if samplingFollowsModel { applyModelSampling() }
+            persistSettings()
+        }
+    }
+    public var temperature: Double = 0.6 { didSet { noteSamplingEdit() } }
+    public var topKEnabled: Bool = true { didSet { noteSamplingEdit() } }
+    public var topK: Int = GenerationDefaults.topK { didSet { noteSamplingEdit() } }
+    public var topPEnabled: Bool = true { didSet { noteSamplingEdit() } }
+    public var topP: Double = 0.95 { didSet { noteSamplingEdit() } }
+    private var applyingModelSampling = false
     public private(set) var newlineShortcut: AppNewlineShortcut = .return
     public private(set) var showPromptExamples: Bool = true
     public var diagnostics: AppDiagnostics?
@@ -84,6 +97,7 @@ public final class AppModel {
             ropeScalingMode: RuntimeRoPEScalingMode(
                 rawValue: settings.ropeScalingMode) ?? .none)
         self.maxContextTokens = settings.contextTokens
+        self.samplingFollowsModel = settings.samplingFollowsModel
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
         self.topK = settings.topK
@@ -98,7 +112,33 @@ public final class AppModel {
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
         self.installETAClock = installETAClock
         self.installETAOrigin = installETAClock.now
+        if settings.samplingFollowsModel { applyModelSampling() }
         refreshInstallReadiness()
+    }
+
+    /// The sampling the model at `directory` ships with: its profile row when
+    /// the manifest is readable, the house values otherwise.
+    public static func modelSampling(forModelAt directory: URL) -> GenerationDefaults.Sampling {
+        (try? ManifestReader.peekIdentity(directoryURL: directory))
+            .map { ModelProfile.resolve(identity: $0).sampling }
+            ?? GenerationDefaults.house
+    }
+
+    private func applyModelSampling() {
+        let sampling = Self.modelSampling(
+            forModelAt: URL(fileURLWithPath: modelPathText, isDirectory: true))
+        applyingModelSampling = true
+        defer { applyingModelSampling = false }
+        temperature = Double(sampling.temperature)
+        topKEnabled = true
+        topK = sampling.topK
+        topPEnabled = true
+        topP = Double(sampling.topP)
+    }
+
+    private func noteSamplingEdit() {
+        guard !applyingModelSampling, samplingFollowsModel else { return }
+        samplingFollowsModel = false
     }
 
     public var isRunning: Bool { runState == .running }
@@ -707,11 +747,15 @@ public final class AppModel {
             ropeScalingMode: RuntimeRoPEScalingMode(
                 rawValue: settings.ropeScalingMode) ?? .none)
         maxContextTokens = settings.contextTokens
+        applyingModelSampling = true
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
         topK = settings.topK
         topPEnabled = settings.topPEnabled
         topP = settings.topP
+        applyingModelSampling = false
+        samplingFollowsModel = settings.samplingFollowsModel
+        if settings.samplingFollowsModel { applyModelSampling() }
         newlineShortcut = settings.newlineShortcut
         showPromptExamples = settings.showPromptExamples
     }
@@ -721,6 +765,7 @@ public final class AppModel {
         let settings = MacAppSettings(
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
+            samplingFollowsModel: samplingFollowsModel,
             temperature: temperature,
             topKEnabled: topKEnabled,
             topK: topK,

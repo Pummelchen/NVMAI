@@ -194,7 +194,8 @@ actor RealInferenceSession {
             onState(.loading(.verifyingWeights))
             let runtimeConfiguration = try key.options.resolvedRuntimeConfiguration(
                 forceLogitsHead: key.forceLogitsHead,
-                maxContextTokens: key.maxContext)
+                maxContextTokens: key.maxContext,
+                modelDirectory: key.directory)
             let context: MetalContext
             if let ctx {
                 context = ctx

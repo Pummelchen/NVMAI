@@ -184,6 +184,13 @@ public func run(args: Args,
                 .first(where: { $0 >= promptIds.count })
                 ?? PrefillRuntimeConfig.maxChunkTokens
         case nil:
+            // The (model, width) row first, so the CLI loads what the server
+            // loads; the family switch below is the fallback for rows that
+            // leave the chunk to the front end.
+            if let tabled = ModelProfile.resolve(identity: identity).prefillChunkTokens {
+                prefillChunkTokens = tabled
+                break
+            }
             switch model.config.family {
             case .qwen36:
                 prefillChunkTokens = RuntimeConfiguration.qwenLongPrefillChunkTokens

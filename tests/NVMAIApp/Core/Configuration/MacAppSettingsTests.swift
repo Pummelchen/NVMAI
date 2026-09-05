@@ -113,6 +113,47 @@ import Testing
         #expect(roundTripped == settings)
     }
 
+    @Test func versionOneFileMigratesTheFlatSlotDefaultToAutomatic() throws {
+        // The old flat 64 was a default nobody chose; it becomes "from the
+        // model's profile". Sampling still at the house values follows the
+        // model; an edited temperature keeps following the user.
+        let legacy = Data("""
+        {
+          "version": 1,
+          "contextTokens": 4096,
+          "expertCacheSlots": 64,
+          "temperature": 0.6,
+          "topKEnabled": true,
+          "topK": 20,
+          "topPEnabled": true,
+          "topP": 0.95,
+          "prefillEnabled": true
+        }
+        """.utf8)
+        let migrated = try JSONDecoder().decode(MacAppSettings.self, from: legacy)
+        #expect(migrated.expertCacheSlots == AppRuntimeOptions.automaticSlotCount)
+        #expect(migrated.samplingFollowsModel)
+        #expect(migrated.version == MacAppSettings.currentVersion)
+        #expect(migrated.isValid())
+
+        let edited = try JSONDecoder().decode(MacAppSettings.self, from: Data("""
+        {
+          "version": 1,
+          "contextTokens": 4096,
+          "expertCacheSlots": 32,
+          "temperature": 0.2,
+          "topKEnabled": true,
+          "topK": 20,
+          "topPEnabled": true,
+          "topP": 0.95,
+          "prefillEnabled": true
+        }
+        """.utf8))
+        #expect(edited.expertCacheSlots == 32)
+        #expect(!edited.samplingFollowsModel)
+        #expect(MacAppSettings().isValid())
+    }
+
     @Test func thinkingModeDecodesAndRoundTrips() throws {
         let initial = MacAppSettings(thinkingMode: "on")
         let decoded = try JSONDecoder().decode(
