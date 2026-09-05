@@ -36,8 +36,7 @@ NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 - **Long context:** Native RoPE supports up to 262K tokens, while optional YaRN
   extends the context to 512K or 1M tokens.
 - **Compressed KV cache:** Live attention state can use 16-bit, 8-bit, or 4-bit
-  storage independently of the installed model quantization, with 8-bit as the
-  default.
+  storage independently of the installed model quantization.
 - **Thinking mode:** Ornith and Qwen support truthful Off/On reasoning control;
   their chat templates do not define Low, Medium, or High effort levels.
 - **MTP off by default:** Native speculative decoding remains experimental and
@@ -83,10 +82,10 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 | Ornith 1.5 35B-A3B | 4-bit | **19.24 tok/s** |
 | Qwen 3.6 35B-A3B | 4-bit | **19.21 tok/s** |
 | Qwen-AgentWorld 35B-A3B | 4-bit | **18.57 tok/s** |
-| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.25 tok/s** |
 | Qwen 3.6 35B-A3B | 8-bit | **9.73 tok/s** |
 | Ornith 1.5 35B-A3B | 8-bit | **9.72 tok/s** |
 | Qwen-AgentWorld 35B-A3B | 8-bit | **9.46 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.25 tok/s** |
 | Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.03 tok/s** |
 
 ## Core Links
