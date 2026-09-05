@@ -224,6 +224,13 @@ if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   fi
 fi
 
+# Persistent memory, when NVMAI_MEMORY=1. The workspace is the directory
+# this was launched from, so each repository keeps its own memory.
+nvmai_export_memory_environment "$PWD"
+if [[ "${NVMAI_MEMORY:-0}" == "1" ]]; then
+  echo "Memory: on (Valkey ${VALKEY_URL}, cache ${NVMAI_MEMORY_CACHE_MIB} MiB, workspace $(basename "$PWD"))"
+fi
+
 echo "Starting NVMAIServer ($ai_model $quant, $mode_word, $think_word)..."
 # No RAM-budget, expert-slot, prefill-chunk or sampling flags here:
 # the runtime takes them from the install's tuning profile (logged at load

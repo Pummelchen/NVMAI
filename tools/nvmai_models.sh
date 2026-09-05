@@ -57,3 +57,40 @@ nvmai_model_port() {
 
 # Every (model, quantization) this checkout knows about, for help text.
 NVMAI_ALL_MODELS=(ornith qwen36 agentworld qwen38)
+
+# --- Persistent memory -------------------------------------------------
+#
+# Off unless NVMAI_MEMORY=1. The Valkey cache ceiling defaults by machine
+# memory, since the working set is a few thousand short facts and does not
+# grow with the host: 256 MiB at 8 GB, 512 MiB at 16 GB, 1 GiB above that.
+# Override with NVMAI_MEMORY_CACHE_MIB.
+#
+# The workspace defaults to the directory the launcher was run from, which
+# is the repository being worked on, so two checkouts never share memory.
+
+nvmai_default_cache_mib() {
+  local bytes
+  bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+  if [[ -z "$bytes" ]]; then
+    # Linux: MemTotal is in kB.
+    bytes="$(awk '/MemTotal/ {print $2 * 1024; exit}' /proc/meminfo 2>/dev/null || true)"
+  fi
+  if [[ -z "$bytes" ]]; then echo 512; return; fi
+  local gib=$(( bytes / 1073741824 ))
+  if   (( gib <= 8 ));  then echo 256
+  elif (( gib <= 16 )); then echo 512
+  else                       echo 1024
+  fi
+}
+
+# Exports the memory environment a server inherits. Everything already set
+# by the caller wins, so a start script never overrides an explicit choice.
+nvmai_export_memory_environment() {
+  local workspace_dir="${1:-$PWD}"
+  export NVMAI_MEMORY="${NVMAI_MEMORY:-0}"
+  [[ "$NVMAI_MEMORY" == "1" ]] || return 0
+  export VALKEY_URL="${VALKEY_URL:-redis://127.0.0.1:6379}"
+  export NVMAI_MEMORY_CACHE_MIB="${NVMAI_MEMORY_CACHE_MIB:-$(nvmai_default_cache_mib)}"
+  export NVMAI_WORKSPACE_DIR="${NVMAI_WORKSPACE_DIR:-$workspace_dir}"
+  export NVMAI_MEMORY_NAMESPACE="${NVMAI_MEMORY_NAMESPACE:-nvmai}"
+}

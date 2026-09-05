@@ -1,0 +1,39 @@
+# Valkey for NVMAI's agent memory.
+#
+#   docker compose -f tools/memory/docker-compose.yml up -d
+#
+# RAM-first with persistence to disk, which is what durable agent memory
+# needs: the working set stays in memory, and an appendonly log plus periodic
+# snapshots mean a restart does not lose what the model learned.
+#
+# maxmemory here is a ceiling for the container. NVMAI also applies its own
+# ceiling at connect (NVMAI_MEMORY_CACHE_MIB, defaulting by machine memory),
+# so this value only has to be at least as large.
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: nvmai-valkey
+    restart: unless-stopped
+    # Loopback only. Memory holds whatever the model decided was worth
+    # keeping about a codebase, so it should not be reachable off the host
+    # without a deliberate decision.
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - nvmai-valkey-data:/data
+    command: >
+      valkey-server
+      --appendonly yes
+      --appendfsync everysec
+      --save 300 10
+      --maxmemory 1gb
+      --maxmemory-policy noeviction
+      --dir /data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  nvmai-valkey-data:
