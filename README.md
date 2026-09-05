@@ -17,10 +17,10 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 | Qwen-AgentWorld 35B-A3B | 4-bit | **21.74 tok/s** |
 | Ornith 1.5 35B-A3B | 4-bit | **21.65 tok/s** |
 | Qwen 3.6 35B-A3B | 4-bit | **21.41 tok/s** |
-| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.46 tok/s** |
 | Qwen 3.6 35B-A3B | 8-bit | **12.37 tok/s** |
 | Qwen-AgentWorld 35B-A3B | 8-bit | **12.28 tok/s** |
 | Ornith 1.5 35B-A3B | 8-bit | **11.93 tok/s** |
+| Qwen3.8-Flash-Next 125B-A6B | 4-bit | **5.46 tok/s** |
 | Qwen3.8-Flash-Next 125B-A6B | 8-bit | **2.10 tok/s** |
 
 
