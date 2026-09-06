@@ -39,7 +39,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ARMS = ("summary", "auto", "minimal", "full")
-OUT = ROOT / ".build/benchmark-logs/memory-book"
+OUT = Path(os.environ.get("NVMAI_MEMVAL_RESULTS", ROOT / ".build/benchmark-logs/memory-book"))
 PORT = int(os.environ.get("NVMAI_PORT", "8096"))
 BASE = f"http://127.0.0.1:{PORT}/v1"
 # Which run of the arm this is; results are kept per run so repeats can be
@@ -240,7 +240,13 @@ def normalise(key: str, value) -> str | bool | None:
     if key == "town":
         return "ashgrove" if "ashgrove" in text else text
     if key.endswith("_eyes"):
-        return "grey" if text in ("gray", "grey") else text
+        # Colour words by prefix: an extraction that paraphrased "hazel" as
+        # "hazelnut" carried the fact perfectly for nine sessions and a
+        # strict match scored every one of them wrong.
+        for colour in ("grey", "gray", "green", "brown", "hazel", "blue"):
+            if text.startswith(colour):
+                return "grey" if colour == "gray" else colour
+        return text
     if key == "tomas_status":
         return "found" if "found" in text or "alive" in text else "missing"
     if key == "inn_status":
@@ -312,6 +318,11 @@ def report():
             for result in results:
                 session = result["session"]
                 expected = truth(session)
+                # Rescored from the stored answers, never from the number the
+                # run wrote down, so a scoring fix applies to every version
+                # identically.
+                correct, total = score(session, result["answers"])
+                result["correct"], result["total"] = correct, total
                 if not result["answers"]:
                     detail = "(no quiz answered)"
                 else:

@@ -49,7 +49,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # control: memory off. minimal: bootstrap plus memory_set/memory_get.
 # full: bootstrap plus all six tools.
 ARMS = ("control", "auto", "minimal", "full")
-OUT = ROOT / ".build/benchmark-logs/memory-value"
+OUT = Path(os.environ.get("NVMAI_MEMVAL_RESULTS", ROOT / ".build/benchmark-logs/memory-value"))
 PORT = int(os.environ.get("NVMAI_PORT", "8096"))
 BASE = f"http://127.0.0.1:{PORT}/v1"
 # Which run of the arm this is; results are kept per run so repeats can be

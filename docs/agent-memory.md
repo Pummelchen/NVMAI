@@ -381,7 +381,8 @@ extraction shown every key by name and values only for keys the session
 touches; consolidation after thirty seconds of quiet instead of two minutes;
 no RAM ceiling by default; thirty-day retention and a cap on project files;
 the store under `<NVMAI>/memory`; and "memory tools" named as such
-everywhere. Measured against v1 on the same benchmarks.
+everywhere. Measured against v1 on the same benchmarks: see
+`docs/memory-database-v2-comparison-2026-09-07.md`.
 
 ## Known limitations
 
