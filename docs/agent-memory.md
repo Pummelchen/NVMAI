@@ -106,7 +106,8 @@ one-line summaries, never their full values: the bootstrap says what exists,
 and the text is a tool call away.
 
 The bootstrap is bounded twice, by record count and by bytes — forty records
-and 12 KiB by default, each value summarised to 200 characters. Twenty was too
+and 16 KiB by default, each value summarised to 200 characters, ties going to
+the older fact so a foundation outranks last session's state. Twenty was too
 few: a novel's bible plus its running state passed thirty keys by the fourth
 session and the eye colours were crowded out by `state/*`. A test fills a
 store with 500 records and asserts session start can never return more than
@@ -127,8 +128,8 @@ Environment variables, which is how the start scripts pass them:
 | `NVMAI_MEMORY_WORKSPACE` | from `NVMAI_WORKSPACE_DIR` | Explicit workspace id |
 | `NVMAI_WORKSPACE_DIR` | launch directory | Directory the workspace id derives from |
 | `NVMAI_MEMORY_MAX_VALUE_BYTES` | `65536` | Largest single memory |
-| `NVMAI_MEMORY_BOOTSTRAP_LIMIT` | `40` | Bootstrap record cap |
-| `NVMAI_MEMORY_BOOTSTRAP_BYTES` | `12288` | Bootstrap byte cap |
+| `NVMAI_MEMORY_BOOTSTRAP_LIMIT` | `60` | Bootstrap record cap |
+| `NVMAI_MEMORY_BOOTSTRAP_BYTES` | `16384` | Bootstrap byte cap |
 | `NVMAI_MEMORY_TOOL_ROUNDS` | `4` | Memory rounds serviced per request |
 | `NVMAI_MEMORY_TOOLS` | `off` | `off`, `minimal` (set, get, list) or `full` (six tools) |
 | `NVMAI_MEMORY_CONSOLIDATION` | `1` | `0` disables the engine writing memory at session boundaries |

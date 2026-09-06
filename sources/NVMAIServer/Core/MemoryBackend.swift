@@ -253,10 +253,15 @@ public actor MemoryBackend: ServerInferenceBackend {
         unconsolidated[scope] = context
         idleTimers[scope]?.cancel()
         let delay = configuration.consolidationIdleSeconds
+        // The timer task only waits. Once the wait is over the consolidation
+        // runs in a task of its own, so a turn arriving later -- which
+        // cancels the timer -- can never cancel a generation already under
+        // way: the gate would release mid-inference and the engine would be
+        // asked to abandon a request for no reason.
         idleTimers[scope] = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
             guard !Task.isCancelled, let self else { return }
-            await self.consolidateIfPending(scope: scope, expecting: context.session.id)
+            Task { await self.consolidateIfPending(scope: scope, expecting: context.session.id) }
         }
         if let previous = pendingAfterTurn.removeValue(forKey: scope) {
             Task { [weak self] in await self?.consolidate(previous) }
@@ -306,7 +311,11 @@ public actor MemoryBackend: ServerInferenceBackend {
             ServerLog.memory("consolidation failed session=\(context.session.id): \(error)")
             return
         }
-        let records = ServerMemory.consolidationRecords(from: completion.content)
+        let parsed = ServerMemory.consolidationRecords(from: completion.content)
+        let (records, merged) = ServerMemory.reconcile(parsed, existing: existing)
+        for (from, to) in merged {
+            ServerLog.memory("consolidation routed \(from) -> \(to) session=\(context.session.id)")
+        }
         if records.isEmpty {
             // Nothing usable came back. The head of the raw output is the only
             // way to tell an honest "[]" from a truncated array or a refusal.

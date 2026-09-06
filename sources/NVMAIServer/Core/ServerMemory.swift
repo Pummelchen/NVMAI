@@ -78,8 +78,11 @@ enum ServerMemory {
             + "specified\", \"unknown\", \"N/A\" or guesses -- omit the key instead. "
             + "When this session changes a state that memory holds, reuse that key "
             + "exactly and write the new state; the old one is kept as history "
-            + "automatically. One fact per key: a group of numbers or attributes is "
-            + "several keys, not one blob. Booleans are true or false.\n\n"
+            + "automatically. Never create a second key for a fact memory already "
+            + "holds under another name: if `state/inn` exists, the inn's state goes "
+            + "to `state/inn`, not to `continuity/inn_status`. One fact per key: a "
+            + "group of numbers or attributes is several keys, not one blob. Booleans "
+            + "are true or false.\n\n"
             + "Output only a JSON array, in a ```json block, of objects with keys "
             + "\"key\", \"value\" and \"importance\" (0 to 1; fixed attributes and "
             + "rules high, passing state lower). Keys are lowercase path-like names "
@@ -119,6 +122,14 @@ enum ServerMemory {
            open < lastClose {
             candidates.append(String(text[open...lastClose]) + "]")
         }
+        // No array at all: one bare object, or several in a row. A session
+        // with a single fact came back as `{...}` and was scored as having
+        // produced nothing, which lost the one fact that session was for.
+        if let open = text.firstIndex(of: "{"), let close = text.lastIndex(of: "}"), open < close {
+            let objects = String(text[open...close])
+            candidates.append("[" + objects.replacingOccurrences(
+                of: #"\}\s*\{"#, with: "},{", options: .regularExpression) + "]")
+        }
         for candidate in candidates {
             guard let data = candidate.data(using: .utf8),
                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
@@ -141,6 +152,52 @@ enum ServerMemory {
         }
         return []
     }
+
+    /// Routes a new fact to the key memory already uses for it.
+    ///
+    /// The extraction is told to reuse keys and still invents parallel names
+    /// under sampling: `state/inn_status` beside `continuity/inn_status`,
+    /// `characters/tomas/status` beside `continuity/tomas_status`. Two keys
+    /// for one fact put a contradiction in the bootstrap, and the model then
+    /// answers whichever it read last. When a new key's final segment names
+    /// exactly one existing key and is specific enough to be a fact rather
+    /// than an attribute, the write goes to that key. `eyes` names six
+    /// characters and is never merged; `inn_status` names one thing.
+    static func reconcile(_ records: [MemoryRecord],
+                          existing: [MemoryRecord]) -> (records: [MemoryRecord],
+                                                       merged: [(from: String, to: String)]) {
+        var byBasename: [String: [MemoryKey]] = [:]
+        for record in existing {
+            byBasename[basename(of: record.key.rawValue), default: []].append(record.key)
+        }
+        let existingKeys = Set(existing.map(\.key.rawValue))
+        var out: [MemoryRecord] = []
+        var merged: [(from: String, to: String)] = []
+        for record in records {
+            let key = record.key.rawValue
+            guard !existingKeys.contains(key) else { out.append(record); continue }
+            let base = basename(of: key)
+            guard base.count >= 4, !genericBasenames.contains(base),
+                  let targets = byBasename[base], targets.count == 1,
+                  let target = targets.first, target.rawValue != key
+            else { out.append(record); continue }
+            var routed = record
+            routed.key = target
+            out.append(routed)
+            merged.append((from: key, to: target.rawValue))
+        }
+        return (out, merged)
+    }
+
+    private static func basename(of key: String) -> String {
+        key.split(separator: "/").last.map(String.init) ?? key
+    }
+
+    /// Final segments that name an attribute many things have, never a fact.
+    private static let genericBasenames: Set<String> = [
+        "eyes", "role", "secret", "status", "name", "title", "state", "value",
+        "note", "notes", "current", "description", "summary", "count", "type",
+    ]
 
     /// Values that are the absence of a fact. Writing one over a real value
     /// is worse than writing nothing, and a model shown a key it has no

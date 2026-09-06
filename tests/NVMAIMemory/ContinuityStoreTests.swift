@@ -738,3 +738,34 @@ import ContinuityCore
         await second.shutDown()
     }
 }
+
+/// The bootstrap's order under pressure.
+@Suite struct MemoryBootstrapOrderTests {
+    @Test func amongEqualImportanceTheOlderFactWins() throws {
+        let early = Date(timeIntervalSince1970: 1_000)
+        let late = Date(timeIntervalSince1970: 9_000)
+        let bible = MemoryRecord(key: try MemoryKey(validating: "characters/rosa/eyes"),
+                                 value: "hazel", importance: 0.9,
+                                 createdAt: early, updatedAt: early)
+        let state = MemoryRecord(key: try MemoryKey(validating: "continuity/last_scene"),
+                                 value: "Rosa on the shore", importance: 0.9,
+                                 createdAt: late, updatedAt: late)
+        let limits = NVMAIMemory.MemoryLimits(bootstrapRecords: 1, bootstrapBytes: 1 << 16)
+        let bootstrap = MemoryBootstrap.build(from: [state, bible], limits: limits)
+        #expect(bootstrap.records.map(\.key.rawValue) == ["characters/rosa/eyes"])
+        #expect(bootstrap.omittedCount == 1)
+    }
+
+    @Test func importanceStillComesFirst() throws {
+        let early = Date(timeIntervalSince1970: 1_000)
+        let late = Date(timeIntervalSince1970: 9_000)
+        let minor = MemoryRecord(key: try MemoryKey(validating: "notes/aside"), value: "x",
+                                 importance: 0.2, createdAt: early, updatedAt: early)
+        let major = MemoryRecord(key: try MemoryKey(validating: "rules/weather"),
+                                 value: "never rains", importance: 0.95,
+                                 createdAt: late, updatedAt: late)
+        let limits = NVMAIMemory.MemoryLimits(bootstrapRecords: 1, bootstrapBytes: 1 << 16)
+        #expect(MemoryBootstrap.build(from: [minor, major], limits: limits)
+                    .records.map(\.key.rawValue) == ["rules/weather"])
+    }
+}

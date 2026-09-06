@@ -109,8 +109,8 @@ public struct MemoryLimits: Sendable, Equatable {
     public init(maximumValueBytes: Int = 64 * 1024,
                 maximumSearchResults: Int = 50,
                 maximumListResults: Int = 200,
-                bootstrapRecords: Int = 40,
-                bootstrapBytes: Int = 12 * 1024) {
+                bootstrapRecords: Int = 60,
+                bootstrapBytes: Int = 16 * 1024) {
         self.maximumValueBytes = maximumValueBytes
         self.maximumSearchResults = maximumSearchResults
         self.maximumListResults = maximumListResults
@@ -134,11 +134,17 @@ extension MemoryBootstrap {
     /// backend gets the same ceiling; the count alone is not enough, because
     /// twenty records of 64 KB would still be 1.2 MB of context.
     static func build(from records: [MemoryRecord], limits: MemoryLimits) -> MemoryBootstrap {
+        // Importance first; among equals the OLDER fact wins. A bible written
+        // in session one and the state of session nine compete for the same
+        // slots, and the foundation is the one a session cannot do without.
+        // Newest-first here is how a novel's character eye colours were
+        // crowded out of the bootstrap by the fourth session.
         let ordered = records.sorted { left, right in
             let leftImportance = left.importance ?? 0
             let rightImportance = right.importance ?? 0
             if leftImportance != rightImportance { return leftImportance > rightImportance }
-            return left.updatedAt > right.updatedAt
+            if left.createdAt != right.createdAt { return left.createdAt < right.createdAt }
+            return left.key.rawValue < right.key.rawValue
         }
         var chosen: [MemoryRecord] = []
         var bytes = 0

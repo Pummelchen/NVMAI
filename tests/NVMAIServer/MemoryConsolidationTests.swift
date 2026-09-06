@@ -269,8 +269,10 @@ import NVMAIMemory
             let index: Int = lock.withLock {
                 active += 1; peak = max(peak, active); calls += 1; return calls
             }
+            // Leave on every path, including a cancelled sleep: a detector
+            // that forgets to leave reports an overlap that never happened.
+            defer { lock.withLock { active -= 1 } }
             try await Task.sleep(for: .milliseconds(60))
-            lock.withLock { active -= 1 }
             return ServerCompletion(content: reply(index), toolCalls: [], finishReason: "stop",
                                     usage: OpenAIUsage(promptTokens: 1, completionTokens: 1,
                                                        totalTokens: 2))
@@ -384,5 +386,56 @@ import NVMAIMemory
         #expect(system.contains("omit the key instead"))
         #expect(request.maximumCompletionTokens >= 2000)
         #expect(request.tools.isEmpty)
+    }
+}
+
+/// Two more things the hundred chapters taught.
+@Suite struct MemoryConsolidationReconcileTests {
+    private func key(_ raw: String) throws -> MemoryKey { try MemoryKey(validating: raw) }
+
+    @Test func aBareObjectIsOneFact() {
+        let one = ServerMemory.consolidationRecords(
+            from: "{ \"key\": \"continuity/halvorsen_confessed\", \"value\": true, \"importance\": 1 }")
+        #expect(one.map(\.key.rawValue) == ["continuity/halvorsen_confessed"])
+        #expect(one.first?.value == "true")
+
+        let several = ServerMemory.consolidationRecords(
+            from: "{\"key\": \"a/b\", \"value\": 1}\n{\"key\": \"a/c\", \"value\": 2}")
+        #expect(several.map(\.key.rawValue) == ["a/b", "a/c"])
+    }
+
+    @Test func aParallelNameForAKnownFactIsRoutedToIt() throws {
+        let existing = [
+            MemoryRecord(key: try key("state/inn_status"), value: "burned"),
+            MemoryRecord(key: try key("characters/marcus/eyes"), value: "grey"),
+            MemoryRecord(key: try key("characters/ines/eyes"), value: "green"),
+        ]
+        let incoming = [
+            MemoryRecord(key: try key("continuity/inn_status"), value: "standing"),
+            MemoryRecord(key: try key("characters/rosa/eyes"), value: "hazel"),
+            MemoryRecord(key: try key("state/inn_status"), value: "rebuilt"),
+            MemoryRecord(key: try key("continuity/ferry_running"), value: "false"),
+        ]
+        let (records, merged) = ServerMemory.reconcile(incoming, existing: existing)
+        #expect(records.map(\.key.rawValue)
+                == ["state/inn_status", "characters/rosa/eyes", "state/inn_status",
+                    "continuity/ferry_running"])
+        // `inn_status` names one thing and is merged; `eyes` names every
+        // character and is never merged; an exact match passes through; a
+        // genuinely new fact is left alone.
+        #expect(merged.count == 1)
+        #expect(merged.first?.from == "continuity/inn_status")
+        #expect(merged.first?.to == "state/inn_status")
+    }
+
+    @Test func aBasenameSharedByTwoKeysIsNotMerged() throws {
+        let existing = [
+            MemoryRecord(key: try key("state/ferry_running"), value: "true"),
+            MemoryRecord(key: try key("continuity/ferry_running"), value: "false"),
+        ]
+        let incoming = [MemoryRecord(key: try key("plot/ferry_running"), value: "false")]
+        let (records, merged) = ServerMemory.reconcile(incoming, existing: existing)
+        #expect(records.first?.key.rawValue == "plot/ferry_running")
+        #expect(merged.isEmpty)
     }
 }
