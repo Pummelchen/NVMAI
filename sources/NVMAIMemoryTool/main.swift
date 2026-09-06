@@ -64,11 +64,20 @@ case "projects":
     let files = MemoryProjectFile.discover(in: directory)
     guard !files.isEmpty else { print("no project files under \(directory.path)"); exit(0) }
     print("\(directory.path)\n")
-    print(String(format: "%-40s %6s %8s %8s %10s  %s", "project", "facts", "sessions", "events", "on disk", "last write"))
+    func column(_ text: String, _ width: Int, right: Bool = false) -> String {
+        let clipped = text.count > width ? String(text.prefix(width)) : text
+        let pad = String(repeating: " ", count: width - clipped.count)
+        return right ? pad + clipped : clipped + pad
+    }
+    // No String(format:) with %s: a Swift String is not a C string, and the
+    // first version of this crashed after its buffered header line.
+    print(column("project", 40), column("facts", 6, right: true), column("sessions", 9, right: true),
+          column("events", 7, right: true), column("on disk", 9, right: true), " last write")
     for file in files {
         let label = file.workspace == MemoryConfiguration.sharedWorkspace ? "global (this person)" : file.workspace
-        print(String(format: "%-40s %6d %8d %8d %9dK  %s", label, file.facts.count, file.sessionCount,
-                     file.eventCount, file.bytesOnDisk / 1024, formatter.string(from: file.modifiedAt)))
+        print(column(label, 40), column("\(file.facts.count)", 6, right: true),
+              column("\(file.sessionCount)", 9, right: true), column("\(file.eventCount)", 7, right: true),
+              column("\(file.bytesOnDisk / 1024)K", 9, right: true), " \(formatter.string(from: file.modifiedAt))")
     }
 
 case "list":
