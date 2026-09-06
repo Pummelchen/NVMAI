@@ -109,8 +109,8 @@ public struct MemoryLimits: Sendable, Equatable {
     public init(maximumValueBytes: Int = 64 * 1024,
                 maximumSearchResults: Int = 50,
                 maximumListResults: Int = 200,
-                bootstrapRecords: Int = 20,
-                bootstrapBytes: Int = 8 * 1024) {
+                bootstrapRecords: Int = 40,
+                bootstrapBytes: Int = 12 * 1024) {
         self.maximumValueBytes = maximumValueBytes
         self.maximumSearchResults = maximumSearchResults
         self.maximumListResults = maximumListResults

@@ -53,37 +53,49 @@ enum ServerMemory {
     /// gone. Existing keys are shown so an update lands on the address it
     /// changes rather than beside it.
     static func consolidationRequest(turns: [JournalTurn],
-                                     existingKeys: [String],
+                                     existing: [MemoryRecord],
                                      workspace: String) -> ValidatedChatRequest {
         var transcript = ""
         for turn in turns {
             transcript += "USER: \(turn.prompt)\n\nASSISTANT: \(turn.reply)\n\n---\n\n"
         }
-        let keys = existingKeys.isEmpty
+        let known = existing.isEmpty
             ? "(none yet)"
-            : existingKeys.map { "- \($0)" }.joined(separator: "\n")
+            : existing.map { record in
+                let value = record.value.replacingOccurrences(of: "\n", with: " ")
+                return "- \(record.key.rawValue) = \(value.prefix(160))"
+            }.joined(separator: "\n")
         let system = "You distil a finished working session into durable facts for a memory "
             + "store scoped to the project `\(workspace)`. Later sessions will see these "
             + "facts and nothing else from this conversation, so record exactly what a "
             + "future session must not contradict: decisions and the reasons for them, "
-            + "fixed attributes, rules and constraints, current state, and what changed "
-            + "(a state change replaces the old state; write the new state, not the "
-            + "history). Do not record conversation, reasoning, code, or anything a "
-            + "future session can re-derive.\n\n"
+            + "fixed attributes, rules and constraints, current state, and what changed. "
+            + "Do not record conversation, reasoning, code, or anything a future session "
+            + "can re-derive.\n\n"
+            + "You are shown what memory already holds. Write ONLY facts this session "
+            + "added or changed. Do not restate a fact that is unchanged, and never "
+            + "write a key whose value you cannot take from this session: no \"not "
+            + "specified\", \"unknown\", \"N/A\" or guesses -- omit the key instead. "
+            + "When this session changes a state that memory holds, reuse that key "
+            + "exactly and write the new state; the old one is kept as history "
+            + "automatically. One fact per key: a group of numbers or attributes is "
+            + "several keys, not one blob. Booleans are true or false.\n\n"
             + "Output only a JSON array, in a ```json block, of objects with keys "
-            + "\"key\", \"value\" and \"importance\" (0 to 1). Keys are lowercase "
-            + "path-like names such as `characters/marcus`, `decisions/storage`, "
-            + "`state/inn` or `rules/weather`. When a fact updates an existing key, reuse "
-            + "that key exactly. Return [] if nothing durable happened."
-        let user = "Existing keys in memory:\n\(keys)\n\nThe session:\n\n\(transcript)"
+            + "\"key\", \"value\" and \"importance\" (0 to 1; fixed attributes and "
+            + "rules high, passing state lower). Keys are lowercase path-like names "
+            + "such as `characters/marcus/eyes`, `decisions/storage`, `state/inn` or "
+            + "`rules/weather`. Return [] if nothing durable was added or changed."
+        let user = "Memory already holds:\n\(known)\n\nThe session:\n\n\(transcript)"
         return ValidatedChatRequest(
             messages: [GFTokenizer.Message(role: .system, content: system),
                        GFTokenizer.Message(role: .user, content: user)],
             tools: [],
             stream: false,
             includeUsage: false,
-            generationConfig: GenerationConfig(maxNewTokens: 900),
-            maximumCompletionTokens: 900)
+            // Sixteen facts ran to about 700 tokens; a session with a plot
+            // event ran into the old 900 cap and came back unparseable.
+            generationConfig: GenerationConfig(maxNewTokens: 2000),
+            maximumCompletionTokens: 2000)
     }
 
     /// The facts a consolidation produced, or none if it produced nothing
@@ -100,6 +112,13 @@ enum ServerMemory {
         if let open = text.firstIndex(of: "["), let close = text.lastIndex(of: "]"), open < close {
             candidates.append(String(text[open...close]))
         }
+        // A truncated array -- the output cap landed mid-object -- still has
+        // every complete object before the cut. Losing sixteen facts to a
+        // seventeenth that was cut off is the failure this recovers from.
+        if let open = text.firstIndex(of: "["), let lastClose = text.lastIndex(of: "}"),
+           open < lastClose {
+            candidates.append(String(text[open...lastClose]) + "]")
+        }
         for candidate in candidates {
             guard let data = candidate.data(using: .utf8),
                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
@@ -108,8 +127,12 @@ enum ServerMemory {
             for entry in parsed {
                 guard let rawKey = entry["key"] as? String,
                       let key = try? MemoryKey(validating: rawKey.lowercased()),
-                      let value = entry["value"].map({ "\($0)" }), !value.isEmpty
+                      let raw = entry["value"], !(raw is NSNull)
                 else { continue }
+                let value: String
+                if let flag = raw as? Bool { value = flag ? "true" : "false" }
+                else { value = "\(raw)".trimmingCharacters(in: .whitespacesAndNewlines) }
+                guard !value.isEmpty, !Self.isPlaceholder(value) else { continue }
                 let importance = (entry["importance"] as? Double)
                     ?? (entry["importance"] as? Int).map(Double.init)
                 records.append(MemoryRecord(key: key, value: value, importance: importance))
@@ -117,6 +140,16 @@ enum ServerMemory {
             if !records.isEmpty || parsed.isEmpty { return records }
         }
         return []
+    }
+
+    /// Values that are the absence of a fact. Writing one over a real value
+    /// is worse than writing nothing, and a model shown a key it has no
+    /// information for will produce exactly these.
+    static func isPlaceholder(_ value: String) -> Bool {
+        let folded = value.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: " .\"'"))
+        return ["not specified", "unspecified", "unknown", "n/a", "na", "none", "null",
+                "tbd", "not mentioned", "not stated", "not given", "no change", "unchanged"]
+            .contains(folded)
     }
 
     /// A stable session id for a conversation.

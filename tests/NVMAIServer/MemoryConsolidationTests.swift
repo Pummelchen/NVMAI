@@ -336,3 +336,53 @@ import NVMAIMemory
         await backend.shutDown()
     }
 }
+
+/// What a hundred-chapter run taught the extraction.
+@Suite struct MemoryConsolidationExtractionTests {
+    @Test func aTruncatedArrayStillYieldsTheCompleteObjects() {
+        // The output cap landed inside the seventeenth object.
+        let cut = """
+        ```json
+        [
+          {"key": "characters/marcus/eyes", "value": "grey", "importance": 0.9},
+          {"key": "state/inn", "value": "burned down in chapter 34", "importance": 0.8},
+          {"key": "state/tomas", "value": "found alive in the ligh
+        """
+        let records = ServerMemory.consolidationRecords(from: cut)
+        #expect(records.map(\.key.rawValue) == ["characters/marcus/eyes", "state/inn"])
+    }
+
+    @Test func placeholdersAreNeverWrittenOverAFact() {
+        let output = """
+        [
+          {"key": "characters/halvorsen/eyes", "value": "not specified", "importance": 0.5},
+          {"key": "state/ferry_day", "value": "N/A", "importance": 0.5},
+          {"key": "state/ferry_running", "value": false, "importance": 0.7},
+          {"key": "state/anyone_left", "value": null, "importance": 0.7},
+          {"key": "rules/weather", "value": "it never rains", "importance": 0.9}
+        ]
+        """
+        let records = ServerMemory.consolidationRecords(from: output)
+        #expect(records.map(\.key.rawValue) == ["state/ferry_running", "rules/weather"])
+        #expect(records.first?.value == "false")
+    }
+
+    @Test func thePromptShowsValuesAndAsksOnlyForChanges() throws {
+        let existing = [
+            MemoryRecord(key: try MemoryKey(validating: "characters/marcus/eyes"), value: "grey"),
+            MemoryRecord(key: try MemoryKey(validating: "state/inn"), value: "standing"),
+        ]
+        let turn = JournalTurn(session: "s", workspace: "w", index: 0,
+                               prompt: "write chapter 34", reply: "The inn burned.")
+        let request = ServerMemory.consolidationRequest(turns: [turn], existing: existing,
+                                                        workspace: "w")
+        let user = request.messages.last?.content ?? ""
+        let system = request.messages.first?.content ?? ""
+        #expect(user.contains("state/inn = standing"))
+        #expect(user.contains("characters/marcus/eyes = grey"))
+        #expect(system.contains("ONLY facts this session added or changed"))
+        #expect(system.contains("omit the key instead"))
+        #expect(request.maximumCompletionTokens >= 2000)
+        #expect(request.tools.isEmpty)
+    }
+}

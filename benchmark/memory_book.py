@@ -195,8 +195,10 @@ def model_id():
 
 def assert_arm_is_real(arm: str, prompt_tokens: int):
     """The bible session is ~500 tokens bare; memory arms must show more."""
-    floor = {"summary": 0, "auto": 600, "minimal": 700, "full": 1200}[arm]
-    ceiling = {"summary": 700, "auto": 1200, "minimal": 20_000, "full": 20_000}[arm]
+    # The bible session is ~400 tokens bare. The tools-off fragment adds
+    # ~80 (measured 482 in total); tool schemas add hundreds more.
+    floor = {"summary": 0, "auto": 450, "minimal": 700, "full": 1200}[arm]
+    ceiling = {"summary": 700, "auto": 900, "minimal": 20_000, "full": 20_000}[arm]
     if not floor <= prompt_tokens <= ceiling:
         raise SystemExit(
             f"ABORT: arm '{arm}' saw {prompt_tokens} prompt tokens in session 1; "

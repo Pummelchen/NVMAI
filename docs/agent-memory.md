@@ -105,7 +105,10 @@ memory may be stale and worth verifying. It lists bootstrap keys with
 one-line summaries, never their full values: the bootstrap says what exists,
 and the text is a tool call away.
 
-The bootstrap is bounded twice, by record count and by bytes. A test fills a
+The bootstrap is bounded twice, by record count and by bytes — forty records
+and 12 KiB by default, each value summarised to 200 characters. Twenty was too
+few: a novel's bible plus its running state passed thirty keys by the fourth
+session and the eye colours were crowded out by `state/*`. A test fills a
 store with 500 records and asserts session start can never return more than
 the limits allow.
 
@@ -124,8 +127,8 @@ Environment variables, which is how the start scripts pass them:
 | `NVMAI_MEMORY_WORKSPACE` | from `NVMAI_WORKSPACE_DIR` | Explicit workspace id |
 | `NVMAI_WORKSPACE_DIR` | launch directory | Directory the workspace id derives from |
 | `NVMAI_MEMORY_MAX_VALUE_BYTES` | `65536` | Largest single memory |
-| `NVMAI_MEMORY_BOOTSTRAP_LIMIT` | `20` | Bootstrap record cap |
-| `NVMAI_MEMORY_BOOTSTRAP_BYTES` | `8192` | Bootstrap byte cap |
+| `NVMAI_MEMORY_BOOTSTRAP_LIMIT` | `40` | Bootstrap record cap |
+| `NVMAI_MEMORY_BOOTSTRAP_BYTES` | `12288` | Bootstrap byte cap |
 | `NVMAI_MEMORY_TOOL_ROUNDS` | `4` | Memory rounds serviced per request |
 | `NVMAI_MEMORY_TOOLS` | `off` | `off`, `minimal` (set, get, list) or `full` (six tools) |
 | `NVMAI_MEMORY_CONSOLIDATION` | `1` | `0` disables the engine writing memory at session boundaries |
@@ -272,6 +275,16 @@ first reply has been returned. With memory on it is on; `NVMAI_MEMORY_CONSOLIDAT
 turns it off. It needs no tools at all, which is the point: with
 `NVMAI_MEMORY_TOOLS=off` the model pays ~200 prompt tokens for the fragment
 and bootstrap, reads what the engine wrote, and never has to decide to write.
+
+The extraction is shown what memory already holds — keys *and* values — and
+asked for only what the session added or changed, one fact per key, never a
+placeholder. That wording is not cosmetic. Shown keys alone, the model
+re-derived every one of them from sessions that said nothing about them,
+wrote `not specified` over a character's eye colour, and confirmed `standing`
+for an inn that had burned three sessions earlier. The parser drops
+placeholder values, recovers every complete object from an array the output
+cap truncated, and a consolidation that yields nothing logs the head of its
+raw output so it can be diagnosed.
 
 The server log shows each one: `consolidated session=… turns=… facts=… keys=…`.
 

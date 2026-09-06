@@ -363,12 +363,16 @@ public actor MemoryService {
         log(.sessionEnded(session: context.session.id, scope: context.scope))
     }
 
-    /// Keys already in a scope, newest first, so a consolidation can update
-    /// an address instead of inventing a near-duplicate beside it.
-    public func recordedKeys(in scope: MemoryScope, limit: Int = 60) async -> [String] {
+    /// Facts already in a scope, most important first, so a consolidation
+    /// can update an address instead of inventing a near-duplicate beside
+    /// it -- and can see the value it would be replacing.
+    ///
+    /// Values, not only keys. Shown keys alone, a model re-derived every one
+    /// of them from a session that said nothing about them, and wrote "not
+    /// specified" over a character's eye colour.
+    public func recordedFacts(in scope: MemoryScope, limit: Int = 60) async -> [MemoryRecord] {
         let store = await activeStore(for: scope)
-        let keys = (try? await store.list(prefix: "", limit: limit, in: scope)) ?? []
-        return keys.map(\.rawValue)
+        return (try? await store.search(MemoryQuery(limit: limit), in: scope)) ?? []
     }
 
     /// Stores a consolidation the engine produced at session end.

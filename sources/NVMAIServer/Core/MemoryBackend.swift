@@ -295,9 +295,9 @@ public actor MemoryBackend: ServerInferenceBackend {
                              + "\(characters) characters, nothing to distil")
             return
         }
-        let existing = await service.recordedKeys(in: scope)
+        let existing = await service.recordedFacts(in: scope)
         let request = ServerMemory.consolidationRequest(
-            turns: Array(turns.reversed()), existingKeys: existing, workspace: scope.workspace)
+            turns: Array(turns.reversed()), existing: existing, workspace: scope.workspace)
         let started = Date()
         let completion: ServerCompletion
         do {
@@ -307,6 +307,13 @@ public actor MemoryBackend: ServerInferenceBackend {
             return
         }
         let records = ServerMemory.consolidationRecords(from: completion.content)
+        if records.isEmpty {
+            // Nothing usable came back. The head of the raw output is the only
+            // way to tell an honest "[]" from a truncated array or a refusal.
+            let head = completion.content.prefix(200).replacingOccurrences(of: "\n", with: " ")
+            ServerLog.memory("consolidation produced no facts session=\(context.session.id) "
+                             + "finish=\(completion.finishReason) output=\"\(head)\"")
+        }
         let written = await service.storeConsolidation(records, in: context)
         ServerLog.memory("consolidated session=\(context.session.id) turns=\(turns.count) "
                          + "facts=\(written) keys=\(records.map(\.key.rawValue).joined(separator: ","))"

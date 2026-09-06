@@ -82,7 +82,7 @@ public enum MemoryPrompt {
     /// One line per record. The bootstrap says what exists, not what it says;
     /// the full value is a tool call away, and pasting values here is how a
     /// memory system quietly becomes a context dump.
-    private static func summarize(_ value: String, limit: Int = 120) -> String {
+    private static func summarize(_ value: String, limit: Int = 200) -> String {
         let flattened = value
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
