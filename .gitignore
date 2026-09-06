@@ -53,3 +53,5 @@ Binary/
 
 # 72-combo harness mock (test scaffolding)
 benchmark/mock/
+# Persistent agent memory: one journal per project, user data, never committed.
+memory/

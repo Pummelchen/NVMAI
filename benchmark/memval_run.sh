@@ -118,7 +118,7 @@ for ARM in "${ARMS[@]}"; do
   rm -rf "$MEMDIR"; mkdir -p "$MEMDIR"
   SERVER_LOG="$LOGS/server-$ARM-r$RUN.log"
 
-  echo "=== $BENCH / $ARM / run $RUN  (memory=$MEMORY tools=$TOOLS consolidation_idle=${IDLE}s dir=$MEMDIR port=$PORT)"
+  echo "=== $BENCH / $ARM / run $RUN  (memory=$MEMORY memory_tools=$TOOLS consolidation_idle=${IDLE}s dir=$MEMDIR port=$PORT)"
   # Never let the launcher find a server to "stop": that path races the
   # readiness poll. The port is free before every arm, or the arm does not
   # start.

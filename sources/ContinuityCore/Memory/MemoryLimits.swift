@@ -11,7 +11,7 @@ public struct MemoryLimits: Sendable, Equatable {
     /// larger belongs in the workspace with a memory item pointing at it.
     public var maxValueBytes: Int
     /// Bytes a task's memory may hold, live items and retained versions
-    /// together.
+    /// together. Zero means no bound.
     ///
     /// This is the real bound. Counting actual bytes rather than multiplying
     /// an item count by the largest permitted value matters by orders of

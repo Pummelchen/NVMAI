@@ -61,13 +61,22 @@ public enum MemoryPrompt {
             lines.append("Note: the durable store is unreachable, so anything you write now "
                          + "lasts only for this session. Say so if the user relies on it.")
         }
+        if !bootstrap.recent.isEmpty {
+            lines.append("")
+            lines.append("Changed in the most recent session:")
+            for record in bootstrap.recent {
+                lines.append("- `\(record.key.rawValue)`: \(summarize(record.value))")
+            }
+        }
         if !bootstrap.records.isEmpty {
             lines.append("")
             lines.append(tools.contains("memory_get")
                          ? "Already known here (retrieve with memory_get for the full text):"
                          : "Already known here:")
-            for record in bootstrap.records {
-                lines.append("- `\(record.key.rawValue)`: \(summarize(record.value))")
+            let recentKeys = Set(bootstrap.recent.map(\.key))
+            for record in bootstrap.records where !recentKeys.contains(record.key) {
+                let marker = record.isDisputed ? " [disputed -- two sessions disagree; settle it]" : ""
+                lines.append("- `\(record.key.rawValue)`\(marker): \(summarize(record.value))")
             }
             if bootstrap.omittedCount > 0 {
                 let more = "- ...and \(bootstrap.omittedCount) more"

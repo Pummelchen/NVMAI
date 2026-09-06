@@ -61,38 +61,17 @@ NVMAI_ALL_MODELS=(ornith qwen36 agentworld qwen38)
 # --- Persistent memory -------------------------------------------------
 #
 # Off unless NVMAI_MEMORY=1. Memory runs inside the server process, so there
-# is no database to install or start. The store ceiling defaults by machine
-# memory, since the working set is a few thousand short facts and does not
-# grow with the host: 256 MiB at 8 GB, 512 MiB at 16 GB, 1 GiB above that.
-# Override with NVMAI_MEMORY_CACHE_MIB, and the location with
-# NVMAI_MEMORY_DIR (default ~/.nvmai/memory).
-#
-# This RAM is ADDITIONAL. It is not taken out of --ram-budget: an 8 GB
-# machine runs the expert cache at its 4 GiB and memory brings the total to
-# 4 GiB + 256 MiB. The ceiling covers every open workspace together, not
-# each one, so turning memory on costs the same whether a session touches
-# one repository or five.
+# is no database to install or start, and it takes what it needs: measured,
+# a hundred-chapter novel over ten sessions was about 100 KB. There is no
+# RAM ceiling by default; NVMAI_MEMORY_CACHE_MIB sets one for anyone who
+# wants it. The files live in a dedicated folder under the checkout,
+# <NVMAI>/memory, beside models/ (override with NVMAI_MEMORY_DIR). One file
+# per project; a project untouched for 30 days is deleted, and at most 100
+# are kept (NVMAI_MEMORY_RETENTION_DAYS, NVMAI_MEMORY_MAX_WORKSPACES).
 #
 # The workspace defaults to the directory the launcher was run from, which
 # is the repository being worked on, so two checkouts never share memory.
 
-nvmai_default_cache_mib() {
-  local bytes
-  bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
-  if [[ -z "$bytes" ]]; then
-    # Linux: MemTotal is in kB.
-    bytes="$(awk '/MemTotal/ {print $2 * 1024; exit}' /proc/meminfo 2>/dev/null || true)"
-  fi
-  if [[ -z "$bytes" ]]; then echo 512; return; fi
-  local gib=$(( bytes / 1073741824 ))
-  if   (( gib <= 8 ));  then echo 256
-  elif (( gib <= 16 )); then echo 512
-  else                       echo 1024
-  fi
-}
-
-# Exports the memory environment a server inherits. Everything already set
-# by the caller wins, so a start script never overrides an explicit choice.
 nvmai_export_memory_environment() {
   local workspace_dir="${1:-$PWD}"
   export NVMAI_MEMORY="${NVMAI_MEMORY:-0}"
@@ -115,8 +94,9 @@ nvmai_export_memory_environment() {
       exit 2
     fi
   fi
-  export NVMAI_MEMORY_CACHE_MIB="${NVMAI_MEMORY_CACHE_MIB:-$(nvmai_default_cache_mib)}"
   export NVMAI_WORKSPACE_DIR="${NVMAI_WORKSPACE_DIR:-$workspace_dir}"
   export NVMAI_MEMORY_NAMESPACE="${NVMAI_MEMORY_NAMESPACE:-nvmai}"
-  export NVMAI_MEMORY_DIR="${NVMAI_MEMORY_DIR:-$HOME/.nvmai/memory}"
+  local nvmai_root
+  nvmai_root="${BASE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+  export NVMAI_MEMORY_DIR="${NVMAI_MEMORY_DIR:-$nvmai_root/memory}"
 }

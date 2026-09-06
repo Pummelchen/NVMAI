@@ -82,7 +82,7 @@ importance (ranks the bootstrap), confidence, tags, the session that wrote it,
 and created/updated timestamps. A rewrite keeps the original creation time,
 because the model is correcting a fact rather than making a new one.
 
-## Model-facing tools
+## Memory tools (not the client's tools)
 
 | Tool | Purpose |
 | --- | --- |
@@ -120,9 +120,11 @@ Environment variables, which is how the start scripts pass them:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `NVMAI_MEMORY` | `0` | `1` enables memory |
-| `NVMAI_MEMORY_DIR` | `~/.nvmai/memory` | Directory holding the journals |
+| `NVMAI_MEMORY_DIR` | `<NVMAI>/memory` | Directory holding the project files (the binary alone falls back to `~/.nvmai/memory`) |
+| `NVMAI_MEMORY_RETENTION_DAYS` | `30` | Delete a project file untouched this long; `0` keeps all |
+| `NVMAI_MEMORY_MAX_WORKSPACES` | `100` | Keep at most this many project files, oldest first out; `0` is no cap |
 | `NVMAI_MEMORY_FSYNC` | `0` | `1` forces every append to disk |
-| `NVMAI_MEMORY_CACHE_MIB` | by machine memory | Store ceiling, as a worst-case item bound |
+| `NVMAI_MEMORY_CACHE_MIB` | none | Optional ceiling for the whole store, in MiB |
 | `NVMAI_MEMORY_NAMESPACE` | `nvmai` | Deployment namespace |
 | `NVMAI_MEMORY_USER` | OS user | User component of the scope |
 | `NVMAI_MEMORY_WORKSPACE` | from `NVMAI_WORKSPACE_DIR` | Explicit workspace id |
@@ -130,49 +132,32 @@ Environment variables, which is how the start scripts pass them:
 | `NVMAI_MEMORY_MAX_VALUE_BYTES` | `65536` | Largest single memory |
 | `NVMAI_MEMORY_BOOTSTRAP_LIMIT` | `60` | Bootstrap record cap |
 | `NVMAI_MEMORY_BOOTSTRAP_BYTES` | `16384` | Bootstrap byte cap |
-| `NVMAI_MEMORY_TOOL_ROUNDS` | `4` | Memory rounds serviced per request |
-| `NVMAI_MEMORY_TOOLS` | `off` | `off`, `minimal` (set, get, list) or `full` (six tools) |
+| `NVMAI_MEMORY_TOOL_ROUNDS` | `4` | Memory-tool rounds serviced per request |
+| `NVMAI_MEMORY_TOOLS` | `off` | The six `memory_*` functions: `off`, `minimal` (set, get, list) or `full`. Never affects the client's own tools. |
 | `NVMAI_MEMORY_CONSOLIDATION` | `1` | `0` disables the engine writing memory at session boundaries |
-| `NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` | `120` | Quiet time after a turn before a session is distilled |
+| `NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` | `30` | Quiet time after a turn before a session is distilled |
 | `NVMAI_MEMORY_LOCAL_FALLBACK` | `1` | `0` disables memory instead of degrading |
 
-### Store sizing
+### Store size
 
-The ceiling defaults by machine memory, because the working set is a few
-thousand short facts and does not grow with the host:
+There is no RAM ceiling by default, and there is nothing to defend against.
+Measured by replaying the benchmark journals with the store's own accounting:
 
-| Machine memory | Default ceiling |
-| --- | ---: |
-| Up to 8 GB | 256 MiB |
-| Up to 16 GB | 512 MiB |
-| More than 16 GB | 1 GiB |
+| Task | Facts held | Resident (facts, history, log) | Journal on disk |
+| --- | ---: | ---: | ---: |
+| A hundred-chapter novel, ten sessions | 93–134 | **96–121 KB** | 194–249 KB |
+| Pong in three languages, three sessions | 10–22 | **10–20 KB** | 25–45 KB |
 
-**This RAM is additional.** It is not taken out of `--ram-budget`, which is the
-expert cache's own ceiling (default 8 GiB, capped at half of physical memory).
-On an 8 GB machine the expert cache gets its 4 GiB and memory brings the total
-to 4 GiB + 256 MiB. Sizing the machine means adding the two.
+That is a rounding error next to one KV-cache block, so the machine-tier
+ceilings that used to sit here (256 MiB at 8 GB and so on) could never bind
+and only confused. The bounds that remain are hygiene, not budgets: a fact is
+at most 64 KiB, an address keeps 32 versions, a session keeps 200 turns and a
+workspace 100 sessions in memory, and the file keeps everything.
 
-The ceiling covers every open workspace **together**, not each one, so turning
-memory on costs the same whether a session touches one repository or five. Over
-the ceiling, the least recently used workspace is closed; nothing is lost,
-because everything it held is in its journal and touching it again replays it.
-
-Override with `NVMAI_MEMORY_CACHE_MIB`. The ceiling is enforced by counting
-actual bytes, and within a workspace it is split between the two stores:
-
-| Store | Share | At the limit |
-| --- | ---: | --- |
-| Curated facts | 3/4 | Refuses the write |
-| Session journal | 1/4 | Drops the oldest sessions from memory |
-
-Facts get the larger share because they are the half that has to be resident:
-they are what a session searches and what goes into a prompt. The journal never
-enters a prompt and every byte of it is already in the file, so on an 8 GB Mac
-resident transcript buys nothing but faster reads of history nobody reads; its
-quarter is a window over recent sessions, not a home for them. The behaviours
-at the limit differ too: silently dropping a fact the model relies on is the
-worse failure, so facts refuse and the caller archives to make room, while the
-journal evicts from memory only — the dropped sessions remain in the file.
+`NVMAI_MEMORY_CACHE_MIB` sets a ceiling for anyone who wants one. It covers
+every open workspace together, split three quarters to facts and one to the
+journal; at the cap facts refuse and the journal evicts its oldest sessions
+from memory, and the least recently used workspace is closed.
 
 ### One writer per workspace
 
@@ -205,10 +190,17 @@ NVMAI_MEMORY=1 NVMAI_MEMORY_DIR=/var/lib/nvmai \
   NVMAI_MEMORY_WORKSPACE=my-project tools/start-ornith-8bit.sh
 ```
 
-State lives in one file per workspace,
-`<dir>/<namespace>/<user>/<workspace>.ndjson`, created owner-readable only
-inside an owner-only directory, with a `.lock` sidecar beside it. Deleting a
-project's memory is deleting its file, and backing it up is copying it.
+State lives in one file per project,
+`<NVMAI>/memory/<namespace>/<user>/<workspace>.ndjson`, created owner-readable
+only inside an owner-only directory, with a `.lock` sidecar beside it. Sessions
+are records inside that file, not files of their own. Deleting a project's
+memory is deleting its file, and backing it up is copying it.
+
+The files do not pile up. A project file untouched for 30 days is deleted
+along with its lock, and at most 100 project files are kept, oldest by last
+write going first. The sweep runs at start and whenever a new project file is
+created; a project this server has open is never touched. Each removal is
+logged: `memory swept 3 project file(s) (untouched for 30 days): …`.
 
 A workspace named per request gets its own file too, so one project's memory
 can never be written into another's.
@@ -258,7 +250,7 @@ carried faithfully for eight sessions. A harness that simply forced a 200-word
 summary at every boundary carried twice as much. The forcing is what works.
 
 So the engine forces it. When a session goes quiet for
-`NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` (two minutes by default), or when a
+`NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` (thirty seconds by default), or when a
 new conversation starts in the same workspace before that — a rollover, the
 end-of-conversation signal the API never sends — the engine asks the model,
 in a separate tool-free request, what from that session must not be
@@ -374,6 +366,22 @@ The session starts with a bootstrap naming `decisions/sync/foo-manager`. The
 model calls `memory_search("sync architecture")`, reads the decision, and
 then checks the repository before proposing anything, because the prompt tells
 it retrieved memory is evidence rather than truth.
+
+## Versions
+
+**v1** (tag `memory-v1`, commit `0175e5b`): the in-process store with
+engine-driven consolidation, routed keys, the idle durability barrier,
+per-project placement and the single-writer lock. Measured at three runs per
+arm on pong and the hundred-chapter novel; see the evaluation document.
+
+**v2** (tag `memory-v2`): v1 plus — the bootstrap ranked by the request with
+priority namespaces and dependencies; a "changed in the most recent session"
+section; reversions flagged as disputed instead of overwritten; the
+extraction shown every key by name and values only for keys the session
+touches; consolidation after thirty seconds of quiet instead of two minutes;
+no RAM ceiling by default; thirty-day retention and a cap on project files;
+the store under `<NVMAI>/memory`; and "memory tools" named as such
+everywhere. Measured against v1 on the same benchmarks.
 
 ## Known limitations
 

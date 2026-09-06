@@ -769,3 +769,107 @@ import ContinuityCore
                     .records.map(\.key.rawValue) == ["rules/weather"])
     }
 }
+
+/// Project files must not pile up.
+@Suite struct MemoryRetentionTests {
+    private func configuration(directory: URL, days: Int = 30, cap: Int = 100) -> MemoryConfiguration {
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "live"
+        configuration.user = "local"
+        configuration.namespace = "nvmai"
+        configuration.storage.directory = directory
+        configuration.storage.retentionDays = days
+        configuration.storage.maximumWorkspaces = cap
+        return configuration
+    }
+
+    /// Writes a project file with a chosen last-write time.
+    private func plant(_ name: String, in directory: URL, daysOld: Int) throws -> URL {
+        let folder = directory.appendingPathComponent("nvmai/local")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("\(name).ndjson")
+        try Data("{}\n".utf8).write(to: url)
+        try Data().write(to: url.appendingPathExtension("lock"))
+        let when = Date().addingTimeInterval(-Double(daysOld) * 86_400)
+        try FileManager.default.setAttributes([.modificationDate: when], ofItemAtPath: url.path)
+        return url
+    }
+
+    private func names(in directory: URL) -> Set<String> {
+        let folder = directory.appendingPathComponent("nvmai/local")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        return Set(files.filter { $0.hasSuffix(".ndjson") })
+    }
+
+    @Test func filesUntouchedForThirtyDaysAreDeletedWithTheirLocks() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retention-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try plant("old-project", in: directory, daysOld: 45)
+        _ = try plant("recent-project", in: directory, daysOld: 3)
+        let service = MemoryService(configuration: configuration(directory: directory))
+        await service.sweepStaleWorkspaces()
+        #expect(names(in: directory) == ["recent-project.ndjson"])
+        let lock = directory.appendingPathComponent("nvmai/local/old-project.ndjson.lock")
+        #expect(FileManager.default.fileExists(atPath: lock.path) == false)
+    }
+
+    @Test func beyondTheCapTheOldestGoFirst() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retention-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<6 {
+            _ = try plant("p\(index)", in: directory, daysOld: index)   // p0 newest
+        }
+        let service = MemoryService(configuration: configuration(directory: directory, cap: 4))
+        await service.sweepStaleWorkspaces()
+        #expect(names(in: directory) == ["p0.ndjson", "p1.ndjson", "p2.ndjson", "p3.ndjson"])
+    }
+
+    @Test func anOpenWorkspaceIsNeverSweptAndCountsAgainstTheCap() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retention-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<3 { _ = try plant("p\(index)", in: directory, daysOld: 60) }
+        let service = MemoryService(configuration: configuration(directory: directory,
+                                                                 days: 0, cap: 2))
+        // Opening the live workspace creates its file and runs the sweep:
+        // the live one plus one planted file fit the cap of two.
+        let context = try #require(await service.beginSession(id: "s1"))
+        #expect(context.isDurable)
+        let kept = names(in: directory)
+        #expect(kept.contains("live.ndjson"))
+        #expect(kept.count == 2)
+        // And the live file is older-proof: backdate it and sweep again.
+        let live = directory.appendingPathComponent("nvmai/local/live.ndjson")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-90 * 86_400)], ofItemAtPath: live.path)
+        await service.sweepStaleWorkspaces()
+        #expect(names(in: directory).contains("live.ndjson"))
+        await service.shutDown()
+    }
+
+    @Test func zeroKeepsEverything() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retention-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 0..<5 { _ = try plant("p\(index)", in: directory, daysOld: 400) }
+        let service = MemoryService(configuration: configuration(directory: directory,
+                                                                 days: 0, cap: 0))
+        await service.sweepStaleWorkspaces()
+        #expect(names(in: directory).count == 5)
+    }
+
+    @Test func retentionIsReadFromTheEnvironment() {
+        let configuration = MemoryConfiguration.fromEnvironment([
+            "NVMAI_MEMORY": "1", "NVMAI_MEMORY_RETENTION_DAYS": "7",
+            "NVMAI_MEMORY_MAX_WORKSPACES": "12",
+        ])
+        #expect(configuration.storage.retentionDays == 7)
+        #expect(configuration.storage.maximumWorkspaces == 12)
+        let defaults = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY": "1"])
+        #expect(defaults.storage.retentionDays == 30)
+        #expect(defaults.storage.maximumWorkspaces == 100)
+    }
+}

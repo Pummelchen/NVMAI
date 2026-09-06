@@ -59,12 +59,21 @@ enum ServerMemory {
         for turn in turns {
             transcript += "USER: \(turn.prompt)\n\nASSISTANT: \(turn.reply)\n\n---\n\n"
         }
-        let known = existing.isEmpty
-            ? "(none yet)"
-            : existing.map { record in
-                let value = record.value.replacingOccurrences(of: "\n", with: " ")
-                return "- \(record.key.rawValue) = \(value.prefix(160))"
-            }.joined(separator: "\n")
+        // Every key by name, so an update lands on the address it changes;
+        // values only for keys the session mentions, so the prompt is not
+        // sixty lines of things this session never touched. Measured, the
+        // full list was most of a 1,600-token extraction prompt.
+        let haystack = transcript.lowercased()
+        let mentioned = existing.filter { Self.isMentioned($0.key.rawValue, in: haystack) }
+        var known = existing.isEmpty ? "(none yet)" : existing.map { "- \($0.key.rawValue)" }
+            .joined(separator: "\n")
+        if !mentioned.isEmpty {
+            known += "\n\nCurrent values of the keys this session touches:\n"
+                + mentioned.prefix(40).map { record in
+                    let value = record.value.replacingOccurrences(of: "\n", with: " ")
+                    return "- \(record.key.rawValue) = \(value.prefix(160))"
+                }.joined(separator: "\n")
+        }
         let system = "You distil a finished working session into durable facts for a memory "
             + "store scoped to the project `\(workspace)`. Later sessions will see these "
             + "facts and nothing else from this conversation, so record exactly what a "
@@ -88,7 +97,7 @@ enum ServerMemory {
             + "rules high, passing state lower). Keys are lowercase path-like names "
             + "such as `characters/marcus/eyes`, `decisions/storage`, `state/inn` or "
             + "`rules/weather`. Return [] if nothing durable was added or changed."
-        let user = "Memory already holds:\n\(known)\n\nThe session:\n\n\(transcript)"
+        let user = "Memory already holds these keys:\n\(known)\n\nThe session:\n\n\(transcript)"
         return ValidatedChatRequest(
             messages: [GFTokenizer.Message(role: .system, content: system),
                        GFTokenizer.Message(role: .user, content: user)],
@@ -151,6 +160,18 @@ enum ServerMemory {
             if !records.isEmpty || parsed.isEmpty { return records }
         }
         return []
+    }
+
+    /// Whether a key's subject appears in the transcript: any segment of
+    /// four or more characters, split on `/` and `_`. `state/inn_status`
+    /// matches a session that mentions the inn; `characters/rosa/eyes`
+    /// matches one that mentions Rosa.
+    static func isMentioned(_ key: String, in haystack: String) -> Bool {
+        let parts = key.lowercased()
+            .split(whereSeparator: { $0 == "/" || $0 == "_" || $0 == "-" })
+            .map(String.init)
+            .filter { $0.count >= 4 }
+        return parts.contains { haystack.contains($0) }
     }
 
     /// Routes a new fact to the key memory already uses for it.

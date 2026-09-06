@@ -3,19 +3,25 @@ import Testing
 @testable import NVMAIMemory
 
 @Suite struct MemoryConfigurationTests {
-    @Test func cacheCeilingFollowsMachineMemory() {
-        let gigabyte = UInt64(1) << 30
-        // The deployment rule: a memory store is worth a fixed slice, not a
-        // fraction, because its working set is a few thousand short facts.
-        #expect(MemoryConfiguration.defaultCacheBytes(physicalMemory: 8 * gigabyte) == 256 << 20)
-        #expect(MemoryConfiguration.defaultCacheBytes(physicalMemory: 16 * gigabyte) == 512 << 20)
-        #expect(MemoryConfiguration.defaultCacheBytes(physicalMemory: 24 * gigabyte) == 1 << 30)
-        #expect(MemoryConfiguration.defaultCacheBytes(physicalMemory: 128 * gigabyte) == 1 << 30)
-        // Boundaries land on the lower tier, and a tiny machine is not given
-        // more than the smallest.
-        #expect(MemoryConfiguration.defaultCacheBytes(physicalMemory: 4 * gigabyte) == 256 << 20)
-        #expect(MemoryConfiguration.defaultCacheBytes(
-            physicalMemory: 8 * gigabyte + 1) == 512 << 20)
+    /// No ceiling by default. Measured, the whole store for a hundred-chapter
+    /// novel was about 100 KB; a bound sized for the machine could never bind
+    /// and only confused. The env var still sets one for anyone who wants it.
+    @Test func thereIsNoCeilingUnlessAsked() {
+        let plain = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY": "1"])
+        #expect(plain.storage.maximumMemoryBytes == nil)
+        #expect(plain.storage.budget.factBytes == 0)
+        #expect(plain.storage.budget.logBytes == 0)
+        #expect(plain.summary.contains("cap=none"))
+
+        let capped = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY": "1",
+                                                          "NVMAI_MEMORY_CACHE_MIB": "256"])
+        #expect(capped.storage.maximumMemoryBytes == 256 << 20)
+        #expect(capped.summary.contains("cap=256MiB"))
+
+        // Zero and junk are "no cap", not "a cap of nothing".
+        let zero = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY": "1",
+                                                        "NVMAI_MEMORY_CACHE_MIB": "0"])
+        #expect(zero.storage.maximumMemoryBytes == nil)
     }
 
     @Test func toolSurfaceIsChosenByName() {
@@ -167,9 +173,7 @@ import Testing
         let summary = configuration.summary
         #expect(summary.contains("memory enabled=true"))
         #expect(summary.contains("store=in-process"))
-        // Labelled as additional, because someone reading this line is
-        // working out whether the machine holds the model *and* this.
-        #expect(summary.contains("budget=512MiB+model"))
+        #expect(summary.contains("cap=512MiB"))
         // There is no host and no port to report any more.
         #expect(!summary.contains("6379"))
     }

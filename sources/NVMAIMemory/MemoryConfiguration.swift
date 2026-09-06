@@ -6,27 +6,48 @@ import Foundation
 /// so the only things left to configure are the directory it writes to and
 /// how much it is allowed to hold.
 public struct ContinuityStorageConfiguration: Sendable, Equatable {
-    /// Directory holding the journal. Created with owner-only permissions.
+    /// Directory holding the journals. Created with owner-only permissions.
+    /// The start scripts pass `<NVMAI>/memory`, beside `models/`; the binary
+    /// alone falls back to `~/.nvmai/memory`.
     public var directory: URL
+    /// A project file untouched for this many days is deleted, with its
+    /// lock. Zero keeps everything. One file per project accumulates one per
+    /// directory a client ever ran from, and nothing else would ever remove
+    /// them.
+    public var retentionDays: Int
+    /// Most project files kept; the oldest by last write go first. Zero is
+    /// no cap.
+    public var maximumWorkspaces: Int
     /// Force every append to disk. Correct across a power cut and slower;
     /// a process crash loses nothing either way, because the write has
     /// already reached the kernel.
     public var synchronizesEveryWrite: Bool
-    /// Ceiling for what the store may hold, in bytes, across every open
-    /// workspace. Nil leaves it unbounded, which is only sensible in tests.
+    /// Optional ceiling for what the store may hold, in bytes, across every
+    /// open workspace. Nil, the default, is no ceiling.
     ///
-    /// This is what memory *adds* to the process. It is not taken out of the
-    /// model's `--ram-budget`: on an 8 GB machine the expert cache gets its
-    /// 4 GiB and memory brings the total to 4 GiB + 256 MiB. Sizing the
-    /// machine means adding the two.
+    /// There is no default because there is nothing to defend against.
+    /// Measured on a hundred-chapter novel written over ten sessions, the
+    /// whole store -- facts, their history and the session log -- was about
+    /// 100 KB resident, and a three-language port was 10 KB. A ceiling sized
+    /// for the machine was a rounding error next to one KV-cache block, and
+    /// a bound that can never bind is a knob that only confuses. The
+    /// hygiene bounds that are not budgets stay: a fact is at most 64 KiB, an
+    /// address keeps 32 versions, the journal keeps 200 turns a session.
+    ///
+    /// `NVMAI_MEMORY_CACHE_MIB` sets one for anyone who wants it; at the cap
+    /// facts refuse and the journal evicts, as before.
     public var maximumMemoryBytes: Int?
 
     public init(directory: URL = ContinuityStorageConfiguration.defaultDirectory,
                 synchronizesEveryWrite: Bool = false,
-                maximumMemoryBytes: Int? = nil) {
+                maximumMemoryBytes: Int? = nil,
+                retentionDays: Int = 30,
+                maximumWorkspaces: Int = 100) {
         self.directory = directory
         self.synchronizesEveryWrite = synchronizesEveryWrite
         self.maximumMemoryBytes = maximumMemoryBytes
+        self.retentionDays = max(0, retentionDays)
+        self.maximumWorkspaces = max(0, maximumWorkspaces)
     }
 
     public static var defaultDirectory: URL {
@@ -35,17 +56,17 @@ public struct ContinuityStorageConfiguration: Sendable, Equatable {
             .appendingPathComponent("memory", isDirectory: true)
     }
 
-    /// How the ceiling is divided between the two stores.
+    /// How a ceiling, when one is set, is divided between the two stores.
+    /// Zero for both means unbounded, which is the default.
     ///
     /// Facts get three quarters, the journal one. Facts are the half that has
     /// to be resident: they are what a session searches and what goes into a
     /// prompt. The journal never enters a prompt and every byte of it is
-    /// already in the file, so resident transcript on a low-memory Mac buys
-    /// nothing but faster reads of history nobody reads. Its quarter is a
-    /// window over recent sessions, not a home for them.
+    /// already in the file, so its quarter is a window over recent sessions,
+    /// not a home for them.
     public var budget: (factBytes: Int, logBytes: Int) {
         guard let total = maximumMemoryBytes, total > 0 else {
-            return (factBytes: 192 << 20, logBytes: 64 << 20)
+            return (factBytes: 0, logBytes: 0)
         }
         let log = max(1 << 20, total / 4)
         return (factBytes: max(1 << 20, total - log), logBytes: log)
@@ -107,9 +128,11 @@ public struct MemoryConfiguration: Sendable, Equatable {
     ///
     /// Consolidation is a full generation, and this machine is single-tenant,
     /// so it runs in the pauses -- while the person reads the reply or has
-    /// walked away -- never in the request path. Two minutes is long enough
-    /// that a person still typing is not interrupted and short enough that
-    /// the next session usually finds the last one already distilled.
+    /// walked away -- never in the request path. Thirty seconds is longer
+    /// than reading a reply and shorter than starting the next conversation,
+    /// so a session begun right after the last one usually finds it already
+    /// distilled rather than one session stale. A turn arriving during one
+    /// waits behind it, and only behind it.
     public var consolidationIdleSeconds: Double
     /// Most recent turns a consolidation reads. Bounds its prompt.
     public var consolidationMaximumTurns: Int
@@ -138,7 +161,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
                 journalEnabled: Bool = true,
                 journalLimits: JournalLimits = .init(),
                 sessionConsolidation: Bool = true,
-                consolidationIdleSeconds: Double = 120,
+                consolidationIdleSeconds: Double = 30,
                 consolidationMaximumTurns: Int = 40,
                 consolidationMinimumCharacters: Int = 150,
                 degradesToLocalStore: Bool = true) {
@@ -167,19 +190,6 @@ public struct MemoryConfiguration: Sendable, Equatable {
         return sanitized.isEmpty ? "local" : String(sanitized.prefix(32))
     }
 
-    /// Default store ceiling for this machine, following the sizing the
-    /// deployment asks for: 256 MiB at 8 GB, 512 MiB at 16 GB, 1 GiB above.
-    /// A memory store is worth a fixed slice, not a fraction: the working set
-    /// is a few thousand short facts and does not grow with the machine.
-    public static func defaultCacheBytes(
-        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
-    ) -> Int {
-        let gigabyte = UInt64(1) << 30
-        if physicalMemory <= 8 * gigabyte { return 256 << 20 }
-        if physicalMemory <= 16 * gigabyte { return 512 << 20 }
-        return 1 << 30
-    }
-
     /// Reads the configuration from the environment, which is how the start
     /// scripts and the launchers pass it.
     ///
@@ -199,8 +209,15 @@ public struct MemoryConfiguration: Sendable, Equatable {
         if let value = environment["NVMAI_MEMORY_FSYNC"] {
             configuration.storage.synchronizesEveryWrite = value == "1"
         }
-        let cacheMiB = environment["NVMAI_MEMORY_CACHE_MIB"].flatMap(Int.init)
-        configuration.storage.maximumMemoryBytes = cacheMiB.map { $0 << 20 } ?? defaultCacheBytes()
+        if let value = environment["NVMAI_MEMORY_RETENTION_DAYS"].flatMap(Int.init) {
+            configuration.storage.retentionDays = max(0, value)
+        }
+        if let value = environment["NVMAI_MEMORY_MAX_WORKSPACES"].flatMap(Int.init) {
+            configuration.storage.maximumWorkspaces = max(0, value)
+        }
+        if let cacheMiB = environment["NVMAI_MEMORY_CACHE_MIB"].flatMap(Int.init), cacheMiB > 0 {
+            configuration.storage.maximumMemoryBytes = cacheMiB << 20
+        }
 
         if let namespace = environment["NVMAI_MEMORY_NAMESPACE"] { configuration.namespace = namespace }
         if let user = environment["NVMAI_MEMORY_USER"] { configuration.user = user }
@@ -321,18 +338,14 @@ public struct MemoryConfiguration: Sendable, Equatable {
     }
 
     /// One line for the log at startup.
-    ///
-    /// The ceiling is labelled as additional because that is what it is: it
-    /// is not carved out of `--ram-budget`, it is what memory adds to the
-    /// process on top of it. Someone reading this line is working out whether
-    /// the machine can hold both.
     public var summary: String {
-        let cache = storage.maximumMemoryBytes.map { "\($0 >> 20)MiB" } ?? "unbounded"
-        return "memory enabled=\(isEnabled) store=in-process budget=\(cache)+model "
+        let cache = storage.maximumMemoryBytes.map { "cap=\($0 >> 20)MiB" } ?? "cap=none"
+        return "memory enabled=\(isEnabled) store=in-process \(cache) "
             + "namespace=\(namespace) user=\(user) workspace=\(workspace) "
-            + "tools=\(toolSurface.rawValue) rounds=\(maximumToolRounds) "
+            + "memory_tools=\(toolSurface.rawValue) memory_tool_rounds=\(maximumToolRounds) "
             + "bootstrap=\(limits.bootstrapRecords)/\(limits.bootstrapBytes)B "
-            + "dir=\(storage.directory.path) "
+            + "dir=\(storage.directory.path) retention=\(storage.retentionDays)d "
+            + "max_workspaces=\(storage.maximumWorkspaces) "
             + "journal=\(journalEnabled) "
             + "journal_limits=\(journalLimits.turnsPerSession)/"
             + "\(journalLimits.sessionsPerWorkspace) "

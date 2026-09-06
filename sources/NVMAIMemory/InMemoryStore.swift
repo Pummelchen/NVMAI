@@ -133,6 +133,26 @@ extension MemoryBootstrap {
     /// Both limits are enforced here rather than at the call site so every
     /// backend gets the same ceiling; the count alone is not enough, because
     /// twenty records of 64 KB would still be 1.2 MB of context.
+    /// Applies the count and byte caps to records already in the order they
+    /// should appear. For a ranking done elsewhere -- by relevance to the
+    /// request -- that must not be re-sorted here.
+    static func build(ordered records: [MemoryRecord], limits: MemoryLimits,
+                      recent: [MemoryRecord] = []) -> MemoryBootstrap {
+        var chosen: [MemoryRecord] = []
+        var bytes = 0
+        for record in records {
+            guard chosen.count < limits.bootstrapRecords else { break }
+            let size = record.key.rawValue.utf8.count + record.value.utf8.count
+            guard bytes + size <= limits.bootstrapBytes else { continue }
+            chosen.append(record)
+            bytes += size
+        }
+        return MemoryBootstrap(records: chosen,
+                               omittedCount: records.count - chosen.count,
+                               totalBytes: bytes,
+                               recent: recent)
+    }
+
     static func build(from records: [MemoryRecord], limits: MemoryLimits) -> MemoryBootstrap {
         // Importance first; among equals the OLDER fact wins. A bible written
         // in session one and the state of session nine compete for the same

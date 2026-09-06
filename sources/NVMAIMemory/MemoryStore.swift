@@ -138,6 +138,9 @@ public struct MemoryRecord: Sendable, Codable, Equatable {
     public var sourceSession: String?
     public var createdAt: Date
     public var updatedAt: Date
+    /// Two sources disagree and nothing has resolved it. Shown to the model
+    /// as such; the next write to the key settles it.
+    public var isDisputed: Bool = false
 
     public init(key: MemoryKey,
                 value: String,
@@ -190,13 +193,19 @@ public struct MemorySession: Sendable, Equatable, Codable {
     /// the client declared. Recorded on the session so a reader can keep a
     /// book session and a coding session apart at a glance.
     public let tag: String?
+    /// What the session opened with -- the first user message -- so the
+    /// bootstrap can be ranked by what is being asked rather than by a
+    /// static importance. A fact about Rosa's eyes outranks the state of the
+    /// ferry when the request is a chapter about Rosa.
+    public let focus: String?
 
     public init(id: String, startedAt: Date = Date(), modelID: String? = nil,
-                tag: String? = nil) {
+                tag: String? = nil, focus: String? = nil) {
         self.id = id
         self.startedAt = startedAt
         self.modelID = modelID
         self.tag = tag
+        self.focus = focus
     }
 }
 
@@ -211,11 +220,17 @@ public struct MemoryBootstrap: Sendable, Equatable {
     /// say memory exists beyond what it shows.
     public let omittedCount: Int
     public let totalBytes: Int
+    /// What the most recent session wrote or changed, shown above the
+    /// established facts. Someone resuming a refactor or a book needs "what
+    /// moved" before "what is".
+    public let recent: [MemoryRecord]
 
-    public init(records: [MemoryRecord], omittedCount: Int, totalBytes: Int) {
+    public init(records: [MemoryRecord], omittedCount: Int, totalBytes: Int,
+                recent: [MemoryRecord] = []) {
         self.records = records
         self.omittedCount = omittedCount
         self.totalBytes = totalBytes
+        self.recent = recent
     }
 
     public static let empty = MemoryBootstrap(records: [], omittedCount: 0, totalBytes: 0)

@@ -300,7 +300,7 @@ public actor MemoryBackend: ServerInferenceBackend {
                              + "\(characters) characters, nothing to distil")
             return
         }
-        let existing = await service.recordedFacts(in: scope)
+        let existing = await service.recordedFacts(in: scope, limit: 400)
         let request = ServerMemory.consolidationRequest(
             turns: Array(turns.reversed()), existing: existing, workspace: scope.workspace)
         let started = Date()
@@ -354,11 +354,14 @@ public actor MemoryBackend: ServerInferenceBackend {
         let id = ServerMemory.sessionIdentifier(messages: request.messages,
                                                 workspace: placement.workspace)
         if let existing = contexts[id] { return existing }
+        let focus = request.messages.first { $0.role == .user }?.content
+            .map { String($0.prefix(600)) }
         guard let context = await service.beginSession(
             id: id,
             workspaceOverride: placement.override,
             modelID: nil,
-            tag: placement.tag) else { return nil }
+            tag: placement.tag,
+            focus: focus) else { return nil }
         contexts[id] = context
         // A new session in a scope whose last session still has undistilled
         // turns is a rollover: the end-of-conversation signal the API never

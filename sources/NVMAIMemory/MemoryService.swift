@@ -101,15 +101,17 @@ public actor MemoryService {
         workspaces[scope] = workspace
         lastUsed[scope] = Date()
         await enforceResidencyBudget(keeping: scope)
+        // A new project file may be the one that pushes the count past the
+        // cap; the sweep skips every workspace this process holds open.
+        sweepStaleWorkspaces()
         return workspace
     }
 
-    /// Keeps the whole subsystem inside the ceiling the machine was sized for.
+    /// Keeps the whole subsystem inside the ceiling, when one is set.
     ///
-    /// The ceiling is what memory adds to the process, not what each workspace
-    /// may take. Per-workspace limits alone would multiply it by the number of
-    /// workspaces a session has touched, so on an 8 GB machine "the model's
-    /// budget plus 256 MiB" would quietly become plus 256 MiB per repository.
+    /// A ceiling is a total, not a per-workspace allowance: per-workspace
+    /// limits alone would multiply it by the number of workspaces a session
+    /// has touched. With no ceiling, the default, this does nothing.
     ///
     /// Over the ceiling, the least recently used workspace is closed. Nothing
     /// is lost: everything it held is in its journal, and touching that
@@ -216,8 +218,61 @@ public actor MemoryService {
     /// expert streamer is about to saturate and off the first user's
     /// latency. Safe to call more than once and safe with memory disabled.
     public func warmUp() async {
+        sweepStaleWorkspaces()
         guard let scope = configuration.scope() else { return }
         _ = await workspace(for: scope)
+    }
+
+    /// Deletes project files nobody has touched, so they cannot pile up.
+    ///
+    /// One journal per project means one per directory a client ever ran
+    /// from, and nothing else removes them. Two rules: a file untouched for
+    /// `retentionDays` goes, and beyond `maximumWorkspaces` the oldest by
+    /// last write go. A workspace this process has open is never touched --
+    /// its lock is held, and it was written moments ago in any case. Runs
+    /// at start and whenever a new project file is created.
+    public func sweepStaleWorkspaces(now: Date = Date()) {
+        let storage = configuration.storage
+        guard storage.retentionDays > 0 || storage.maximumWorkspaces > 0 else { return }
+        let manager = FileManager.default
+        guard let walker = manager.enumerator(at: storage.directory,
+                                              includingPropertiesForKeys: [.contentModificationDateKey],
+                                              options: [.skipsHiddenFiles]) else { return }
+        let open = Set(workspaces.keys.map { storage.journalURL(for: $0).standardizedFileURL.path })
+        var candidates: [(url: URL, modified: Date)] = []
+        for case let url as URL in walker where url.pathExtension == "ndjson" {
+            guard !open.contains(url.standardizedFileURL.path) else { continue }
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            candidates.append((url, modified))
+        }
+        var doomed: [(URL, String)] = []
+        if storage.retentionDays > 0 {
+            let cutoff = now.addingTimeInterval(-Double(storage.retentionDays) * 86_400)
+            for candidate in candidates where candidate.modified < cutoff {
+                doomed.append((candidate.url, "untouched for \(storage.retentionDays) days"))
+            }
+        }
+        if storage.maximumWorkspaces > 0 {
+            let already = Set(doomed.map { $0.0.path })
+            let remaining = candidates.filter { !already.contains($0.url.path) }
+                .sorted { $0.modified > $1.modified }
+            // The open workspaces count against the cap too.
+            let keep = max(0, storage.maximumWorkspaces - open.count)
+            for candidate in remaining.dropFirst(keep) {
+                doomed.append((candidate.url, "more than \(storage.maximumWorkspaces) projects"))
+            }
+        }
+        guard !doomed.isEmpty else { return }
+        var removed: [String] = []
+        for (url, _) in doomed {
+            try? manager.removeItem(at: url)
+            try? manager.removeItem(at: url.appendingPathExtension("lock"))
+            try? manager.removeItem(at: url.appendingPathExtension("compacting"))
+            removed.append(url.lastPathComponent)
+        }
+        let reasons = Set(doomed.map { $0.1 }).sorted().joined(separator: "; ")
+        log(.swept(removed: removed, reason: reasons))
     }
 
     /// Close every workspace, flushing and releasing the workspace locks.
@@ -268,13 +323,14 @@ public actor MemoryService {
     public func beginSession(id: String,
                              workspaceOverride: String? = nil,
                              modelID: String? = nil,
-                             tag: String? = nil) async -> MemorySessionContext? {
+                             tag: String? = nil,
+                             focus: String? = nil) async -> MemorySessionContext? {
         guard configuration.isEnabled else { return nil }
         guard let scope = configuration.scope(workspaceOverride: workspaceOverride) else {
             log(.rejectedScope(workspaceOverride ?? configuration.workspace))
             return nil
         }
-        let session = MemorySession(id: id, modelID: modelID, tag: tag)
+        let session = MemorySession(id: id, modelID: modelID, tag: tag, focus: focus)
         var bootstrap = MemoryBootstrap.empty
         if let workspace = await workspace(for: scope) {
             do {
@@ -384,7 +440,14 @@ public actor MemoryService {
             var stamped = record
             stamped.sourceSession = context.session.id
             do {
-                try await store.set(stamped, in: context.scope)
+                if let continuity = store as? ContinuityStore {
+                    if try await continuity.set(stamped, in: context.scope,
+                                                flaggingReversions: true) {
+                        log(.reversionFlagged(key: stamped.key.rawValue))
+                    }
+                } else {
+                    try await store.set(stamped, in: context.scope)
+                }
                 written += 1
             } catch {
                 log(.toolFailed(tool: "consolidation", detail: "\(error)"))
@@ -432,6 +495,10 @@ public enum MemoryLogEvent: Sendable, Equatable {
     case rejectedScope(String)
     case consolidated(session: String, records: Int)
     case journaled(session: String, index: Int, bytes: Int)
+    /// Project files removed by retention, and why.
+    case swept(removed: [String], reason: String)
+    /// A consolidation wrote a value the key had before; it is now disputed.
+    case reversionFlagged(key: String)
 
     /// One log line. Never contains a memory's contents or a credential: the
     /// log is operational, and memory can hold anything the model wrote.
@@ -454,6 +521,11 @@ public enum MemoryLogEvent: Sendable, Equatable {
             return "memory session=\(session) consolidated \(records) records"
         case .journaled(let session, let index, let bytes):
             return "journal session=\(session) turn=\(index) \(bytes)B"
+        case .reversionFlagged(let key):
+            return "memory reversion flagged as disputed: \(key)"
+        case .swept(let removed, let reason):
+            return "memory swept \(removed.count) project file(s) (\(reason)): "
+                + removed.joined(separator: ", ")
         }
     }
 }

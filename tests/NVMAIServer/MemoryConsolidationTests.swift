@@ -241,7 +241,7 @@ import NVMAIMemory
     @Test func consolidationIsOnByDefaultWithMemory() {
         let on = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY": "1"])
         #expect(on.sessionConsolidation)
-        #expect(on.consolidationIdleSeconds == 120)
+        #expect(on.consolidationIdleSeconds == 30)
         let off = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY": "1",
                                                         "NVMAI_MEMORY_CONSOLIDATION": "0"])
         #expect(!off.sessionConsolidation)
@@ -380,8 +380,11 @@ import NVMAIMemory
                                                         workspace: "w")
         let user = request.messages.last?.content ?? ""
         let system = request.messages.first?.content ?? ""
+        // Every key by name; a value only for the key this session touches.
+        // Measured, the full value list was most of a 1,600-token prompt.
+        #expect(user.contains("- characters/marcus/eyes"))
         #expect(user.contains("state/inn = standing"))
-        #expect(user.contains("characters/marcus/eyes = grey"))
+        #expect(user.contains("characters/marcus/eyes = grey") == false)
         #expect(system.contains("ONLY facts this session added or changed"))
         #expect(system.contains("omit the key instead"))
         #expect(request.maximumCompletionTokens >= 2000)
@@ -458,5 +461,91 @@ import NVMAIMemory
         let (records, merged) = ServerMemory.reconcile(incoming, existing: existing)
         #expect(records.first?.key.rawValue == "plot/ferry_running")
         #expect(merged.isEmpty)
+    }
+}
+
+
+/// The bootstrap is ranked by the request, the last session's changes come
+/// first, and a reversion is a dispute rather than a silent overwrite.
+@Suite struct MemoryBootstrapQualityTests {
+    private func scope() throws -> MemoryScope {
+        try MemoryScope(namespace: "nvmai", user: "local", workspace: "novel")
+    }
+    private func key(_ raw: String) throws -> MemoryKey { try MemoryKey(validating: raw) }
+
+    @Test func theRequestDecidesWhatIsInTheWindow() async throws {
+        let limits = NVMAIMemory.MemoryLimits(bootstrapRecords: 2, bootstrapBytes: 1 << 16)
+        let store = ContinuityStore(engine: ContinuityEngine(), limits: limits)
+        let scope = try scope()
+        // Running state rated highest, the way an extraction rates events.
+        try await store.set(MemoryRecord(key: try key("state/ferry"), value: "stopped running",
+                                         importance: 1.0), in: scope)
+        try await store.set(MemoryRecord(key: try key("state/lighthouse"), value: "dark",
+                                         importance: 1.0), in: scope)
+        try await store.set(MemoryRecord(key: try key("characters/rosa/eyes"), value: "hazel",
+                                         importance: 0.8), in: scope)
+        try await store.set(MemoryRecord(key: try key("characters/marcus/eyes"), value: "grey",
+                                         importance: 0.8), in: scope)
+
+        // A static ranking would show the two state facts. The request is
+        // about Rosa, and characters outrank state in any case.
+        let bootstrap = try await store.sessionInit(
+            MemorySession(id: "s1", focus: "Write the chapter where Rosa closes the inn."),
+            in: scope)
+        let shown = bootstrap.records.map(\.key.rawValue)
+        #expect(shown.contains("characters/rosa/eyes"))
+        #expect(shown.contains("state/ferry") == false)
+    }
+
+    @Test func theLastSessionsChangesAreListedFirst() async throws {
+        let store = ContinuityStore(engine: ContinuityEngine())
+        let scope = try scope()
+        _ = try await store.sessionInit(MemorySession(id: "s1"), in: scope)
+        try await store.set(MemoryRecord(key: try key("rules/weather"), value: "never rains",
+                                         sourceSession: "s1"), in: scope)
+        try await store.set(MemoryRecord(key: try key("state/inn"), value: "burned",
+                                         sourceSession: "s1"), in: scope)
+
+        let next = try await store.sessionInit(MemorySession(id: "s2", focus: "continue"),
+                                               in: scope)
+        #expect(Set(next.recent.map(\.key.rawValue)) == ["rules/weather", "state/inn"])
+        let text = MemoryPrompt.instructions(scope: scope, session: MemorySession(id: "s2"),
+                                             bootstrap: next)
+        #expect(text.contains("Changed in the most recent session:"))
+        // Listed once, under "changed", not again under "already known".
+        #expect(text.components(separatedBy: "`state/inn`").count == 2)
+    }
+
+    @Test func aReversionIsWrittenButDisputed() async throws {
+        let store = ContinuityStore(engine: ContinuityEngine())
+        let scope = try scope()
+        try await store.set(MemoryRecord(key: try key("state/inn"), value: "standing"), in: scope)
+        try await store.set(MemoryRecord(key: try key("state/inn"), value: "burned"), in: scope)
+        // A later consolidation, written against a stale bootstrap, says
+        // "standing" again.
+        let flagged = try await store.set(MemoryRecord(key: try key("state/inn"), value: "Standing."),
+                                          in: scope, flaggingReversions: true)
+        #expect(flagged)
+        let record = try #require(try await store.get(try key("state/inn"), in: scope))
+        #expect(record.isDisputed)
+        let text = MemoryPrompt.instructions(
+            scope: scope, session: MemorySession(id: "s3"),
+            bootstrap: try await store.sessionInit(MemorySession(id: "s3"), in: scope))
+        #expect(text.contains("[disputed"))
+
+        // A genuinely new value is not a reversion, and settles the dispute.
+        let again = try await store.set(MemoryRecord(key: try key("state/inn"), value: "rebuilt"),
+                                        in: scope, flaggingReversions: true)
+        #expect(again == false)
+        #expect(try await store.get(try key("state/inn"), in: scope)?.isDisputed == false)
+    }
+
+    @Test func keysAreMentionedBySubject() {
+        #expect(ServerMemory.isMentioned("state/inn_status", in: "rosa lit the inn's lamps"))
+        #expect(ServerMemory.isMentioned("characters/rosa/eyes", in: "rosa stood at the door"))
+        #expect(ServerMemory.isMentioned("state/ferry_running", in: "the tide came in") == false)
+        // Short segments never match on their own: "eyes" alone is not a subject.
+        #expect(ServerMemory.isMentioned("x/eyes", in: "her eyes") == true)
+        #expect(ServerMemory.isMentioned("a/b", in: "a b c") == false)
     }
 }

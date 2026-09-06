@@ -118,7 +118,10 @@ public actor TaskMemory {
         } ?? 0
         let delta = updated.storageBytes - (existing?.storageBytes ?? 0) + archivedCost
         let held = bytes[taskID] ?? 0
-        if delta > 0 && held + delta > limits.maxBytesPerTask {
+        // A budget of zero is no budget: measured, a hundred-chapter novel
+        // held about 100 KB, and a ceiling sized for the machine was a
+        // rounding error against one KV-cache block.
+        if limits.maxBytesPerTask > 0, delta > 0, held + delta > limits.maxBytesPerTask {
             throw ContinuityError.storeFull(bytes: held + delta,
                                             limit: limits.maxBytesPerTask)
         }

@@ -338,6 +338,18 @@ actor MutationCollector {
         #expect(await memory.value(taskID: task, namespace: "n", key: "k0") == chunk)
     }
 
+    @Test func aZeroBudgetIsNoBudget() async throws {
+        let memory = TaskMemory(limits: MemoryLimits(maxValueBytes: 1 << 20, maxBytesPerTask: 0))
+        let task = UUID()
+        for index in 0..<50 {
+            try await memory.write(taskID: task, namespace: "n", key: "k\(index)",
+                                   value: String(repeating: "x", count: 100_000))
+        }
+        #expect(await memory.count(taskID: task) == 50)
+        #expect(await memory.byteCount(taskID: task) > 5_000_000)
+        #expect(await memory.utilization(taskID: task) == 0)
+    }
+
     @Test func archivingAndForgettingReleaseTheirBytes() async throws {
         let memory = TaskMemory()
         let task = UUID()

@@ -176,18 +176,99 @@ public actor ContinuityStore: MemoryStore {
                                                            tag: session.tag)
             sessionIDs[session.id] = continuity.id
         }
-        // Bounded at the engine, not after the fact: the bootstrap runs on
-        // every session start, and reading a whole workspace to then keep
-        // twenty records is the read that quietly gets slower for two years.
-        let candidates = max(limits.bootstrapRecords * 5, limits.bootstrapRecords)
+        // Ranked by what is being asked, not by a static importance. A flat
+        // list ranked by importance dropped a character's eye colour out of
+        // the window by the fourth session of a novel because running state
+        // had been rated higher; the fact was in the store every time. The
+        // engine's assembler ranks by priority namespace, then relevance to
+        // the request, then importance, and drags dependencies in with
+        // what it picks.
+        let candidates = max(limits.bootstrapRecords * 8, 200)
         let items = await engine.recall(
             taskID: taskID,
             ContinuityCore.MemoryQuery(statuses: [.active, .disputed],
-                                       limit: max(1, candidates),
+                                       limit: candidates,
                                        order: .relevance))
         await loadLabels(taskID: taskID)
-        let records = items.compactMap { try? record(from: $0) }
-        return MemoryBootstrap.build(from: records, limits: limits)
+        guard let task = await engine.task(taskID) else { return .empty }
+        var index: [String: ContinuityCore.MemoryItem] = [:]
+        for item in items { index[item.address] = item }
+        let request = ContextRequest(
+            task: task,
+            items: items,
+            index: index,
+            budget: ContextBudget(maxTokens: max(64, limits.bootstrapBytes / 4),
+                                  priorityNamespaces: Self.bootstrapPriority,
+                                  recentTurnCount: 0),
+            focus: session.focus)
+        let ordered: [ContinuityCore.MemoryItem]
+        if let snapshot = try? DefaultContextAssembler().assemble(request) {
+            let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+            ordered = snapshot.memoryItemIDs.compactMap { byID[$0] }
+        } else {
+            ordered = items
+        }
+        let records = ordered.compactMap { try? record(from: $0) }
+        return MemoryBootstrap.build(ordered: records, limits: limits,
+                                     recent: recentlyChanged(among: items,
+                                                             excluding: sessionIDs[session.id]))
+    }
+
+    /// The namespaces a session cannot do without, first. Rules and
+    /// constraints bound everything; decisions explain the code; a novel's
+    /// characters and setting are its rules. Running state comes last: it is
+    /// what most recently changed, and it is exactly what a session is most
+    /// likely to be about to change again.
+    static let bootstrapPriority: [String] = [
+        "k.rules", "k.rule", "k.constraints", "k.constraint",
+        "k.decisions", "k.decision", "k.gotchas", "k.gotcha",
+        "k.project", "k.setting", "k.characters", "k.character",
+        "k.architecture", "k.conventions",
+    ]
+
+    /// What the most recent other session wrote, newest first, bounded.
+    private func recentlyChanged(among items: [ContinuityCore.MemoryItem],
+                                 excluding current: UUID?) -> [MemoryRecord] {
+        let newest = items
+            .filter { $0.provenance?.sessionID != nil && $0.provenance?.sessionID != current }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        guard let last = newest.first?.provenance?.sessionID else { return [] }
+        return newest.filter { $0.provenance?.sessionID == last }
+            .prefix(12)
+            .compactMap { try? record(from: $0) }
+    }
+
+    /// A write that reverts a key to a value it already had before is almost
+    /// never a real event and almost always a re-derivation -- an inn that
+    /// burned coming back as "standing" because a later session's chapters
+    /// were written against a stale bootstrap. The value is written, because
+    /// it may be right, and the key is marked disputed so the model sees the
+    /// conflict instead of inheriting whichever side it read last.
+    ///
+    /// Returns true when a reversion was flagged.
+    @discardableResult
+    public func set(_ record: MemoryRecord, in scope: MemoryScope,
+                    flaggingReversions: Bool) async throws -> Bool {
+        guard flaggingReversions else { try await set(record, in: scope); return false }
+        let taskID = try await task(for: scope)
+        let address = Self.address(for: Self.normalize(record).key)
+        let history = await engine.history(taskID: taskID, namespace: address.namespace,
+                                           key: address.key)
+        let incoming = Self.fold(record.value)
+        let current = history.last.map { Self.fold($0.value) }
+        let reverts = current != nil && current != incoming
+            && history.dropLast().contains { Self.fold($0.value) == incoming }
+        try await set(record, in: scope)
+        if reverts {
+            _ = try? await engine.dispute(taskID: taskID, namespace: address.namespace,
+                                          key: address.key)
+        }
+        return reverts
+    }
+
+    private static func fold(_ value: String) -> String {
+        value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".\"'"))
     }
 
     // MARK: - Beyond the protocol
@@ -205,15 +286,17 @@ public actor ContinuityStore: MemoryStore {
 
     private func record(from item: ContinuityCore.MemoryItem) throws -> MemoryRecord {
         let key = try MemoryKey(validating: Self.keyText(for: item))
-        return MemoryRecord(key: key,
-                            value: item.value,
-                            importance: item.importance,
-                            confidence: item.confidence,
-                            tags: item.tags,
-                            sourceSession: item.provenance?.sessionID
-                                .flatMap { sessionLabels[$0] },
-                            createdAt: item.createdAt,
-                            updatedAt: item.updatedAt)
+        var record = MemoryRecord(key: key,
+                                  value: item.value,
+                                  importance: item.importance,
+                                  confidence: item.confidence,
+                                  tags: item.tags,
+                                  sourceSession: item.provenance?.sessionID
+                                      .flatMap { sessionLabels[$0] },
+                                  createdAt: item.createdAt,
+                                  updatedAt: item.updatedAt)
+        record.isDisputed = item.status == .disputed
+        return record
     }
 
     /// Fills the session-name map for a task, once.
