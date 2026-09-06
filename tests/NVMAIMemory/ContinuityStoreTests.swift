@@ -802,7 +802,10 @@ import ContinuityCore
         return Set(files.filter { $0.hasSuffix(".ndjson") })
     }
 
-    @Test func filesUntouchedForThirtyDaysAreDeletedWithTheirLocks() async throws {
+    /// Retention never deletes: an old project keeps its file and its facts.
+    /// Only the cap removes a project. The transcript expiry itself is
+    /// covered in MemoryRetentionKeepsFactsTests.
+    @Test func filesUntouchedForThirtyDaysAreKeptNotDeleted() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("retention-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -810,9 +813,7 @@ import ContinuityCore
         _ = try plant("recent-project", in: directory, daysOld: 3)
         let service = MemoryService(configuration: configuration(directory: directory))
         await service.sweepStaleWorkspaces()
-        #expect(names(in: directory) == ["recent-project.ndjson"])
-        let lock = directory.appendingPathComponent("nvmai/local/old-project.ndjson.lock")
-        #expect(FileManager.default.fileExists(atPath: lock.path) == false)
+        #expect(names(in: directory) == ["old-project.ndjson", "recent-project.ndjson"])
     }
 
     @Test func beyondTheCapTheOldestGoFirst() async throws {
@@ -871,5 +872,89 @@ import ContinuityCore
         let defaults = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY": "1"])
         #expect(defaults.storage.retentionDays == 30)
         #expect(defaults.storage.maximumWorkspaces == 100)
+    }
+}
+
+/// v3: retention keeps the facts, and the project file can be read back
+/// without a lock.
+@Suite struct MemoryRetentionKeepsFactsTests {
+    @Test func anOldProjectLosesItsSessionsAndKeepsItsFacts() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("retention-facts-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let folder = directory.appendingPathComponent("nvmai/local")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("old-novel.ndjson")
+
+        // A project with a bible and two sessions of transcript.
+        do {
+            let engine = ContinuityEngine(journal: try FileJournal(url: url))
+            try await engine.start()
+            let task = try await engine.createTask(title: "The Photograph")
+            for index in 0..<2 {
+                let session = try await engine.beginSession(taskID: task.id)
+                try await engine.recordUserPrompt(sessionID: session.id, text: "chapter \(index)")
+                try await engine.recordAssistantResponse(sessionID: session.id,
+                                                         text: String(repeating: "prose ", count: 200))
+                try await engine.remember(sessionID: session.id, namespace: "k.characters.rosa",
+                                          key: "eyes", value: "hazel")
+                _ = try await engine.endSession(session.id)
+            }
+            await engine.shutDown()
+        }
+        let before = try MemoryProjectFile.load(url)
+        #expect(before.sessionCount == 2)
+        #expect(before.facts.count == 1)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-45 * 86_400)], ofItemAtPath: url.path)
+
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "live"
+        configuration.user = "local"
+        configuration.namespace = "nvmai"
+        configuration.storage.directory = directory
+        configuration.storage.retentionDays = 30
+        let service = MemoryService(configuration: configuration)
+        await service.sweepStaleWorkspaces()
+
+        // Still there, smaller, facts intact, transcript gone.
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        let after = try MemoryProjectFile.load(url)
+        #expect(after.facts.map(\.key) == ["characters/rosa/eyes"])
+        #expect(after.facts.first?.value == "hazel")
+        #expect(after.sessionCount == 0)
+        #expect(after.bytesOnDisk < before.bytesOnDisk)
+    }
+
+    @Test func theProjectFileReaderFoldsHistoryAndResolvesPrefixes() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reader-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let folder = directory.appendingPathComponent("nvmai/local")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("photograph-851a1c1a.ndjson")
+        let engine = ContinuityEngine(journal: try FileJournal(url: url))
+        try await engine.start()
+        let task = try await engine.createTask(title: "Novel")
+        try await engine.remember(taskID: task.id, namespace: "k.state", key: "inn", value: "standing")
+        try await engine.remember(taskID: task.id, namespace: "k.state", key: "inn", value: "burned")
+        // Read while the writer still holds the lock: no lock is taken.
+        let file = try MemoryProjectFile.load(url)
+        await engine.shutDown()
+        let inn = try #require(file.facts.first { $0.key == "state/inn" })
+        #expect(inn.value == "burned")
+        #expect(inn.version == 2)
+        #expect(inn.history.map(\.value) == ["standing"])
+        #expect(file.title == "Novel")
+
+        let files = MemoryProjectFile.discover(in: directory)
+        #expect(files.count == 1)
+        if case .success(let found) = MemoryProjectFile.resolve("photo", among: files) {
+            #expect(found.workspace == "photograph-851a1c1a")
+        } else { Issue.record("prefix did not resolve") }
+        if case .failure = MemoryProjectFile.resolve("nothing", among: files) {} else {
+            Issue.record("an unknown name resolved")
+        }
     }
 }

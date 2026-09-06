@@ -103,7 +103,7 @@ public actor MemoryService {
         await enforceResidencyBudget(keeping: scope)
         // A new project file may be the one that pushes the count past the
         // cap; the sweep skips every workspace this process holds open.
-        sweepStaleWorkspaces()
+        await sweepStaleWorkspaces()
         return workspace
     }
 
@@ -218,61 +218,95 @@ public actor MemoryService {
     /// expert streamer is about to saturate and off the first user's
     /// latency. Safe to call more than once and safe with memory disabled.
     public func warmUp() async {
-        sweepStaleWorkspaces()
+        await sweepStaleWorkspaces()
         guard let scope = configuration.scope() else { return }
         _ = await workspace(for: scope)
     }
 
-    /// Deletes project files nobody has touched, so they cannot pile up.
+    /// Keeps project files from piling up, without losing what they know.
     ///
     /// One journal per project means one per directory a client ever ran
-    /// from, and nothing else removes them. Two rules: a file untouched for
-    /// `retentionDays` goes, and beyond `maximumWorkspaces` the oldest by
-    /// last write go. A workspace this process has open is never touched --
-    /// its lock is held, and it was written moments ago in any case. Runs
-    /// at start and whenever a new project file is created.
-    public func sweepStaleWorkspaces(now: Date = Date()) {
+    /// from, and nothing else removes them. Two rules. A file untouched for
+    /// `retentionDays` has its session log expired -- the transcript, which
+    /// is the bulk of it -- and keeps its facts, because a novel paused for
+    /// six weeks must not come back without its bible. Beyond
+    /// `maximumWorkspaces`, the oldest by last write are deleted outright;
+    /// that cap is the only thing that removes facts. A workspace this
+    /// process has open is never touched -- its lock is held, and it was
+    /// written moments ago in any case. Runs at start and whenever a new
+    /// project file is created.
+    public func sweepStaleWorkspaces(now: Date = Date()) async {
         let storage = configuration.storage
         guard storage.retentionDays > 0 || storage.maximumWorkspaces > 0 else { return }
         let manager = FileManager.default
-        guard let walker = manager.enumerator(at: storage.directory,
-                                              includingPropertiesForKeys: [.contentModificationDateKey],
-                                              options: [.skipsHiddenFiles]) else { return }
         let open = Set(workspaces.keys.map { storage.journalURL(for: $0).standardizedFileURL.path })
-        var candidates: [(url: URL, modified: Date)] = []
-        for case let url as URL in walker where url.pathExtension == "ndjson" {
-            guard !open.contains(url.standardizedFileURL.path) else { continue }
-            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-            candidates.append((url, modified))
+        let candidates = Self.projectFiles(under: storage.directory).filter {
+            !open.contains($0.url.standardizedFileURL.path)
+                && $0.url.deletingPathExtension().lastPathComponent != MemoryConfiguration.sharedWorkspace
         }
-        var doomed: [(URL, String)] = []
-        if storage.retentionDays > 0 {
-            let cutoff = now.addingTimeInterval(-Double(storage.retentionDays) * 86_400)
-            for candidate in candidates where candidate.modified < cutoff {
-                doomed.append((candidate.url, "untouched for \(storage.retentionDays) days"))
-            }
-        }
+        // The cap deletes; it is the only rule that removes facts.
+        var doomed: [URL] = []
         if storage.maximumWorkspaces > 0 {
-            let already = Set(doomed.map { $0.0.path })
-            let remaining = candidates.filter { !already.contains($0.url.path) }
-                .sorted { $0.modified > $1.modified }
+            let ordered = candidates.sorted { $0.modified > $1.modified }
             // The open workspaces count against the cap too.
             let keep = max(0, storage.maximumWorkspaces - open.count)
-            for candidate in remaining.dropFirst(keep) {
-                doomed.append((candidate.url, "more than \(storage.maximumWorkspaces) projects"))
+            doomed = ordered.dropFirst(keep).map(\.url)
+        }
+        if !doomed.isEmpty {
+            var removed: [String] = []
+            for url in doomed {
+                try? manager.removeItem(at: url)
+                try? manager.removeItem(at: url.appendingPathExtension("lock"))
+                try? manager.removeItem(at: url.appendingPathExtension("compacting"))
+                removed.append(url.lastPathComponent)
+            }
+            log(.swept(removed: removed, reason: "more than \(storage.maximumWorkspaces) projects"))
+        }
+        // Retention expires the session log and keeps the facts.
+        guard storage.retentionDays > 0 else { return }
+        let cutoff = now.addingTimeInterval(-Double(storage.retentionDays) * 86_400)
+        let deleted = Set(doomed.map(\.path))
+        var expired: [String] = []
+        for candidate in candidates where candidate.modified < cutoff && !deleted.contains(candidate.url.path) {
+            if await Self.expireSessionLog(at: candidate.url) {
+                expired.append(candidate.url.lastPathComponent)
             }
         }
-        guard !doomed.isEmpty else { return }
-        var removed: [String] = []
-        for (url, _) in doomed {
-            try? manager.removeItem(at: url)
-            try? manager.removeItem(at: url.appendingPathExtension("lock"))
-            try? manager.removeItem(at: url.appendingPathExtension("compacting"))
-            removed.append(url.lastPathComponent)
+        if !expired.isEmpty { log(.expired(files: expired)) }
+    }
+
+    /// Every project file under the directory with its last-write time.
+    /// Synchronous on purpose: a directory enumerator cannot be iterated
+    /// from an async context.
+    private static func projectFiles(under directory: URL) -> [(url: URL, modified: Date)] {
+        guard let walker = FileManager.default.enumerator(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]) else { return [] }
+        var files: [(url: URL, modified: Date)] = []
+        for case let url as URL in walker where url.pathExtension == "ndjson" {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            files.append((url, modified))
         }
-        let reasons = Set(doomed.map { $0.1 }).sorted().joined(separator: "; ")
-        log(.swept(removed: removed, reason: reasons))
+        return files
+    }
+
+    /// Rewrites a project file as a checkpoint of its facts alone.
+    ///
+    /// Opens it with the ordinary engine, which takes the workspace lock, so
+    /// a file another server holds is left alone. Every session is pruned
+    /// and the journal compacted; the facts, their history and the task
+    /// survive. Returns false when the file could not be opened.
+    private static func expireSessionLog(at url: URL) async -> Bool {
+        guard let journal = try? FileJournal(url: url) else { return false }
+        let engine = ContinuityEngine(journal: journal)
+        do { try await engine.start() } catch { await engine.shutDown(); return false }
+        for task in await engine.tasks() {
+            await engine.pruneSessions(taskID: task.id, keeping: 0)
+        }
+        try? await engine.compactJournal()
+        await engine.shutDown()
+        return true
     }
 
     /// Close every workspace, flushing and releasing the workspace locks.
@@ -344,6 +378,14 @@ public actor MemoryService {
             }
         } else {
             bootstrap = (try? await localStore.sessionInit(session, in: scope)) ?? .empty
+        }
+        // The person's own facts, from the shared workspace, ride along on
+        // every project's bootstrap. Bounded small: they are preferences,
+        // not state, and there should be a handful.
+        if let sharedScope = configuration.sharedScope, scope != sharedScope,
+           await workspace(for: sharedScope) != nil {
+            let shared = await recordedFacts(in: sharedScope, limit: 12)
+            if !shared.isEmpty { bootstrap = bootstrap.withShared(shared) }
         }
         let durable = await isDurable(in: scope)
         log(.sessionStarted(session: session.id, scope: scope,
@@ -436,7 +478,38 @@ public actor MemoryService {
                                    in context: MemorySessionContext) async -> Int {
         let store = await activeStore(for: context.scope)
         var written = 0
+        var unchanged = 0
         for record in records {
+            // A fact about the person rather than the project goes to the
+            // shared workspace, where every project's bootstrap reads it.
+            if record.isGlobal, let sharedScope = configuration.sharedScope,
+               context.scope != sharedScope {
+                let sharedStore = await activeStore(for: sharedScope)
+                if let current = try? await sharedStore.get(record.key, in: sharedScope),
+                   Self.fold(current.value) == Self.fold(record.value) {
+                    unchanged += 1
+                    continue
+                }
+                var stamped = record
+                stamped.sourceSession = context.session.id
+                do {
+                    try await sharedStore.set(stamped, in: sharedScope)
+                    written += 1
+                    log(.sharedFactWritten(key: stamped.key.rawValue))
+                } catch {
+                    log(.toolFailed(tool: "consolidation", detail: "\(error)"))
+                }
+                continue
+            }
+            // The extraction is told to write only what changed and still
+            // restates unchanged facts: every eye colour in a novel got a v2
+            // and a v3 with the identical value. A write that changes nothing
+            // is version churn and completion tokens for no fact.
+            if let current = try? await store.get(record.key, in: context.scope),
+               Self.fold(current.value) == Self.fold(record.value) {
+                unchanged += 1
+                continue
+            }
             var stamped = record
             stamped.sourceSession = context.session.id
             do {
@@ -453,8 +526,14 @@ public actor MemoryService {
                 log(.toolFailed(tool: "consolidation", detail: "\(error)"))
             }
         }
+        if unchanged > 0 { log(.unchangedSkipped(session: context.session.id, count: unchanged)) }
         log(.consolidated(session: context.session.id, records: written))
         return written
+    }
+
+    static func fold(_ value: String) -> String {
+        value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".\"'"))
     }
 
     private func activeStore(for scope: MemoryScope) async -> any MemoryStore {
@@ -499,6 +578,12 @@ public enum MemoryLogEvent: Sendable, Equatable {
     case swept(removed: [String], reason: String)
     /// A consolidation wrote a value the key had before; it is now disputed.
     case reversionFlagged(key: String)
+    /// Facts a consolidation returned that already held the same value.
+    case unchangedSkipped(session: String, count: Int)
+    /// A consolidation wrote a fact about the person to the shared workspace.
+    case sharedFactWritten(key: String)
+    /// Project files whose session log was expired by retention; facts kept.
+    case expired(files: [String])
 
     /// One log line. Never contains a memory's contents or a credential: the
     /// log is operational, and memory can hold anything the model wrote.
@@ -523,6 +608,13 @@ public enum MemoryLogEvent: Sendable, Equatable {
             return "journal session=\(session) turn=\(index) \(bytes)B"
         case .reversionFlagged(let key):
             return "memory reversion flagged as disputed: \(key)"
+        case .sharedFactWritten(let key):
+            return "memory shared fact written for every project: \(key)"
+        case .unchangedSkipped(let session, let count):
+            return "memory session=\(session) consolidation skipped \(count) unchanged fact(s)"
+        case .expired(let files):
+            return "memory expired the session log of \(files.count) project file(s), facts kept: "
+                + files.joined(separator: ", ")
         case .swept(let removed, let reason):
             return "memory swept \(removed.count) project file(s) (\(reason)): "
                 + removed.joined(separator: ", ")

@@ -141,6 +141,10 @@ public struct MemoryRecord: Sendable, Codable, Equatable {
     /// Two sources disagree and nothing has resolved it. Shown to the model
     /// as such; the next write to the key settles it.
     public var isDisputed: Bool = false
+    /// Holds in every project, not this one: a preference, a convention, a
+    /// language. Routing only -- a consolidation marks it and the service
+    /// stores it in the user's shared workspace instead of the project's.
+    public var isGlobal: Bool = false
 
     public init(key: MemoryKey,
                 value: String,
@@ -224,13 +228,24 @@ public struct MemoryBootstrap: Sendable, Equatable {
     /// established facts. Someone resuming a refactor or a book needs "what
     /// moved" before "what is".
     public let recent: [MemoryRecord]
+    /// The person's own facts, from the shared workspace: conventions,
+    /// language, tone. Shown in every project so a preference stated once
+    /// is not relearned in the next repository.
+    public let shared: [MemoryRecord]
 
     public init(records: [MemoryRecord], omittedCount: Int, totalBytes: Int,
-                recent: [MemoryRecord] = []) {
+                recent: [MemoryRecord] = [], shared: [MemoryRecord] = []) {
         self.records = records
         self.omittedCount = omittedCount
         self.totalBytes = totalBytes
         self.recent = recent
+        self.shared = shared
+    }
+
+    /// The same bootstrap with the shared facts attached.
+    public func withShared(_ shared: [MemoryRecord]) -> MemoryBootstrap {
+        MemoryBootstrap(records: records, omittedCount: omittedCount, totalBytes: totalBytes,
+                        recent: recent, shared: shared)
     }
 
     public static let empty = MemoryBootstrap(records: [], omittedCount: 0, totalBytes: 0)

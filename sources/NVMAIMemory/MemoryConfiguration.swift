@@ -10,10 +10,13 @@ public struct ContinuityStorageConfiguration: Sendable, Equatable {
     /// The start scripts pass `<NVMAI>/memory`, beside `models/`; the binary
     /// alone falls back to `~/.nvmai/memory`.
     public var directory: URL
-    /// A project file untouched for this many days is deleted, with its
-    /// lock. Zero keeps everything. One file per project accumulates one per
-    /// directory a client ever ran from, and nothing else would ever remove
-    /// them.
+    /// A project file untouched for this many days has its session log
+    /// expired -- the transcript, which is the bulk of it -- and keeps its
+    /// facts. Zero keeps everything. One file per project accumulates one
+    /// per directory a client ever ran from, and nothing else would ever
+    /// trim them; but a novel paused for six weeks must not come back
+    /// without its bible, so retention never removes a fact. Only the
+    /// project cap does.
     public var retentionDays: Int
     /// Most project files kept; the oldest by last write go first. Zero is
     /// no cap.
@@ -328,12 +331,24 @@ public struct MemoryConfiguration: Sendable, Equatable {
         return hash
     }
 
+    /// The workspace that holds the person's own facts -- conventions,
+    /// language, tone -- shown in every project. Reserved: a request may not
+    /// name it, and a derived workspace id can never spell it, so nothing a
+    /// client sends can write project state into it.
+    public static let sharedWorkspace = "_global"
+
+    /// The scope of the person's shared facts.
+    public var sharedScope: MemoryScope? {
+        try? MemoryScope(namespace: namespace, user: user, workspace: Self.sharedWorkspace)
+    }
+
     /// The scope this configuration describes, or nil when a component is
     /// unusable. A rejected scope disables memory rather than falling back to
     /// a shared one, because the failure mode of guessing is cross-project
     /// leakage.
     public func scope(workspaceOverride: String? = nil) -> MemoryScope? {
         let effective = allowsPerRequestWorkspace ? (workspaceOverride ?? workspace) : workspace
+        guard effective != Self.sharedWorkspace else { return nil }
         return try? MemoryScope(namespace: namespace, user: user, workspace: effective)
     }
 

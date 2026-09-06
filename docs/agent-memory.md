@@ -196,11 +196,41 @@ only inside an owner-only directory, with a `.lock` sidecar beside it. Sessions
 are records inside that file, not files of their own. Deleting a project's
 memory is deleting its file, and backing it up is copying it.
 
-The files do not pile up. A project file untouched for 30 days is deleted
-along with its lock, and at most 100 project files are kept, oldest by last
-write going first. The sweep runs at start and whenever a new project file is
-created; a project this server has open is never touched. Each removal is
-logged: `memory swept 3 project file(s) (untouched for 30 days): …`.
+The files do not pile up, and retention never removes a fact. A project file
+untouched for 30 days (`NVMAI_MEMORY_RETENTION_DAYS`) has its session log
+expired — the transcript, which is the bulk of it — and keeps its facts, their
+history and its title, so a novel paused for six weeks comes back with its
+bible. At most 100 project files are kept (`NVMAI_MEMORY_MAX_WORKSPACES`),
+oldest by last write going first; that cap is the only rule that deletes
+facts. The sweep runs at start and whenever a new project file is created; a
+project this server has open, and the person's shared file, are never touched.
+Each action is logged: `memory expired the session log of 2 project file(s),
+facts kept: …` and `memory swept 1 project file(s) (more than 100 projects): …`.
+
+### The person's own facts
+
+A consolidation can mark a fact `"global": true` — a convention wanted
+everywhere, a language, a tone, a tool always used. Those go to the shared
+workspace `_global` under the same user, and every project's bootstrap opens
+with them under "About this person, in every project". Project facts never go
+there, and a request cannot name `_global`: a derived workspace id can never
+spell it and the header is refused.
+
+### Seeing and correcting memory
+
+```bash
+swift run nvmai-memory projects                 # every project, newest first
+swift run nvmai-memory list photograph          # a project's facts (prefix is enough)
+swift run nvmai-memory show photograph state/inn
+swift run nvmai-memory delete photograph state/inn   # retired, kept in history
+swift run nvmai-memory forget photograph --yes       # the whole project
+swift run nvmai-memory list global              # the person's shared facts
+```
+
+Reads take no lock and work while a server is running. `delete` and `forget`
+need the workspace and refuse it while a server holds it — stop the server, or
+let the next consolidation supersede the fact. `--dir` or `NVMAI_MEMORY_DIR`
+selects the directory.
 
 A workspace named per request gets its own file too, so one project's memory
 can never be written into another's.
@@ -269,9 +299,13 @@ turns it off. It needs no tools at all, which is the point: with
 `NVMAI_MEMORY_TOOLS=off` the model pays ~200 prompt tokens for the fragment
 and bootstrap, reads what the engine wrote, and never has to decide to write.
 
-The extraction is shown what memory already holds — keys *and* values — and
-asked for only what the session added or changed, one fact per key, never a
-placeholder. That wording is not cosmetic. Shown keys alone, the model
+The extraction is shown what memory already holds — every key by name in the
+namespaces the session touches, the other namespaces as one line with a
+count, and current values only for keys the session mentions — and asked for
+only what the session added or changed, one fact per key, never a placeholder.
+A returned fact whose value memory already holds is not written again. A long
+session is distilled incrementally: each consolidation reads only the turns
+after the last one it distilled, plus one for context. That wording is not cosmetic. Shown keys alone, the model
 re-derived every one of them from sessions that said nothing about them,
 wrote `not specified` over a character's eye colour, and confirmed `standing`
 for an inn that had burned three sessions earlier. The parser drops
@@ -383,6 +417,15 @@ no RAM ceiling by default; thirty-day retention and a cap on project files;
 the store under `<NVMAI>/memory`; and "memory tools" named as such
 everywhere. Measured against v1 on the same benchmarks: see
 `docs/memory-database-v2-comparison-2026-09-07.md`.
+
+**v3** (tag `memory-v3`): v2 plus — the extraction lists keys by name only
+for namespaces the session touches and summarises the rest (the every-key
+list was v2's whole extra cost); a fact returned with its current value is
+not rewritten; a long session is distilled incrementally, new turns only;
+retention expires a project's session log and keeps its facts; the person's
+own facts live in a shared workspace shown to every project; and
+`nvmai-memory` lists, shows, retires and forgets. Not yet measured against
+v2 — benchmarks held.
 
 ## Known limitations
 

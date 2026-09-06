@@ -51,6 +51,12 @@ public actor MemoryBackend: ServerInferenceBackend {
     /// A session that rolled over before its idle timer fired. Consolidated
     /// as soon as the current request has returned, never before.
     private var pendingAfterTurn: [MemoryScope: MemorySessionContext] = [:]
+    /// The last journal turn index each session has been distilled through.
+    /// Every idle gap used to re-read the newest forty turns of the whole
+    /// session and extract them again; a fifty-turn coding session paid that
+    /// on every pause. Only turns after this index are read now, plus the
+    /// one before them for context.
+    private var consolidatedThrough: [String: Int] = [:]
     /// One generation at a time through this backend.
     ///
     /// The HTTP layer admits one request at a time, but a consolidation is
@@ -290,19 +296,29 @@ public actor MemoryBackend: ServerInferenceBackend {
             unconsolidated[scope] = nil
         }
         guard let journal = await service.journalStore(for: scope) else { return }
-        let turns = await journal.turns(session: context.session.id,
-                                        limit: configuration.consolidationMaximumTurns,
-                                        in: scope)
-        guard !turns.isEmpty else { return }
-        let characters = turns.reduce(0) { $0 + $1.prompt.count + $1.reply.count }
-        guard characters >= configuration.consolidationMinimumCharacters else {
-            ServerLog.memory("consolidation skipped session=\(context.session.id): "
-                             + "\(characters) characters, nothing to distil")
+        let newestFirst = await journal.turns(session: context.session.id,
+                                              limit: configuration.consolidationMaximumTurns,
+                                              in: scope)
+        let chronological = Array(newestFirst.reversed())
+        let through = consolidatedThrough[context.session.id] ?? -1
+        let fresh = chronological.filter { $0.index > through }
+        guard let last = fresh.last else {
+            ServerLog.memory("consolidation skipped session=\(context.session.id): no new turns")
             return
         }
+        let characters = fresh.reduce(0) { $0 + $1.prompt.count + $1.reply.count }
+        guard characters >= configuration.consolidationMinimumCharacters else {
+            ServerLog.memory("consolidation skipped session=\(context.session.id): "
+                             + "\(characters) new characters, nothing to distil")
+            return
+        }
+        // One already-distilled turn ahead of the new ones, so a reply that
+        // answers the previous prompt is read with that prompt.
+        let overlap = chronological.last { $0.index <= through }.map { [$0] } ?? []
+        let turns = overlap + fresh
         let existing = await service.recordedFacts(in: scope, limit: 400)
         let request = ServerMemory.consolidationRequest(
-            turns: Array(turns.reversed()), existing: existing, workspace: scope.workspace)
+            turns: turns, existing: existing, workspace: scope.workspace)
         let started = Date()
         let completion: ServerCompletion
         do {
@@ -324,7 +340,8 @@ public actor MemoryBackend: ServerInferenceBackend {
                              + "finish=\(completion.finishReason) output=\"\(head)\"")
         }
         let written = await service.storeConsolidation(records, in: context)
-        ServerLog.memory("consolidated session=\(context.session.id) turns=\(turns.count) "
+        consolidatedThrough[context.session.id] = last.index
+        ServerLog.memory("consolidated session=\(context.session.id) turns=\(fresh.count) "
                          + "facts=\(written) keys=\(records.map(\.key.rawValue).joined(separator: ","))"
                          + " prompt=\(completion.usage.promptTokens) "
                          + "completion=\(completion.usage.completionTokens) "

@@ -61,6 +61,13 @@ public enum MemoryPrompt {
             lines.append("Note: the durable store is unreachable, so anything you write now "
                          + "lasts only for this session. Say so if the user relies on it.")
         }
+        if !bootstrap.shared.isEmpty {
+            lines.append("")
+            lines.append("About this person, in every project:")
+            for record in bootstrap.shared {
+                lines.append("- `\(record.key.rawValue)`: \(summarize(record.value))")
+            }
+        }
         if !bootstrap.recent.isEmpty {
             lines.append("")
             lines.append("Changed in the most recent session:")

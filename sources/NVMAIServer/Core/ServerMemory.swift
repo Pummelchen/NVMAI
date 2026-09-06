@@ -59,14 +59,14 @@ enum ServerMemory {
         for turn in turns {
             transcript += "USER: \(turn.prompt)\n\nASSISTANT: \(turn.reply)\n\n---\n\n"
         }
-        // Every key by name, so an update lands on the address it changes;
-        // values only for keys the session mentions, so the prompt is not
-        // sixty lines of things this session never touched. Measured, the
-        // full list was most of a 1,600-token extraction prompt.
+        // Keys by name only for the namespaces this session touches; the
+        // other namespaces as one line each with a count. Values only for
+        // keys the session mentions. Measured, listing every key by name was
+        // the whole overhead of the feature and it grew with the store: v2
+        // cost 15% more than v1 on a hundred-chapter novel for it.
         let haystack = transcript.lowercased()
         let mentioned = existing.filter { Self.isMentioned($0.key.rawValue, in: haystack) }
-        var known = existing.isEmpty ? "(none yet)" : existing.map { "- \($0.key.rawValue)" }
-            .joined(separator: "\n")
+        var known = Self.keyListing(existing, mentioned: mentioned)
         if !mentioned.isEmpty {
             known += "\n\nCurrent values of the keys this session touches:\n"
                 + mentioned.prefix(40).map { record in
@@ -96,7 +96,11 @@ enum ServerMemory {
             + "\"key\", \"value\" and \"importance\" (0 to 1; fixed attributes and "
             + "rules high, passing state lower). Keys are lowercase path-like names "
             + "such as `characters/marcus/eyes`, `decisions/storage`, `state/inn` or "
-            + "`rules/weather`. Return [] if nothing durable was added or changed."
+            + "`rules/weather`. A fact about the PERSON rather than this project -- a "
+            + "convention they want everywhere, their language, their tone, a tool "
+            + "they always use -- also carries \"global\": true, and goes under "
+            + "`preferences/...`; project facts never do. Return [] if nothing durable "
+            + "was added or changed."
         let user = "Memory already holds these keys:\n\(known)\n\nThe session:\n\n\(transcript)"
         return ValidatedChatRequest(
             messages: [GFTokenizer.Message(role: .system, content: system),
@@ -155,23 +159,69 @@ enum ServerMemory {
                 guard !value.isEmpty, !Self.isPlaceholder(value) else { continue }
                 let importance = (entry["importance"] as? Double)
                     ?? (entry["importance"] as? Int).map(Double.init)
-                records.append(MemoryRecord(key: key, value: value, importance: importance))
+                var record = MemoryRecord(key: key, value: value, importance: importance)
+                record.isGlobal = (entry["global"] as? Bool) ?? false
+                records.append(record)
             }
             if !records.isEmpty || parsed.isEmpty { return records }
         }
         return []
     }
 
+    /// The key names an extraction is shown.
+    ///
+    /// Namespaces the session mentions are listed in full, so an update lands
+    /// on the key it changes. Every other namespace is one line with a count:
+    /// enough to tell the model the namespace exists and how it is spelled,
+    /// which is what stops it inventing a parallel one. Capped, because a
+    /// list that grows with the store is the cost curve this replaces.
+    static func keyListing(_ existing: [MemoryRecord], mentioned: [MemoryRecord],
+                           maximumListed: Int = 60) -> String {
+        guard !existing.isEmpty else { return "(none yet)" }
+        let touched = Set(mentioned.map { namespace(of: $0.key.rawValue) })
+        var lines: [String] = []
+        var listed = 0
+        var byNamespace: [String: [String]] = [:]
+        for record in existing {
+            byNamespace[namespace(of: record.key.rawValue), default: []].append(record.key.rawValue)
+        }
+        for name in byNamespace.keys.sorted() {
+            let keys = byNamespace[name]!.sorted()
+            if touched.contains(name), listed + keys.count <= maximumListed {
+                lines.append(contentsOf: keys.map { "- \($0)" })
+                listed += keys.count
+            } else if touched.contains(name) {
+                let room = max(0, maximumListed - listed)
+                lines.append(contentsOf: keys.prefix(room).map { "- \($0)" })
+                lines.append("- \(name)/ ... and \(keys.count - room) more keys")
+                listed = maximumListed
+            } else {
+                lines.append("- \(name)/ (\(keys.count) key\(keys.count == 1 ? "" : "s"), not touched by this session)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func namespace(of key: String) -> String {
+        key.split(separator: "/").first.map(String.init) ?? key
+    }
+
     /// Whether a key's subject appears in the transcript: any segment of
-    /// four or more characters, split on `/` and `_`. `state/inn_status`
-    /// matches a session that mentions the inn; `characters/rosa/eyes`
-    /// matches one that mentions Rosa.
+    /// three or more characters, split on `/`, `_` and `-`, matched as a
+    /// whole word. `state/inn_status` matches a session that mentions the
+    /// inn; `characters/rosa/eyes` matches one that mentions Rosa. Whole
+    /// words, because "inn" must not match "beginning" and "ferry" must not
+    /// match nothing but itself.
     static func isMentioned(_ key: String, in haystack: String) -> Bool {
         let parts = key.lowercased()
             .split(whereSeparator: { $0 == "/" || $0 == "_" || $0 == "-" })
             .map(String.init)
-            .filter { $0.count >= 4 }
-        return parts.contains { haystack.contains($0) }
+            .filter { $0.count >= 3 }
+        guard !parts.isEmpty else { return false }
+        return parts.contains { part in
+            let pattern = "(?<![a-z0-9])" + NSRegularExpression.escapedPattern(for: part) + "(?![a-z0-9])"
+            return haystack.range(of: pattern, options: .regularExpression) != nil
+        }
     }
 
     /// Routes a new fact to the key memory already uses for it.

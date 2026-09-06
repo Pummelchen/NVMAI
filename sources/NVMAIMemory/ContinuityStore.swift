@@ -370,9 +370,9 @@ public actor ContinuityStore: MemoryStore {
 
     // MARK: - Address mapping
 
-    struct Address: Equatable {
-        let namespace: String
-        let key: String
+    public struct Address: Equatable {
+        public let namespace: String
+        public let key: String
     }
 
     /// `decisions/sync` becomes namespace `k.decisions`, key `sync`.
@@ -380,7 +380,7 @@ public actor ContinuityStore: MemoryStore {
     /// The leading `k` keeps a one-segment key from colliding with a
     /// two-segment one, and it is added on every address, so no key the model
     /// writes can produce it by accident.
-    static func address(for key: MemoryKey) -> Address {
+    public static func address(for key: MemoryKey) -> Address {
         let segments = normalizeKeyText(key.rawValue).split(separator: "/").map(String.init)
         guard let last = segments.last else { return Address(namespace: "k", key: "empty") }
         let leading = segments.dropLast()
@@ -388,7 +388,7 @@ public actor ContinuityStore: MemoryStore {
         return Address(namespace: namespace, key: last)
     }
 
-    static func keyText(for item: ContinuityCore.MemoryItem) -> String {
+    public static func keyText(for item: ContinuityCore.MemoryItem) -> String {
         var segments = item.namespace.split(separator: ".").map(String.init)
         if segments.first == "k" { segments.removeFirst() }
         segments.append(item.key)

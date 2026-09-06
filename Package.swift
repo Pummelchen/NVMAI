@@ -17,6 +17,7 @@ let package = Package(
         .executable(name: "NVMAIServer", targets: ["NVMAIServer"]),
         .executable(name: "NVMAIBench", targets: ["NVMAIBench"]),
         .executable(name: "ContinuityDemo", targets: ["ContinuityDemo"]),
+        .executable(name: "nvmai-memory", targets: ["NVMAIMemoryTool"]),
     ],
     dependencies: [
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
@@ -114,6 +115,13 @@ let package = Package(
             name: "NVMAIMemory",
             dependencies: ["ContinuityCore"],
             path: "sources/NVMAIMemory"
+        ),
+        // See and correct what the server remembers: list, show, delete.
+        // Reads take no lock; writes need the workspace.
+        .executableTarget(
+            name: "NVMAIMemoryTool",
+            dependencies: ["NVMAIMemory", "ContinuityCore"],
+            path: "sources/NVMAIMemoryTool"
         ),
         .target(
             name: "NVMAIServerCore",

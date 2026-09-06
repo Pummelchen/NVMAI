@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import NVMAI
 import NVMAIMemory
+import ContinuityCore
 @testable import NVMAIServerCore
 
 /// The engine writing memory on its own, and the loop answering when its
@@ -380,11 +381,12 @@ import NVMAIMemory
                                                         workspace: "w")
         let user = request.messages.last?.content ?? ""
         let system = request.messages.first?.content ?? ""
-        // Every key by name; a value only for the key this session touches.
-        // Measured, the full value list was most of a 1,600-token prompt.
-        #expect(user.contains("- characters/marcus/eyes"))
+        // The touched namespace by name with its value; the untouched one
+        // summarised. The every-key list was v2's whole extra cost.
+        #expect(user.contains("- state/inn"))
         #expect(user.contains("state/inn = standing"))
-        #expect(user.contains("characters/marcus/eyes = grey") == false)
+        #expect(user.contains("- characters/ (1 key, not touched by this session)"))
+        #expect(user.contains("- characters/marcus/eyes") == false)
         #expect(system.contains("ONLY facts this session added or changed"))
         #expect(system.contains("omit the key instead"))
         #expect(request.maximumCompletionTokens >= 2000)
@@ -544,8 +546,205 @@ import NVMAIMemory
         #expect(ServerMemory.isMentioned("state/inn_status", in: "rosa lit the inn's lamps"))
         #expect(ServerMemory.isMentioned("characters/rosa/eyes", in: "rosa stood at the door"))
         #expect(ServerMemory.isMentioned("state/ferry_running", in: "the tide came in") == false)
-        // Short segments never match on their own: "eyes" alone is not a subject.
+        // Whole words: "inn" is a subject, "beginning" is not the inn.
+        #expect(ServerMemory.isMentioned("state/inn", in: "at the beginning") == false)
         #expect(ServerMemory.isMentioned("x/eyes", in: "her eyes") == true)
         #expect(ServerMemory.isMentioned("a/b", in: "a b c") == false)
+    }
+}
+
+/// v3: the extraction sees a bounded key list, unchanged facts are not
+/// rewritten, a long session is distilled incrementally, and a fact about
+/// the person lands in the shared workspace.
+@Suite struct MemoryV3Tests {
+    /// unchecked-invariant: every access to `script` and `seen` is under `lock`.
+    private final class ScriptedBackend: ServerInferenceBackend, @unchecked Sendable {
+        private var script: [ServerCompletion]
+        private var seen: [ValidatedChatRequest] = []
+        private let lock = NSLock()
+        init(_ script: [ServerCompletion]) { self.script = script }
+        func generate(_ request: ValidatedChatRequest,
+                      onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws
+            -> ServerCompletion {
+            lock.withLock { seen.append(request) }
+            let completion = lock.withLock { script.isEmpty ? nil : script.removeFirst() }
+            return completion ?? ServerCompletion(
+                content: "[]", toolCalls: [], finishReason: "stop",
+                usage: OpenAIUsage(promptTokens: 0, completionTokens: 0, totalTokens: 0))
+        }
+        var requests: [ValidatedChatRequest] { lock.withLock { seen } }
+    }
+
+    private func completion(_ content: String) -> ServerCompletion {
+        ServerCompletion(content: content, toolCalls: [], finishReason: "stop",
+                         usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2))
+    }
+    private func request(_ text: String) -> ValidatedChatRequest {
+        ValidatedChatRequest(messages: [GFTokenizer.Message(role: .user, content: text)],
+                             tools: [], stream: false, includeUsage: false,
+                             generationConfig: GenerationConfig(maxNewTokens: 32),
+                             maximumCompletionTokens: 32)
+    }
+    private func key(_ raw: String) throws -> MemoryKey { try MemoryKey(validating: raw) }
+    private func configuration() -> MemoryConfiguration {
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "repo-a"
+        configuration.user = "local"
+        configuration.toolSurface = .off
+        configuration.sessionConsolidation = true
+        configuration.consolidationIdleSeconds = 0.05
+        configuration.consolidationMinimumCharacters = 0
+        return configuration
+    }
+    /// An extraction is its own two-message conversation whose system prompt
+    /// names the job. A turn also opens with a system message -- the memory
+    /// fragment -- so the role alone does not tell them apart.
+    private func isExtraction(_ request: ValidatedChatRequest) -> Bool {
+        request.messages.count == 2
+            && request.messages.first?.content?.hasPrefix("You distil") == true
+    }
+    private func waitForConsolidations(_ inner: ScriptedBackend, atLeast count: Int) async throws {
+        for _ in 0..<200 {
+            if inner.requests.filter(isExtraction).count >= count { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    // MARK: 1. the key list
+
+    @Test func onlyTouchedNamespacesAreListedInFull() throws {
+        let existing = try (0..<30).map {
+            MemoryRecord(key: try key("decisions/d\($0)"), value: "v")
+        } + [MemoryRecord(key: try key("state/inn_status"), value: "burned"),
+             MemoryRecord(key: try key("characters/rosa/eyes"), value: "hazel")]
+        let turn = JournalTurn(session: "s", workspace: "w", index: 0,
+                               prompt: "write the scene at the inn", reply: "Rosa lit the lamps.")
+        let request = ServerMemory.consolidationRequest(turns: [turn], existing: existing,
+                                                        workspace: "w")
+        let user = request.messages.last?.content ?? ""
+        // Touched namespaces by name, untouched ones as one line with a count.
+        #expect(user.contains("- state/inn_status"))
+        #expect(user.contains("- characters/rosa/eyes"))
+        #expect(user.contains("- decisions/ (30 keys, not touched by this session)"))
+        #expect(user.contains("- decisions/d7") == false)
+    }
+
+    @Test func aTouchedNamespaceIsCappedNotUnbounded() throws {
+        let existing = try (0..<80).map {
+            MemoryRecord(key: try key("state/thing\($0)"), value: "v")
+        }
+        let listing = ServerMemory.keyListing(existing, mentioned: [existing[0]], maximumListed: 10)
+        #expect(listing.components(separatedBy: "\n").count == 11)
+        #expect(listing.contains("and 70 more keys"))
+    }
+
+    // MARK: 2. unchanged facts are not rewritten
+
+    @Test func aFactWithTheSameValueIsNotWrittenAgain() async throws {
+        let configuration = configuration()
+        let store = ContinuityStore(engine: ContinuityEngine())
+        let service = MemoryService(configuration: configuration, durableStore: store)
+        let scope = try #require(configuration.scope())
+        let context = try #require(await service.beginSession(id: "s1"))
+        _ = await service.storeConsolidation(
+            [MemoryRecord(key: try key("characters/rosa/eyes"), value: "hazel")], in: context)
+        let written = await service.storeConsolidation(
+            [MemoryRecord(key: try key("characters/rosa/eyes"), value: "Hazel."),
+             MemoryRecord(key: try key("state/inn"), value: "burned")], in: context)
+        #expect(written == 1)
+        let rosa = try #require(try await store.get(try key("characters/rosa/eyes"), in: scope))
+        #expect(rosa.value == "hazel")
+    }
+
+    // MARK: 3. incremental consolidation
+
+    @Test func aSecondConsolidationReadsOnlyTheNewTurns() async throws {
+        let inner = ScriptedBackend([
+            completion("Chapter one."),          // turn 1
+            completion("[]"),                    // consolidation of turn 1
+            completion("Chapter two."),          // turn 2
+            completion("[]"),                    // consolidation of turn 2
+            completion("Chapter three."),        // turn 3
+            completion("[]"),                    // consolidation of turn 3
+        ])
+        let service = MemoryService(configuration: configuration(), durableStore: InMemoryStore(),
+                                    journal: InMemoryJournal())
+        let backend = MemoryBackend(wrapping: inner, service: service, configuration: configuration())
+        // One conversation growing turn by turn: the first user message stays
+        // the same, so it is one session with three turns, not three sessions.
+        func conversation(_ prompts: [String], _ replies: [String]) -> ValidatedChatRequest {
+            var messages: [GFTokenizer.Message] = []
+            for (index, prompt) in prompts.enumerated() {
+                messages.append(GFTokenizer.Message(role: .user, content: prompt))
+                if index < replies.count {
+                    messages.append(GFTokenizer.Message(role: .assistant, content: replies[index]))
+                }
+            }
+            return ValidatedChatRequest(messages: messages, tools: [], stream: false,
+                                        includeUsage: false,
+                                        generationConfig: GenerationConfig(maxNewTokens: 32),
+                                        maximumCompletionTokens: 32)
+        }
+        _ = try await backend.generate(conversation(["write chapter one"], []), onEvent: { _ in })
+        try await waitForConsolidations(inner, atLeast: 1)
+        _ = try await backend.generate(conversation(["write chapter one", "write chapter two"],
+                                                    ["Chapter one."]), onEvent: { _ in })
+        try await waitForConsolidations(inner, atLeast: 2)
+        _ = try await backend.generate(conversation(["write chapter one", "write chapter two",
+                                                     "write chapter three"],
+                                                    ["Chapter one.", "Chapter two."]),
+                                       onEvent: { _ in })
+        try await waitForConsolidations(inner, atLeast: 3)
+
+        let extractions = inner.requests.filter(isExtraction)
+        #expect(extractions.count == 3)
+        let third = extractions[2].messages.last?.content ?? ""
+        // Turn three plus one turn of context, and not turn one.
+        #expect(third.contains("write chapter three"))
+        #expect(third.contains("write chapter two"))
+        #expect(third.contains("write chapter one") == false)
+        await backend.shutDown()
+    }
+
+    // MARK: 8. a fact about the person
+
+    @Test func aGlobalFactLandsInTheSharedWorkspaceAndEveryBootstrap() async throws {
+        let configuration = configuration()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("shared-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var stored = configuration
+        stored.storage.directory = directory
+        stored.allowsPerRequestWorkspace = true
+        let service = MemoryService(configuration: stored)
+        let context = try #require(await service.beginSession(id: "s1"))
+        var preference = MemoryRecord(key: try key("preferences/language"),
+                                      value: "answer in British English")
+        preference.isGlobal = true
+        let written = await service.storeConsolidation(
+            [preference, MemoryRecord(key: try key("state/inn"), value: "burned")], in: context)
+        #expect(written == 2)
+
+        // Another project sees the preference and not the inn.
+        let other = try #require(await service.beginSession(id: "s2", workspaceOverride: "repo-b"))
+        #expect(other.bootstrap.shared.map(\.key.rawValue) == ["preferences/language"])
+        #expect(other.bootstrap.records.contains { $0.key.rawValue == "state/inn" } == false)
+        let text = await service.instructions(for: other)
+        #expect(text.contains("About this person, in every project:"))
+        #expect(text.contains("British English"))
+
+        // The shared workspace cannot be named by a request.
+        #expect(await service.beginSession(id: "s3", workspaceOverride: "_global") == nil)
+        await service.shutDown()
+        let files = (try? FileManager.default.subpathsOfDirectory(atPath: directory.path)) ?? []
+        #expect(files.contains { $0.hasSuffix("_global.ndjson") })
+    }
+
+    @Test func theExtractionCanMarkAFactGlobal() {
+        let records = ServerMemory.consolidationRecords(
+            from: "[{\"key\": \"preferences/tabs\", \"value\": \"uses tabs\", \"global\": true}, "
+                + "{\"key\": \"state/x\", \"value\": \"y\"}]")
+        #expect(records.map(\.isGlobal) == [true, false])
     }
 }
