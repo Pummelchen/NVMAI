@@ -428,6 +428,27 @@ import NVMAIMemory
         #expect(merged.first?.to == "state/inn_status")
     }
 
+    /// The false positive that gave Marcus a fact before chapter 60: a
+    /// shared last word is not a shared fact when the entity differs.
+    @Test func aPerEntityAttributeIsNeverRoutedToAnotherEntity() throws {
+        let existing = [
+            MemoryRecord(key: try key("characters/marcus/knows_photo_content"), value: "false"),
+            MemoryRecord(key: try key("setting/location"), value: "Ashgrove"),
+        ]
+        let incoming = [
+            MemoryRecord(key: try key("characters/ines/knows_photo_content"), value: "true"),
+            MemoryRecord(key: try key("characters/tomas/location"), value: "lighthouse"),
+            // A renamed namespace for the same path is still routed.
+            MemoryRecord(key: try key("world/location"), value: "Ashgrove, coastal"),
+        ]
+        let (records, merged) = ServerMemory.reconcile(incoming, existing: existing)
+        #expect(records.map(\.key.rawValue)
+                == ["characters/ines/knows_photo_content", "characters/tomas/location",
+                    "setting/location"])
+        #expect(merged.count == 1)
+        #expect(merged.first?.from == "world/location")
+    }
+
     @Test func aBasenameSharedByTwoKeysIsNotMerged() throws {
         let existing = [
             MemoryRecord(key: try key("state/ferry_running"), value: "true"),

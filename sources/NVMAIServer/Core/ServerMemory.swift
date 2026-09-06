@@ -155,30 +155,35 @@ enum ServerMemory {
 
     /// Routes a new fact to the key memory already uses for it.
     ///
-    /// The extraction is told to reuse keys and still invents parallel names
-    /// under sampling: `state/inn_status` beside `continuity/inn_status`,
-    /// `characters/tomas/status` beside `continuity/tomas_status`. Two keys
-    /// for one fact put a contradiction in the bootstrap, and the model then
-    /// answers whichever it read last. When a new key's final segment names
-    /// exactly one existing key and is specific enough to be a fact rather
-    /// than an attribute, the write goes to that key. `eyes` names six
-    /// characters and is never merged; `inn_status` names one thing.
+    /// The extraction is told to reuse keys and still invents parallel
+    /// namespaces under sampling: `continuity/inn_status` beside
+    /// `state/inn_status`. Two keys for one fact put a contradiction in the
+    /// bootstrap, and the model then answers whichever it read last.
+    ///
+    /// The rule is narrow on purpose: a new key is routed only when
+    /// everything after its first segment matches exactly one existing key
+    /// whose first segment differs. That is the shape of a renamed
+    /// namespace, and nothing else. A first version matched on the final
+    /// segment alone and routed `characters/ines/knows_photo_content` onto
+    /// `characters/marcus/knows_photo_content`, which gave Marcus a fact he
+    /// was not allowed to have until chapter 60.
     static func reconcile(_ records: [MemoryRecord],
                           existing: [MemoryRecord]) -> (records: [MemoryRecord],
                                                        merged: [(from: String, to: String)]) {
-        var byBasename: [String: [MemoryKey]] = [:]
+        var byPath: [String: [MemoryKey]] = [:]
         for record in existing {
-            byBasename[basename(of: record.key.rawValue), default: []].append(record.key)
+            if let path = pathAfterNamespace(record.key.rawValue) {
+                byPath[path, default: []].append(record.key)
+            }
         }
         let existingKeys = Set(existing.map(\.key.rawValue))
         var out: [MemoryRecord] = []
         var merged: [(from: String, to: String)] = []
         for record in records {
             let key = record.key.rawValue
-            guard !existingKeys.contains(key) else { out.append(record); continue }
-            let base = basename(of: key)
-            guard base.count >= 4, !genericBasenames.contains(base),
-                  let targets = byBasename[base], targets.count == 1,
+            guard !existingKeys.contains(key),
+                  let path = pathAfterNamespace(key), path.count >= 4,
+                  let targets = byPath[path], targets.count == 1,
                   let target = targets.first, target.rawValue != key
             else { out.append(record); continue }
             var routed = record
@@ -189,15 +194,14 @@ enum ServerMemory {
         return (out, merged)
     }
 
-    private static func basename(of key: String) -> String {
-        key.split(separator: "/").last.map(String.init) ?? key
+    /// `state/inn_status` gives `inn_status`; `characters/ines/eyes` gives
+    /// `ines/eyes`; a single-segment key gives nil, because it has no
+    /// namespace to have been renamed.
+    private static func pathAfterNamespace(_ key: String) -> String? {
+        let segments = key.split(separator: "/", omittingEmptySubsequences: false)
+        guard segments.count >= 2 else { return nil }
+        return segments.dropFirst().joined(separator: "/")
     }
-
-    /// Final segments that name an attribute many things have, never a fact.
-    private static let genericBasenames: Set<String> = [
-        "eyes", "role", "secret", "status", "name", "title", "state", "value",
-        "note", "notes", "current", "description", "summary", "count", "type",
-    ]
 
     /// Values that are the absence of a fact. Writing one over a real value
     /// is worse than writing nothing, and a model shown a key it has no
