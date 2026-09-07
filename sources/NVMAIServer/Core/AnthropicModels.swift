@@ -196,8 +196,8 @@ public enum AnthropicMapper {
     static func chatMessages(for message: AnthropicMessagesRequest.Message,
                              index: Int) throws -> [OpenAIChatMessage] {
         let param = "messages.\(index)"
-        guard message.role == "user" || message.role == "assistant" else {
-            throw invalid("role must be user or assistant", "\(param).role")
+        guard ["user", "assistant", "system"].contains(message.role) else {
+            throw invalid("role must be user, assistant or system", "\(param).role")
         }
         switch message.content {
         case .string(let text):
@@ -322,7 +322,10 @@ public enum AnthropicMapper {
 
     /// Extended thinking is a load-time property of the served model, as it
     /// is for reasoning_effort on the OpenAI path: a request may confirm the
-    /// active mode, never switch it.
+    /// active mode, never switch it. `adaptive` leaves the choice to the
+    /// model and is accepted whatever the server runs — Claude Code sends it
+    /// on every request — while `enabled` asks for thinking and is refused
+    /// when the server cannot render it.
     static func validateThinking(_ thinking: JSONValue?, maxTokens: Int,
                                  profile: ServerReasoningProfile) throws {
         guard let thinking else { return }
@@ -330,14 +333,14 @@ public enum AnthropicMapper {
             throw invalid("thinking must be an object with a type", "thinking")
         }
         switch type {
-        case "disabled":
+        case "disabled", "adaptive":
             return
-        case "enabled", "adaptive":
+        case "enabled":
             guard profile.thinkingMode == .on else {
                 throw unsupported("thinking is a load-time control; this server was started with thinking off. Restart with --thinking on",
                                   "thinking.type")
             }
-            if type == "enabled" {
+            do {
                 guard case .integer(let budget)? = dict["budget_tokens"] else {
                     throw invalid("thinking.budget_tokens is required when thinking is enabled", "thinking.budget_tokens")
                 }
@@ -356,13 +359,18 @@ public enum AnthropicMapper {
     /// Build the chat-completions request for a Messages request, so the one
     /// validator and the one generation path serve both APIs.
     public static func chatRequest(_ request: AnthropicMessagesRequest,
-                                   profile: ServerReasoningProfile) throws -> OpenAIChatRequest {
-        guard let maxTokens = request.maxTokens else {
+                                   profile: ServerReasoningProfile,
+                                   maxContext: Int = Int.max) throws -> OpenAIChatRequest {
+        guard let requestedMaxTokens = request.maxTokens else {
             throw invalid("field required", "max_tokens")
         }
-        guard maxTokens > 0 else {
+        guard requestedMaxTokens > 0 else {
             throw invalid("max_tokens must be greater than 0", "max_tokens")
         }
+        // Clients set max_tokens to the model's ceiling (Claude Code sends
+        // 32,000); a server with a smaller context window serves what it has
+        // rather than refusing every request.
+        let maxTokens = min(requestedMaxTokens, maxContext)
         if let temperature = request.temperature, !(0...1).contains(temperature) {
             throw invalid("temperature must be between 0 and 1", "temperature")
         }
@@ -381,23 +389,32 @@ public enum AnthropicMapper {
         if request.mcpServers != nil {
             throw unsupported("MCP servers are not supported", "mcp_servers")
         }
-        if request.contextManagement != nil {
-            throw unsupported("context management is not supported", "context_management")
-        }
+        // context_management asks the API to clear old thinking or tool
+        // results from the context. This server returns no thinking and
+        // keeps every turn the client sends, so the edits have nothing to
+        // do; accepting them keeps Claude Code, which sends them always.
         try validateThinking(request.thinking, maxTokens: maxTokens, profile: profile)
         guard !request.messages.isEmpty else {
             throw invalid("at least one message is required", "messages")
         }
-        if request.messages.last?.role == "assistant" {
+        if request.messages.last(where: { $0.role != "system" })?.role == "assistant" {
             throw unsupported("a trailing assistant message (prefill) is not supported", "messages")
         }
 
         var messages: [OpenAIChatMessage] = []
+        var systemParts: [String] = []
         if let system = try systemText(request.system), !system.isEmpty {
-            messages.append(OpenAIChatMessage(role: "system", content: .text(system),
-                                              toolCalls: nil, toolCallID: nil, name: nil))
+            systemParts.append(system)
         }
         for (index, message) in request.messages.enumerated() {
+            // A system message inside the conversation (Claude Code's
+            // mid-conversation guidance) joins the leading system block: the
+            // chat template renders exactly one, ahead of the turns.
+            if message.role == "system" {
+                let text = try systemText(message.content) ?? ""
+                if !text.isEmpty { systemParts.append(text) }
+                continue
+            }
             for chat in try chatMessages(for: message, index: index) {
                 // Consecutive user text turns combine into one, as the API
                 // itself documents; the template renders one turn per role.
@@ -410,6 +427,14 @@ public enum AnthropicMapper {
                     messages.append(chat)
                 }
             }
+        }
+        if !systemParts.isEmpty {
+            messages.insert(OpenAIChatMessage(
+                role: "system", content: .text(systemParts.joined(separator: "\n\n")),
+                toolCalls: nil, toolCallID: nil, name: nil), at: 0)
+        }
+        guard messages.contains(where: { $0.role != "system" }) else {
+            throw invalid("at least one user message is required", "messages")
         }
         let stop: OpenAIStop? = (request.stopSequences?.isEmpty ?? true) ? nil : .many(request.stopSequences ?? [])
         return OpenAIChatRequest(

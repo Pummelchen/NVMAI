@@ -41,27 +41,40 @@ misconfigured client believe it was talking to a model it was not.
   protocol's error envelope naming the offending part
   (`unsupported_content` / `invalid_request_error`), never silently dropped.
 - **Function tools.** Tools are the client's to run; the server returns the
-  call. Hosted and built-in tool types (`web_search`, `file_search`,
-  `code_interpreter`, `mcp`, `computer_use`, Anthropic's `bash_*`,
-  `text_editor_*`, `web_search_*`) are refused by type. The server runs
-  exactly one kind of tool itself: its own `memory_*` functions, when memory
-  tools are on (see `agent-memory.md`).
+  call. The server runs exactly one kind of tool itself: its own `memory_*`
+  functions, when memory tools are on (see `agent-memory.md`). Hosted tool
+  types on the Responses API (`web_search`, `file_search`,
+  `code_interpreter`, `mcp`, `image_generation`, computer use, shell) have
+  nothing here to run them and are left out of the prompt — the model never
+  sees them, never calls them, and the request goes through, because Codex
+  sends `web_search` on every turn. Anthropic's built-in tool types
+  (`bash_*`, `text_editor_*`, `web_search_*`, ...) are refused by type;
+  Claude Code sends only custom tools. A Responses `namespace` tool is
+  flattened into its function tools, and a call to one carries `namespace`
+  back, as the API's does.
 - **Tool choice.** `auto` and `none` are honoured. Forcing a call —
   `required`, a named function, Anthropic's `any` / `tool` — is refused,
-  because the decoder cannot guarantee one. `parallel_tool_calls=false` and
-  `disable_parallel_tool_use` are refused for the same reason.
+  because the decoder cannot guarantee one. `parallel_tool_calls: false`
+  (Codex sends it always) is echoed and not enforced; Anthropic's
+  `disable_parallel_tool_use` is refused.
 - **Reasoning is a load-time setting.** `--thinking on` and
   `--reasoning-effort` decide what the template renders. A request may
   confirm the active level (`reasoning.effort`, `reasoning_effort`,
-  `thinking.type`) and is refused if it asks for another, with the restart
-  flag named in the message. The model's thoughts are never returned.
+  `thinking: {type: enabled}`) and is refused if it asks for another, with
+  the restart flag named in the message. `thinking: {type: adaptive}` leaves
+  the choice to the model and is accepted whatever the server runs (Claude
+  Code sends it on every request), as is `output_config.effort`. The model's
+  thoughts are never returned, so Anthropic's `context_management` edits
+  (clearing old thinking) are accepted and have nothing to do.
 - **Structured output** (`response_format`, `text.format: json_schema`,
   `output_config.format`) is refused; the decoder has no grammar constraint.
 - **Logprobs**, `n > 1`, `background: true`, prompt templates, hosted
   conversations, containers and MCP servers are refused by name.
 - **Output cap.** Omitting `max_tokens` / `max_output_tokens` lets the model
   run to the context window. The Messages API requires `max_tokens`, as the
-  real one does.
+  real one does, and clamps it to the server's context window: Claude Code
+  sends 32,000 on every request, and a server started with a smaller window
+  serves what it has rather than refusing every turn.
 - **Usage** is exact: prompt and generated tokens, with the prompt-cache hit
   reported as `cached_tokens` (OpenAI) or `cache_read_input_tokens`
   (Anthropic, where `input_tokens` excludes it).
@@ -124,8 +137,10 @@ the end.
 `messages` with `user` and `assistant` roles, content a string or blocks of
 type `text`, `tool_use` (assistant), `tool_result` (user; `is_error` prefixes
 the result with `Error:`), `thinking` and `redacted_thinking` (accepted and
-skipped). `system` is a string or text blocks. Consecutive user turns combine
-into one, as the API documents. A trailing assistant message (prefill) is
+skipped). `system` is a string or text blocks; a `system` message inside
+`messages` (Claude Code's mid-conversation guidance) joins the leading system
+block, because the chat template renders exactly one. Consecutive user turns
+combine into one, as the API documents. A trailing assistant message (prefill) is
 refused. `tools` are `{name, description, input_schema}`; `cache_control`,
 `strict`, `input_examples` and the other tool decorations are accepted and
 ignored. `stop_sequences`, `temperature` (0–1), `top_p`, `top_k`, `metadata`
@@ -159,8 +174,16 @@ without a tokenizer (a test double) answers 501.
 
 ```bash
 swift test --filter "ResponsesAPI|AnthropicMapper|AnthropicMessages|HTTPServerTests|OpenAIValidation"
+swift test --filter ClientCLITests     # the installed codex and claude binaries, end to end
 ```
 
 The HTTP suites drive real sockets against scripted backends and check the
 event grammars event by event; the mapper suites cover the request grammars
-and the refusals. None of them needs a model.
+and the refusals. `ClientCLITests` runs the real Codex CLI and Claude Code
+against the server with the model replaced by a scripted backend, which is
+what caught the fields the unit tests never wrote (Codex's `namespace` and
+`web_search` tools, Claude Code's `context_management` and `adaptive`
+thinking); it skips when a CLI is not installed. None of them needs a model.
+For hand runs, `NVMAI_STUB_SERVER_SECONDS=600 swift test --filter
+StubServerForManualRuns` keeps such a server up and writes its port to
+`/tmp/nvmai-stub-port`.

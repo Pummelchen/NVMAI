@@ -319,7 +319,6 @@ struct ResponsesAPIHTTPTests {
             for body in [
                 #"{"model":"test-model","input":"x","background":true}"#,
                 #"{"model":"test-model","input":"x","text":{"format":{"type":"json_schema","name":"s","schema":{}}}}"#,
-                #"{"model":"test-model","input":"x","tools":[{"type":"web_search_preview"}]}"#,
                 #"{"model":"test-model","input":[{"role":"user","content":[{"type":"input_image","image_url":"http://x"}]}]}"#,
             ] {
                 let (data, response) = try await post(port, "/v1/responses", body)

@@ -750,6 +750,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             case .toolCall(let call):
                                 self.enqueueResponsesToolCall(
                                     id: responseID, call: call, itemState: itemState,
+                                    namespace: echo.namespaces[call.name],
                                     outbox: outbox, context: contextBox.value)
                             }
                         }
@@ -771,7 +772,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     }
                     if stores {
                         self.storeResponse(id: responseID, object: final,
-                                           input: storedInput, completion: completion)
+                                           input: storedInput, completion: completion,
+                                           namespaces: echo.namespaces)
                     }
                 } catch {
                     streamState.stop()
@@ -827,11 +829,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 let call = completion.toolCalls[ordinal]
                 slots[index] = ResponsesAPIBuilder.functionCallItem(
                     id: ids.calls[ordinal], name: call.name, arguments: call.argumentsJSON,
-                    callID: call.id, status: "completed")
+                    callID: call.id, status: "completed", namespace: echo.namespaces[call.name])
             }
             output = slots.keys.sorted().compactMap { slots[$0] }
         } else {
-            output = ResponsesAPIBuilder.outputItems(completion: completion, responseID: id)
+            output = ResponsesAPIBuilder.outputItems(completion: completion, responseID: id,
+                                                     namespaces: echo.namespaces)
         }
         if output.isEmpty {
             output = [ResponsesAPIBuilder.messageItem(
@@ -848,11 +851,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func storeResponse(id: String,
                                object: [String: Any],
                                input: [ResponsesAPIRequest.Item],
-                               completion: ServerCompletion) {
+                               completion: ServerCompletion,
+                               namespaces: [String: String]) {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
         responseStore.put(id: id, entry: ResponseStore.Entry(
             responseJSON: data, inputItems: input,
-            outputItems: ResponsesAPIMapper.outputAsInput(completion: completion, responseID: id),
+            outputItems: ResponsesAPIMapper.outputAsInput(
+                completion: completion, responseID: id, namespaces: namespaces),
             created: Date()))
     }
 
@@ -925,14 +930,16 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func enqueueResponsesToolCall(id: String,
                                           call: ParsedToolCall,
                                           itemState: ResponsesStreamState,
+                                          namespace: String?,
                                           outbox: SSEOutbox,
                                           context: ChannelHandlerContext) {
         let (index, ordinal) = itemState.allocateCall()
         let itemID = ResponsesAPIBuilder.functionCallItemID(responseID: id, index: ordinal)
         responsesEvent("response.output_item.added",
                        ["output_index": index,
-                        "item": ["id": itemID, "type": "function_call", "status": "in_progress",
-                                 "name": call.name, "arguments": "", "call_id": call.id]],
+                        "item": ResponsesAPIBuilder.functionCallItem(
+                            id: itemID, name: call.name, arguments: "", callID: call.id,
+                            status: "in_progress", namespace: namespace)],
                        itemState: itemState, outbox: outbox, context: context)
         for fragment in utf8Fragments(call.argumentsJSON, maximumBytes: 1024) {
             responsesEvent("response.function_call_arguments.delta",
@@ -947,7 +954,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                        ["output_index": index,
                         "item": ResponsesAPIBuilder.functionCallItem(
                             id: itemID, name: call.name, arguments: call.argumentsJSON,
-                            callID: call.id, status: "completed")],
+                            callID: call.id, status: "completed", namespace: namespace)],
                        itemState: itemState, outbox: outbox, context: context)
     }
 
@@ -1051,7 +1058,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             let decoded = try JSONDecoder().decode(
                 AnthropicMessagesRequest.self, from: Data(body.readableBytesView))
-            let chatRequest = try AnthropicMapper.chatRequest(decoded, profile: reasoningProfile)
+            let chatRequest = try AnthropicMapper.chatRequest(
+                decoded, profile: reasoningProfile, maxContext: backend.maximumContext)
             let request = try OpenAIRequestValidator.validate(
                 chatRequest, modelID: modelID, maxContext: backend.maximumContext,
                 reasoningProfile: reasoningProfile,

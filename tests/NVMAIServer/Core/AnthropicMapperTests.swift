@@ -106,6 +106,22 @@ import Testing
         #expect(chat.messages[1].content == .text("answer"))
     }
 
+    @Test func midConversationSystemMessagesJoinTheSystemBlock() throws {
+        let chat = try map("""
+        {"model":"m","max_tokens":8,"system":"lead",
+         "messages":[{"role":"user","content":"one"},{"role":"system","content":"later"},
+                     {"role":"assistant","content":"two"},{"role":"user","content":"three"}]}
+        """)
+        #expect(chat.messages.map(\.role) == ["system", "user", "assistant", "user"])
+        #expect(chat.messages[0].content == .text("lead\n\nlater"))
+    }
+
+    @Test func maxTokensIsClampedToTheContextWindow() throws {
+        let request = try decode(#"{"model":"m","max_tokens":32000,"messages":[{"role":"user","content":"hi"}]}"#)
+        let chat = try AnthropicMapper.chatRequest(request, profile: .default, maxContext: 8192)
+        #expect(chat.maxTokens == 8192)
+    }
+
     @Test func consecutiveUserTurnsCombine() throws {
         let chat = try map("""
         {"model":"m","max_tokens":8,
@@ -165,6 +181,13 @@ import Testing
          "messages":[{"role":"user","content":"hi"}]}
         """
         #expect(throws: ServerRequestError.self) { try map(body) }
+        // Adaptive leaves it to the model; Claude Code sends it always.
+        _ = try map("""
+        {"model":"m","max_tokens":4096,"thinking":{"type":"adaptive","display":"omitted"},
+         "context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},
+         "output_config":{"effort":"high"},
+         "messages":[{"role":"user","content":"hi"}]}
+        """)
         let on = ServerReasoningProfile(family: .qwen36, thinkingMode: .on, reasoningEffort: nil)
         _ = try map(body, profile: on)
         #expect(throws: ServerRequestError.self) {

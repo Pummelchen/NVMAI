@@ -26,9 +26,12 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
         /// Reasoning items round-tripped by a client; carried, never read.
         public let summary: JSONValue?
         public let encryptedContent: String?
+        /// The namespace a function call belongs to, when its tool was
+        /// declared inside a `namespace` tool.
+        public let namespace: String?
 
         enum CodingKeys: String, CodingKey {
-            case type, id, status, role, content, name, arguments, output, summary
+            case type, id, status, role, content, name, arguments, output, summary, namespace
             case callID = "call_id"
             case encryptedContent = "encrypted_content"
         }
@@ -37,7 +40,8 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
                     role: String? = nil, content: JSONValue? = nil,
                     callID: String? = nil, name: String? = nil,
                     arguments: String? = nil, output: JSONValue? = nil,
-                    summary: JSONValue? = nil, encryptedContent: String? = nil) {
+                    summary: JSONValue? = nil, encryptedContent: String? = nil,
+                    namespace: String? = nil) {
             self.type = type
             self.id = id
             self.status = status
@@ -49,6 +53,7 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
             self.output = output
             self.summary = summary
             self.encryptedContent = encryptedContent
+            self.namespace = namespace
         }
 
         /// Resolved item kind: the explicit `type`, or inferred from the
@@ -68,14 +73,18 @@ public struct ResponsesAPIRequest: Decodable, Sendable {
         public let description: String?
         public let parameters: JSONValue?
         public let strict: Bool?
+        /// A `namespace` tool groups function tools under a name; the model
+        /// calls the functions, and the call carries the namespace back.
+        public let tools: [Tool]?
 
         public init(type: String, name: String?, description: String?,
-                    parameters: JSONValue?, strict: Bool?) {
+                    parameters: JSONValue?, strict: Bool?, tools: [Tool]? = nil) {
             self.type = type
             self.name = name
             self.description = description
             self.parameters = parameters
             self.strict = strict
+            self.tools = tools
         }
     }
 
@@ -267,11 +276,37 @@ public enum ResponsesAPIMapper {
                     param: "include", code: "unsupported_value")
             }
         }
-        for (index, tool) in (request.tools ?? []).enumerated() where tool.type != "function" {
-            throw ServerRequestError.invalid(
-                message: "tool type \(tool.type) is not supported; only function tools are available",
-                param: "tools.\(index).type", code: "unsupported_tool")
+    }
+
+    /// The function tools of a request, with namespaced functions flattened
+    /// into the list and remembered by namespace. Hosted tool types
+    /// (web_search, file_search, code_interpreter, mcp, image_generation,
+    /// computer use, shell, apply_patch) have nothing on this server to run
+    /// them and are left out; the model never sees them and never calls
+    /// them. Codex sends web_search on every turn, so refusing would refuse
+    /// Codex.
+    public static func functionTools(_ tools: [ResponsesAPIRequest.Tool]?)
+        -> (tools: [OpenAITool], namespaces: [String: String]) {
+        var out: [OpenAITool] = []
+        var namespaces: [String: String] = [:]
+        func add(_ tool: ResponsesAPIRequest.Tool, namespace: String?) {
+            guard tool.type == "function", let name = tool.name, !name.isEmpty else { return }
+            let parameters: JSONValue = tool.parameters
+                ?? .object(["type": .string("object"), "properties": .object([:])])
+            out.append(OpenAITool(
+                type: "function",
+                function: OpenAIFunctionDefinition(name: name, description: tool.description,
+                                                   parameters: parameters)))
+            if let namespace { namespaces[name] = namespace }
         }
+        for tool in tools ?? [] {
+            if tool.type == "namespace" {
+                for nested in tool.tools ?? [] { add(nested, namespace: tool.name) }
+            } else {
+                add(tool, namespace: nil)
+            }
+        }
+        return (out, namespaces)
     }
 
     /// Build the chat-completions request equivalent to a responses request.
@@ -342,15 +377,7 @@ public enum ResponsesAPIMapper {
                 role: "system", content: .text(systemParts.joined(separator: "\n\n")),
                 toolCalls: nil, toolCallID: nil, name: nil), at: 0)
         }
-        let tools: [OpenAITool]? = (request.tools ?? []).compactMap { tool in
-            guard tool.type == "function", let name = tool.name, !name.isEmpty else { return nil }
-            let parameters: JSONValue = tool.parameters ?? .object(["type": .string("object"), "properties": .object([:])])
-            return OpenAITool(
-                type: "function",
-                function: OpenAIFunctionDefinition(name: name,
-                                                   description: tool.description,
-                                                   parameters: parameters))
-        }
+        let tools = functionTools(request.tools).tools
         return OpenAIChatRequest(
             model: request.model,
             messages: chatMessages,
@@ -365,11 +392,14 @@ public enum ResponsesAPIMapper {
             maxCompletionTokens: nil,
             stop: nil,
             seed: nil,
-            tools: (tools?.isEmpty ?? true) ? nil : tools,
+            tools: tools.isEmpty ? nil : tools,
             // The chat validator knows every tool_choice form the server
             // honours ("auto", "none") and refuses the rest by name.
             toolChoice: request.toolChoice,
-            parallelToolCalls: request.parallelToolCalls,
+            // Codex sends parallel_tool_calls=false on every turn. The
+            // decoder cannot promise a single call per turn, and refusing
+            // would refuse Codex; the value is echoed and not enforced.
+            parallelToolCalls: nil,
             topK: request.topK ?? GenerationDefaults.topK,
             repetitionPenalty: nil,
             n: 1,
@@ -383,7 +413,8 @@ public enum ResponsesAPIMapper {
     /// A finished response's output, in the shape a later request carries it
     /// back as input. This is what `previous_response_id` chains on.
     public static func outputAsInput(completion: ServerCompletion,
-                                     responseID: String) -> [ResponsesAPIRequest.Item] {
+                                     responseID: String,
+                                     namespaces: [String: String] = [:]) -> [ResponsesAPIRequest.Item] {
         var items: [ResponsesAPIRequest.Item] = []
         let ids = ResponsesAPIBuilder.itemIDs(responseID: responseID, completion: completion)
         if !completion.content.isEmpty {
@@ -396,7 +427,8 @@ public enum ResponsesAPIMapper {
         for (index, call) in completion.toolCalls.enumerated() {
             items.append(ResponsesAPIRequest.Item(
                 type: "function_call", id: ids.calls[index], status: "completed",
-                callID: call.id, name: call.name, arguments: call.argumentsJSON))
+                callID: call.id, name: call.name, arguments: call.argumentsJSON,
+                namespace: namespaces[call.name]))
         }
         return items
     }
@@ -492,6 +524,7 @@ public struct ResponsesAPIEcho: Sendable {
     public let topP: Float?
     public let store: Bool
     public let tools: [ResponsesAPIRequest.Tool]
+    public let namespaces: [String: String]
     public let toolChoice: JSONValue
     public let textVerbosity: String
     public let reasoningEffort: String?
@@ -513,6 +546,7 @@ public struct ResponsesAPIEcho: Sendable {
         topP = request.topP
         store = request.stores
         tools = request.tools ?? []
+        namespaces = ResponsesAPIMapper.functionTools(request.tools).namespaces
         toolChoice = request.toolChoice ?? .string("auto")
         textVerbosity = request.text?.verbosity ?? "medium"
         reasoningEffort = request.reasoning?.effort ?? effectiveEffort?.rawValue
@@ -618,13 +652,17 @@ public enum ResponsesAPIBuilder {
     }
 
     static func toolObject(_ tool: ResponsesAPIRequest.Tool) -> [String: Any] {
-        [
-            "type": tool.type,
-            "name": tool.name ?? "",
-            "description": tool.description.map { $0 as Any } ?? NSNull(),
-            "parameters": tool.parameters?.foundationObject() ?? NSNull(),
-            "strict": tool.strict ?? false,
-        ]
+        var object: [String: Any] = ["type": tool.type]
+        if let name = tool.name { object["name"] = name }
+        if tool.type == "function" || tool.type == "custom" {
+            object["description"] = tool.description.map { $0 as Any } ?? NSNull()
+            object["parameters"] = tool.parameters?.foundationObject() ?? NSNull()
+            object["strict"] = tool.strict ?? false
+        }
+        if let nested = tool.tools {
+            object["tools"] = nested.map(toolObject)
+        }
+        return object
     }
 
     public static func outputTextPart(_ text: String) -> [String: Any] {
@@ -643,14 +681,18 @@ public enum ResponsesAPIBuilder {
                                         name: String,
                                         arguments: String,
                                         callID: String,
-                                        status: String) -> [String: Any] {
-        ["id": id, "type": "function_call", "status": status,
-         "name": name, "arguments": arguments, "call_id": callID]
+                                        status: String,
+                                        namespace: String? = nil) -> [String: Any] {
+        var item: [String: Any] = ["id": id, "type": "function_call", "status": status,
+                                   "name": name, "arguments": arguments, "call_id": callID]
+        if let namespace { item["namespace"] = namespace }
+        return item
     }
 
     /// Output items for a completed generation, message first, then calls.
     public static func outputItems(completion: ServerCompletion,
-                                   responseID: String) -> [[String: Any]] {
+                                   responseID: String,
+                                   namespaces: [String: String] = [:]) -> [[String: Any]] {
         let ids = itemIDs(responseID: responseID, completion: completion)
         var output: [[String: Any]] = []
         if !completion.content.isEmpty || completion.toolCalls.isEmpty {
@@ -660,7 +702,8 @@ public enum ResponsesAPIBuilder {
         for (index, call) in completion.toolCalls.enumerated() {
             output.append(functionCallItem(
                 id: ids.calls[index], name: call.name,
-                arguments: call.argumentsJSON, callID: call.id, status: "completed"))
+                arguments: call.argumentsJSON, callID: call.id, status: "completed",
+                namespace: namespaces[call.name]))
         }
         return output
     }
