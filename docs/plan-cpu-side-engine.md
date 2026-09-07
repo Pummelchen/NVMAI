@@ -32,15 +32,41 @@ Measured with `NVMAIBench cpu` while a 35B was generating:
 Two things fall out immediately. Four threads is the whole win: the four
 efficiency cores add 1 GB/s, which is why the kernel's default width is the
 performance-core count rather than `activeProcessorCount`. And the headline
-number is good — 23 tokens a second is a usable side model.
+number is good — 23 tokens a second is a usable side model. Idle, the same
+sweep reaches 52.6 GB/s at four threads, so the GPU's load costs the CPU
+about a sixth of its bandwidth even before the CPU takes any back.
 
-**What it does not yet say is what those 44 GB/s cost the 35B.** That is the
-measurement this plan is gated on, and it is cheap: the same generation, run
-once alone and once with the probe hammering, comparing tokens per second.
-If the cost is small, the side-engine runs whenever it likes. If it is
-large, it runs in the gaps — between requests, during the idle window
-consolidation already waits for — and the design changes accordingly. Either
-way that number is known before the engine is built, not after.
+## What it costs the model the person is waiting for
+
+Measured, not estimated. The same generation -- 292 tokens, fixed prompt,
+temperature 0 -- run against Qwen 3.6 35B at 8-bit, alone and again with the
+CPU kernel reading at a fixed width for the whole window.
+
+| CPU threads | CPU GB/s | implied 2B tok/s | 35B generation | cost to the 35B |
+| --- | --- | --- | --- | --- |
+| none | — | — | 25.9 s | — |
+| 1 | 13.9 | 7.3 | 26.8 s | 3% |
+| 2 | 24.8 | 13.1 | 29.2 s | 13% |
+| 3 | 31.1 | 16.4 | 33.7 s | 30% |
+| 4 | 42.4 | 22.3 | 34.0 s | 31% |
+
+**The side-engine is not free, and the knee is sharp.** One thread is
+effectively invisible: 3% is inside this machine's own run-to-run spread,
+and it still buys 7 tokens a second of 2B, which is enough to distil a
+session or check a reply. Two threads costs 13% for nearly double that.
+Three costs 30% and buys almost nothing over two -- past that point the two
+engines are simply taking turns at the same memory controller.
+
+The clean runs came in at 25.6, 25.6, 26.1 and 25.9 seconds, so the spread
+here is far tighter than the ±15% this project usually sees, and a 30%
+effect is nowhere near it.
+
+**So width is a scheduling decision, not a constant.** The engine already
+knows whether a client generation is in flight, which is the only input the
+policy needs: one thread while the person is waiting, four in the gaps --
+between requests, and during the idle window consolidation already waits
+for. That is the design this measurement produced, and it is the opposite of
+what "the CPU is idle, so it is free" would have produced.
 
 ## What exists
 
@@ -74,8 +100,8 @@ Everything else. In the order it has to be built:
    fraction, which the checkpoint does not state and the converter now
    writes explicitly from the family default.
 4. **Tokenizer and sampler**, reusing what the engine already has.
-5. **Residency and scheduling** — when it may run, decided by the bandwidth
-   measurement above.
+5. **Residency and scheduling** — one thread while a client generation is in
+   flight, four in the gaps, per the measurement above.
 
 ## Order of work
 

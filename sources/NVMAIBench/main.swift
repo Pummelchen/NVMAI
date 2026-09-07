@@ -43,6 +43,15 @@ struct NVMAIBench {
 
         // Before the Metal context: this one measures the CPU and must not
         // touch the GPU, whose bandwidth is the thing being competed for.
+        if kernelName == "cpuload" {
+            // Sustained load at one width, for measuring what the side-engine
+            // costs the model the person is waiting for. `iterations` is
+            // seconds here; the third argument is the thread count.
+            let threads = CommandLine.arguments.count > 3
+                ? Int(CommandLine.arguments[3]) ?? 4 : 4
+            runCPULoad(seconds: Double(iterations), threads: threads)
+            return
+        }
         if kernelName.hasPrefix("cpu") {
             runCPUGEMV(iterations: iterations)
             return
@@ -761,6 +770,50 @@ struct NVMAIBench {
                          threads, perIteration * 1e3, bandwidth, tokens))
         }
         print("  (checksum \(out[0]))")
+    }
+
+
+    /// Hold the memory system at the side-engine's working width for a while.
+    ///
+    /// The companion to `runCPUGEMV`: that one asks what the CPU can read,
+    /// this one exists so the same question can be asked of the GPU while
+    /// the CPU is reading. A side-engine that halves the throughput of the
+    /// model the person is waiting for is not a side-engine.
+    static func runCPULoad(seconds: Double, threads: Int) {
+        let rows = 8192, n = 8192, group = 64
+        let weightBytes = rows * n, groups = rows * (n / group)
+        let weights = UnsafeMutablePointer<UInt8>.allocate(capacity: weightBytes)
+        let scales = UnsafeMutablePointer<UInt16>.allocate(capacity: groups)
+        let biases = UnsafeMutablePointer<UInt16>.allocate(capacity: groups)
+        let x = UnsafeMutablePointer<Float>.allocate(capacity: n)
+        let out = UnsafeMutablePointer<Float>.allocate(capacity: rows)
+        defer {
+            weights.deallocate(); scales.deallocate(); biases.deallocate()
+            x.deallocate(); out.deallocate()
+        }
+        var state: UInt64 = 0x2545_F491_4F6C_DD1D
+        for i in 0..<weightBytes {
+            state ^= state << 13; state ^= state >> 7; state ^= state << 17
+            weights[i] = UInt8(truncatingIfNeeded: state)
+        }
+        for i in 0..<groups { scales[i] = 0x3F80; biases[i] = 0 }
+        for i in 0..<n { x[i] = Float(i % 7) * 0.125 }
+
+        print("cpu load: \(threads) threads for \(seconds)s")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        var passes = 0
+        let started = ContinuousClock.now
+        while ContinuousClock.now < deadline {
+            Int8AffineGEMV.threaded(weights: weights, scales: scales, biases: biases,
+                                    x: x, rows: rows, n: n, out: out, threads: threads)
+            passes += 1
+        }
+        let elapsed = started.duration(to: .now)
+        let taken = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        let bandwidth = Double(passes) * Double(weightBytes + groups * 4) / taken / 1e9
+        print(String(format: "  %d passes in %.1fs, %.1f GB/s (checksum %.0f)",
+                     passes, taken, bandwidth, out[0]))
     }
 
 }
