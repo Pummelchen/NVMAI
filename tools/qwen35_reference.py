@@ -21,6 +21,7 @@ attention every fourth layer, without the hyper-connections, the PLE, the
 sparse-attention indexer or the mixture of experts.
 
     python3.13 tools/qwen35_reference.py                 # logits at position 0
+    python3.13 tools/qwen35_reference.py --check         # known continuations
     python3.13 tools/qwen35_reference.py --dump acts.npz --tokens 5
     python3.13 tools/qwen35_reference.py --snapshot .build/qwen35-2b-affine-4bit
 """
@@ -28,10 +29,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
+import struct
 from pathlib import Path
 
 import numpy as np
-from safetensors import safe_open
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT = ROOT / ".build/qwen35-2b-affine-8bit"
@@ -50,6 +52,46 @@ def softplus(x):
     return np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0.0)
 
 
+class Shard:
+    """A safetensors file, read directly.
+
+    The library's numpy path cannot decode BF16, and every scale and bias in
+    this snapshot is BF16 -- so the header is parsed and the payload
+    memory-mapped here instead. That is not a workaround so much as the right
+    shape for this job: a row of the tied embedding can be sliced out of the
+    map without materializing 508 M parameters to read one vector.
+    """
+
+    def __init__(self, path: Path):
+        self.file = open(path, "rb")
+        size = struct.unpack("<Q", self.file.read(8))[0]
+        self.header = json.loads(self.file.read(size))
+        self.base = 8 + size
+        self.map = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
+
+    def raw(self, name: str, rows: slice | None = None) -> np.ndarray:
+        meta = self.header[name]
+        start, end = meta["data_offsets"]
+        shape = meta["shape"]
+        dtype = {"BF16": np.uint16, "F32": np.float32, "U32": np.uint32,
+                 "F16": np.float16, "I32": np.int32}[meta["dtype"]]
+        block = np.frombuffer(self.map, dtype=dtype,
+                              count=(end - start) // np.dtype(dtype).itemsize,
+                              offset=self.base + start).reshape(shape)
+        if rows is not None:
+            block = block[rows]
+        return block
+
+    def get(self, name: str, rows: slice | None = None) -> np.ndarray:
+        """Values as float32, BF16 widened by bit pattern rather than by a
+        library that may not know the type."""
+        meta = self.header[name]
+        block = self.raw(name, rows)
+        if meta["dtype"] == "BF16":
+            return (block.astype(np.uint32) << 16).view(np.float32)
+        return block
+
+
 class Weights:
     """The affine snapshot, dequantized on demand and kept.
 
@@ -65,10 +107,11 @@ class Weights:
         self.quantization = self.config["quantization"]
         index = json.loads((self.dir / "model.safetensors.index.json").read_text())
         self.map = index["weight_map"]
-        self.files = {name: safe_open(str(self.dir / file), framework="np")
-                      for name, file in
-                      {f: f for f in set(self.map.values())}.items()}
+        self.shards = {file: Shard(self.dir / file) for file in set(self.map.values())}
         self.cache: dict[str, np.ndarray] = {}
+
+    def shard(self, name: str) -> Shard:
+        return self.shards[self.map[name]]
 
     def _bits(self, stem: str) -> int:
         entry = self.quantization.get(stem)
@@ -79,34 +122,30 @@ class Weights:
     def get(self, name: str) -> np.ndarray:
         if name in self.cache:
             return self.cache[name]
-        handle = self.files[self.map[name]]
-        raw = handle.get_tensor(name)
         stem = name.removesuffix(".weight")
+        shard = self.shard(name)
         if stem + ".scales" in self.map:
-            scales = self.files[self.map[stem + ".scales"]].get_tensor(stem + ".scales")
-            biases = self.files[self.map[stem + ".biases"]].get_tensor(stem + ".biases")
-            value = dequantize(raw, scales, biases, self._bits(stem),
-                               self.quantization["group_size"])
+            value = dequantize(shard.raw(name),
+                               self.shard(stem + ".scales").get(stem + ".scales"),
+                               self.shard(stem + ".biases").get(stem + ".biases"),
+                               self._bits(stem), self.quantization["group_size"])
         else:
-            value = raw.astype(np.float32)
+            value = shard.get(name).astype(np.float32)
         self.cache[name] = value
         return value
 
-    def row(self, name: str, index: int) -> np.ndarray:
-        """One row of a quantized matrix, without materializing the rest.
-
-        The tied embedding is 508 M parameters; dequantizing all of it to
-        read one token would cost two gigabytes for one vector.
-        """
+    def rows(self, name: str, start: int, stop: int) -> np.ndarray:
+        """A row range of a quantized matrix, without materializing the rest."""
         stem = name.removesuffix(".weight")
-        handle = self.files[self.map[name]]
-        raw = handle.get_tensor(name)[index : index + 1]
-        scales = self.files[self.map[stem + ".scales"]].get_tensor(
-            stem + ".scales")[index : index + 1]
-        biases = self.files[self.map[stem + ".biases"]].get_tensor(
-            stem + ".biases")[index : index + 1]
-        return dequantize(raw, scales, biases, self._bits(stem),
-                          self.quantization["group_size"])[0]
+        window = slice(start, stop)
+        return dequantize(
+            self.shard(name).raw(name, window),
+            self.shard(stem + ".scales").get(stem + ".scales", window),
+            self.shard(stem + ".biases").get(stem + ".biases", window),
+            self._bits(stem), self.quantization["group_size"])
+
+    def row(self, name: str, index: int) -> np.ndarray:
+        return self.rows(name, index, index + 1)[0]
 
 
 def dequantize(packed, scales, biases, bits: int, group: int) -> np.ndarray:
@@ -220,7 +259,18 @@ class Reference:
         # other norm in this checkpoint, so the converter must not fold +1
         # into it and this must not add one either.
         yn = self.rms_norm(y, g(prefix + "norm.weight"))
-        out = yn * sigmoid(z.reshape(self.hv, self.dv))
+        # SiLU, not sigmoid. This one line was the whole difference between a
+        # model that answers and one that does not, and it is the family
+        # hazard this project already knows about: the gate is `silu` in the
+        # Qwen3-Next/3.6 lineage and `sigmoid` in Qwen3.8-Flash-Next, whose
+        # reference this file was ported from. NVMAI's own kernel carries the
+        # same choice as a function constant (`FC_GDN_SIGMOID_GATE`), so the
+        # engine has to select it per family too.
+        #
+        # With sigmoid, "Once upon a" predicted a bare space and "The capital
+        # of France is" predicted a colon; with silu, " time" and " Paris",
+        # both top-1. Nothing else about the forward pass changed.
+        out = yn * silu(z.reshape(self.hv, self.dv))
         return g(prefix + "out_proj.weight") @ out.reshape(-1)
 
     def attention(self, layer: int, x):
@@ -289,22 +339,51 @@ class Reference:
         return logits
 
     def logits(self, h, block: int = 8192):
+        """The tied head, in row blocks.
+
+        The embedding *is* the output projection here, and dequantizing all
+        508 M parameters at once would cost two gigabytes for one vector.
+        """
         name = f"{P}embed_tokens.weight"
-        stem = name.removesuffix(".weight")
-        handle = self.w.files[self.w.map[name]]
-        packed = handle.get_tensor(name)
-        scales = self.w.files[self.w.map[stem + ".scales"]].get_tensor(stem + ".scales")
-        biases = self.w.files[self.w.map[stem + ".biases"]].get_tensor(stem + ".biases")
-        bits = self.w._bits(stem)
-        group = self.w.quantization["group_size"]
-        rows = packed.shape[0]
+        rows = self.w.shard(name).header[name]["shape"][0]
         out = np.empty(rows, np.float32)
         for start in range(0, rows, block):
             stop = min(start + block, rows)
-            weights = dequantize(packed[start:stop], scales[start:stop],
-                                 biases[start:stop], bits, group)
-            out[start:stop] = weights @ h
+            out[start:stop] = self.w.rows(name, start, stop) @ h
         return out
+
+
+# Continuations a 2B model has no excuse for getting wrong, with the token
+# ids taken straight from the snapshot's own vocabulary so no tokenizer
+# library is needed. This is the check that says the *converter* worked: it
+# exercises every fold, the fused gate, the tie and the quantization at once,
+# and it is how the SiLU-versus-sigmoid gate bug was found.
+CHECKS = [
+    (["Once", "\u0120upon", "\u0120a"], "\u0120time"),
+    (["The", "\u0120capital", "\u0120of", "\u0120France", "\u0120is"], "\u0120Paris"),
+    (["The", "\u0120quick", "\u0120brown", "\u0120fox", "\u0120jumps",
+      "\u0120over", "\u0120the", "\u0120lazy"], "\u0120dog"),
+]
+
+
+def check(snapshot: Path) -> int:
+    vocab = json.loads((snapshot / "vocab.json").read_text())
+    inverse = {i: t for t, i in vocab.items()}
+    failures = 0
+    for words, expected in CHECKS:
+        reference = Reference(snapshot)
+        logits = None
+        for word in words:
+            logits = reference.step(vocab[word])
+        top = int(np.argmax(logits))
+        prompt = "".join(w.replace("\u0120", " ") for w in words)
+        mark = "ok " if top == vocab[expected] else "FAIL"
+        failures += top != vocab[expected]
+        print(f"  {mark} {prompt:44s} -> {inverse[top]!r} ({logits[top]:.2f}), "
+              f"wanted {expected!r}")
+    print("all continuations correct" if not failures
+          else f"{failures} of {len(CHECKS)} wrong")
+    return 0 if not failures else 2
 
 
 def main() -> int:
@@ -314,7 +393,12 @@ def main() -> int:
     ap.add_argument("--tokens", type=int, default=1, help="steps to run")
     ap.add_argument("--dump", default=None, help="write per-layer activations here")
     ap.add_argument("--top", type=int, default=8)
+    ap.add_argument("--check", action="store_true",
+                    help="run known continuations as a self-test")
     args = ap.parse_args()
+
+    if args.check:
+        return check(Path(args.snapshot))
 
     reference = Reference(Path(args.snapshot))
     print(f"{args.snapshot}: {reference.layers} layers, hidden {reference.hidden}, "

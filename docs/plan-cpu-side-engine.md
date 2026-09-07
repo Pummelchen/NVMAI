@@ -84,11 +84,12 @@ what "the CPU is idle, so it is free" would have produced.
 
 Everything else. In the order it has to be built:
 
-1. **Position-0 parity.** Load the snapshot, run one token, agree with the
-   reference on the logits. This is also the first thing that will have
-   actually executed the converter's output, which until now has been
-   checked only by inspection — and this project has already shipped one
-   converter whose zero-centred norms were unfolded.
+1. ~~**Position-0 parity.**~~ The reference now runs, and the converter's
+   output is correct: "Once upon a" → " time", "The capital of France is" →
+   " Paris", "The quick brown fox jumps over the lazy" → " dog", all top-1,
+   on both the 8-bit snapshot and the mixed-precision 4-bit one.
+   `qwen35_reference.py --check` is that test. What remains is agreeing with
+   it from Swift.
 2. **The blocks**, each checked against the reference's own dump before the
    next is started: RMSNorm, SiLU, the gated MLP, full attention with its
    fused output gate and partial rotary, and the Gated DeltaNet recurrence
@@ -110,3 +111,34 @@ an activation dump, not by reading code, and four of five bugs in the last
 port were Qwen 3.6 constants silently reused for a different model. Qwen3.5
 shares an architecture family with both models already ported here, which is
 exactly the condition under which that mistake is made.
+
+
+## What the reference found on its first run
+
+The converter was right and the reference was wrong, in one line.
+
+Predictions were structurally healthy and semantically nonsense — a bare
+space for "Once upon a", a colon for "The capital of France is" — with
+logits far too flat. A logit lens over the layers put the failure at layer
+4, right after the first attention layer, and an ablation settled it:
+*zeroing the Gated DeltaNet blocks entirely made the model better*, which
+only happens when those blocks are actively destroying the signal.
+
+The cause: the GDN output gate is **SiLU** in the Qwen3-Next / 3.6 lineage
+and **sigmoid** in Qwen3.8-Flash-Next, whose reference this file was ported
+from. NVMAI's own kernel already carries the distinction as a function
+constant, `FC_GDN_SIGMOID_GATE`, with a comment naming Qwen3.8 as the
+sigmoid one. So the engine must select it per family as well — this is the
+first constant to check when the Swift side disagrees.
+
+That is the family-specialization hazard this project has been bitten by
+before, in the other direction: four of five bugs in the last port were
+Qwen 3.6 constants silently reused. Every baked function constant in a new
+family is a suspect until a real continuation comes out right.
+
+Worth keeping: the diagnosis cost four cheap steps and no ground truth at
+all. Confirm the tensor set is complete against the source header; confirm
+the tied head with `E @ E[t]`, which peaks on the token itself and its case
+variants when the embedding and quantization are sound; logit-lens each
+layer to find where meaning stops; then ablate whole block types. The
+answer was the third-cheapest thing tried.
