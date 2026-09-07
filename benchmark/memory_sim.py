@@ -99,6 +99,7 @@ def load_runs() -> list[dict]:
             "name": f"{label} r{run}",
             "writes": load_writes(journal),
             "answers": {r["session"]: r.get("answers") or {} for r in results},
+            "text": {r["session"]: r.get("content", "") for r in results},
         })
     return runs
 
@@ -106,6 +107,9 @@ def load_runs() -> list[dict]:
 # --------------------------------------------------------------------------
 # What the user actually asserted
 # --------------------------------------------------------------------------
+
+EXTRA_ASSERTION = "Marcus learns what the photograph shows in chapter 60."
+
 
 def user_text(session: int) -> str:
     """The text the user put in front of the model up to and including this
@@ -115,6 +119,10 @@ def user_text(session: int) -> str:
     for number, (_, sentence) in sorted(book.EVENTS.items()):
         if number <= session:
             parts.append(sentence)
+    # session_prompt adds one assertion outside EVENTS; it is the user's word
+    # like any other and the guard has to see it.
+    if session >= 6:
+        parts.append(EXTRA_ASSERTION)
     return " ".join(parts).lower()
 
 
@@ -214,18 +222,19 @@ def candidates(store: dict[str, dict], key: str) -> list[dict]:
             return False
         return not refine or any(word in hay for word in refine)
 
-    addressed, mentioned = [], []
+    hits = []
     for fact in store.values():
         if matches(fact["address"]):
-            addressed.append(fact)
+            hits.append((fact, 1))          # the address names the topic
         elif matches(fact["address"] + " " + fact["value"]):
-            mentioned.append(fact)
+            hits.append((fact, 0))          # only the text mentions it
 
-    def order(fact: dict) -> tuple[int, int]:
-        return fact["session"], fact["order"]
-
-    return (sorted(addressed, key=order, reverse=True)
-            + sorted(mentioned, key=order, reverse=True))
+    # Newest first, and only within one session does an address match beat a
+    # passing mention. Ranking every address match above every newer fact is
+    # what let a session-2 note outrank what the user said in session 6.
+    hits.sort(key=lambda pair: (pair[0]["session"], pair[1], pair[0]["order"]),
+              reverse=True)
+    return [fact for fact, _ in hits]
 
 
 def interpret(key: str, fact: dict, session: int):
@@ -356,8 +365,13 @@ def user_facts(session: int) -> list[tuple[str, str]]:
                 ("bible/ferry_running", "the ferry is running"),
                 ("bible/anyone_left_ashgrove", "no character has left Ashgrove")] \
             if view else []
+    stated = []
     event = book.EVENTS.get(session)
-    return [(f"event/session{session}", event[1])] if event else []
+    if event:
+        stated.append((f"event/session{session}", event[1]))
+    if session == 6:
+        stated.append(("event/session6_marcus", EXTRA_ASSERTION))
+    return stated
 
 
 def apply_policy(writes: list[dict], policy: str) -> dict[int, dict[str, dict]]:
@@ -516,11 +530,81 @@ def detail(key: str) -> None:
         print()
 
 
+# --------------------------------------------------------------------------
+# The verbatim tail
+# --------------------------------------------------------------------------
+
+# Evidence that a state change has happened, as it would appear in the prose
+# the model itself wrote, rather than in a distilled fact.
+EVIDENCE: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # key: (words that show the change happened, words that show it has not)
+    "inn_status": (("inn burn", "burned", "burning inn", "ashes of the inn",
+                    "inn was gone", "fire at the inn"), ("inn stood", "inn still")),
+    "tomas_status": (("tomas was found", "found tomas", "tomas, alive",
+                      "tomas alive", "found alive"), ("still missing",)),
+    "marcus_knows_photo": (("marcus learned", "marcus knew", "marcus saw what",
+                            "marcus understood", "marcus finally"), ()),
+    "halvorsen_confessed": (("halvorsen confessed", "confession", "confessed to aldo"), ()),
+    "ferry_running": (("ferry stopped", "last crossing", "ferry ran for the last",
+                       "no more ferry", "ferry would not"), ()),
+}
+
+
+def tail() -> None:
+    """Would the previous session's own chapters have carried the answer?
+
+    The recap literature's advice is to prepend a few raw turns alongside the
+    distilled facts, on the grounds that a summary loses the concrete state
+    of the thing last being worked on. Here one turn is ten chapters, so the
+    tail is the previous session's whole output -- about 600-700 tokens.
+
+    This measures only whether the evidence is *present* in that text. Whether
+    the model would read it correctly is not something a replay can answer;
+    a keyword matcher is strictly worse at prose than the model, so treat the
+    coverage below as a floor.
+    """
+    runs = load_runs()
+    covered = missed = 0
+    per_key: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for run in runs:
+        stores = apply_policy(run["writes"], "v3")
+        for session in range(2, 11):
+            truth = book.truth(session)
+            answers = run["answers"].get(session) or {}
+            previous = run["text"].get(session - 1, "").lower()
+            for key in book.QUIZ_KEYS:
+                if book.normalise(key, answers.get(key)) == truth[key]:
+                    continue                      # the model already had it
+                if key not in EVIDENCE:
+                    continue
+                changed, _ = EVIDENCE[key]
+                present = any(phrase in previous for phrase in changed)
+                store_right = read(stores[session], key, session) == truth[key]
+                per_key[key][0] += 1
+                if present:
+                    covered += 1
+                    per_key[key][1] += 1
+                else:
+                    missed += 1
+                del store_right
+    total = covered + missed
+    print("of the model's misses on state keys, how many had the evidence in\n"
+          "the previous session's own chapters (the verbatim tail)?\n")
+    print(f"  {'key':24s} {'misses':>7s} {'evidence in tail':>18s}")
+    for key, (seen, hit) in sorted(per_key.items(), key=lambda kv: -kv[1][0]):
+        print(f"  {key:24s} {seen:7d} {hit:14d} = {100 * hit / seen if seen else 0:3.0f}%")
+    print(f"\n  overall {covered}/{total} = {100 * covered / total if total else 0:.0f}% "
+          f"of state misses had the answer in the preceding 600-700 tokens")
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "compare"
     if command == "validate":
         validate()
+    elif command == "tail":
+        tail()
     elif command == "detail":
         detail(sys.argv[2] if len(sys.argv) > 2 else "inn_status")
     else:
         compare()
+
+
