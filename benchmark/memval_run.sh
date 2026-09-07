@@ -2,9 +2,14 @@
 # Runs the memory-value benchmarks arm by arm against Qwen 3.6 35B 4-bit.
 #
 #   benchmark/memval_run.sh smoke           # placement + one fact, ~3 minutes
-#   benchmark/memval_run.sh pong            # control, minimal, full
-#   benchmark/memval_run.sh book            # summary, minimal, full
+#   benchmark/memval_run.sh pong            # control, auto, minimal, full
+#   benchmark/memval_run.sh book            # summary, auto, minimal, full
 #   benchmark/memval_run.sh pong full       # one arm
+#
+# The install: NVMAI_MEMVAL_MODEL=ornith|qwen36|agentworld (default qwen36)
+# and NVMAI_MEMVAL_QUANT=4|8 (default 4). NVMAI_MEMVAL_ARMS="summary auto"
+# limits the arms. Results go under .build/benchmark-logs/memory-<bench>-
+# <label>/ where the label is NVMAI_MEMVAL_LABEL or "<model>-<quant>bit".
 #
 # Each arm gets a freshly started server with its own configuration and its
 # own empty memory directory under the scratch root, so nothing an arm writes
@@ -15,8 +20,18 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH="${1:?pong|book}"
 ONLY="${2:-}"
 PORT="${NVMAI_PORT:-8096}"
-SCRATCH="${NVMAI_MEMVAL_SCRATCH:-$ROOT/.build/benchmark-logs/memval-scratch}"
-LOGS="$ROOT/.build/benchmark-logs/memory-$( [[ "$BENCH" == pong ]] && echo value || echo book )"
+MODEL="${NVMAI_MEMVAL_MODEL:-qwen36}"
+QUANT="${NVMAI_MEMVAL_QUANT:-4}"
+case "$MODEL" in
+  ornith)     START="$ROOT/tools/start-ornith-${QUANT}bit.sh" ;;
+  qwen36)     START="$ROOT/tools/start-qwen3.6-${QUANT}bit.sh" ;;
+  agentworld) START="$ROOT/tools/start-agentworld-${QUANT}bit.sh" ;;
+  *) echo "NVMAI_MEMVAL_MODEL must be ornith, qwen36 or agentworld" >&2; exit 2 ;;
+esac
+[[ -x "$START" ]] || { echo "no start script $START" >&2; exit 2; }
+LABEL="${NVMAI_MEMVAL_LABEL:-$MODEL-${QUANT}bit}"
+SCRATCH="${NVMAI_MEMVAL_SCRATCH:-$ROOT/.build/benchmark-logs/memval-scratch-$LABEL}"
+LOGS="$ROOT/.build/benchmark-logs/memory-$( [[ "$BENCH" == pong ]] && echo value || echo book )-$LABEL"
 mkdir -p "$LOGS" "$SCRATCH"
 
 case "$BENCH" in
@@ -26,6 +41,9 @@ case "$BENCH" in
   *) echo "usage: $0 smoke|pong|book [arm]" >&2; exit 2 ;;
 esac
 [[ -n "$ONLY" ]] && ARMS=("$ONLY")
+if [[ -n "${NVMAI_MEMVAL_ARMS:-}" && "$BENCH" != smoke ]]; then
+  read -r -a ARMS <<< "$NVMAI_MEMVAL_ARMS"
+fi
 # Repeats. Only meaningful with sampling on: at temperature 0 a repeat is the
 # same output, so the default leaves temperature to the server, which is what
 # a real client does. NVMAI_MEMVAL_TEMPERATURE=0 pins it for a determinism
@@ -44,7 +62,9 @@ fi
 # The release binary must be newer than every source file, or the arms
 # measure whatever was last built. This is the check that was missing when
 # three arms of numbers turned out to be the same arm.
-newest_source="$(find "$ROOT/sources" -name '*.swift' -newer "$BINARY" | head -1)"
+# NVMAIMemoryTool is the CLI; the server does not link it, so SwiftPM will
+# not relink the server when it changes, and it is not measured here.
+newest_source="$(find "$ROOT/sources" -path "$ROOT/sources/NVMAIMemoryTool" -prune -o -name '*.swift' -newer "$BINARY" -print | head -1)"
 if [[ -n "$newest_source" ]]; then
   echo "ERROR: $newest_source is newer than the release binary; rebuild first." >&2
   exit 1
@@ -118,7 +138,7 @@ for ARM in "${ARMS[@]}"; do
   rm -rf "$MEMDIR"; mkdir -p "$MEMDIR"
   SERVER_LOG="$LOGS/server-$ARM-r$RUN.log"
 
-  echo "=== $BENCH / $ARM / run $RUN  (memory=$MEMORY memory_tools=$TOOLS consolidation_idle=${IDLE}s dir=$MEMDIR port=$PORT)"
+  echo "=== $BENCH / $LABEL / $ARM / run $RUN  (memory=$MEMORY memory_tools=$TOOLS consolidation_idle=${IDLE}s dir=$MEMDIR port=$PORT)"
   # Never let the launcher find a server to "stop": that path races the
   # readiness poll. The port is free before every arm, or the arm does not
   # start.
@@ -131,18 +151,18 @@ for ARM in "${ARMS[@]}"; do
     NVMAI_PORT="$PORT" NVMAI_MEMORY="$MEMORY" NVMAI_MEMORY_TOOLS="$TOOLS" \
     NVMAI_MEMORY_DIR="$MEMDIR" NVMAI_MEMORY_JOURNAL=1 \
     NVMAI_MEMORY_CONSOLIDATION=1 NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS="$IDLE" \
-      exec tools/start-qwen3.6-4bit.sh codex full default off
+      exec "$START" codex full default off
   ) >"$SERVER_LOG" 2>&1 &
   LAUNCHER_PID=$!
   wait_ready
   grep -m1 "memory enabled" "$SERVER_LOG" || echo "(memory line: none, as expected for $ARM)"
 
   NVMAI_PORT="$PORT" NVMAI_MEMVAL_MEMDIR="$MEMDIR" NVMAI_MEMVAL_RUN="$RUN" \
-  NVMAI_MEMVAL_SERVER_LOG="$SERVER_LOG" \
+  NVMAI_MEMVAL_SERVER_LOG="$SERVER_LOG" NVMAI_MEMVAL_RESULTS="$LOGS" \
     python3 "$SCRIPT" "$ARM" 2>&1 | tee "$LOGS/run-$ARM-r$RUN.log"
   stop_server
   echo "--- consolidations for $ARM run $RUN:"; grep -c "consolidated session=" "$SERVER_LOG" || true
 done
 done
 
-[[ "$BENCH" == smoke ]] || { echo; echo "=== report"; python3 "$SCRIPT" report; }
+[[ "$BENCH" == smoke ]] || { echo; echo "=== report ($LABEL)"; NVMAI_MEMVAL_RESULTS="$LOGS" python3 "$SCRIPT" report; }

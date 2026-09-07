@@ -137,6 +137,24 @@ Environment variables, which is how the start scripts pass them:
 | `NVMAI_MEMORY_CONSOLIDATION` | `1` | `0` disables the engine writing memory at session boundaries |
 | `NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` | `30` | Quiet time after a turn before a session is distilled |
 | `NVMAI_MEMORY_LOCAL_FALLBACK` | `1` | `0` disables memory instead of degrading |
+| `NVMAI_MEMORY_GUARD` | `0` | `1` stops a model-derived fact from silently superseding one the person asserted. Off until the labelling it rests on is measured; see below. |
+
+### The guard
+
+With `NVMAI_MEMORY_GUARD=1`, a write the extraction attributed to the model
+does not overwrite a live fact the person asserted. The person's value
+stays, the address is marked disputed, and both values are visible to the
+next session. The person always supersedes their own facts, model-over-model
+is untouched, and a model write that agrees is stored rather than held --
+holding it would put a conflict in front of the next session over nothing.
+
+It rests entirely on the `source` field the consolidation prompt asks for,
+which is why it is off. **Before enabling it anywhere, measure the mislabel
+rate**: run consolidation over recorded transcripts on a real 35B and count
+how often a fact the model invented comes back labelled `user`. The gate is
+under 5%, and no mislabel at all on an invented fact -- a mislabelled
+invention would be *protected*, which is worse than today's behaviour rather
+than merely different.
 
 ### Store size
 

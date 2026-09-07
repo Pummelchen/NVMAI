@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 150" width="560" height="150" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="10">
+  <line x1="30" y1="70" x2="540" y2="70" stroke="#333"/>
+  <text x="30" y="20" font-size="9.5" fill="#333">time →</text>
+  <!-- generation blocks -->
+  <rect x="40" y="50" width="150" height="40" fill="#fdf3e4" stroke="#d98f2b"/><text x="115" y="74" text-anchor="middle">model reply (decode)</text>
+  <text x="115" y="104" text-anchor="middle" font-size="9" fill="#8a5a10">SSD busy: expert streaming</text>
+  <rect x="330" y="50" width="130" height="40" fill="#fdf3e4" stroke="#d98f2b"/><text x="395" y="74" text-anchor="middle">consolidation (tool-free)</text>
+  <text x="395" y="104" text-anchor="middle" font-size="9" fill="#8a5a10">after ≥30 s idle or rollover</text>
+  <!-- appends -->
+  <g fill="#2f7fb3"><rect x="60" y="34" width="3" height="16"/><rect x="120" y="34" width="3" height="16"/><rect x="186" y="34" width="3" height="16"/><rect x="455" y="34" width="3" height="16"/></g>
+  <text x="120" y="30" text-anchor="middle" font-size="9" fill="#2f7fb3">appends: write(2) to page cache, µs</text>
+  <!-- barrier -->
+  <rect x="222" y="44" width="6" height="52" fill="#5aa469"/>
+  <text x="225" y="120" text-anchor="middle" font-size="9" fill="#2d6b3a">F_FULLFSYNC barrier, ~2 s after last append</text>
+  <text x="225" y="132" text-anchor="middle" font-size="9" fill="#2d6b3a">(forced at 30 s; drive idle here)</text>
+  <rect x="490" y="44" width="6" height="52" fill="#5aa469"/>
+  <text x="515" y="120" text-anchor="middle" font-size="9" fill="#2d6b3a">barrier</text>
+  <!-- idle -->
+  <text x="260" y="66" text-anchor="middle" font-size="9" fill="#555">idle</text>
+</svg>

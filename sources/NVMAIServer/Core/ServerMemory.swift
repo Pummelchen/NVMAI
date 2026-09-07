@@ -116,7 +116,9 @@ enum ServerMemory {
             // Sixteen facts ran to about 700 tokens; a session with a plot
             // event ran into the old 900 cap and came back unparseable.
             generationConfig: GenerationConfig(maxNewTokens: 2000),
-            maximumCompletionTokens: 2000)
+            maximumCompletionTokens: 2000,
+            // B6: the engine's own generation, and not watched.
+            isEngineInternal: true)
     }
 
     /// The facts a consolidation produced, or none if it produced nothing

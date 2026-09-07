@@ -1,0 +1,68 @@
+{
+  "note": "Shared between tests/NVMAIServer/WatchdogTests.swift and benchmark/watchdog_calibrate.py --selftest. The calibration is a Python port of the Swift detector; if the two ever disagree here, the corpus numbers stop describing what ships.",
+  "defaults": {
+    "window": 64,
+    "history": 1200,
+    "repeats": 6,
+    "minimumPeriodBytes": 8,
+    "minimumDistinctBytes": 12
+  },
+  "cases": [
+    {
+      "name": "looped-phrase",
+      "text": "Wait, I need to check the facts again. ",
+      "repeat": 8,
+      "loopTrips": true,
+      "why": "the measured Qwen 0.8B failure"
+    },
+    {
+      "name": "few-repeats",
+      "text": "Wait, I need to check the facts again. ",
+      "repeat": 4,
+      "loopTrips": false,
+      "why": "prose and code both repeat a line a few times"
+    },
+    {
+      "name": "warm-up-boundary",
+      "text": "Wait, I need to check the facts again. ",
+      "repeat": 6,
+      "loopTrips": false,
+      "why": "a phrase shorter than the window costs one repetition to fill it"
+    },
+    {
+      "name": "warm-up-boundary-crossed",
+      "text": "Wait, I need to check the facts again. ",
+      "repeat": 7,
+      "loopTrips": true,
+      "why": "and trips on the next one"
+    },
+    {
+      "name": "table-rule",
+      "text": "|---",
+      "repeat": 300,
+      "loopTrips": false,
+      "why": "perfectly periodic and not a loop; the variety rule rejects it"
+    },
+    {
+      "name": "dashes",
+      "text": "-",
+      "repeat": 900,
+      "loopTrips": false,
+      "why": "a horizontal rule"
+    },
+    {
+      "name": "indentation",
+      "text": " ",
+      "repeat": 900,
+      "loopTrips": false,
+      "why": "a block of indentation"
+    },
+    {
+      "name": "sdl-degenerate",
+      "text": "        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);\n",
+      "repeat": 12,
+      "loopTrips": true,
+      "why": "the one genuine loop in the recorded corpus, memory-value/auto-r2"
+    }
+  ]
+}

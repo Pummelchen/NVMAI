@@ -26,6 +26,9 @@ enum ServerLog {
             + "cached=\(usage.promptTokensDetails.cachedTokens) "
             + "completion=\(usage.completionTokens) "
             + "finish=\(completion.finishReason)")
+        for trip in completion.watchdogTrips {
+            watchdog(id: id, trip: trip)
+        }
     }
 
     static func failed(id: String,
@@ -65,6 +68,14 @@ enum ServerLog {
     /// which can be anything the model chose to write.
     static func memory(_ detail: String) {
         write("memory \(detail)")
+    }
+
+    /// A watchdog trip. Operational only: what was repeated, or what was
+    /// too short, is in the reply the user already has, and generated text
+    /// does not belong in a log line any more than a memory's contents do.
+    static func watchdog(id: String, trip: WatchdogSet.Trip) {
+        write("request \(id) watchdog \(trip.kind.rawValue) "
+            + "\(trip.acted ? "stopped" : "observed") \(trip.message)")
     }
 
     private static func format(_ duration: Duration) -> String {

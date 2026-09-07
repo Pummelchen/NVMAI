@@ -49,15 +49,21 @@ public struct ServerCompletion: Equatable, Sendable {
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
+    /// What the watchdogs saw, empty when they are off. Carried on the
+    /// completion so the HTTP layer, which owns the request id, can log them
+    /// on the one line that already reports how the request ended.
+    public let watchdogTrips: [WatchdogSet.Trip]
 
     public init(content: String,
                 toolCalls: [ParsedToolCall],
                 finishReason: String,
-                usage: OpenAIUsage) {
+                usage: OpenAIUsage,
+                watchdogTrips: [WatchdogSet.Trip] = []) {
         self.content = content
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
+        self.watchdogTrips = watchdogTrips
     }
 }
 
@@ -960,7 +966,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// that closes over eight locals -- hoisting it would mean an
     /// eight-parameter signature for a twenty-line body.
     public func generate(
-        _ request: ValidatedChatRequest,
+        _ incoming: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         // Stage-split measurement (NVMAI_RUNNER_STATS): snapshot the runner's
@@ -1012,6 +1018,26 @@ public actor ServerModelSession: ServerInferenceBackend {
                 mtpDecoder?.reset()
             }
         }
+        // B6: an engine-internal generation is never watched. Everything
+        // else gets the configured set, which is inert unless the operator
+        // turned watchdogs on.
+        let watchdogs = incoming.isEngineInternal
+            ? WatchdogSupervisor.inert
+            : WatchdogSupervisor(configuration: WatchdogConfiguration.shared)
+        let watchdogTicker = watchdogs.startTicker()
+        defer { watchdogTicker?.cancel() }
+        // B2: a tool loop shows up in the incoming message history, not in
+        // the output stream, so it is judged before anything is generated.
+        if !incoming.isEngineInternal {
+            watchdogs.record(pingPong: PingPongWatchdog.inspect(
+                incoming.messages, configuration: watchdogs.configuration))
+        }
+        // B7: and the only intervention that breaks such a loop is to answer
+        // this one turn with no tools offered.
+        let request = watchdogs.withholdsTools
+            ? incoming.replacingMessages(incoming.messages, tools: [])
+            : incoming
+
         let prepared = try preparePrompt(request)
         let promptIDs = prepared.promptIDs
         let cacheRequest = prepared.cacheRequest
@@ -1060,6 +1086,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                     if !visible.isEmpty {
                         content += visible
                         onEvent(.content(visible))
+                        watchdogs.observe(visible)
                     }
                     if stopMatcher.isStopped { shouldStop = true }
                 case .toolCall(let call):
@@ -1077,7 +1104,9 @@ public actor ServerModelSession: ServerInferenceBackend {
             scratch: scratch,
             prefillConfig: prefillConfig,
             start: activeStart,
-            shouldStop: { shouldStop }) { progress in
+            // A watchdog stop is polled here, between tokens, alongside the
+            // stop-string matcher's own flag.
+            shouldStop: { shouldStop || watchdogs.wantsStop }) { progress in
                 guard decodingError == nil else { return }
                 do {
                     switch progress {
@@ -1146,13 +1175,23 @@ public actor ServerModelSession: ServerInferenceBackend {
             content += tail
             onEvent(.content(tail))
         }
-        let reason: String
+        var reason: String
         if !calls.isEmpty {
             reason = "tool_calls"
         } else if result.reason == .maxTokens {
             reason = "length"
         } else {
             reason = "stop"
+        }
+        watchdogs.finish(visibleBytes: content.utf8.count, finishReason: reason)
+        // B4: neither protocol has an honest reason for "the server stopped
+        // this", and inventing one breaks clients. The mapping and the note
+        // live in `WatchdogSet.resolve`, which is testable without a model.
+        let outcome = watchdogs.resolve(content: content, finishReason: reason)
+        if let note = outcome.note {
+            content = outcome.content
+            reason = outcome.finishReason
+            onEvent(.content(note))
         }
         publishCacheEntry(
             cacheRequest: cacheRequest,
@@ -1172,7 +1211,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             usage: OpenAIUsage(promptTokens: result.prefillTokens,
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
-                               cachedTokens: result.cachedPromptTokens))
+                               cachedTokens: result.cachedPromptTokens),
+            watchdogTrips: watchdogs.trips)
     }
 
     /// Publish this turn's KV range to the prompt cache, and persist a snapshot

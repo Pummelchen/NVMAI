@@ -58,6 +58,26 @@ consolidation is a server-internal call with deliberately repetitive
 structure. It runs with watchdogs disabled; only client-facing generations
 are watched.
 
+**B7 — "acting" was undefined for ping-pong.** The loop is in the request
+that just arrived, so there is no generation to stop. The only intervention
+that breaks it is to answer that one turn with no tools offered, forcing the
+model to use what it already has. Its finish reason is left alone: that
+answer was not cut short, and reporting `length` would tell the client it
+was incomplete when it is not.
+
+**B8 — the stall watchdog cannot live on the HTTP heartbeat.** The heartbeat
+only exists for streaming responses, so a non-streaming request would go
+unwatched. It runs instead on a small supervising task started inside the
+generation, which covers both. The honest limit is worth stating: the runner
+polls for a stop *between tokens*, so a generation that has genuinely wedged
+is reported and not stopped. Killing a stuck GPU command buffer is a
+process-level decision.
+
+**B9 — there are two API surfaces on this branch, not three.** OpenAI chat
+completions (streaming and not) and the Responses API. The Anthropic
+Messages surface lives on `api-compat`; the mapping there is the same
+`length`-equivalent and needs doing when that branch merges.
+
 ## Principles
 
 - **Observe before acting.** Every watchdog defaults to logging. Stopping a
@@ -96,6 +116,7 @@ arrival, and reports through the same protocol.
 | Watchdog | Proposed rule | Calibrate against |
 | --- | --- | --- |
 | Loop | a 40-character window repeats ≥ 4 times within the last 1,200 characters | 180 recorded replies, including code with legitimate boilerplate |
+
 | Stall | no visible token for 90 s **after the first token** (B1) | measured decode rates: 6.7–20 tok/s, so 90 s is far outside normal |
 | Stub | `finish_reason == stop`, no tool call, and < 24 visible tokens | recorded replies; session-9-style stubs are 151 tokens, so this rule deliberately does **not** catch them (see below) |
 | Ping-pong | same tool name and identical arguments ≥ 3 times in the request's messages | recorded tool-arm conversations |
@@ -182,3 +203,36 @@ added.
 3. Wire into `publish` and the heartbeat, observation only.
 4. Finish-reason mapping across the three API surfaces, with tests.
 5. Acting mode, `stall` first.
+
+
+## Outcome (2026-09-08)
+
+Built, calibrated and tested. Off by default; `NVMAI_WATCHDOGS=1` observes,
+and a watchdog acts only when named in `NVMAI_WATCHDOG_ACT`.
+
+**The proposed loop threshold was wrong, and measurement is what said so.**
+A 40-byte window at four repeats fired on 8.1% of the recorded corpus, all
+of it real code. The corpus turned out to be 999 replies rather than the 180
+this plan assumed, and the clean setting is a 64-byte window at six repeats
+— the middle of a plateau that runs from 56 bytes and five repeats upward.
+Two further rules were needed and are not in this plan: a minimum period of
+8 bytes, and a minimum of 12 distinct bytes in a window, which between them
+reject table rules, horizontal lines and indentation.
+
+Also learned: the corpus contained one genuinely broken reply, a C99 program
+that emitted the same `SDL_SetRenderDrawColor` line dozens of times. It is
+listed in the calibration script by name, so a true catch is never scored as
+a false alarm.
+
+| Item | State |
+| --- | --- |
+| Protocol, four detectors, unit tests | done — 38 tests |
+| `benchmark/watchdog_calibrate.py`, thresholds tuned | done — zero false positives on 999 replies |
+| Python/Swift agreement on a shared fixture | done — checked from both sides |
+| Wiring into the generation path, observation only | done |
+| Finish-reason mapping and the note in the content | done — `WatchdogSet.resolve`, tested without a model |
+| Acting mode | implemented, and no watchdog is in the default list |
+| Observation run over a full book and coder install | **not done** — the gate before any watchdog acts by default |
+| Anthropic Messages mapping | deferred to the `api-compat` merge (B9) |
+
+`docs/watchdogs.md` is the user-facing description.

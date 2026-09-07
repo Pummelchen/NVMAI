@@ -300,6 +300,12 @@ public struct ValidatedChatRequest: Sendable {
     /// server allows a request to choose one. Nil means the workspace the
     /// server was launched with.
     public let workspace: String?
+    /// True for a generation the engine asked for itself -- memory
+    /// consolidation is the only one today. Watchdogs do not police these
+    /// (B6): their prompts are repetitive by construction and their answers
+    /// are meant to be terse, which is the shape the detectors hunt, and no
+    /// person is waiting on the result.
+    public let isEngineInternal: Bool
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
@@ -308,7 +314,8 @@ public struct ValidatedChatRequest: Sendable {
                 generationConfig: GenerationConfig,
                 maximumCompletionTokens: Int,
                 stripCLIPrompt: Bool = false,
-                workspace: String? = nil) {
+                workspace: String? = nil,
+                isEngineInternal: Bool = false) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
@@ -317,6 +324,7 @@ public struct ValidatedChatRequest: Sendable {
         self.maximumCompletionTokens = maximumCompletionTokens
         self.stripCLIPrompt = stripCLIPrompt
         self.workspace = workspace
+        self.isEngineInternal = isEngineInternal
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -339,7 +347,8 @@ public struct ValidatedChatRequest: Sendable {
             generationConfig: generationConfig,
             maximumCompletionTokens: maximumCompletionTokens,
             stripCLIPrompt: stripCLIPrompt,
-            workspace: workspace)
+            workspace: workspace,
+            isEngineInternal: isEngineInternal)
     }
 
     /// The memory workspace this request names, from the X-NVMAI-Workspace
@@ -354,7 +363,8 @@ public struct ValidatedChatRequest: Sendable {
             generationConfig: generationConfig,
             maximumCompletionTokens: maximumCompletionTokens,
             stripCLIPrompt: stripCLIPrompt,
-            workspace: workspace)
+            workspace: workspace,
+            isEngineInternal: isEngineInternal)
     }
 }
 
