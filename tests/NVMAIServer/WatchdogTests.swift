@@ -227,27 +227,53 @@ import Testing
     /// program belonged, and the request reported a clean stop.
     @Test func stubFiresOnAnEmptyNormalFinish() {
         var watchdog = StubWatchdog(configuration: observing)
-        #expect(watchdog.finish(visibleBytes: 20, finishReason: "stop") != .fine)
+        #expect(watchdog.finish(visibleBytes: 20, requestBytes: 700,
+                                finishReason: "stop") != .fine)
+    }
+
+    /// The case that found this rule's missing half. On the first request of
+    /// the first observation run the harness asked "Say OK." and the model
+    /// answered "OK.", and the watchdog called it a failure. A short answer
+    /// to a short question is an answer, and no rule that ignores the
+    /// question can tell the two apart.
+    @Test func stubIgnoresAShortAnswerToAShortQuestion() {
+        var watchdog = StubWatchdog(configuration: observing)
+        #expect(watchdog.finish(visibleBytes: 3, requestBytes: 7,
+                                finishReason: "stop") == .fine)
+    }
+
+    /// It is the last user message that counts, not the prompt: an agent
+    /// harness puts a long system prompt in front of every question,
+    /// including the one-word ones.
+    @Test func stubMeasuresWhatWasAskedNotWhatWasSent() {
+        var watchdog = StubWatchdog(configuration:
+            WatchdogConfiguration(isEnabled: true, stubAskedBytes: 200))
+        #expect(watchdog.finish(visibleBytes: 4, requestBytes: 199,
+                                finishReason: "stop") == .fine)
+        #expect(watchdog.finish(visibleBytes: 4, requestBytes: 200,
+                                finishReason: "stop") != .fine)
     }
 
     /// A short reply that ended in a tool call is a normal turn of a tool
     /// loop, not a stub.
     @Test func stubIgnoresAToolCall() {
         var watchdog = StubWatchdog(configuration: observing)
-        #expect(watchdog.finish(visibleBytes: 20, finishReason: "tool_calls") == .fine)
+        #expect(watchdog.finish(visibleBytes: 20, requestBytes: 700,
+                                finishReason: "tool_calls") == .fine)
     }
 
     /// A truncated reply already tells the client what happened through
     /// `length`; saying it twice adds nothing.
     @Test func stubIgnoresALengthFinish() {
         var watchdog = StubWatchdog(configuration: observing)
-        #expect(watchdog.finish(visibleBytes: 20, finishReason: "length") == .fine)
+        #expect(watchdog.finish(visibleBytes: 20, requestBytes: 700,
+                                finishReason: "length") == .fine)
     }
 
     @Test func stubIgnoresARealAnswer() {
         var watchdog = StubWatchdog(configuration: observing)
         let answer = String(repeating: "a real answer. ", count: 40)
-        #expect(watchdog.finish(visibleBytes: answer.utf8.count,
+        #expect(watchdog.finish(visibleBytes: answer.utf8.count, requestBytes: 700,
                                 finishReason: "stop") == .fine)
     }
 
@@ -256,7 +282,8 @@ import Testing
     /// what was asked, and that judgement is not this detector's to make.
     @Test func stubDoesNotReachForTheShortAnswerCase() {
         var watchdog = StubWatchdog(configuration: observing)
-        #expect(watchdog.finish(visibleBytes: 600, finishReason: "stop") == .fine)
+        #expect(watchdog.finish(visibleBytes: 600, requestBytes: 700,
+                                finishReason: "stop") == .fine)
     }
 
     // MARK: ping-pong
@@ -350,7 +377,7 @@ import Testing
     @Test func disabledSetSeesNothing() {
         var set = WatchdogSet(configuration: .off)
         set.observe(String(repeating: "Wait, I need to check again. ", count: 40))
-        set.finish(visibleBytes: 0, finishReason: "stop")
+        set.finish(visibleBytes: 0, requestBytes: 700, finishReason: "stop")
         set.record(pingPong: .concern("ignored"))
         #expect(set.trips.isEmpty)
         #expect(set.wantsStop == false)
@@ -429,7 +456,7 @@ import Testing
         var set = WatchdogSet(configuration:
             WatchdogConfiguration(isEnabled: true, acting: Set(WatchdogKind.allCases)))
         set.observe("The ferry runs on Sundays.")
-        set.finish(visibleBytes: 400, finishReason: "stop")
+        set.finish(visibleBytes: 400, requestBytes: 700, finishReason: "stop")
         let outcome = set.resolve(content: "The ferry runs on Sundays.",
                                   finishReason: "stop")
         #expect(outcome.note == nil)
@@ -457,7 +484,7 @@ import Testing
     @Test func observationIsInvisibleToTheClient() {
         var set = WatchdogSet(configuration: WatchdogConfiguration(isEnabled: true))
         set.observe(String(repeating: "Wait, I need to check the facts again. ", count: 8))
-        set.finish(visibleBytes: 4, finishReason: "stop")
+        set.finish(visibleBytes: 4, requestBytes: 700, finishReason: "stop")
         let outcome = set.resolve(content: "x", finishReason: "stop")
         #expect(set.trips.count == 2, "both loop and stub saw something")
         #expect(outcome.note == nil)

@@ -149,12 +149,55 @@ is untouched, and a model write that agrees is stored rather than held --
 holding it would put a conflict in front of the next session over nothing.
 
 It rests entirely on the `source` field the consolidation prompt asks for,
-which is why it is off. **Before enabling it anywhere, measure the mislabel
-rate**: run consolidation over recorded transcripts on a real 35B and count
-how often a fact the model invented comes back labelled `user`. The gate is
-under 5%, and no mislabel at all on an invented fact -- a mislabelled
+which is why it is off. The gate before enabling it anywhere is under 5%
+mislabelled and no mislabel at all on an invented fact: a mislabelled
 invention would be *protected*, which is worse than today's behaviour rather
 than merely different.
+
+`benchmark/guard_source_rate.py` is that measurement. It replays a recorded
+book run's facts against exactly what the person put in front of the model
+in each session -- the story bible plus the plot events delivered so far,
+which the offline simulator already knows precisely -- and flags any fact
+claiming the person's authority whose substance is nowhere in the person's
+own words.
+
+| Run | Facts | Labelled `user` | Mislabelled | Gate |
+| --- | --- | --- | --- | --- |
+| Qwen 3.6 35B 8-bit, book, auto | 59 | 28 (47%) | 0 | met |
+| Ornith 1.5 35B 4-bit, book, auto | 45 | 19 (42%) | 2 (10.5%) | **not met** |
+
+**The gate is met on one model and failed on the other, so the guard stays
+off.** That split is the finding, not an inconvenience: the label's quality
+is a property of the model, and it lines up exactly with everything else
+measured here, where memory was a clean win on Qwen 8-bit and a loss on
+Ornith 4-bit.
+
+Both of Ornith's mislabels are the same shape, and it is worth naming
+because it is not carelessness by the model. At session 7 it wrote
+`characters/rosa` as "Rosa: hazel eyes, keeps the inn; raised a new inn from
+charred walls in chapter 65 while keeping the old hearth as a monument" and
+labelled it `user`. The first clause is the person's, from the bible. The
+second is the model's own chapter 65. One key, two sources, one label -- and
+the label cannot be right. The other case is the same: a summary of ten
+chapters the model itself wrote, filed under the person's authority because
+the person asked for chapters in that format.
+
+So the composite fact is the real obstacle, and the consolidation prompt
+already tells the model "one fact per key". Until a value is reliably from
+one source, `source` cannot be reliable either, and a guard that protects a
+composite protects the invented half of it.
+
+The control matters as much as the number. A scorer generous enough to
+ground anything would report a perfect run whatever the model did, so the
+facts labelled `model` go through the same test: they ground at 36% against
+the user-labelled facts' 100%. The gap is what says the test discriminates.
+
+Two things it got wrong first, both worth knowing. Its opening candidates
+were "hazels" against a bible that says "Rosa, hazel eyes", and "burned"
+against a user event that says the inn "burns" -- inflection, not invention
+-- so it strips English suffixes before comparing. And it prints every fact
+it flags, because "no invented fact labelled `user`" is a claim a person
+checks, not a number a script reports.
 
 ### Store size
 

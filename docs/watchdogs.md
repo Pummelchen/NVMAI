@@ -15,7 +15,7 @@ a generation is a second, separate opt-in, per watchdog.
 | --- | --- | --- |
 | `loop` | a 64-byte window of the output repeated six times inside the last 1,200 bytes | Qwen 0.8B repeating "Wait, I need to check the facts again" until its 600-token budget died; a C99 reply emitting the same `SDL_SetRenderDrawColor` line dozens of times |
 | `stall` | no visible token for 90 s, counted from the **first** token | orphaned servers during harness bring-up: a bound port that never produced a token |
-| `stub` | finished normally, no tool call, under 96 visible bytes | Ornith's C99 stage returning forty tokens of empty `<tool_call>` markup where a program belonged |
+| `stub` | something substantial was asked for, and the reply finished normally, with no tool call, under 96 visible bytes | Ornith's C99 stage returning forty tokens of empty `<tool_call>` markup where a program belonged |
 | `pingpong` | the same tool called with identical arguments three times in a row in the incoming message history | a tool loop that exhausted its rounds and returned a 31-token preamble as the answer |
 
 ## Configuration
@@ -82,11 +82,30 @@ initialisers, tables of similar cases. At 64 bytes and six repeats the
 corpus is clean, and the one genuinely broken reply in it is still caught:
 
 ```
-999 recorded replies, 4.4 MB, from 16 runs
+1012 recorded replies, 4.5 MB, from 18 runs
   window=64 history=1200 repeats=6 stub_bytes=96
-  loop       0 false positives   stub  0 false positives
+  loop  0 false positives over 1012 replies
+  stub  0 false positives over 289 recorded exchanges
   2 of 2 known-bad replies caught
 ```
+
+**The stub rule needed a request side, and the first observation run is what
+said so.** On the very first request of that run the harness asked "Say OK.",
+the model answered "OK.", and the watchdog called it a failure. A short
+answer to a short question is an answer, and no rule that ignores the
+question can tell the two apart. So a stub now also requires that something
+substantial was asked: 200 bytes in the *last user message*, not the whole
+prompt, because an agent harness puts a long system prompt in front of every
+question including the one-word ones. The recorded corpus separates cleanly
+— the readiness probe is 7 bytes and every real book request is 657 or more.
+
+Calibrating that needed a second corpus, because the reply corpus has no
+prompts in it. The session journals record both sides, which gives 289 real
+exchanges. They also elide long replies behind a placeholder that states
+what it left out, and measuring the placeholder makes every long answer look
+like a 79-byte stub — so the script adds the elided bytes back before
+judging. The first version of it did not, and reported 21 stubs that were
+nothing of the kind.
 
 The clean region is wide rather than a knife-edge: every combination from a
 56-byte window at five repeats upward gives the same result, so the defaults

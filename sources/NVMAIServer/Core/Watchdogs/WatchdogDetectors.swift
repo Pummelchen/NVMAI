@@ -192,17 +192,24 @@ public struct StubWatchdog: Watchdog {
     public static let kind = WatchdogKind.stub
 
     private let threshold: Int
+    private let asked: Int
 
     public init(configuration: WatchdogConfiguration = .off) {
         threshold = configuration.stubVisibleBytes
+        asked = configuration.stubAskedBytes
     }
 
     public mutating func finish(visibleBytes: Int,
+                                requestBytes: Int,
                                 finishReason: String) -> WatchdogVerdict {
         // `tool_calls` is a real answer in a tool loop and `length` already
         // tells the client what happened. Only a normal stop can be a stub.
         guard finishReason == "stop", visibleBytes < threshold else { return .fine }
-        return .concern("finished normally with \(visibleBytes) visible bytes")
+        // And something has to have been asked for. Judged without the
+        // request, this rule calls "OK." a failure.
+        guard requestBytes >= asked else { return .fine }
+        return .concern("finished normally with \(visibleBytes) visible bytes "
+                        + "for a \(requestBytes)-byte request")
     }
 }
 

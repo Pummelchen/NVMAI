@@ -344,3 +344,29 @@ was `!= "0"`.
 
 All five are fixed, with a test each. The step-0 gate is unchanged and still
 stands in front of enabling any of it.
+
+
+## Step 0 measured (2026-09-08)
+
+The gate in front of enabling the guard has been run on two models, with
+`benchmark/guard_source_rate.py`.
+
+| Run | Facts | Labelled `user` | Mislabelled | Gate |
+| --- | --- | --- | --- | --- |
+| Qwen 3.6 35B 8-bit | 59 | 28 | 0 | met |
+| Ornith 1.5 35B 4-bit | 45 | 19 | 2 (10.5%) | not met |
+
+**The guard stays off, and the reason is now measured rather than
+suspected.** One model labels reliably and the other does not, which is the
+same split every other memory measurement on this project has shown.
+
+Both Ornith failures are composite facts: one key holding a clause from the
+person and a clause the model invented, labelled `user` because half of it
+is. That is the obstacle, and it is upstream of the guard. `source` cannot
+be a property of a value that has two sources, and a guard that protects a
+composite protects the invented half. Splitting composites is the next piece
+of work if the guard is to be enabled anywhere -- not a better prompt for
+the label, which is being asked an unanswerable question.
+
+The book scores for these two runs were 94% and 92%, both inside the
+established noise band, so the labelling work costs nothing measurable.

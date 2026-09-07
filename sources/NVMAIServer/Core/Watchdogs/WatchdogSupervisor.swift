@@ -67,8 +67,11 @@ public final class WatchdogSupervisor: @unchecked Sendable {
         lock.withLock { set.check(at: instant) }
     }
 
-    public func finish(visibleBytes: Int, finishReason: String) {
-        lock.withLock { set.finish(visibleBytes: visibleBytes, finishReason: finishReason) }
+    public func finish(visibleBytes: Int, requestBytes: Int, finishReason: String) {
+        lock.withLock {
+            set.finish(visibleBytes: visibleBytes, requestBytes: requestBytes,
+                       finishReason: finishReason)
+        }
     }
 
     public func record(pingPong verdict: WatchdogVerdict) {

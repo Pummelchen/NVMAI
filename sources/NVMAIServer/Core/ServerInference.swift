@@ -1182,7 +1182,13 @@ public actor ServerModelSession: ServerInferenceBackend {
         } else {
             reason = "stop"
         }
-        watchdogs.finish(visibleBytes: content.utf8.count, finishReason: reason)
+        // The *last user message*, not the whole prompt: a long system
+        // prompt in front of "hi" is still a short question, and an agent
+        // harness puts a long system prompt in front of everything.
+        let asked = request.messages.last { $0.role == .user }?.content?.utf8.count ?? 0
+        watchdogs.finish(visibleBytes: content.utf8.count,
+                         requestBytes: asked,
+                         finishReason: reason)
         // B4: neither protocol has an honest reason for "the server stopped
         // this", and inventing one breaks clients. The mapping and the note
         // live in `WatchdogSet.resolve`, which is testable without a model.

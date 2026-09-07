@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -102,11 +103,24 @@ def loop_trip(text: str, window: int = 64, history: int = 1200,
     return None
 
 
-def stub_trip(text: str, finish_reason: str, threshold: int = 96) -> dict | None:
-    """A port of `StubWatchdog`: finished normally with nothing in it."""
-    visible = len(text.encode("utf-8"))
-    if finish_reason == "stop" and visible < threshold:
-        return {"visible": visible}
+def stub_trip(text: str, finish_reason: str, request_bytes: int,
+              threshold: int = 96, asked: int = 200) -> dict | None:
+    return stub_trip_bytes(len(text.encode("utf-8")), finish_reason,
+                           request_bytes, threshold, asked)
+
+
+def stub_trip_bytes(visible: int, finish_reason: str, request_bytes: int,
+                    threshold: int = 96, asked: int = 200) -> dict | None:
+    """A port of `StubWatchdog`: something substantial was asked for, and the
+    reply finished normally with nothing in it.
+
+    The request side is not decoration. Without it the rule fires on "Say
+    OK." answered with "OK." -- which it did, on the very first request of
+    the first observation run, because the harness's readiness probe is
+    exactly that shape. A short answer to a short question is an answer.
+    """
+    if finish_reason == "stop" and visible < threshold and request_bytes >= asked:
+        return {"visible": visible, "asked": request_bytes}
     return None
 
 
@@ -136,6 +150,55 @@ def replies() -> list[dict]:
                 # stop is the right assumption for the stub rule.
                 "finish": "stop",
             })
+    return found
+
+
+# The journal does not store a long reply verbatim; it stores a placeholder
+# that states what it left out, e.g. "[29 lines, 2228 bytes of output
+# omitted]". Measuring the placeholder instead of the reply makes every long
+# answer look like a 79-byte stub, which is what the first attempt at this
+# corpus did.
+ELISION = re.compile(r"\[(\d+) lines, (\d+) bytes of \w+ omitted\]")
+
+
+def reply_bytes(text: str) -> int:
+    """The reply's real size, with the journal's elisions added back."""
+    omitted = sum(int(m.group(2)) for m in ELISION.finditer(text))
+    kept = len(ELISION.sub("", text).encode("utf-8"))
+    return kept + omitted
+
+
+def exchanges() -> list[dict]:
+    """Real (request, reply) pairs, from the session journals.
+
+    The reply corpus above has no prompts, so it cannot say anything about a
+    rule that depends on what was asked. The journals record both, across
+    every recorded run, which is what the stub rule has to be judged on.
+    """
+    found: list[dict] = []
+    for path in sorted(LOGS.glob("memval-scratch-*/**/*.ndjson")):
+        if "_global" in path.name:
+            continue
+        pending: str | None = None
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                event = json.loads(line).get("event", {}).get("_0")
+            except json.JSONDecodeError:
+                continue
+            if not event:
+                continue
+            if event.get("kind") == "userPrompt":
+                pending = ((event.get("payload") or {}).get("text") or {}).get("_0")
+            elif event.get("kind") == "assistantResponse" and pending is not None:
+                reply = ((event.get("payload") or {}).get("response") or {}).get("_0") or {}
+                found.append({
+                    "source": path.parent.parent.parent.name,
+                    "request_bytes": len(pending.encode("utf-8")),
+                    "text": reply.get("text") or reply.get("content") or "",
+                    "elided": True,
+                    "finish": reply.get("finishReason") or "stop",
+                })
+                pending = None
     return found
 
 
@@ -170,6 +233,9 @@ def main() -> int:
     ap.add_argument("--history", type=int, default=1200)
     ap.add_argument("--repeats", type=int, default=6)
     ap.add_argument("--stub-bytes", type=int, default=96)
+    ap.add_argument("--stub-asked", type=int, default=200,
+                    help="bytes the last user message must reach before a "
+                         "short reply counts as a stub")
     ap.add_argument("--pingpong-repeats", type=int, default=3)
     ap.add_argument("--show", type=int, default=0,
                     help="print this many tripped replies in full")
@@ -193,18 +259,31 @@ def main() -> int:
         if trip:
             known = reply["source"] in KNOWN_LOOPS
             (caught if known else loop_hits).append((reply, trip))
-        trip = stub_trip(reply["text"], reply["finish"], args.stub_bytes)
-        if trip:
-            stub_hits.append((reply, trip))
+        # The reply corpus carries no prompt, so the request side of the
+        # stub rule cannot be applied to it. It is judged on `exchanges()`
+        # below instead, and counted here only for the loop.
 
     print(f"{len(corpus)} recorded replies, {total_bytes / 1e6:.1f} MB, "
           f"from {len({r['source'].split('/')[0] for r in corpus})} runs\n")
     print(f"  window={args.window} history={args.history} repeats={args.repeats} "
           f"stub_bytes={args.stub_bytes}\n")
     print(f"  {'watchdog':10s} {'false positives':>16s} {'rate':>8s}")
-    for name, hits in (("loop", loop_hits), ("stub", stub_hits)):
-        rate = len(hits) / len(corpus)
-        print(f"  {name:10s} {len(hits):16d} {rate:7.1%}")
+    rate = len(loop_hits) / len(corpus)
+    print(f"  {'loop':10s} {len(loop_hits):16d} {rate:7.1%}")
+
+    pairs = exchanges()
+    for pair in pairs:
+        trip = stub_trip_bytes(reply_bytes(pair["text"]), pair["finish"],
+                               pair["request_bytes"], args.stub_bytes,
+                               args.stub_asked)
+        if trip:
+            stub_hits.append((pair, trip))
+    if pairs:
+        print(f"  {'stub':10s} {len(stub_hits):16d} "
+              f"{len(stub_hits) / len(pairs):7.1%}   "
+              f"over {len(pairs)} recorded exchanges")
+    else:
+        print(f"  {'stub':10s} {'no corpus':>16s}")
 
     conversations = tool_conversations()
     if conversations:
@@ -232,7 +311,7 @@ def main() -> int:
     if stub_hits:
         print(f"\n{len(stub_hits)} stub trips:")
         for reply, trip in stub_hits[:20]:
-            print(f"  {reply['source']} {reply['label']:>10s} "
+            print(f"  {reply['source']:34s} asked={trip['asked']}B "
                   f"visible={trip['visible']}B")
 
     for reply, trip in loop_hits[: args.show]:

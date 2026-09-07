@@ -67,14 +67,16 @@ public protocol Watchdog: Sendable {
     static var kind: WatchdogKind { get }
     mutating func observe(_ chunk: String, at instant: ContinuousClock.Instant) -> WatchdogVerdict
     mutating func check(at instant: ContinuousClock.Instant) -> WatchdogVerdict
-    mutating func finish(visibleBytes: Int, finishReason: String) -> WatchdogVerdict
+    mutating func finish(visibleBytes: Int, requestBytes: Int,
+                         finishReason: String) -> WatchdogVerdict
 }
 
 public extension Watchdog {
     mutating func observe(_ chunk: String,
                           at instant: ContinuousClock.Instant) -> WatchdogVerdict { .fine }
     mutating func check(at instant: ContinuousClock.Instant) -> WatchdogVerdict { .fine }
-    mutating func finish(visibleBytes: Int, finishReason: String) -> WatchdogVerdict { .fine }
+    mutating func finish(visibleBytes: Int, requestBytes: Int,
+                         finishReason: String) -> WatchdogVerdict { .fine }
 }
 
 /// The whole configuration surface. Off by default, and observation-only
@@ -110,6 +112,17 @@ public struct WatchdogConfiguration: Sendable, Equatable {
     /// a stub. Roughly 24 tokens at four bytes a token; see `StubWatchdog`
     /// for why the rule is written in bytes rather than tokens.
     public var stubVisibleBytes: Int
+    /// Bytes the last user message must reach before a short reply counts as
+    /// a stub.
+    ///
+    /// Without this the rule fires on "Say OK." answered with "OK.", which
+    /// is exactly what it did on the first request of the first observation
+    /// run: the harness's readiness probe is that shape. A short answer to a
+    /// short question is an answer, and no rule that ignores the question
+    /// can tell the two apart. Two hundred bytes separates the recorded
+    /// corpus cleanly -- the probe is 7 bytes, every real book request is
+    /// 657 or more -- and over 289 recorded exchanges it flags none.
+    public var stubAskedBytes: Int
     /// Identical tool calls in one request's history before it is a loop.
     public var pingPongRepeats: Int
 
@@ -120,6 +133,7 @@ public struct WatchdogConfiguration: Sendable, Equatable {
                 loopWindowBytes: Int = 64,
                 loopHistoryBytes: Int = 1_200,
                 stubVisibleBytes: Int = 96,
+                stubAskedBytes: Int = 200,
                 pingPongRepeats: Int = 3) {
         self.isEnabled = isEnabled
         self.acting = acting
@@ -131,6 +145,7 @@ public struct WatchdogConfiguration: Sendable, Equatable {
         // supposed to contain.
         self.loopHistoryBytes = max(self.loopWindowBytes * 2, loopHistoryBytes)
         self.stubVisibleBytes = max(0, stubVisibleBytes)
+        self.stubAskedBytes = max(0, stubAskedBytes)
         self.pingPongRepeats = max(2, pingPongRepeats)
     }
 

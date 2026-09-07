@@ -63,10 +63,12 @@ public struct WatchdogSet: Sendable {
         record(StallWatchdog.kind, stall.check(at: instant))
     }
 
-    public mutating func finish(visibleBytes: Int, finishReason: String) {
+    public mutating func finish(visibleBytes: Int, requestBytes: Int,
+                                finishReason: String) {
         guard configuration.isEnabled else { return }
         record(StubWatchdog.kind,
-               stub.finish(visibleBytes: visibleBytes, finishReason: finishReason))
+               stub.finish(visibleBytes: visibleBytes, requestBytes: requestBytes,
+                           finishReason: finishReason))
     }
 
     /// A ping-pong report from the incoming request (B2), folded in so
