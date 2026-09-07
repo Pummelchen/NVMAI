@@ -478,6 +478,7 @@ public actor MemoryService {
                                    in context: MemorySessionContext) async -> Int {
         let store = await activeStore(for: context.scope)
         var written = 0
+        var held = 0
         var unchanged = 0
         for record in records {
             // A fact about the person rather than the project goes to the
@@ -514,14 +515,28 @@ public actor MemoryService {
             stamped.sourceSession = context.session.id
             do {
                 if let continuity = store as? ContinuityStore {
-                    if try await continuity.set(stamped, in: context.scope,
-                                                flaggingReversions: true) {
+                    switch try await continuity.set(
+                        stamped, in: context.scope,
+                        guarding: configuration.guardsUserFacts,
+                        flaggingReversions: true) {
+                    case .stored:
+                        written += 1
+                    case .reverted:
                         log(.reversionFlagged(key: stamped.key.rawValue))
+                        written += 1
+                    case .heldByGuard:
+                        // Not written: the person said otherwise and the model
+                        // did not. The address is disputed, so the next
+                        // session is shown both rather than one of them. The
+                        // value that was kept stays out of the log, which
+                        // never carries a memory's contents.
+                        log(.guardHeld(key: stamped.key.rawValue))
+                        held += 1
                     }
                 } else {
                     try await store.set(stamped, in: context.scope)
+                    written += 1
                 }
-                written += 1
             } catch {
                 log(.toolFailed(tool: "consolidation", detail: "\(error)"))
             }
@@ -578,6 +593,9 @@ public enum MemoryLogEvent: Sendable, Equatable {
     case swept(removed: [String], reason: String)
     /// A consolidation wrote a value the key had before; it is now disputed.
     case reversionFlagged(key: String)
+    /// The guard refused a model-derived write over what the person asserted.
+    /// The person's value stays active and the address is disputed.
+    case guardHeld(key: String)
     /// Facts a consolidation returned that already held the same value.
     case unchangedSkipped(session: String, count: Int)
     /// A consolidation wrote a fact about the person to the shared workspace.
@@ -608,6 +626,8 @@ public enum MemoryLogEvent: Sendable, Equatable {
             return "journal session=\(session) turn=\(index) \(bytes)B"
         case .reversionFlagged(let key):
             return "memory reversion flagged as disputed: \(key)"
+        case .guardHeld(let key):
+            return "memory guard kept the user's fact, marked disputed: \(key)"
         case .sharedFactWritten(let key):
             return "memory shared fact written for every project: \(key)"
         case .unchangedSkipped(let session, let count):

@@ -61,7 +61,7 @@ public actor ContinuityStore: MemoryStore {
                                           namespace: address.namespace,
                                           key: address.key,
                                           value: normalized.value,
-                                          author: .model,
+                                          author: Self.author(of: normalized),
                                           importance: normalized.importance,
                                           confidence: normalized.confidence,
                                           tags: normalized.tags)
@@ -70,7 +70,7 @@ public actor ContinuityStore: MemoryStore {
                                           namespace: address.namespace,
                                           key: address.key,
                                           value: normalized.value,
-                                          author: .model,
+                                          author: Self.author(of: normalized),
                                           importance: normalized.importance,
                                           confidence: normalized.confidence,
                                           tags: normalized.tags)
@@ -247,6 +247,59 @@ public actor ContinuityStore: MemoryStore {
     ///
     /// Returns true when a reversion was flagged.
     @discardableResult
+    /// Who a record is attributed to. The person's own statements are the
+    /// only thing in a transcript that is not the model's own output, and
+    /// the guard is built entirely on being able to tell them apart.
+    static func author(of record: MemoryRecord) -> ProvenanceAuthor {
+        record.isUserAsserted ? .user : .model
+    }
+
+    /// The outcome of a guarded write, for the caller to log.
+    public enum GuardedWrite: Sendable, Equatable {
+        /// Written normally.
+        case stored
+        /// Written, and it reverted an earlier value, so the address is
+        /// disputed.
+        case reverted
+        /// Refused: the model derived this, the store holds what the person
+        /// said, and the two disagree. The person's value stays active and
+        /// the address is disputed so the next session is shown the conflict
+        /// rather than being quietly handed one side of it.
+        case heldByGuard(existing: String)
+    }
+
+    /// `set`, with the precedence rule the guard adds.
+    ///
+    /// A user-asserted fact may always be replaced by a newer user-asserted
+    /// one -- that is how a state the person changes ("the inn burned in
+    /// chapter 34") reaches the store. What is refused is the model
+    /// overwriting the person, which is the direction that measured as the
+    /// single largest source of wrong facts.
+    public func set(_ record: MemoryRecord, in scope: MemoryScope,
+                    guarding: Bool,
+                    flaggingReversions: Bool) async throws -> GuardedWrite {
+        guard guarding, !record.isUserAsserted else {
+            let reverted = try await set(record, in: scope,
+                                         flaggingReversions: flaggingReversions)
+            return reverted ? .reverted : .stored
+        }
+        let taskID = try await task(for: scope)
+        let address = Self.address(for: Self.normalize(record).key)
+        let active = await engine.recall(taskID: taskID,
+                                         namespace: address.namespace,
+                                         key: address.key)
+        if let active, active.provenance?.author == .user, active.status != .archived,
+           Self.fold(active.value) != Self.fold(record.value) {
+            _ = try? await engine.dispute(taskID: taskID,
+                                          namespace: address.namespace,
+                                          key: address.key)
+            return .heldByGuard(existing: active.value)
+        }
+        let reverted = try await set(record, in: scope,
+                                     flaggingReversions: flaggingReversions)
+        return reverted ? .reverted : .stored
+    }
+
     public func set(_ record: MemoryRecord, in scope: MemoryScope,
                     flaggingReversions: Bool) async throws -> Bool {
         guard flaggingReversions else { try await set(record, in: scope); return false }

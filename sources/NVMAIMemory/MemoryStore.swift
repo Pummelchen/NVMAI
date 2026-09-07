@@ -146,6 +146,15 @@ public struct MemoryRecord: Sendable, Codable, Equatable {
     /// stores it in the user's shared workspace instead of the project's.
     public var isGlobal: Bool = false
 
+    /// The person said this, rather than the model having derived it from
+    /// its own output. Consolidation marks it from the transcript, where the
+    /// user's turns are labelled. With the guard on, a model-derived write
+    /// never silently supersedes one of these: the disagreement is recorded
+    /// and shown instead, because a model that invents a fact and then
+    /// overwrites what it was told is the failure this whole flag exists to
+    /// stop.
+    public var isUserAsserted: Bool = false
+
     public init(key: MemoryKey,
                 value: String,
                 importance: Double? = nil,

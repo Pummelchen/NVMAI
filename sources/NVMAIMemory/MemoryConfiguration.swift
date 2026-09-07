@@ -146,6 +146,13 @@ public struct MemoryConfiguration: Sendable, Equatable {
     /// that the town is Ashgrove" and a one-line confirmation is about two
     /// hundred characters and is exactly what must be kept.
     public var consolidationMinimumCharacters: Int
+    /// The precedence rule: a model-derived fact never silently supersedes
+    /// one the person asserted; the disagreement is recorded and shown
+    /// instead. Off until the labelling it rests on has been measured -- a
+    /// mislabelled invention would be *protected*, which is worse than
+    /// today's behaviour rather than merely different.
+    public var guardsUserFacts: Bool
+
     /// Serve memory from process-local storage when the journal cannot be written,
     /// so a session still has working memory. It does not survive restart,
     /// and the model is told which one it is talking to.
@@ -167,6 +174,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
                 consolidationIdleSeconds: Double = 30,
                 consolidationMaximumTurns: Int = 40,
                 consolidationMinimumCharacters: Int = 150,
+                guardsUserFacts: Bool = false,
                 degradesToLocalStore: Bool = true) {
         self.isEnabled = isEnabled
         self.storage = storage
@@ -184,6 +192,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
         self.consolidationIdleSeconds = max(0, consolidationIdleSeconds)
         self.consolidationMaximumTurns = max(1, consolidationMaximumTurns)
         self.consolidationMinimumCharacters = max(0, consolidationMinimumCharacters)
+        self.guardsUserFacts = guardsUserFacts
         self.degradesToLocalStore = degradesToLocalStore
     }
 
@@ -276,6 +285,9 @@ public struct MemoryConfiguration: Sendable, Equatable {
         }
         if let value = environment["NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS"].flatMap(Double.init) {
             configuration.consolidationIdleSeconds = max(0, value)
+        }
+        if let value = environment["NVMAI_MEMORY_GUARD"] {
+            configuration.guardsUserFacts = value != "0"
         }
         if let value = environment["NVMAI_MEMORY_LOCAL_FALLBACK"] {
             configuration.degradesToLocalStore = value != "0"

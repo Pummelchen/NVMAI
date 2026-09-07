@@ -93,8 +93,13 @@ enum ServerMemory {
             + "group of numbers or attributes is several keys, not one blob. Booleans "
             + "are true or false.\n\n"
             + "Output only a JSON array, in a ```json block, of objects with keys "
-            + "\"key\", \"value\" and \"importance\" (0 to 1; fixed attributes and "
-            + "rules high, passing state lower). Keys are lowercase path-like names "
+            + "\"key\", \"value\", \"importance\" (0 to 1; fixed attributes and "
+            + "rules high, passing state lower) and \"source\". Set \"source\" to "
+            + "\"user\" when the fact is something the USER stated or required, and "
+            + "\"assistant\" when it comes from the assistant's own output. This is a "
+            + "labelling question about where the fact appears in the transcript "
+            + "above, not a judgement about whether it is true: if the USER wrote it, "
+            + "it is \"user\". Keys are lowercase path-like names "
             + "such as `characters/marcus/eyes`, `decisions/storage`, `state/inn` or "
             + "`rules/weather`. A fact about the PERSON rather than this project -- a "
             + "convention they want everywhere, their language, their tone, a tool "
@@ -161,6 +166,13 @@ enum ServerMemory {
                     ?? (entry["importance"] as? Int).map(Double.init)
                 var record = MemoryRecord(key: key, value: value, importance: importance)
                 record.isGlobal = (entry["global"] as? Bool) ?? false
+                // Anything but an explicit "user" is the model's own: an
+                // extraction that omits the field, or answers something
+                // unexpected, degrades to today's behaviour rather than to a
+                // protected fact. Guessing the other way would let a
+                // confused label make an invention permanent.
+                record.isUserAsserted =
+                    (entry["source"] as? String)?.lowercased() == "user"
                 records.append(record)
             }
             if !records.isEmpty || parsed.isEmpty { return records }
