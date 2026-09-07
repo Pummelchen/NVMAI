@@ -249,6 +249,22 @@ def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
     text["tie_word_embeddings"] = True
     text["source_repo"] = REPO
     text["source_commit"] = COMMIT
+    # The checkpoint states neither of these: transformers supplies them from
+    # the architecture's own defaults, and a snapshot that inherits a default
+    # it never wrote down is a snapshot whose rotation depends on which
+    # library version reads it. Written explicitly, with the source of the
+    # values named, so a reader here and a reader in a year agree.
+    #
+    # Both match this project's Qwen 3.6 install manifest (`arch.ropeTheta`
+    # 10000000, `arch.partialRotaryFactor` 0.25), which is the same
+    # architecture family, and the Qwen3.8-Flash-Next reference in
+    # `tools/qwen38_reference.py`. They cannot be checked at position 0,
+    # where the rotation is the identity whatever they are, so they are
+    # checked by sequence parity instead.
+    text.setdefault("rope_theta", 10_000_000.0)
+    text.setdefault("partial_rotary_factor", 0.25)
+    text["rope_constants_source"] = ("architecture default; absent from "
+                                     f"{REPO}@{COMMIT[:7]}/config.json")
     overrides = {}
     for name in tensor_names:
         if not name.endswith(".weight"):

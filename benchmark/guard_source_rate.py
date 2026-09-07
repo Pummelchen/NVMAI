@@ -65,6 +65,32 @@ def significant(text: str) -> set[str]:
             if w not in SCAFFOLD and len(w) > 2}
 
 
+# Inflection, not paraphrase. The first two candidates this script produced
+# were both of this shape and both wrong: the bible says "Rosa, hazel eyes"
+# and the extraction wrote "hazels"; the user's session-4 event says "Rosa's
+# inn burns to the ground" and the extraction wrote "burned". Both facts are
+# the user's, and an exact-token comparison called them inventions.
+#
+# A blunt prefix would fix those and blur real differences with them, so this
+# strips the English suffixes that carry no claim instead. It is deliberately
+# generous in one direction only: a value that survives it has no
+# morphological relative anywhere in what the person wrote, which is what an
+# invention looks like. Everything it flags is printed, because "no invented
+# fact labelled user" is a claim a person checks, not a number.
+SUFFIXES = ("ing", "ed", "es", "s", "d")
+
+
+def stem(word: str) -> str:
+    for suffix in SUFFIXES:
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def stems(words: set[str]) -> set[str]:
+    return {stem(w) for w in words}
+
+
 def newest_label() -> str | None:
     runs = sorted(LOGS.glob("memval-scratch-*/book-auto-r*"),
                   key=lambda p: p.stat().st_mtime, reverse=True)
@@ -140,16 +166,30 @@ def main() -> int:
         print(f"{journal} holds no facts")
         return 1
 
+    def score(fact: dict) -> float | None:
+        said = stems(significant(sim.user_text(fact["session"])))
+        words = significant(fact["value"])
+        if not words:
+            return None
+        return len({w for w in words if stem(w) in said}) / len(words)
+
     claimed = [f for f in written if f["user_asserted"]]
     mislabelled, grounded = [], []
     for fact in claimed:
-        said = sim.user_text(fact["session"])
-        words = significant(fact["value"])
-        if not words:
+        overlap = score(fact)
+        if overlap is None:
             continue
-        overlap = len({w for w in words if w in said}) / len(words)
         fact["overlap"] = overlap
         (grounded if overlap >= args.threshold else mislabelled).append(fact)
+
+    # The control. A scorer generous enough to ground anything would report a
+    # perfect run whatever the model did, so the facts labelled *model* are
+    # put through the same test: they are the model's own output, and most of
+    # them should not be traceable to the person's words. If the two rates
+    # are close, this measurement is not measuring anything.
+    derived = [f for f in written if not f["user_asserted"]]
+    derived_scores = [s for s in (score(f) for f in derived) if s is not None]
+    derived_grounded = sum(1 for s in derived_scores if s >= args.threshold)
 
     print(f"{label}: {journal.name}\n")
     print(f"  facts written                {len(written):5d}")
@@ -159,6 +199,12 @@ def main() -> int:
     if claimed:
         rate = len(mislabelled) / len(claimed)
         print(f"  of those, mislabelled        {len(mislabelled):5d}  ({rate:.1%})")
+        if derived_scores:
+            print(f"\n  control: model-labelled facts that would also score as "
+                  f"the user's: {derived_grounded}/{len(derived_scores)} "
+                  f"({derived_grounded / len(derived_scores):.0%})")
+            print("  (a rate near the user rate would mean the test does not "
+                  "discriminate)")
         print(f"\n  gate: under 5% mislabelled -- "
               f"{'MET' if rate < 0.05 else 'NOT MET'}")
         print(f"  gate: no invented fact labelled user -- "
