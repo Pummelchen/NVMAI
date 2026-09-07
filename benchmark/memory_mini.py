@@ -123,7 +123,8 @@ def complete(system: str, user: str, max_tokens: int = 400) -> tuple[str, dict, 
         # before the answer starts. The memory keeper is an extraction job;
         # it does not need to deliberate, and a shadow agent that costs a
         # thousand tokens of reasoning per turn is not a shadow agent.
-        "chat_template_kwargs": {"enable_thinking": False},
+        "chat_template_kwargs": {
+            "enable_thinking": os.environ.get("NVMAI_MINI_THINK") == "1"},
     }).encode()
     request = urllib.request.Request(
         f"http://127.0.0.1:{PORT}/v1/chat/completions", data=body,
@@ -327,7 +328,8 @@ def verify(limit: int = 6) -> None:
                               and book.normalise(key, answers[key]) != truth[key]}
             try:
                 text, _, _ = complete(
-                    VERIFY_SYSTEM, f"FACTS\n{facts}\n\nANSWER\n{given}", max_tokens=200)
+                    VERIFY_SYSTEM, f"FACTS\n{facts}\n\nANSWER\n{given}",
+                    max_tokens=int(os.environ.get("NVMAI_MINI_MAXTOK", "200")))
             except Exception as error:
                 print(f"  {run['name']} s{session}: {error}")
                 continue
@@ -335,8 +337,14 @@ def verify(limit: int = 6) -> None:
             parsed = parse_facts(text.replace("[", '["').replace("]", '"]')) if False else None
             match = re.search(r'"wrong"\s*:\s*\[([^\]]*)\]', text)
             if match:
-                flagged = {name.strip().strip('"\' ') for name in match.group(1).split(",")
-                           if name.strip().strip('"\' ')}
+                # A small model often answers "marcus_eyes: hazel" where the
+                # key alone was asked for. Taking the key prefix is reading
+                # its answer, not grading its formatting.
+                flagged = set()
+                for name in match.group(1).split(","):
+                    name = name.strip().strip('"\' ').split(":")[0].strip()
+                    if name:
+                        flagged.add(name)
             flagged &= set(book.QUIZ_KEYS)
             for key in flagged & actually_wrong:
                 caught += 1
