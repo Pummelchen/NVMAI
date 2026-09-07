@@ -22,7 +22,7 @@ import NVMAI
 /// has no deinit-safe cleanup, so tearing one down per unload would be unsafe;
 /// it also compiles the whole shader library, which would make every reload pay
 /// for a rebuild. It is small next to the weights.
-public actor ManagedModelBackend: ServerInferenceBackend, ResidencyManaging {
+public actor ManagedModelBackend: ServerInferenceBackend, ResidencyManaging, PromptTokenCounting {
     /// Builds a session. Injectable so the residency logic can be tested
     /// against a stub without a model on disk.
     public typealias Loader =
@@ -85,6 +85,15 @@ public actor ManagedModelBackend: ServerInferenceBackend, ResidencyManaging {
         let active = try await acquire()
         defer { release() }
         return try await active.generate(request, onEvent: onEvent)
+    }
+
+    public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        let active = try await acquire()
+        defer { release() }
+        guard let counting = active as? any PromptTokenCounting else {
+            throw ServerRequestError.unsupportedOperation("count_tokens")
+        }
+        return try await counting.countPromptTokens(request)
     }
 
     /// Releases the model on demand. Waits for in-flight requests to drain

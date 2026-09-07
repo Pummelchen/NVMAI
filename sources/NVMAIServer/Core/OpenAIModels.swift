@@ -270,6 +270,12 @@ public enum ServerRequestError: Error, Equatable, Sendable {
     case invalid(message: String, param: String?, code: String)
     case unknownModel
     case queueFull
+    /// A well-formed request for something this backend cannot do at all
+    /// (a token count without a tokenizer, for instance): 501, not 400.
+    case unsupportedOperation(String)
+    /// A stored response named by `previous_response_id` or a path that
+    /// does not exist: 404.
+    case notFound(message: String, param: String?)
 
     public var envelope: OpenAIErrorEnvelope {
         switch self {
@@ -282,6 +288,22 @@ public enum ServerRequestError: Error, Equatable, Sendable {
             OpenAIErrorEnvelope(message: "generation queue is full",
                                 code: "queue_full",
                                 type: "rate_limit_error")
+        case .unsupportedOperation(let operation):
+            OpenAIErrorEnvelope(message: "\(operation) is not supported by this backend",
+                                code: "unsupported_operation",
+                                type: "server_error")
+        case .notFound(let message, let param):
+            OpenAIErrorEnvelope(message: message, param: param, code: "not_found")
+        }
+    }
+
+    /// The HTTP status each error maps to, shared by every API surface.
+    public var httpStatus: Int {
+        switch self {
+        case .invalid: 400
+        case .unknownModel, .notFound: 404
+        case .queueFull: 429
+        case .unsupportedOperation: 501
         }
     }
 }

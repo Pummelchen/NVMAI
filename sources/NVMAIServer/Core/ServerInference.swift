@@ -49,16 +49,30 @@ public struct ServerCompletion: Equatable, Sendable {
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
+    /// The client stop string that ended generation, when one did. OpenAI
+    /// folds this into finish_reason "stop"; the Anthropic Messages API
+    /// distinguishes it as stop_reason "stop_sequence" and names the string.
+    public let stopSequence: String?
 
     public init(content: String,
                 toolCalls: [ParsedToolCall],
                 finishReason: String,
-                usage: OpenAIUsage) {
+                usage: OpenAIUsage,
+                stopSequence: String? = nil) {
         self.content = content
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
+        self.stopSequence = stopSequence
     }
+}
+
+/// A backend that can count the prompt tokens a request would occupy
+/// without generating. Kept apart from `ServerInferenceBackend` so wrappers
+/// and test doubles that cannot count are not forced to pretend; the
+/// Anthropic `count_tokens` endpoint answers 501 when the backend lacks it.
+public protocol PromptTokenCounting: Sendable {
+    func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int
 }
 
 // MARK: - Structured Output Diagnostics (#90)
@@ -467,7 +481,7 @@ private struct RunnerCounterSnapshot {
     let expertStreaming: ExpertStreamingStatistics
 }
 
-public actor ServerModelSession: ServerInferenceBackend {
+public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
     /// Manifest-derived API model identifier used when --model-id is absent.
     public nonisolated let defaultModelID: String
     /// The session's configured context window; the HTTP layer validates
@@ -1172,7 +1186,8 @@ public actor ServerModelSession: ServerInferenceBackend {
             usage: OpenAIUsage(promptTokens: result.prefillTokens,
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
-                               cachedTokens: result.cachedPromptTokens))
+                               cachedTokens: result.cachedPromptTokens),
+            stopSequence: stopMatcher.matchedStop)
     }
 
     /// Publish this turn's KV range to the prompt cache, and persist a snapshot
@@ -1277,6 +1292,14 @@ public actor ServerModelSession: ServerInferenceBackend {
         !tools.isEmpty || messages.contains {
             $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
         }
+    }
+
+    /// Prompt tokens of a request as the chat template would render it. The
+    /// same encoding generation uses, minus the generation.
+    public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        try encodePrompt(
+            messages: request.messages, tools: request.tools,
+            usesToolTemplate: usesToolTemplate(messages: request.messages, tools: request.tools)).count
     }
 
     private func encodePrompt(

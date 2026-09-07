@@ -4,6 +4,9 @@ public struct StreamingStopMatcher: Sendable {
     private let stops: [String]
     private var pending = ""
     public private(set) var isStopped = false
+    /// The stop string that ended the stream, once one has matched. The
+    /// Anthropic Messages API reports it as `stop_sequence`.
+    public private(set) var matchedStop: String?
 
     public init(stops: [String]) {
         self.stops = stops.filter { !$0.isEmpty }
@@ -13,9 +16,10 @@ public struct StreamingStopMatcher: Sendable {
         guard !isStopped else { return "" }
         pending += text
         if let match = earliestMatch(in: pending) {
-            let output = String(pending[..<match])
+            let output = String(pending[..<match.index])
             pending = ""
             isStopped = true
+            matchedStop = match.stop
             return output
         }
         let retained = longestPossibleSuffix(in: pending)
@@ -31,8 +35,9 @@ public struct StreamingStopMatcher: Sendable {
         return pending
     }
 
-    private func earliestMatch(in text: String) -> String.Index? {
-        stops.compactMap { text.range(of: $0)?.lowerBound }.min()
+    private func earliestMatch(in text: String) -> (index: String.Index, stop: String)? {
+        stops.compactMap { stop in text.range(of: stop).map { (index: $0.lowerBound, stop: stop) } }
+            .min { $0.index < $1.index }
     }
 
     /// Longest byte-length suffix of `text` that could be the byte prefix of a
