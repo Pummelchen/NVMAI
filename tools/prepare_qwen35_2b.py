@@ -115,6 +115,32 @@ def quantize_affine(value: np.ndarray, bits: int) -> tuple[np.ndarray, ...]:
 HEAD_BITS = BITS_8      # --head-bits: the tied embedding slot
 WITH_MTP = False        # --mtp: also convert the one-layer draft head
 
+# Tensors carried a width above the build's, because measurement says they
+# are worth it (tools/precision_plan_qwen35.py, against the bf16 source):
+#
+#   kind        err@4    err@8    MB@4   error removed per MB by 4 -> 8
+#   v_proj     0.1231   0.0067       3   0.037
+#   k_proj     0.1173   0.0067       3   0.035
+#   o_proj     0.0967   0.0062      13   0.007
+#   q_proj     0.0903   0.0057      25   0.003
+#   mlp.*      0.094-0.099          151   0.0006
+#
+# K and V are the worst at 4-bit and the smallest, so promoting them is an
+# order of magnitude the best trade on the board -- six megabytes removes
+# 94% of their error. They are also the only projections whose output is
+# cached and reused for every later token: with two KV heads shared by eight
+# query heads, an error there is in the context for the rest of the session,
+# where an error in a feed-forward is spent on one token.
+#
+# Nothing is promoted above 8-bit. At 8-bit every kind measures 0.006 error
+# and 0.99998 direction agreement; bf16 would double the bytes to remove
+# what is already three orders below the 4-bit case.
+PROMOTE_TO_8BIT = (
+    ".self_attn.k_proj",
+    ".self_attn.v_proj",
+)
+PROMOTE = True          # --no-promote: build a uniform-width snapshot
+
 
 def skipped(name: str) -> bool:
     """The vision tower is 297 of the checkpoint's 632 tensors and this
@@ -194,6 +220,10 @@ def quant_bits(name: str, width: int) -> int | None:
         return None
     if name.endswith("embed_tokens.weight"):
         return HEAD_BITS                              # tied: this is the head too
+    if PROMOTE and width < BITS_8:
+        stem = name[: -len(".weight")]
+        if stem.endswith(PROMOTE_TO_8BIT):
+            return BITS_8
     return width
 
 
@@ -379,6 +409,10 @@ def main() -> int:
     ap.add_argument("--head-bits", type=int, choices=(4, 8), default=8,
                     help="tied embedding width (default 8; it is 508M parameters "
                          "and serves as both the embedding and the output head)")
+    ap.add_argument("--no-promote", action="store_true",
+                    help="uniform build width; by default a 4-bit snapshot keeps "
+                         "k_proj and v_proj at 8-bit, which costs 6 MB and removes "
+                         "94%% of their error (tools/precision_plan_qwen35.py)")
     ap.add_argument("--mtp", action="store_true",
                     help="also convert the one-layer mtp.* draft head")
     ap.add_argument("--plan", action="store_true",
@@ -389,9 +423,10 @@ def main() -> int:
                     help="snapshot directory; with two widths, a prefix that gets -4bit/-8bit")
     ap.add_argument("--work", type=Path, help="scratch for in-flight shards")
     args = ap.parse_args()
-    global HEAD_BITS, WITH_MTP
+    global HEAD_BITS, WITH_MTP, PROMOTE
     HEAD_BITS = args.head_bits
     WITH_MTP = args.mtp
+    PROMOTE = not args.no_promote
 
     config = fetch_json("config.json")
     if config.get("model_type") != "qwen3_5":
