@@ -19,6 +19,20 @@ public protocol MemoryStore: Sendable {
     /// Removes a key. Returns whether something was removed.
     @discardableResult
     func delete(_ key: MemoryKey, in scope: MemoryScope) async throws -> Bool
+    /// `set`, subject to the precedence rule: a model-derived write never
+    /// silently supersedes a fact the person asserted.
+    ///
+    /// On the protocol rather than on one implementation because every
+    /// writer has to go through it. The guard was first written only for
+    /// consolidation, and the model's own `memory_set` walked straight past
+    /// it -- a fact the person established could be overwritten by the tool
+    /// call in the very next session, with the guard switched on.
+    func set(_ record: MemoryRecord, in scope: MemoryScope,
+             guarding: Bool) async throws -> GuardedWrite
+    /// `delete`, subject to the same rule. Retiring the person's fact on the
+    /// model's own initiative is the same failure as overwriting it.
+    func delete(_ key: MemoryKey, in scope: MemoryScope,
+                guarding: Bool) async throws -> GuardedDelete
     func exists(_ key: MemoryKey, in scope: MemoryScope) async throws -> Bool
     /// Keys under a prefix, newest first, bounded by `limit`.
     func list(prefix: String, limit: Int, in scope: MemoryScope) async throws -> [MemoryKey]
@@ -288,5 +302,45 @@ public enum MemoryError: Error, Equatable, CustomStringConvertible {
         case .backendUnavailable, .timedOut, .disabled: return true
         case .invalidKey, .invalidScope, .valueTooLarge: return false
         }
+    }
+}
+
+
+/// What a guarded write did. Declared beside the protocol because every
+/// store answers in these terms, whether or not it can enforce anything.
+public enum GuardedWrite: Sendable, Equatable {
+    /// Written normally.
+    case stored
+    /// Written, and it reverted an earlier value, so the address is
+    /// disputed.
+    case reverted
+    /// Refused: the model derived this, the store holds what the person
+    /// said, and the two disagree. The person's value stays active and the
+    /// address is disputed so the next session is shown the conflict rather
+    /// than being quietly handed one side of it.
+    case heldByGuard(existing: String)
+}
+
+public enum GuardedDelete: Sendable, Equatable {
+    case deleted
+    case absent
+    /// Refused: the person asserted this and the model did not.
+    case heldByGuard
+}
+
+public extension MemoryStore {
+    /// A store with no provenance cannot enforce precedence, and pretending
+    /// otherwise would be worse than not having the guard: it would report
+    /// protection that is not there. So it writes, and says plainly that it
+    /// only wrote.
+    func set(_ record: MemoryRecord, in scope: MemoryScope,
+             guarding: Bool) async throws -> GuardedWrite {
+        try await set(record, in: scope)
+        return .stored
+    }
+
+    func delete(_ key: MemoryKey, in scope: MemoryScope,
+                guarding: Bool) async throws -> GuardedDelete {
+        try await delete(key, in: scope) ? .deleted : .absent
     }
 }

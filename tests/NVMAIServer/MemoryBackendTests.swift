@@ -88,6 +88,26 @@ import Testing
         return (MemoryService(configuration: configuration, durableStore: store), configuration)
     }
 
+    /// Every memory-enabled request is rebuilt on the way out of this
+    /// backend, and the rebuild used to drop what the watchdogs saw. Since
+    /// observation is the whole feature's default posture, that silenced it
+    /// entirely whenever memory was on -- which is the configuration the
+    /// observation runs use.
+    @Test func rebuildingTheCompletionKeepsTheWatchdogTrips() async throws {
+        let trip = WatchdogSet.Trip(kind: .loop, message: "a window repeated", acted: false)
+        let watched = ServerCompletion(
+            content: "hi", toolCalls: [], finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2),
+            watchdogTrips: [trip])
+        let inner = ScriptedBackend([watched])
+        let (service, configuration) = service(tools: false)
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+
+        let completion = try await backend.generate(request(), onEvent: { _ in })
+        #expect(completion.watchdogTrips == [trip])
+    }
+
     @Test func installsInstructionsAndToolsWithoutTouchingTheUserMessage() async throws {
         let inner = ScriptedBackend([completion("hi")])
         let (service, configuration) = service(tools: false)

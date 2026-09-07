@@ -218,21 +218,40 @@ public struct StubWatchdog: Watchdog {
 public enum PingPongWatchdog {
     public static let kind = WatchdogKind.pingpong
 
+    /// The rule is a **consecutive** run, not a tally.
+    ///
+    /// A long agent session legitimately reads the same file three times an
+    /// hour apart, and counting every identical call in the history would
+    /// call that a loop. What is never right is the same tool called with
+    /// the same arguments three times in a row with nothing else in
+    /// between: the model is not getting what it needs and is asking again
+    /// identically, which is the failure this watches for.
     public static func inspect(_ messages: [GFTokenizer.Message],
                                configuration: WatchdogConfiguration) -> WatchdogVerdict {
         guard configuration.isEnabled else { return .fine }
-        var counts: [String: Int] = [:]
+        var previous: String?
+        var run = 0
         var worst: (name: String, count: Int)?
         for message in messages {
+            if message.toolCalls.isEmpty {
+                // Anything that is not a tool call breaks the run, except the
+                // tool results that answer one: a user turn, or the
+                // assistant writing prose, means the conversation moved on.
+                // Counting only within the tool-call subsequence would treat
+                // three reads an hour apart as consecutive, which is the
+                // false positive this rule exists to avoid.
+                if message.role != .tool { previous = nil; run = 0 }
+                continue
+            }
             for call in message.toolCalls {
                 let signature = "\(call.name)\u{1}\(canonical(call.arguments))"
-                let count = (counts[signature] ?? 0) + 1
-                counts[signature] = count
-                if count > (worst?.count ?? 0) { worst = (call.name, count) }
+                run = signature == previous ? run + 1 : 1
+                previous = signature
+                if run > (worst?.count ?? 0) { worst = (call.name, run) }
             }
         }
         guard let worst, worst.count >= configuration.pingPongRepeats else { return .fine }
-        return .concern("tool \(worst.name) called \(worst.count) times "
+        return .concern("tool \(worst.name) called \(worst.count) times in a row "
                         + "with identical arguments")
     }
 

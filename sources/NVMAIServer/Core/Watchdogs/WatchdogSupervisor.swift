@@ -35,7 +35,10 @@ public final class WatchdogSupervisor: @unchecked Sendable {
     public var isActive: Bool { configuration.isEnabled }
 
     public var wantsStop: Bool {
-        lock.withLock { set.wantsStop }
+        // Polled between tokens. A disabled feature must not appear on that
+        // path at all, not even as an uncontended lock.
+        guard isActive else { return false }
+        return lock.withLock { set.wantsStop }
     }
 
     public var stopMessage: String? {
@@ -46,9 +49,6 @@ public final class WatchdogSupervisor: @unchecked Sendable {
         lock.withLock { set.explanation }
     }
 
-    public var withholdsTools: Bool {
-        lock.withLock { set.withholdsTools }
-    }
 
     public func resolve(content: String, finishReason: String) -> WatchdogSet.Outcome {
         lock.withLock { set.resolve(content: content, finishReason: finishReason) }
@@ -59,6 +59,7 @@ public final class WatchdogSupervisor: @unchecked Sendable {
     }
 
     public func observe(_ chunk: String, at instant: ContinuousClock.Instant = .now) {
+        guard isActive else { return }
         lock.withLock { set.observe(chunk, at: instant) }
     }
 

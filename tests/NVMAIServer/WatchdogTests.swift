@@ -277,6 +277,46 @@ import Testing
         #expect(PingPongWatchdog.inspect(messages, configuration: observing) != .fine)
     }
 
+    /// A long session legitimately reads the same file more than once. Only
+    /// a consecutive run is a loop; identical calls with work in between are
+    /// a tool being used.
+    @Test func pingPongIgnoresIdenticalCallsWithWorkBetweenThem() {
+        let messages = [
+            message(callingTool: "read_file", arguments: #"{"path":"main.swift"}"#),
+            message(callingTool: "grep", arguments: #"{"q":"publish"}"#),
+            message(callingTool: "read_file", arguments: #"{"path":"main.swift"}"#),
+            message(callingTool: "write_file", arguments: #"{"path":"main.swift"}"#),
+            message(callingTool: "read_file", arguments: #"{"path":"main.swift"}"#),
+        ]
+        #expect(PingPongWatchdog.inspect(messages, configuration: observing) == .fine)
+    }
+
+    /// A user turn between identical calls means the conversation moved on.
+    /// Counting only within the tool-call subsequence would call three reads
+    /// in three separate turns a loop.
+    @Test func pingPongRunIsBrokenByAUserTurn() {
+        var messages: [GFTokenizer.Message] = []
+        for _ in 0..<3 {
+            messages.append(message(callingTool: "read_file",
+                                    arguments: #"{"path":"main.swift"}"#))
+            messages.append(GFTokenizer.Message(role: .user, content: "and now?"))
+        }
+        #expect(PingPongWatchdog.inspect(messages, configuration: observing) == .fine)
+    }
+
+    /// A tool result does not break the run: it is the answer to the call,
+    /// and the model asking again identically right after it is the failure.
+    @Test func pingPongSurvivesTheToolResultsBetweenCalls() {
+        var messages: [GFTokenizer.Message] = []
+        for _ in 0..<3 {
+            messages.append(message(callingTool: "read_file",
+                                    arguments: #"{"path":"main.swift"}"#))
+            messages.append(GFTokenizer.Message(role: .tool, content: "not found",
+                                                toolCallID: "x"))
+        }
+        #expect(PingPongWatchdog.inspect(messages, configuration: observing) != .fine)
+    }
+
     /// The same tool with different arguments is a tool being used.
     @Test func pingPongIgnoresDifferentArguments() {
         let messages = (0..<6).map { index in
@@ -348,22 +388,26 @@ import Testing
         #expect(set.wantsStop == false)
     }
 
-    /// B7: a tool loop has no generation to stop, so acting on it means
-    /// answering this one turn with no tools offered.
-    @Test func actingOnPingPongWithholdsToolsRatherThanStopping() {
-        var set = WatchdogSet(configuration:
-            WatchdogConfiguration(isEnabled: true, acting: [.pingpong]))
-        set.record(pingPong: .concern("tool read_file called 3 times"))
-        #expect(set.withholdsTools)
-        #expect(set.wantsStop == false)
-        #expect(set.explanation?.contains("without tools") == true)
-    }
+    /// Ping-pong reports and never intervenes, whatever the operator asks
+    /// for. The obvious intervention -- answer this turn with no tools --
+    /// leaves a tool-templated prompt with a decoder that allows none, and
+    /// fails the request outright. Naming it in the acting list is therefore
+    /// dropped at parse time rather than honoured into a worse failure.
+    @Test func pingPongNeverActs() {
+        let configuration = WatchdogConfiguration.fromEnvironment([
+            "NVMAI_WATCHDOGS": "1",
+            "NVMAI_WATCHDOG_ACT": "pingpong,loop",
+        ])
+        #expect(configuration.acting == [.loop])
+        #expect(configuration.acts(.pingpong) == false)
 
-    @Test func observedPingPongDoesNotWithholdTools() {
-        var set = WatchdogSet(configuration: WatchdogConfiguration(isEnabled: true))
-        set.record(pingPong: .concern("tool read_file called 3 times"))
-        #expect(set.withholdsTools == false)
+        var set = WatchdogSet(configuration:
+            WatchdogConfiguration(isEnabled: true, acting: Set(WatchdogKind.allCases)))
+        set.record(pingPong: .concern("tool read_file called 3 times in a row"))
         #expect(set.trips.count == 1)
+        #expect(set.trips.first?.acted == false)
+        #expect(set.wantsStop == false)
+        #expect(set.resolve(content: "the answer", finishReason: "stop").note == nil)
     }
 
     /// One report per kind: a loop that continues must not fill the log with
@@ -405,18 +449,6 @@ import Testing
         #expect(outcome.content.hasPrefix("partial answer"))
         #expect(outcome.content.contains("NVMAI stopped this generation"))
         #expect(outcome.content.contains("loop"))
-    }
-
-    /// A turn that only lost its tools was not cut short, so its own finish
-    /// reason stands. Reporting `length` there would tell the client the
-    /// answer is incomplete when it is not.
-    @Test func withholdingToolsKeepsTheRealFinishReason() {
-        var set = WatchdogSet(configuration:
-            WatchdogConfiguration(isEnabled: true, acting: [.pingpong]))
-        set.record(pingPong: .concern("tool read_file called 3 times"))
-        let outcome = set.resolve(content: "the answer", finishReason: "stop")
-        #expect(outcome.finishReason == "stop")
-        #expect(outcome.content.contains("without tools"))
     }
 
     /// Observation changes nothing a client can see. This is what makes

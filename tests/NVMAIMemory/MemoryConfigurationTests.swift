@@ -200,4 +200,21 @@ import Testing
         #expect(tiny.factBytes >= 1 << 20)
         #expect(tiny.logBytes >= 1 << 20)
     }
+
+    /// A feature whose own documentation says it must stay off until its
+    /// labelling is measured must not be switched *on* by an operator
+    /// writing `off`. The parse used to be `!= "0"`.
+    @Test func theGuardIsOffUnlessExplicitlyAskedFor() {
+        for value in ["0", "off", "false", "no", ""] {
+            let configuration = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY_GUARD": value])
+            #expect(configuration.guardsUserFacts == false,
+                    Comment(rawValue: "NVMAI_MEMORY_GUARD=\(value) must not enable it"))
+        }
+        for value in ["1", "on", "true", "TRUE"] {
+            let configuration = MemoryConfiguration.fromEnvironment(["NVMAI_MEMORY_GUARD": value])
+            #expect(configuration.guardsUserFacts,
+                    Comment(rawValue: "NVMAI_MEMORY_GUARD=\(value) must enable it"))
+        }
+        #expect(MemoryConfiguration.fromEnvironment([:]).guardsUserFacts == false)
+    }
 }

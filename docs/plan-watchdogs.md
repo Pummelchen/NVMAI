@@ -236,3 +236,44 @@ a false alarm.
 | Anthropic Messages mapping | deferred to the `api-compat` merge (B9) |
 
 `docs/watchdogs.md` is the user-facing description.
+
+
+## Post-implementation audit (2026-09-08)
+
+**B10 — the ping-pong intervention turned a degraded case into a hard
+failure, and has been removed.** Withholding the tools does not stop the
+prompt being rendered with the tool template: the trip *requires* three tool
+calls in the history, so the template is always in force. The model goes on
+emitting tool calls into a decoder that now allows none of them, the parser
+throws `unknownTool`, and `generate` fails the request — worse than the loop
+it was meant to break, and a direct violation of this module's own rule that
+a watchdog never fails a completion. Rendering the history without the tool
+template is not an alternative: it is what the transcript is written in.
+
+So ping-pong reports and never intervenes. `WatchdogKind.canAct` records
+this, `NVMAI_WATCHDOG_ACT=pingpong` is dropped at parse time rather than
+honoured into a worse failure, and the client, which owns the loop, decides.
+This supersedes B7.
+
+**B11 — watchdog trips were dropped whenever memory was enabled.**
+`MemoryBackend` rebuilds the completion on the way out and did not carry
+`watchdogTrips`, which default to empty. Every memory-enabled request lost
+them. Since observation is the whole feature's default posture — and memory
+enabled is exactly the configuration an observation run uses — this silenced
+the feature in the only setting it was going to be judged in. The first
+observation run was re-done after the fix.
+
+**B12 — the ping-pong run was only broken by a different tool call.** A user
+turn or an assistant reply between two identical calls did not reset it, so
+three reads of the same file in three separate turns counted as consecutive
+— precisely the false positive the rule's own comment said it avoided. Tool
+results still do not break a run, because they are the answer to the call.
+
+**B13 — the watchdog note was written into the prompt-cache entry.** The
+note is server-authored and has no tokens behind it in the KV range, so an
+entry carrying it would have text and KV that disagree, and a continuation
+would splice the difference in.
+
+Also fixed: a window-boundary off-by-one that corrupted the byte-occupancy
+count on the first full window, a history clamp that read the unclamped
+window parameter, and a startup summary printed twice.

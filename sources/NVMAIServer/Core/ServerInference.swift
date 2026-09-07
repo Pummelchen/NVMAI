@@ -966,7 +966,7 @@ public actor ServerModelSession: ServerInferenceBackend {
     /// that closes over eight locals -- hoisting it would mean an
     /// eight-parameter signature for a twenty-line body.
     public func generate(
-        _ incoming: ValidatedChatRequest,
+        _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         // Stage-split measurement (NVMAI_RUNNER_STATS): snapshot the runner's
@@ -1021,23 +1021,22 @@ public actor ServerModelSession: ServerInferenceBackend {
         // B6: an engine-internal generation is never watched. Everything
         // else gets the configured set, which is inert unless the operator
         // turned watchdogs on.
-        let watchdogs = incoming.isEngineInternal
+        let watchdogs = request.isEngineInternal
             ? WatchdogSupervisor.inert
             : WatchdogSupervisor(configuration: WatchdogConfiguration.shared)
         let watchdogTicker = watchdogs.startTicker()
         defer { watchdogTicker?.cancel() }
         // B2: a tool loop shows up in the incoming message history, not in
         // the output stream, so it is judged before anything is generated.
-        if !incoming.isEngineInternal {
+        if !request.isEngineInternal {
             watchdogs.record(pingPong: PingPongWatchdog.inspect(
-                incoming.messages, configuration: watchdogs.configuration))
+                request.messages, configuration: watchdogs.configuration))
         }
-        // B7: and the only intervention that breaks such a loop is to answer
-        // this one turn with no tools offered.
-        let request = watchdogs.withholdsTools
-            ? incoming.replacingMessages(incoming.messages, tools: [])
-            : incoming
-
+        // There is no safe intervention from here -- withholding the tools
+        // leaves a tool-templated prompt with a decoder that allows none,
+        // which fails the request outright. `WatchdogKind.canAct` carries the
+        // reasoning; ping-pong observes, and the client, which owns the loop,
+        // decides.
         let prepared = try preparePrompt(request)
         let promptIDs = prepared.promptIDs
         let cacheRequest = prepared.cacheRequest
@@ -1188,6 +1187,11 @@ public actor ServerModelSession: ServerInferenceBackend {
         // this", and inventing one breaks clients. The mapping and the note
         // live in `WatchdogSet.resolve`, which is testable without a model.
         let outcome = watchdogs.resolve(content: content, finishReason: reason)
+        // The cache entry must carry what was GENERATED. The note is written
+        // by the server after the fact and has no tokens behind it in the KV
+        // range, so publishing it would leave an entry whose text and KV
+        // disagree, and a later continuation would splice the difference in.
+        let generated = content
         if let note = outcome.note {
             content = outcome.content
             reason = outcome.finishReason
@@ -1195,7 +1199,7 @@ public actor ServerModelSession: ServerInferenceBackend {
         }
         publishCacheEntry(
             cacheRequest: cacheRequest,
-            content: content,
+            content: generated,
             calls: calls,
             result: result,
             stopStringFiltered: stopMatcher.isStopped)

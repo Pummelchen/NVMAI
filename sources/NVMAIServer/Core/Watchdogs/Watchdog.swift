@@ -21,6 +21,22 @@ public enum WatchdogKind: String, Sendable, CaseIterable {
     case stall
     case stub
     case pingpong
+
+    /// Whether this watchdog has an intervention at all.
+    ///
+    /// `pingpong` does not, and the reason is worth recording because the
+    /// obvious intervention was tried and is unsafe. The loop lives in the
+    /// request that just arrived, so there is no generation to stop; the
+    /// apparent answer is to answer that turn with no tools offered. But a
+    /// history containing tool calls still renders with the tool template,
+    /// so the model goes on emitting tool calls into a decoder that now
+    /// allows none of them -- and the request fails outright, which is worse
+    /// than the loop and breaks this module's own rule that a watchdog never
+    /// fails a completion. Rendering the history without the tool template
+    /// is not an option either: it is what the transcript is written in.
+    ///
+    /// So ping-pong reports, and the client, which owns the loop, decides.
+    public var canAct: Bool { self != .pingpong }
 }
 
 /// What a detector has to say. `concern` is a detector's strongest verdict;
@@ -110,7 +126,10 @@ public struct WatchdogConfiguration: Sendable, Equatable {
         self.stallSeconds = max(1, stallSeconds)
         self.loopRepeats = max(2, loopRepeats)
         self.loopWindowBytes = max(16, loopWindowBytes)
-        self.loopHistoryBytes = max(loopWindowBytes * 2, loopHistoryBytes)
+        // Against the clamped window, not the parameter: otherwise a small
+        // window argument leaves a history shorter than the window it is
+        // supposed to contain.
+        self.loopHistoryBytes = max(self.loopWindowBytes * 2, loopHistoryBytes)
         self.stubVisibleBytes = max(0, stubVisibleBytes)
         self.pingPongRepeats = max(2, pingPongRepeats)
     }
@@ -118,7 +137,7 @@ public struct WatchdogConfiguration: Sendable, Equatable {
     public static let off = WatchdogConfiguration()
 
     public func acts(_ kind: WatchdogKind) -> Bool {
-        isEnabled && acting.contains(kind)
+        isEnabled && kind.canAct && acting.contains(kind)
     }
 
     /// Read once at startup and held as a static. Per-call
@@ -137,7 +156,8 @@ public struct WatchdogConfiguration: Sendable, Equatable {
             configuration.acting = Set(list
                 .split(separator: ",")
                 .compactMap { WatchdogKind(rawValue: $0.trimmingCharacters(in: .whitespaces)
-                    .lowercased()) })
+                    .lowercased()) }
+                .filter(\.canAct))
         }
         if let value = environment["NVMAI_WATCHDOG_STALL_SECONDS"].flatMap(Double.init) {
             configuration.stallSeconds = max(1, value)
@@ -157,5 +177,14 @@ public struct WatchdogConfiguration: Sendable, Equatable {
             .map(\.rawValue)
             .joined(separator: ",")
         return "watchdogs=act(\(names))"
+    }
+}
+
+
+public extension WatchdogConfiguration {
+    /// Say what is watching, at startup, on the channel a server log
+    /// actually captures.
+    func announce() {
+        ServerLog.watchdogStartup(summary)
     }
 }

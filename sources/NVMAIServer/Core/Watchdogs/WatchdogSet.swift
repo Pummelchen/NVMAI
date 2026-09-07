@@ -29,11 +29,7 @@ public struct WatchdogSet: Sendable {
     public private(set) var trips: [Trip] = []
     /// Set when a watchdog that is allowed to act has tripped mid-stream.
     public private(set) var stopMessage: String?
-    /// Set when ping-pong is allowed to act. B7: there is no generation to
-    /// stop -- the loop is in the request that just arrived -- so the only
-    /// intervention that breaks it is to answer this one turn without tools,
-    /// which forces the model to use what it already has.
-    public private(set) var withheldToolsMessage: String?
+
 
     public init(configuration: WatchdogConfiguration) {
         self.configuration = configuration
@@ -77,13 +73,10 @@ public struct WatchdogSet: Sendable {
     /// every watchdog result reaches the log by one path.
     public mutating func record(pingPong verdict: WatchdogVerdict) {
         guard configuration.isEnabled, let message = verdict.message else { return }
-        let acts = configuration.acts(PingPongWatchdog.kind)
-        trips.append(Trip(kind: PingPongWatchdog.kind, message: message, acted: acts))
-        if acts { withheldToolsMessage = message }
+        // `acted` is always false: ping-pong has no safe intervention, and
+        // `WatchdogKind.canAct` records why.
+        trips.append(Trip(kind: PingPongWatchdog.kind, message: message, acted: false))
     }
-
-    /// Whether this turn should be answered with no tools offered.
-    public var withholdsTools: Bool { withheldToolsMessage != nil }
 
     private mutating func record(_ kind: WatchdogKind, _ verdict: WatchdogVerdict) {
         guard let message = verdict.message else { return }
@@ -112,8 +105,6 @@ public struct WatchdogSet: Sendable {
             return Outcome(content: content, finishReason: finishReason, note: nil)
         }
         // B4: `length` is the nearest honest reason either protocol offers.
-        // A generation that a watchdog stopped really was cut short; one
-        // that merely lost its tools was not, and keeps its own reason.
         let reason = stopMessage == nil ? finishReason : "length"
         return Outcome(content: content + explanation,
                        finishReason: reason,
@@ -129,9 +120,6 @@ public struct WatchdogSet: Sendable {
         var notes: [String] = []
         if let stopMessage {
             notes.append("[NVMAI stopped this generation: \(stopMessage).]")
-        }
-        if let withheldToolsMessage {
-            notes.append("[NVMAI answered without tools: \(withheldToolsMessage).]")
         }
         guard !notes.isEmpty else { return nil }
         return "\n\n" + notes.joined(separator: " ")

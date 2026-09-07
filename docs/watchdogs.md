@@ -16,7 +16,7 @@ a generation is a second, separate opt-in, per watchdog.
 | `loop` | a 64-byte window of the output repeated six times inside the last 1,200 bytes | Qwen 0.8B repeating "Wait, I need to check the facts again" until its 600-token budget died; a C99 reply emitting the same `SDL_SetRenderDrawColor` line dozens of times |
 | `stall` | no visible token for 90 s, counted from the **first** token | orphaned servers during harness bring-up: a bound port that never produced a token |
 | `stub` | finished normally, no tool call, under 96 visible bytes | Ornith's C99 stage returning forty tokens of empty `<tool_call>` markup where a program belonged |
-| `pingpong` | the same tool called with identical arguments three times in the incoming message history | a tool loop that exhausted its rounds and returned a 31-token preamble as the answer |
+| `pingpong` | the same tool called with identical arguments three times in a row in the incoming message history | a tool loop that exhausted its rounds and returned a 31-token preamble as the answer |
 
 ## Configuration
 
@@ -42,11 +42,19 @@ honest reason for "the server stopped this", and inventing one breaks
 clients — so the reason is the nearest existing value and the truth is told
 in the one place that cannot break anything, the content itself.
 
-`pingpong` is the exception. There is nothing to stop: the loop is in the
-request that just arrived. Acting on it means answering that one turn with
-no tools offered, which forces the model to use what it already has, and the
-appended note says so. The finish reason is untouched, because that answer
-was not cut short.
+`pingpong` never intervenes, whatever the operator asks for. There is
+nothing to stop — the loop is in the request that just arrived — and the
+obvious intervention was tried and is unsafe: withholding the tools leaves
+the prompt still rendered with the tool template, because the trip requires
+three tool calls in the history, so the model goes on emitting tool calls
+into a decoder that now allows none of them and the request fails outright.
+That is worse than the loop. Naming `pingpong` in `NVMAI_WATCHDOG_ACT` is
+dropped at parse time rather than honoured into a worse failure. It reports,
+and the client, which owns the loop, decides.
+
+A run is consecutive: a user turn or an assistant reply between two
+identical calls resets it, because the conversation moved on. Tool results
+do not, because they are the answer to the call being repeated.
 
 ## What they never do
 
@@ -133,7 +141,7 @@ programs, and real coding sessions are where the risk lives.
 
 ## Testing
 
-`tests/NVMAIServer/WatchdogTests.swift` — 38 tests over synthetic streams,
+`tests/NVMAIServer/WatchdogTests.swift` — 39 tests over synthetic streams,
 no model, fully deterministic. Roughly half are false-positive cases,
 because that is the half that costs a user an answer.
 

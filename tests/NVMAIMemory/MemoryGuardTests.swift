@@ -118,6 +118,82 @@ import Testing
         #expect(outcome == .stored)
     }
 
+    // MARK: every writer, not just consolidation
+
+    /// The guard was first written for consolidation alone, and the model's
+    /// own `memory_set` walked straight past it: with the guard on, a fact
+    /// the person established could be overwritten by a tool call in the
+    /// very next session. Every writer goes through the rule now.
+    @Test func aModelToolWriteDoesNotOverwriteTheUser() async throws {
+        let (store, scope) = try await store()
+        _ = try await store.set(try record("rules/language", "German", user: true),
+                                in: scope, guarding: true, flaggingReversions: true)
+        let outcome = try await store.set(
+            try record("rules/language", "English", user: false),
+            in: scope, guarding: true)
+
+        #expect(outcome == .heldByGuard(existing: "German"))
+        let held = try await store.get(try MemoryKey(validating: "rules/language"), in: scope)
+        #expect(held?.value == "German")
+    }
+
+    /// Retiring the person's fact on the model's initiative is the same
+    /// failure as overwriting it, and gets the same answer.
+    @Test func aModelToolDeleteDoesNotRemoveTheUsersFact() async throws {
+        let (store, scope) = try await store()
+        _ = try await store.set(try record("rules/ferry", "Sundays only", user: true),
+                                in: scope, guarding: true, flaggingReversions: true)
+        let outcome = try await store.delete(try MemoryKey(validating: "rules/ferry"),
+                                             in: scope, guarding: true)
+
+        #expect(outcome == .heldByGuard)
+        let kept = try await store.get(try MemoryKey(validating: "rules/ferry"), in: scope)
+        #expect(kept?.value == "Sundays only")
+        #expect(kept?.isDisputed == true)
+    }
+
+    /// A fact the model wrote is the model's to delete.
+    @Test func aModelToolDeleteRemovesTheModelsOwnFact() async throws {
+        let (store, scope) = try await store()
+        _ = try await store.set(try record("state/draft", "chapter 3", user: false),
+                                in: scope, guarding: true, flaggingReversions: true)
+        let outcome = try await store.delete(try MemoryKey(validating: "state/draft"),
+                                             in: scope, guarding: true)
+        #expect(outcome == .deleted)
+    }
+
+    /// Authority has to survive a *read*, or every read-modify-write quietly
+    /// relabels the person's fact as the model's. `append` is one, and
+    /// without this a single append disarmed the guard on that address for
+    /// good.
+    @Test func authoritySurvivesAReadAndAnAppend() async throws {
+        let (store, scope) = try await store()
+        _ = try await store.set(try record("rules/style", "no semicolons", user: true),
+                                in: scope, guarding: true, flaggingReversions: true)
+
+        let read = try await store.get(try MemoryKey(validating: "rules/style"), in: scope)
+        #expect(read?.isUserAsserted == true, "a read must not launder authorship")
+
+        _ = try await store.append("and no tabs",
+                                   to: try MemoryKey(validating: "rules/style"), in: scope)
+        let outcome = try await store.set(
+            try record("rules/style", "semicolons everywhere", user: false),
+            in: scope, guarding: true)
+        #expect(outcome != .stored, "an append must not disarm the guard")
+    }
+
+    /// With the guard off, a tool write behaves exactly as it did before the
+    /// guard existed.
+    @Test func guardOffLetsAToolWriteThrough() async throws {
+        let (store, scope) = try await store()
+        _ = try await store.set(try record("rules/language", "German", user: true),
+                                in: scope, guarding: false, flaggingReversions: true)
+        let outcome = try await store.set(
+            try record("rules/language", "English", user: false),
+            in: scope, guarding: false)
+        #expect(outcome == .stored)
+    }
+
     /// Authority has to survive the write, because the rule reads it back on
     /// the *next* write rather than at the time. A user fact written, then
     /// challenged much later, must still be protected.

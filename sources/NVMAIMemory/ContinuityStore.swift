@@ -255,19 +255,6 @@ public actor ContinuityStore: MemoryStore {
     }
 
     /// The outcome of a guarded write, for the caller to log.
-    public enum GuardedWrite: Sendable, Equatable {
-        /// Written normally.
-        case stored
-        /// Written, and it reverted an earlier value, so the address is
-        /// disputed.
-        case reverted
-        /// Refused: the model derived this, the store holds what the person
-        /// said, and the two disagree. The person's value stays active and
-        /// the address is disputed so the next session is shown the conflict
-        /// rather than being quietly handed one side of it.
-        case heldByGuard(existing: String)
-    }
-
     /// `set`, with the precedence rule the guard adds.
     ///
     /// A user-asserted fact may always be replaced by a newer user-asserted
@@ -275,6 +262,40 @@ public actor ContinuityStore: MemoryStore {
     /// chapter 34") reaches the store. What is refused is the model
     /// overwriting the person, which is the direction that measured as the
     /// single largest source of wrong facts.
+    /// The protocol's guarded write. Reversion flagging is off here: that
+    /// heuristic was tuned on consolidation, where a value returning to one
+    /// it already had is almost always a re-derivation. A deliberate tool
+    /// call is not the same act, and flagging it would put a dispute marker
+    /// in front of the next session for a write the model meant to make.
+    public func set(_ record: MemoryRecord, in scope: MemoryScope,
+                    guarding: Bool) async throws -> GuardedWrite {
+        try await set(record, in: scope, guarding: guarding, flaggingReversions: false)
+    }
+
+    /// The protocol's guarded delete. A model retiring a fact the person
+    /// established is the same failure as overwriting it, and the same
+    /// answer: the fact stays, the disagreement is recorded, and the next
+    /// session sees both.
+    public func delete(_ key: MemoryKey, in scope: MemoryScope,
+                       guarding: Bool) async throws -> GuardedDelete {
+        guard guarding else {
+            return try await delete(key, in: scope) ? .deleted : .absent
+        }
+        let taskID = try await task(for: scope)
+        let address = Self.address(for: key)
+        let active = await engine.recall(taskID: taskID,
+                                         namespace: address.namespace,
+                                         key: address.key)
+        if let active, active.provenance?.author == .user,
+           active.status.isEligibleForContext {
+            _ = try? await engine.dispute(taskID: taskID,
+                                          namespace: address.namespace,
+                                          key: address.key)
+            return .heldByGuard
+        }
+        return try await delete(key, in: scope) ? .deleted : .absent
+    }
+
     public func set(_ record: MemoryRecord, in scope: MemoryScope,
                     guarding: Bool,
                     flaggingReversions: Bool) async throws -> GuardedWrite {
@@ -349,6 +370,11 @@ public actor ContinuityStore: MemoryStore {
                                   createdAt: item.createdAt,
                                   updatedAt: item.updatedAt)
         record.isDisputed = item.status == .disputed
+        // Authority has to survive a read. Without this, every
+        // read-modify-write -- `append` is one -- rewrites a fact the person
+        // asserted as though the model had derived it, and the guard can
+        // never fire on that address again.
+        record.isUserAsserted = item.provenance?.author == .user
         return record
     }
 

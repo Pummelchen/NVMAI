@@ -118,7 +118,8 @@ public enum MemoryTools {
                                store: any MemoryStore,
                                scope: MemoryScope,
                                session: MemorySession,
-                               limits: MemoryLimits) async -> MemoryToolResult {
+                               limits: MemoryLimits,
+                               guarding: Bool = false) async -> MemoryToolResult {
         do {
             switch name {
             case "memory_get":
@@ -140,8 +141,21 @@ public enum MemoryTools {
                     confidence: arguments["confidence"]?.doubleValue,
                     tags: arguments["tags"]?.stringArrayValue ?? [],
                     sourceSession: session.id)
-                try await store.set(record, in: scope)
-                return .ok(["stored": .bool(true), "key": .string(key.rawValue)])
+                // The model's own write is a model-derived fact like any
+                // other, so it goes through the same precedence rule
+                // consolidation does. `held` is reported rather than hidden:
+                // a tool that says it stored something it did not is the one
+                // failure this whole surface exists to avoid.
+                switch try await store.set(record, in: scope, guarding: guarding) {
+                case .stored, .reverted:
+                    return .ok(["stored": .bool(true), "key": .string(key.rawValue)])
+                case .heldByGuard(let existing):
+                    return .ok(["stored": .bool(false), "held": .bool(true),
+                                "key": .string(key.rawValue),
+                                "reason": .string("the user stated this; your value "
+                                    + "was not stored and the disagreement is recorded"),
+                                "current": .string(existing)])
+                }
 
             case "memory_append":
                 let key = try key(from: arguments)
@@ -154,8 +168,17 @@ public enum MemoryTools {
 
             case "memory_delete":
                 let key = try key(from: arguments)
-                let removed = try await store.delete(key, in: scope)
-                return .ok(["deleted": .bool(removed), "key": .string(key.rawValue)])
+                switch try await store.delete(key, in: scope, guarding: guarding) {
+                case .deleted:
+                    return .ok(["deleted": .bool(true), "key": .string(key.rawValue)])
+                case .absent:
+                    return .ok(["deleted": .bool(false), "key": .string(key.rawValue)])
+                case .heldByGuard:
+                    return .ok(["deleted": .bool(false), "held": .bool(true),
+                                "key": .string(key.rawValue),
+                                "reason": .string("the user stated this; it was kept "
+                                    + "and the disagreement is recorded")])
+                }
 
             case "memory_list":
                 let prefix = arguments["prefix"]?.stringValue ?? ""

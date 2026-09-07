@@ -70,6 +70,14 @@ enum ServerLog {
         write("memory \(detail)")
     }
 
+    /// The watchdog configuration, once, at startup. On stderr beside the
+    /// memory line rather than in the launcher's banner: the launcher prints
+    /// its own box and an operator reading a server log needs to know what
+    /// was watching without reconstructing the environment.
+    static func watchdogStartup(_ summary: String) {
+        write(summary)
+    }
+
     /// A watchdog trip. Operational only: what was repeated, or what was
     /// too short, is in the reply the user already has, and generated text
     /// does not belong in a log line any more than a memory's contents do.

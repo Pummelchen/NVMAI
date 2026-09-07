@@ -303,3 +303,44 @@ hallucinations).
 4. Job 1 behind `NVMAI_SHADOW=1`, with the store still guarded.
 5. Free-text precision measurement offline.
 6. Jobs 2 and 3 only if the gate passes.
+
+
+## Post-implementation audit (2026-09-08)
+
+An independent read of the implemented guard found four ways a
+model-derived write still reached a fact the person had asserted. The plan
+described the rule correctly; the implementation applied it in one place.
+
+**A7 — every model tool write walked past the guard.** The guarded write
+existed only on `ContinuityStore` and had exactly one caller, consolidation.
+`memory_set` and `memory_delete` used the plain protocol methods, so with
+`NVMAI_MEMORY_GUARD=1` the model could overwrite or retire the person's fact
+by tool call in the very next session. The guarded write and delete are now
+on the `MemoryStore` protocol, which is what makes "every writer" true
+rather than aspirational; a store with no provenance says plainly that it
+only wrote, instead of reporting protection it cannot give.
+
+**A8 — authority did not survive a read.** `record(from:)` restored
+`isDisputed` and not `isUserAsserted`, so every read-modify-write relabelled
+the person's fact as the model's. A single `memory_append` disarmed the
+guard on that address permanently.
+
+**A9 — the disputed marking was deterministically invisible.** Disputing an
+address updates it; the bootstrap's "changed in the most recent session"
+list is sorted by exactly that, so a freshly disputed key is *always* on
+that list — and the marker was rendered only on the other list. The guard
+held the write, recorded the conflict, and then handed the next session the
+surviving value with nothing to say anything was disputed. Since being seen
+is the entire reason for disputing rather than refusing silently, this made
+the feature's visible half a no-op.
+
+**A10 — the person's own facts were the one category never covered.** The
+shared-workspace path took the unguarded write, and the degraded local store
+skipped the guard through a failed cast. Conventions and preferences are the
+most user-asserted things in the store.
+
+**A11 — `NVMAI_MEMORY_GUARD=off` switched the guard on**, because the parse
+was `!= "0"`.
+
+All five are fixed, with a test each. The step-0 gate is unchanged and still
+stands in front of enabling any of it.

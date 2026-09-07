@@ -72,7 +72,8 @@ public enum MemoryPrompt {
             lines.append("")
             lines.append("Changed in the most recent session:")
             for record in bootstrap.recent {
-                lines.append("- `\(record.key.rawValue)`: \(summarize(record.value))")
+                lines.append("- `\(record.key.rawValue)`\(Self.marker(for: record)): "
+                             + "\(summarize(record.value))")
             }
         }
         if !bootstrap.records.isEmpty {
@@ -82,8 +83,8 @@ public enum MemoryPrompt {
                          : "Already known here:")
             let recentKeys = Set(bootstrap.recent.map(\.key))
             for record in bootstrap.records where !recentKeys.contains(record.key) {
-                let marker = record.isDisputed ? " [disputed -- two sessions disagree; settle it]" : ""
-                lines.append("- `\(record.key.rawValue)`\(marker): \(summarize(record.value))")
+                lines.append("- `\(record.key.rawValue)`\(Self.marker(for: record)): "
+                             + "\(summarize(record.value))")
             }
             if bootstrap.omittedCount > 0 {
                 let more = "- ...and \(bootstrap.omittedCount) more"
@@ -98,6 +99,19 @@ public enum MemoryPrompt {
     /// One line per record. The bootstrap says what exists, not what it says;
     /// the full value is a tool call away, and pasting values here is how a
     /// memory system quietly becomes a context dump.
+    /// The disputed marker, wherever a record is rendered.
+    ///
+    /// It has to be on both lists. Disputing an address updates it, and the
+    /// "changed in the most recent session" list is sorted by exactly that,
+    /// so a freshly disputed key is *always* on that list and never on the
+    /// other one. Marking only the other list meant the marker was
+    /// unreachable in practice: the guard held a write, recorded the
+    /// disagreement, and the next session was shown the surviving value with
+    /// nothing to say two sessions disagreed about it.
+    static func marker(for record: MemoryRecord) -> String {
+        record.isDisputed ? " [disputed -- two sessions disagree; settle it]" : ""
+    }
+
     private static func summarize(_ value: String, limit: Int = 200) -> String {
         let flattened = value
             .replacingOccurrences(of: "\n", with: " ")

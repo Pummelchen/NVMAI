@@ -126,7 +126,16 @@ public actor MemoryBackend: ServerInferenceBackend {
                 let finished = ServerCompletion(content: transcript,
                                                 toolCalls: otherCalls,
                                                 finishReason: completion.finishReason,
-                                                usage: completion.usage)
+                                                usage: completion.usage,
+                                                // Rebuilding the completion
+                                                // must not drop what the
+                                                // watchdogs saw: this path
+                                                // runs for every
+                                                // memory-enabled request, so
+                                                // forgetting it here silenced
+                                                // the whole feature whenever
+                                                // memory was on.
+                                                watchdogTrips: completion.watchdogTrips)
                 await journal(request: request, completion: finished, context: context,
                               conversation: conversation, startedAt: startedAt)
                 return finished
@@ -162,7 +171,8 @@ public actor MemoryBackend: ServerInferenceBackend {
                     content: transcript,
                     toolCalls: last.toolCalls.filter { !MemoryTools.isMemoryTool($0.name) },
                     finishReason: transcript.isEmpty ? "length" : last.finishReason,
-                    usage: last.usage)
+                    usage: last.usage,
+                    watchdogTrips: last.watchdogTrips)
                 ServerLog.memory("tool rounds exhausted; answered without tools "
                                  + "session=\(context.session.id)")
                 await journal(request: request, completion: finished, context: context,

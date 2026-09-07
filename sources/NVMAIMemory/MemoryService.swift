@@ -426,7 +426,8 @@ public actor MemoryService {
                                                store: store,
                                                scope: context.scope,
                                                session: context.session,
-                                               limits: configuration.limits)
+                                               limits: configuration.limits,
+                                               guarding: configuration.guardsUserFacts)
         if case .failure(let message) = result {
             log(.toolFailed(tool: name, detail: message))
             // A durable backend that failed sends later work to the local
@@ -441,7 +442,8 @@ public actor MemoryService {
                                                      store: localStore,
                                                      scope: context.scope,
                                                      session: context.session,
-                                                     limits: configuration.limits)
+                                                     limits: configuration.limits,
+                                                     guarding: configuration.guardsUserFacts)
                 }
             }
         } else {
@@ -494,9 +496,18 @@ public actor MemoryService {
                 var stamped = record
                 stamped.sourceSession = context.session.id
                 do {
-                    try await sharedStore.set(stamped, in: sharedScope)
-                    written += 1
-                    log(.sharedFactWritten(key: stamped.key.rawValue))
+                    // The person's own conventions and preferences live here.
+                    // They are the most user-asserted category in the store,
+                    // so the guard has to reach them too.
+                    switch try await sharedStore.set(stamped, in: sharedScope,
+                                                     guarding: configuration.guardsUserFacts) {
+                    case .stored, .reverted:
+                        written += 1
+                        log(.sharedFactWritten(key: stamped.key.rawValue))
+                    case .heldByGuard:
+                        log(.guardHeld(key: stamped.key.rawValue))
+                        held += 1
+                    }
                 } catch {
                     log(.toolFailed(tool: "consolidation", detail: "\(error)"))
                 }
@@ -515,6 +526,9 @@ public actor MemoryService {
             stamped.sourceSession = context.session.id
             do {
                 if let continuity = store as? ContinuityStore {
+                    // The durable store also flags reversions, which the
+                    // protocol method deliberately does not: that heuristic
+                    // belongs to consolidation, not to every writer.
                     switch try await continuity.set(
                         stamped, in: context.scope,
                         guarding: configuration.guardsUserFacts,
@@ -534,7 +548,11 @@ public actor MemoryService {
                         held += 1
                     }
                 } else {
-                    try await store.set(stamped, in: context.scope)
+                    // Degraded to process-local storage: there is no
+                    // provenance to enforce precedence with, and the
+                    // protocol says so rather than pretending.
+                    _ = try await store.set(stamped, in: context.scope,
+                                            guarding: configuration.guardsUserFacts)
                     written += 1
                 }
             } catch {

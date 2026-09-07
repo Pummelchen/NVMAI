@@ -286,8 +286,11 @@ public struct MemoryConfiguration: Sendable, Equatable {
         if let value = environment["NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS"].flatMap(Double.init) {
             configuration.consolidationIdleSeconds = max(0, value)
         }
-        if let value = environment["NVMAI_MEMORY_GUARD"] {
-            configuration.guardsUserFacts = value != "0"
+        if let value = environment["NVMAI_MEMORY_GUARD"]?.lowercased() {
+            // Explicitly, not `!= "0"`. A feature whose own documentation
+            // says it must stay off until its labelling is measured must not
+            // be switched *on* by an operator writing `off`.
+            configuration.guardsUserFacts = value == "1" || value == "on" || value == "true"
         }
         if let value = environment["NVMAI_MEMORY_LOCAL_FALLBACK"] {
             configuration.degradesToLocalStore = value != "0"
