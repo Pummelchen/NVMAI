@@ -225,6 +225,84 @@ import Testing
         }
     }
 
+    // MARK: - the width policy
+
+    /// A snapshot with no layers at all: enough for `CPUQwen35` to
+    /// initialize, which is all the width policy needs, and it exercises the
+    /// real initializer rather than a stand-in.
+    private func writeEmptyModel(hidden: Int = 64) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("empty-model-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        let url = try writeShard([
+            ("language_model.model.norm.weight", "BF16", [hidden],
+             bf16([Float](repeating: 1, count: hidden))),
+        ])
+        try FileManager.default.moveItem(
+            at: url, to: directory.appendingPathComponent("model.safetensors"))
+        let config: [String: Any] = [
+            "hidden_size": hidden, "num_hidden_layers": 0, "num_attention_heads": 1,
+            "num_key_value_heads": 1, "head_dim": hidden, "full_attention_interval": 4,
+            "linear_num_key_heads": 1, "linear_num_value_heads": 1,
+            "linear_key_head_dim": hidden, "linear_value_head_dim": hidden,
+            "linear_conv_kernel_dim": 4, "intermediate_size": hidden,
+            "vocab_size": 8, "rms_norm_eps": 1e-6,
+            "quantization": ["bits": 8, "group_size": 64, "mode": "affine"],
+        ]
+        try JSONSerialization.data(withJSONObject: config)
+            .write(to: directory.appendingPathComponent("config.json"))
+        try JSONSerialization.data(withJSONObject: [
+            "weight_map": ["language_model.model.norm.weight": "model.safetensors"]])
+            .write(to: directory.appendingPathComponent("model.safetensors.index.json"))
+        return directory
+    }
+
+    /// Width is a scheduling decision, and the whole policy is one line:
+    /// narrow while a person is waiting on the main engine, wide in the
+    /// gaps. Measured, four threads costs a 35B generation 31% and one
+    /// costs 3%, so this is the difference between a side-engine and a
+    /// tax on the answer someone asked for.
+    ///
+    /// Exercised through a tiny snapshot rather than the real model, because
+    /// what is being tested is the decision, not the arithmetic.
+    @Test func widthFollowsContention() throws {
+        let directory = try writeEmptyModel()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try CPUQwen35(snapshot: try AffineSnapshot(directory: directory),
+                                  threads: 4)
+        #expect(model.threads == 4, "without a signal the width is whatever was asked for")
+
+        let busy = Busy()
+        model.contention = { busy.value }
+        model.busyThreads = 1
+        model.idleThreads = 4
+
+        busy.value = true
+        model.applyWidthPolicy()
+        #expect(model.threads == 1, "a person is waiting; take one core")
+
+        busy.value = false
+        model.applyWidthPolicy()
+        #expect(model.threads == 4, "nothing waiting; take the performance cores")
+    }
+
+    /// A signal that never fires leaves the width exactly as configured, so
+    /// a caller that does not care about contention is not surprised by it.
+    @Test func noSignalLeavesTheWidthAlone() throws {
+        let directory = try writeEmptyModel()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try CPUQwen35(snapshot: try AffineSnapshot(directory: directory),
+                                  threads: 3)
+        model.applyWidthPolicy()
+        #expect(model.threads == 3)
+    }
+
+    /// unchecked-invariant: written and read only from the test's own thread,
+    /// which is serial; the closure that reads it runs synchronously inside
+    /// the same call.
+    private final class Busy: @unchecked Sendable { var value = false }
+
     // MARK: - the arithmetic between the GEMVs
 
     @Test func rmsNormScalesToUnitRootMeanSquare() {

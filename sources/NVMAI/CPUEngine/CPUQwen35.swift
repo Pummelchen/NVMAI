@@ -23,7 +23,28 @@ public final class CPUQwen35 {
     /// Rows of the GEMVs to split across performance cores. See the note
     /// above: this is the knob that decides what the side-engine costs the
     /// model the person is waiting for.
+    ///
+    /// Set directly for a fixed width, or leave it to `contention` below,
+    /// which is re-read before every token.
     public var threads: Int
+    /// Whether someone is waiting on the main engine right now.
+    ///
+    /// When this is set the width becomes a decision rather than a constant,
+    /// taken once per token: `busyThreads` while a client generation is in
+    /// flight, `idleThreads` otherwise. Per token is the right granularity —
+    /// changing width inside one would gain nothing, and a token is 50 ms.
+    ///
+    /// Nil leaves `threads` alone, which is what the benchmarks want.
+    public var contention: (@Sendable () -> Bool)?
+    /// Measured on this machine: one thread slows a 35B generation by 3%,
+    /// which is inside its own run-to-run spread, and still gives this model
+    /// about 6.7 tokens a second — enough to distil a session or check a
+    /// claim. Two costs 13%, four costs 31%.
+    public var busyThreads = 1
+    /// With nothing waiting, take the performance cores. The four efficiency
+    /// cores add about a gigabyte a second out of forty-five, so asking for
+    /// eight buys nothing and can lose.
+    public var idleThreads: Int
 
     private let prefix = "language_model.model."
     private var position = 0
@@ -58,6 +79,7 @@ public final class CPUQwen35 {
         self.snapshot = snapshot
         configuration = snapshot.configuration
         self.threads = threads ?? Int8AffineGEMV.preferredThreads
+        idleThreads = threads ?? Int8AffineGEMV.preferredThreads
         for layer in 0..<configuration.layers {
             inputNorm.append(try snapshot.floats("\(prefix)layers.\(layer).input_layernorm.weight"))
             postNorm.append(try snapshot.floats(
@@ -94,6 +116,7 @@ public final class CPUQwen35 {
 
     /// Returns the logits over the whole vocabulary.
     public func step(token: Int) throws -> [Float] {
+        applyWidthPolicy()
         var h = try embedding(of: token)
         for layer in 0..<configuration.layers {
             var normalized = h
@@ -113,6 +136,13 @@ public final class CPUQwen35 {
         CPUOps.rmsNorm(&h, gamma: finalNorm, epsilon: configuration.normEpsilon)
         position += 1
         return try head(h)
+    }
+
+    /// Re-decide the width. Called before every token; separate so the
+    /// decision can be tested without a forward pass.
+    public func applyWidthPolicy() {
+        guard let contention else { return }
+        threads = contention() ? busyThreads : idleThreads
     }
 
     // MARK: - blocks

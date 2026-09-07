@@ -938,6 +938,9 @@ struct NVMAIBench {
         let semaphore = DispatchSemaphore(value: 0)
         // GFTokenizer loads asynchronously; this command is a one-shot tool,
         // so it waits rather than restructuring main around it.
+        // unchecked-invariant: written exactly once inside the Task below
+        // and read only after `semaphore.wait()` returns, which the signal
+        // orders after that write. There is no concurrent access.
         final class Box: @unchecked Sendable { var value: GFTokenizer? }
         let box = Box()
         Task {

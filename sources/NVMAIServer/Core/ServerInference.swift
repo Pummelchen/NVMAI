@@ -335,6 +335,27 @@ public protocol ResidencyManaging: Sendable {
     func unload() async -> Bool
 }
 
+/// Whether a client generation is running, readable without awaiting the
+/// coordinator.
+///
+/// The CPU side-engine needs this before every token it produces, from
+/// whatever thread it happens to be on, and `await`ing an actor to decide
+/// how wide to run a GEMV would cost more than the decision is worth.
+///
+/// unchecked-invariant: `depth` is only ever read or written under `lock`.
+public final class GenerationSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var depth = 0
+
+    public init() {}
+
+    /// True while at least one client generation is in flight.
+    public var isBusy: Bool { lock.withLock { depth > 0 } }
+
+    func enter() { lock.withLock { depth += 1 } }
+    func leave() { lock.withLock { depth = max(0, depth - 1) } }
+}
+
 public actor ServerCoordinator {
     private struct Waiter {
         let id: UUID
@@ -346,6 +367,10 @@ public actor ServerCoordinator {
     private var active = false
     private var waiters: [Waiter] = []
     private var shuttingDown = false
+    /// Raised for the duration of every client generation. The side-engine
+    /// reads it to choose its width: one thread while a person is waiting,
+    /// four in the gaps.
+    public nonisolated let generating = GenerationSignal()
 
     public init(queueLimit: Int) {
         self.queueLimit = queueLimit
@@ -381,6 +406,8 @@ public actor ServerCoordinator {
         try Task.checkCancellation()
         try await acquire(onQueued: onQueued)
         defer { release() }
+        generating.enter()
+        defer { generating.leave() }
         return try await operation(prepared)
     }
 

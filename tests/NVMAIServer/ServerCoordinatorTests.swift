@@ -54,4 +54,56 @@ struct ServerCoordinatorTests {
     }
 
     private struct CoordinatorTimeout: Error {}
+
+    /// The side-engine reads this before every token to decide how wide to
+    /// run, from whatever thread it is on, so it has to be readable without
+    /// awaiting the actor — and it has to be accurate, because the whole
+    /// point is not to slow down the answer someone is waiting for.
+    @Test func generationSignalIsRaisedForTheDurationOfAGeneration() async throws {
+        let coordinator = ServerCoordinator(queueLimit: 2)
+        #expect(coordinator.generating.isBusy == false)
+
+        let started = AsyncSemaphore()
+        let release = AsyncSemaphore()
+        let work = Task {
+            try await coordinator.run {
+                await started.signal()
+                await release.wait()
+                return 1
+            }
+        }
+        await started.wait()
+        #expect(coordinator.generating.isBusy, "raised while the generation runs")
+        await release.signal()
+        _ = try await work.value
+        #expect(coordinator.generating.isBusy == false, "and lowered after it")
+    }
+
+    /// It must survive a failing generation too: a signal that stuck high
+    /// after one error would pin the side-engine to one thread forever.
+    @Test func generationSignalIsLoweredWhenTheGenerationThrows() async throws {
+        let coordinator = ServerCoordinator(queueLimit: 2)
+        struct Boom: Error {}
+        _ = try? await coordinator.run { throw Boom() }
+        #expect(coordinator.generating.isBusy == false)
+    }
+}
+
+/// A one-shot signal between two tasks, so the test can hold a generation
+/// open while it observes the flag.
+private actor AsyncSemaphore {
+    private var signalled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        signalled = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+
+    func wait() async {
+        if signalled { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
 }
