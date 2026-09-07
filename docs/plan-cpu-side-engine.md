@@ -80,29 +80,58 @@ what "the CPU is idle, so it is free" would have produced.
 - `tools/qwen35_reference.py` — a stateful numpy reference, and the oracle
   everything below is checked against.
 
-## What does not
+## Where it stands
 
-Everything else. In the order it has to be built:
+The engine runs, and it agrees with the oracle.
 
-1. ~~**Position-0 parity.**~~ The reference now runs, and the converter's
-   output is correct: "Once upon a" → " time", "The capital of France is" →
-   " Paris", "The quick brown fox jumps over the lazy" → " dog", all top-1,
-   on both the 8-bit snapshot and the mixed-precision 4-bit one.
-   `qwen35_reference.py --check` is that test. What remains is agreeing with
-   it from Swift.
-2. **The blocks**, each checked against the reference's own dump before the
-   next is started: RMSNorm, SiLU, the gated MLP, full attention with its
-   fused output gate and partial rotary, and the Gated DeltaNet recurrence
-   with its convolution tail.
-3. **Sequence parity.** The four carried states — the KV cache, the delta
-   rule's recurrent state, the convolution tail — are where a wrong hand-off
-   between tokens hides, and position 0 is blind to all of them. This is
-   also the only thing that can check `rope_theta` and the partial rotary
-   fraction, which the checkpoint does not state and the converter now
-   writes explicitly from the family default.
-4. **Tokenizer and sampler**, reusing what the engine already has.
-5. **Residency and scheduling** — one thread while a client generation is in
-   flight, four in the gaps, per the measurement above.
+`NVMAIBench cpu35 <snapshot>` loads a snapshot and answers the same three
+continuations the numpy reference checks itself with, at both widths. Against
+the reference's own logits over the full 248,320-token vocabulary:
+
+| prompt | max abs difference | cosine |
+| --- | --- | --- |
+| "Once upon a" | 0.00004 | 0.9999999 |
+| "The capital of France is" | 0.00001 | 0.9999999 |
+| "The quick brown fox jumps over the lazy" | 0.00003 | 0.9999999 |
+
+That is float32 rounding order, not different arithmetic. And it is
+*sequence* parity, not just position 0: the eight-token prompt threads the
+KV cache, the delta rule's recurrent state and the convolution tail across
+positions, which is where a wrong hand-off between tokens would hide.
+
+Throughput, on the real model, tracks the synthetic bandwidth probe closely:
+
+| threads | probe predicted | measured |
+| --- | --- | --- |
+| 1 | 7.5 tok/s | 6.2 |
+| 2 | 14.8 | 12.2 |
+| 4 | 27.7 | 20.0 |
+| 8 | 31.6 | 19.1 |
+
+The output is identical at every width, because the threading splits rows
+and rows are independent — there is no reduction order to get wrong.
+
+**The 4-bit snapshot is not worth using here.** It reads half the bytes and
+runs at the same speed, 19.3 against 19.9 tokens a second, because unpacking
+two lanes per byte costs what the saved reads buy back. At equal speed the
+8-bit build is simply more accurate, so 4-bit is for a machine short of
+memory and nothing else.
+
+Loading is instant — 0.02 s — because the snapshot is memory-mapped rather
+than read. The resident cost is the page cache's, which is the right owner
+for pages read sequentially and never written.
+
+## What does not exist yet
+
+1. **Tokenizer.** The checks address tokens by id out of `vocab.json`;
+   nothing turns text into ids yet. The engine already has a tokenizer for
+   the served models, and reusing it is the next piece.
+2. **Sampler.** `step` returns logits and nothing chooses from them.
+3. **Residency and scheduling** — one thread while a client generation is in
+   flight, four in the gaps, per the measurement above. The knob exists
+   (`CPUQwen35.threads`); the policy that sets it does not.
+4. **A resident service** the memory subsystem can call, rather than a
+   benchmark command.
 
 ## Order of work
 

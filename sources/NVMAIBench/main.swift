@@ -41,21 +41,9 @@ struct NVMAIBench {
         let iterations = CommandLine.arguments.count > 2
             ? Int(CommandLine.arguments[2]) ?? 300 : 300
 
-        // Before the Metal context: this one measures the CPU and must not
+        // Before the Metal context: these measure the CPU and must not
         // touch the GPU, whose bandwidth is the thing being competed for.
-        if kernelName == "cpuload" {
-            // Sustained load at one width, for measuring what the side-engine
-            // costs the model the person is waiting for. `iterations` is
-            // seconds here; the third argument is the thread count.
-            let threads = CommandLine.arguments.count > 3
-                ? Int(CommandLine.arguments[3]) ?? 4 : 4
-            runCPULoad(seconds: Double(iterations), threads: threads)
-            return
-        }
-        if kernelName.hasPrefix("cpu") {
-            runCPUGEMV(iterations: iterations)
-            return
-        }
+        if try runCPUCommand(kernelName, iterations: iterations) { return }
 
         let context = try MetalContext()
         let device = context.device
@@ -814,6 +802,115 @@ struct NVMAIBench {
         let bandwidth = Double(passes) * Double(weightBytes + groups * 4) / taken / 1e9
         print(String(format: "  %d passes in %.1fs, %.1f GB/s (checksum %.0f)",
                      passes, taken, bandwidth, out[0]))
+    }
+
+
+    /// Qwen3.5-2B on the CPU, checked against the continuations that define
+    /// correctness for the numpy reference.
+    ///
+    /// The token ids come out of the snapshot's own `vocab.json`, so this
+    /// needs no tokenizer and cannot drift from what the reference does.
+    static func runCPUQwen35(snapshot path: String, dump: URL? = nil) throws {
+        let directory = URL(fileURLWithPath: path)
+        let started = ContinuousClock.now
+        let snapshot = try AffineSnapshot(directory: directory)
+        // Width is the side-engine's scheduling knob, so it is settable
+        // here: the measurement that produced the policy is a sweep of it.
+        let requested = ProcessInfo.processInfo.environment["NVMAI_CPU35_THREADS"]
+            .flatMap(Int.init)
+        let model = try CPUQwen35(snapshot: snapshot, threads: requested)
+        func seconds(_ from: ContinuousClock.Instant) -> Double {
+            let elapsed = from.duration(to: .now)
+            return Double(elapsed.components.seconds)
+                + Double(elapsed.components.attoseconds) / 1e18
+        }
+        print("\(path): \(snapshot.configuration.layers) layers, "
+              + "hidden \(snapshot.configuration.hiddenSize), "
+              + "rotary \(snapshot.configuration.rotaryDim)/"
+              + "\(snapshot.configuration.headDim), "
+              + "loaded in \(String(format: "%.2fs", seconds(started)))")
+        print("threads: \(model.threads)")
+
+        let vocabulary = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: directory.appendingPathComponent("vocab.json")))
+        guard let vocabulary = vocabulary as? [String: Int] else {
+            print("vocab.json is not a mapping"); return
+        }
+        var inverse: [Int: String] = [:]
+        inverse.reserveCapacity(vocabulary.count)
+        for (text, id) in vocabulary { inverse[id] = text }
+
+        let checks: [([String], String)] = [
+            (["Once", "\u{120}upon", "\u{120}a"], "\u{120}time"),
+            (["The", "\u{120}capital", "\u{120}of", "\u{120}France", "\u{120}is"],
+             "\u{120}Paris"),
+            (["The", "\u{120}quick", "\u{120}brown", "\u{120}fox", "\u{120}jumps",
+              "\u{120}over", "\u{120}the", "\u{120}lazy"], "\u{120}dog"),
+        ]
+        var failures = 0
+        for (index, (words, expected)) in checks.enumerated() {
+            model.reset()
+            var logits: [Float] = []
+            let run = ContinuousClock.now
+            for word in words {
+                guard let id = vocabulary[word] else {
+                    print("  no token for \(word)"); failures += 1; break
+                }
+                logits = try model.step(token: id)
+            }
+            guard !logits.isEmpty else { continue }
+            var best = 0
+            for index in logits.indices where logits[index] > logits[best] { best = index }
+            let want = vocabulary[expected] ?? -1
+            let ok = best == want
+            failures += ok ? 0 : 1
+            let prompt = words.map { $0.replacingOccurrences(of: "\u{120}", with: " ") }
+                .joined()
+            let rate = Double(words.count) / seconds(run)
+            print(String(format: "  %@ %-46@ -> %@ (%.2f), wanted %@  [%.1f tok/s]",
+                         ok ? "ok " : "FAIL", prompt as NSString,
+                         inverse[best] ?? "?", logits[best], expected, rate))
+            if let dump {
+                try? FileManager.default.createDirectory(
+                    at: dump, withIntermediateDirectories: true)
+                let file = dump.appendingPathComponent("check\(index).f32")
+                let payload = logits.withUnsafeBufferPointer { Data(buffer: $0) }
+                try? payload.write(to: file)
+            }
+        }
+        print(failures == 0 ? "all continuations correct"
+              : "\(failures) of \(checks.count) wrong")
+    }
+
+
+    /// The CPU side-engine's commands. Returns whether one ran, so `main`
+    /// can dispatch them before it creates a Metal context.
+    static func runCPUCommand(_ name: String, iterations: Int) throws -> Bool {
+        switch name {
+        case "cpuload":
+            // Sustained load at one width, for measuring what the side-engine
+            // costs the model the person is waiting for. `iterations` is
+            // seconds here; the third argument is the thread count.
+            let threads = CommandLine.arguments.count > 3
+                ? Int(CommandLine.arguments[3]) ?? 4 : 4
+            runCPULoad(seconds: Double(iterations), threads: threads)
+        case "cpu35":
+            // The side-engine's model, on the same continuations the numpy
+            // reference checks itself with. Agreement here is what says the
+            // Swift forward pass matches the oracle.
+            let snapshot = CommandLine.arguments.count > 2
+                ? CommandLine.arguments[2] : ".build/qwen35-2b-affine-8bit"
+            // An optional directory to write each check's full logit vector
+            // into, so parity is a number rather than an impression.
+            let dump = CommandLine.arguments.count > 3
+                ? URL(fileURLWithPath: CommandLine.arguments[3]) : nil
+            try runCPUQwen35(snapshot: snapshot, dump: dump)
+        case let other where other.hasPrefix("cpu"):
+            runCPUGEMV(iterations: iterations)
+        default:
+            return false
+        }
+        return true
     }
 
 }
