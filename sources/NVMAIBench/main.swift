@@ -915,6 +915,19 @@ struct NVMAIBench {
             let limit = CommandLine.arguments.count > 4
                 ? Int(CommandLine.arguments[4]) ?? 32 : 32
             try runCPUQwen35Generation(snapshot: snapshot, prompt: prompt, limit: limit)
+        case "cpu35batch":
+            // A file of prompts in, a file of completions out, so an
+            // experiment can be written in Python and still run on the real
+            // engine. One JSON object per line, `{"prompt": ..., "max": n}`.
+            let snapshot = CommandLine.arguments.count > 2
+                ? CommandLine.arguments[2] : ".build/qwen35-2b-affine-8bit"
+            guard CommandLine.arguments.count > 4 else {
+                print("usage: NVMAIBench cpu35batch <snapshot> <in.jsonl> <out.jsonl>")
+                return true
+            }
+            try runCPUQwen35Batch(snapshot: snapshot,
+                                  input: URL(fileURLWithPath: CommandLine.arguments[3]),
+                                  output: URL(fileURLWithPath: CommandLine.arguments[4]))
         case let other where other.hasPrefix("cpu"):
             runCPUGEMV(iterations: iterations)
         default:
@@ -935,20 +948,7 @@ struct NVMAIBench {
         let requested = ProcessInfo.processInfo.environment["NVMAI_CPU35_THREADS"]
             .flatMap(Int.init)
         let model = try CPUQwen35(snapshot: snapshot, threads: requested)
-        let semaphore = DispatchSemaphore(value: 0)
-        // GFTokenizer loads asynchronously; this command is a one-shot tool,
-        // so it waits rather than restructuring main around it.
-        // unchecked-invariant: written exactly once inside the Task below
-        // and read only after `semaphore.wait()` returns, which the signal
-        // orders after that write. There is no concurrent access.
-        final class Box: @unchecked Sendable { var value: GFTokenizer? }
-        let box = Box()
-        Task {
-            box.value = try? await GFTokenizer.load(from: directory)
-            semaphore.signal()
-        }
-        semaphore.wait()
-        guard let tokenizer = box.value else {
+        guard let tokenizer = try loadTokenizer(directory) else {
             print("no tokenizer in \(path)"); return
         }
         let ids = tokenizer.encode(prompt, addBOS: false).map(Int.init)
@@ -964,6 +964,90 @@ struct NVMAIBench {
         print(String(format: "%d prompt + %d generated in %.1fs (%.1f tok/s)",
                      ids.count, produced.count, seconds,
                      Double(ids.count + produced.count) / seconds))
+    }
+
+
+    /// Run a file of prompts through the side-engine.
+    ///
+    /// The model loads once and the session resets between prompts, which is
+    /// the shape every experiment wants and the shape a resident service
+    /// will have: two gigabytes mapped once, then many short jobs.
+    static func runCPUQwen35Batch(snapshot path: String,
+                                  input: URL,
+                                  output: URL) throws {
+        let directory = URL(fileURLWithPath: path)
+        let snapshot = try AffineSnapshot(directory: directory)
+        let requested = ProcessInfo.processInfo.environment["NVMAI_CPU35_THREADS"]
+            .flatMap(Int.init)
+        let model = try CPUQwen35(snapshot: snapshot, threads: requested)
+        let tokenizer = try loadTokenizer(directory)
+        guard let tokenizer else { print("no tokenizer in \(path)"); return }
+
+        let lines = try String(contentsOf: input, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+        var results: [String] = []
+        let started = ContinuousClock.now
+        var tokens = 0
+        for (index, line) in lines.enumerated() {
+            guard let data = line.data(using: .utf8),
+                  let job = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let prompt = job["prompt"] as? String else { continue }
+            let limit = (job["max"] as? Int) ?? 64
+            model.reset()
+            // `chat` renders the model's own template, which an
+            // instruction-tuned model needs to answer rather than continue.
+            // Raw continuation stays the default: the parity checks depend
+            // on it.
+            let rendered: String
+            if (job["chat"] as? Bool) == true {
+                var messages: [GFTokenizer.Message] = []
+                if let system = job["system"] as? String {
+                    messages.append(GFTokenizer.Message(role: .system, content: system))
+                }
+                messages.append(GFTokenizer.Message(role: .user, content: prompt))
+                rendered = (try? tokenizer.applyChatTemplate(messages)) ?? prompt
+            } else {
+                rendered = prompt
+            }
+            let ids = tokenizer.encode(rendered, addBOS: false).map(Int.init)
+            let produced = try model.generate(prompt: ids, maximumTokens: limit,
+                                              stopping: [Int(tokenizer.eosID)])
+            tokens += ids.count + produced.count
+            var record = job
+            record["completion"] = tokenizer.decode(produced.map(Int32.init))
+            record["prompt_tokens"] = ids.count
+            record["completion_tokens"] = produced.count
+            let encoded = try JSONSerialization.data(withJSONObject: record)
+            results.append(String(decoding: encoded, as: UTF8.self))
+            if (index + 1) % 10 == 0 {
+                FileHandle.standardError.write(Data("  \(index + 1)/\(lines.count)\n".utf8))
+            }
+        }
+        try results.joined(separator: "\n").appending("\n").write(
+            to: output, atomically: true, encoding: .utf8)
+        let elapsed = started.duration(to: .now)
+        let seconds = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        print(String(format: "%d prompts, %d tokens in %.1fs (%.1f tok/s) -> %@",
+                     results.count, tokens, seconds, Double(tokens) / seconds,
+                     output.path as NSString))
+    }
+
+    /// GFTokenizer loads asynchronously and these commands are one-shot
+    /// tools, so they wait rather than restructuring `main` around it.
+    static func loadTokenizer(_ directory: URL) throws -> GFTokenizer? {
+        // unchecked-invariant: written exactly once inside the Task below and
+        // read only after `semaphore.wait()` returns, which the signal orders
+        // after that write. There is no concurrent access.
+        final class Box: @unchecked Sendable { var value: GFTokenizer? }
+        let box = Box()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task {
+            box.value = try? await GFTokenizer.load(from: directory)
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return box.value
     }
 
 }

@@ -115,7 +115,19 @@ public final class CPUQwen35 {
     // MARK: - one token
 
     /// Returns the logits over the whole vocabulary.
+    @discardableResult
     public func step(token: Int) throws -> [Float] {
+        try step(token: token, needsLogits: true)
+    }
+
+    /// One token, optionally without the output head.
+    ///
+    /// The head is the tied embedding: 248,320 rows over 2048 columns, half
+    /// a gigabyte of the model's 1.9, read in full for every token. A prompt
+    /// token's logits are thrown away — only the last one's are used — so
+    /// computing them costs about a third of each prompt token for nothing.
+    @discardableResult
+    public func step(token: Int, needsLogits: Bool) throws -> [Float] {
         applyWidthPolicy()
         var h = try embedding(of: token)
         for layer in 0..<configuration.layers {
@@ -135,7 +147,7 @@ public final class CPUQwen35 {
         }
         CPUOps.rmsNorm(&h, gamma: finalNorm, epsilon: configuration.normEpsilon)
         position += 1
-        return try head(h)
+        return needsLogits ? try head(h) : []
     }
 
     /// Re-decide the width. Called before every token; separate so the
@@ -382,7 +394,9 @@ public final class CPUQwen35 {
                          onToken: ((Int) -> Bool)? = nil) throws -> [Int] {
         precondition(!prompt.isEmpty, "a generation needs a prompt")
         var logits: [Float] = []
-        for token in prompt { logits = try step(token: token) }
+        for (index, token) in prompt.enumerated() {
+            logits = try step(token: token, needsLogits: index == prompt.count - 1)
+        }
         var produced: [Int] = []
         for _ in 0..<maximumTokens {
             var best = 0
