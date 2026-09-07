@@ -121,16 +121,47 @@ Loading is instant — 0.02 s — because the snapshot is memory-mapped rather
 than read. The resident cost is the page cache's, which is the right owner
 for pages read sequentially and never written.
 
+## End to end
+
+`NVMAIBench cpu35gen <snapshot> "<prompt>" [n]` takes text and returns text,
+through the engine's own tokenizer loaded straight out of the snapshot:
+
+```
+prompt: "Write one sentence about a lighthouse." -> 8 tokens, threads 4
+output: "A lighthouse stands as a silent sentinel on the cliffs, its beam
+         cutting through the dark ocean to guide ships safely to shore."
+8 prompt + 31 generated in 1.9s (20.0 tok/s)
+```
+
+It stops on the end-of-turn token rather than running to the limit.
+Generation is greedy, deliberately: this engine distils sessions and checks
+claims, both of which want the model's best answer and neither of which
+wants variety — and a deterministic side-engine is one whose output can be
+compared between runs.
+
+| threads | end-to-end tok/s |
+| --- | --- |
+| 1 | 6.7 |
+| 2 | 12.1 |
+| 4 | 20.0 |
+
+**One `madvise` hint was worth 2.6× of that.** The mapping was opened with
+`MADV_SEQUENTIAL`, which is true of the access pattern and disastrous as a
+promise: it also tells the kernel it may free pages once they are behind the
+read point, and this file is read end to end again for the very next token,
+fifty milliseconds later. The engine was re-faulting the whole model every
+token and running at 7.6 tokens a second. `MADV_WILLNEED` — all of it will
+be wanted — put it at 19.8. Worth remembering that a hint which describes
+the access pattern correctly can still be the wrong thing to say.
+
 ## What does not exist yet
 
-1. **Tokenizer.** The checks address tokens by id out of `vocab.json`;
-   nothing turns text into ids yet. The engine already has a tokenizer for
-   the served models, and reusing it is the next piece.
-2. **Sampler.** `step` returns logits and nothing chooses from them.
-3. **Residency and scheduling** — one thread while a client generation is in
+1. **A sampler.** Greedy is the only mode; temperature and top-p can be
+   added when something needs them.
+2. **Residency and scheduling** — one thread while a client generation is in
    flight, four in the gaps, per the measurement above. The knob exists
    (`CPUQwen35.threads`); the policy that sets it does not.
-4. **A resident service** the memory subsystem can call, rather than a
+3. **A resident service** the memory subsystem can call, rather than a
    benchmark command.
 
 ## Order of work

@@ -198,30 +198,52 @@ public final class CPUQwen35 {
         CPUOps.applyRoPE(&key, headDim: dim, rotaryDim: configuration.rotaryDim,
                          position: position, theta: configuration.ropeTheta)
 
-        keys[layer, default: []].append(contentsOf: key)
-        values[layer, default: []].append(contentsOf: value)
-        let cached = keys[layer]!.count / (kvHeads * dim)
+        // Taken out of the dictionary and put back after. Indexing
+        // `keys[layer]!` inside the inner loop is a dictionary lookup and a
+        // uniqueness check *per element*, which cost more than the attention
+        // arithmetic it was wrapping -- measured, it more than halved the
+        // engine's throughput.
+        var cachedKeys = keys.removeValue(forKey: layer) ?? []
+        var cachedValues = values.removeValue(forKey: layer) ?? []
+        cachedKeys.append(contentsOf: key)
+        cachedValues.append(contentsOf: value)
+        let cached = cachedKeys.count / (kvHeads * dim)
 
         let group = heads / kvHeads
         let scale = 1 / Float(dim).squareRoot()
         var out = [Float](repeating: 0, count: heads * dim)
         var scores = [Float](repeating: 0, count: cached)
-        for head in 0..<heads {
-            let kvHead = head / group
-            for step in 0..<cached {
-                let base = step * kvHeads * dim + kvHead * dim
-                var total: Float = 0
-                for index in 0..<dim { total += keys[layer]![base + index] * query[head * dim + index] }
-                scores[step] = total * scale
-            }
-            CPUOps.softmaxInPlace(&scores)
-            for step in 0..<cached {
-                let weight = scores[step]
-                if weight == 0 { continue }
-                let base = step * kvHeads * dim + kvHead * dim
-                for index in 0..<dim { out[head * dim + index] += weight * values[layer]![base + index] }
+        cachedKeys.withUnsafeBufferPointer { keyStore in
+            cachedValues.withUnsafeBufferPointer { valueStore in
+                query.withUnsafeBufferPointer { queries in
+                    out.withUnsafeMutableBufferPointer { output in
+                        for head in 0..<heads {
+                            let kvHead = head / group
+                            let queryBase = head * dim
+                            for step in 0..<cached {
+                                let base = step * kvHeads * dim + kvHead * dim
+                                var total: Float = 0
+                                for index in 0..<dim {
+                                    total += keyStore[base + index] * queries[queryBase + index]
+                                }
+                                scores[step] = total * scale
+                            }
+                            CPUOps.softmaxInPlace(&scores)
+                            for step in 0..<cached {
+                                let weight = scores[step]
+                                if weight == 0 { continue }
+                                let base = step * kvHeads * dim + kvHead * dim
+                                for index in 0..<dim {
+                                    output[queryBase + index] += weight * valueStore[base + index]
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+        keys[layer] = cachedKeys
+        values[layer] = cachedValues
         for index in out.indices { out[index] *= CPUOps.sigmoid(gate[index]) }
         return project(try matrix(stem + "o_proj.weight"), out)
     }
@@ -309,6 +331,38 @@ public final class CPUQwen35 {
         // for "Once upon a".
         for index in readout.indices { readout[index] *= CPUOps.silu(z[index]) }
         return project(try matrix(stem + "out_proj.weight"), readout)
+    }
+
+    // MARK: - generation
+
+    /// Feed a prompt and continue it, greedily.
+    ///
+    /// Greedy because of what this engine is for. It distils a session into
+    /// facts and checks a claim against a store; both want the model's best
+    /// answer and neither wants variety, and a deterministic side-engine is
+    /// one whose output can be compared between runs. Sampling can be added
+    /// when something needs it.
+    ///
+    /// `onToken` sees each generated id as it is produced, so a caller can
+    /// stream or stop early; returning false ends the generation.
+    @discardableResult
+    public func generate(prompt: [Int],
+                         maximumTokens: Int,
+                         stopping: Set<Int> = [],
+                         onToken: ((Int) -> Bool)? = nil) throws -> [Int] {
+        precondition(!prompt.isEmpty, "a generation needs a prompt")
+        var logits: [Float] = []
+        for token in prompt { logits = try step(token: token) }
+        var produced: [Int] = []
+        for _ in 0..<maximumTokens {
+            var best = 0
+            for index in logits.indices where logits[index] > logits[best] { best = index }
+            if stopping.contains(best) { break }
+            produced.append(best)
+            if let onToken, !onToken(best) { break }
+            logits = try step(token: best)
+        }
+        return produced
     }
 
     // MARK: - one row of a quantized matrix

@@ -905,12 +905,62 @@ struct NVMAIBench {
             let dump = CommandLine.arguments.count > 3
                 ? URL(fileURLWithPath: CommandLine.arguments[3]) : nil
             try runCPUQwen35(snapshot: snapshot, dump: dump)
+        case "cpu35gen":
+            // End to end: real text in, real text out, through the engine's
+            // own tokenizer. `NVMAIBench cpu35gen <snapshot> "<prompt>" [n]`
+            let snapshot = CommandLine.arguments.count > 2
+                ? CommandLine.arguments[2] : ".build/qwen35-2b-affine-8bit"
+            let prompt = CommandLine.arguments.count > 3
+                ? CommandLine.arguments[3] : "The capital of France is"
+            let limit = CommandLine.arguments.count > 4
+                ? Int(CommandLine.arguments[4]) ?? 32 : 32
+            try runCPUQwen35Generation(snapshot: snapshot, prompt: prompt, limit: limit)
         case let other where other.hasPrefix("cpu"):
             runCPUGEMV(iterations: iterations)
         default:
             return false
         }
         return true
+    }
+
+
+    /// The side-engine answering in text, which is what everything above was
+    /// for. The tokenizer is the engine's own, loaded straight out of the
+    /// snapshot the converter wrote.
+    static func runCPUQwen35Generation(snapshot path: String,
+                                       prompt: String,
+                                       limit: Int) throws {
+        let directory = URL(fileURLWithPath: path)
+        let snapshot = try AffineSnapshot(directory: directory)
+        let requested = ProcessInfo.processInfo.environment["NVMAI_CPU35_THREADS"]
+            .flatMap(Int.init)
+        let model = try CPUQwen35(snapshot: snapshot, threads: requested)
+        let semaphore = DispatchSemaphore(value: 0)
+        // GFTokenizer loads asynchronously; this command is a one-shot tool,
+        // so it waits rather than restructuring main around it.
+        final class Box: @unchecked Sendable { var value: GFTokenizer? }
+        let box = Box()
+        Task {
+            box.value = try? await GFTokenizer.load(from: directory)
+            semaphore.signal()
+        }
+        semaphore.wait()
+        guard let tokenizer = box.value else {
+            print("no tokenizer in \(path)"); return
+        }
+        let ids = tokenizer.encode(prompt, addBOS: false).map(Int.init)
+        print("prompt: \(prompt.debugDescription) -> \(ids.count) tokens, "
+              + "threads \(model.threads)")
+        let started = ContinuousClock.now
+        let produced = try model.generate(prompt: ids, maximumTokens: limit,
+                                          stopping: [Int(tokenizer.eosID)])
+        let elapsed = started.duration(to: .now)
+        let seconds = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        print("output: " + tokenizer.decode(produced.map(Int32.init)).debugDescription)
+        print(String(format: "%d prompt + %d generated in %.1fs (%.1f tok/s)",
+                     ids.count, produced.count, seconds,
+                     Double(ids.count + produced.count) / seconds))
     }
 
 }

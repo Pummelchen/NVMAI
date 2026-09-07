@@ -79,9 +79,14 @@ public struct SafeTensorsFile: Sendable {
               raw != MAP_FAILED else {
             throw Failure.unreadable(url.path)
         }
-        // Sequential, and read exactly once per token: tell the kernel so it
-        // reads ahead rather than faulting a page at a time.
-        madvise(raw, length, MADV_SEQUENTIAL)
+        // WILLNEED, emphatically not SEQUENTIAL. The access pattern *is*
+        // sequential, but SEQUENTIAL also tells the kernel it may free pages
+        // once they are behind the read point -- and this file is read from
+        // end to end again for the very next token, milliseconds later. With
+        // SEQUENTIAL the engine re-faulted the whole model every token and
+        // ran at a third of its speed; the right hint is that all of it will
+        // be wanted, which on a machine with room keeps it resident.
+        madvise(raw, length, MADV_WILLNEED)
         let base = UnsafeRawPointer(raw)
         mapping = Mapping(base: base, length: length)
 
