@@ -41,6 +41,13 @@ struct NVMAIBench {
         let iterations = CommandLine.arguments.count > 2
             ? Int(CommandLine.arguments[2]) ?? 300 : 300
 
+        // Before the Metal context: this one measures the CPU and must not
+        // touch the GPU, whose bandwidth is the thing being competed for.
+        if kernelName.hasPrefix("cpu") {
+            runCPUGEMV(iterations: iterations)
+            return
+        }
+
         let context = try MetalContext()
         let device = context.device
         print("device: \(device.name)")
@@ -677,4 +684,83 @@ struct NVMAIBench {
             + "achieved=\(String(format: "%.1f", Double(bytes) / per / 1e9)) GB/s "
             + "y0=\(y0) yLast=\(yLast)")
     }
+
+    /// What the CPU side-engine can actually read, and at how many threads.
+    ///
+    /// The premise of the side-engine is that NVMAI leaves the CPU idle --
+    /// measured, 0.20 of one core out of eight while a 35B generates. That
+    /// is true of the *cores* and says nothing about the *memory*, which is
+    /// the resource decode is bound by on both sides. The GPU already reads
+    /// at 74-88 GB/s during a 35B decode, near this machine's practical
+    /// ceiling, and a 2B model reads about 1.9 GB per token at 8-bit. So the
+    /// question this answers is not "is there a spare core" but "is there
+    /// spare bandwidth, and what does taking it cost the model the person is
+    /// waiting for".
+    ///
+    /// Run it twice -- idle, and with a generation in flight -- and the
+    /// difference is the answer.
+    ///
+    ///     NVMAIBench cpu            # 8-bit, thread sweep
+    static func runCPUGEMV(iterations: Int) {
+        // Big enough that nothing is served from cache: the point is the
+        // memory system, and a matrix that fits in the SLC measures the SLC.
+        let rows = 8192
+        let n = 8192
+        let group = 64
+        let weightBytes = rows * n
+        let groups = rows * (n / group)
+        print("cpu int8 affine gemv: \(rows)x\(n), "
+              + "\(Double(weightBytes) / 1e6) MB of weights per pass, "
+              + "\(iterations) passes")
+        print("performance cores reported: \(Int8AffineGEMV.preferredThreads)")
+
+        let weights = UnsafeMutablePointer<UInt8>.allocate(capacity: weightBytes)
+        let scales = UnsafeMutablePointer<UInt16>.allocate(capacity: groups)
+        let biases = UnsafeMutablePointer<UInt16>.allocate(capacity: groups)
+        let x = UnsafeMutablePointer<Float>.allocate(capacity: n)
+        let out = UnsafeMutablePointer<Float>.allocate(capacity: rows)
+        defer {
+            weights.deallocate(); scales.deallocate(); biases.deallocate()
+            x.deallocate(); out.deallocate()
+        }
+        var state: UInt64 = 0x2545_F491_4F6C_DD1D
+        func next() -> UInt64 {
+            state ^= state << 13; state ^= state >> 7; state ^= state << 17
+            return state
+        }
+        for i in 0..<weightBytes { weights[i] = UInt8(truncatingIfNeeded: next()) }
+        // 1.0 and 0.0 as BF16 bit patterns: the arithmetic is the same
+        // whatever the constants, and the measurement is of the reads.
+        for i in 0..<groups { scales[i] = 0x3F80; biases[i] = 0 }
+        for i in 0..<n { x[i] = Float(i % 7) * 0.125 }
+
+        let perPass = Double(weightBytes + groups * 4)
+        print("  \("threads".padding(toLength: 8, withPad: " ", startingAt: 0))"
+              + "\("ms/pass".padding(toLength: 10, withPad: " ", startingAt: 0))"
+              + "\("GB/s".padding(toLength: 9, withPad: " ", startingAt: 0))"
+              + "2B tok/s at 8-bit")
+        for threads in [1, 2, 4, 6, 8] {
+            // One untimed pass so the first one's page faults are not the
+            // measurement.
+            Int8AffineGEMV.threaded(weights: weights, scales: scales, biases: biases,
+                                    x: x, rows: rows, n: n, out: out, threads: threads)
+            let started = ContinuousClock.now
+            for _ in 0..<iterations {
+                Int8AffineGEMV.threaded(weights: weights, scales: scales, biases: biases,
+                                        x: x, rows: rows, n: n, out: out, threads: threads)
+            }
+            let elapsed = started.duration(to: .now)
+            let seconds = Double(elapsed.components.seconds)
+                + Double(elapsed.components.attoseconds) / 1e18
+            let perIteration = seconds / Double(iterations)
+            let bandwidth = perPass / perIteration / 1e9
+            // A 2B at 8-bit reads about 1.9 GB per token, the tied output
+            // head included -- it is read in full for every token.
+            let tokens = bandwidth / 1.9
+            print(String(format: "  %-8d%-10.2f%-9.1f%.1f",
+                         threads, perIteration * 1e3, bandwidth, tokens))
+        }
+        print("  (checksum \(out[0]))")
+    }
+
 }
