@@ -26,6 +26,30 @@ damaged.
     python3.13 benchmark/composite_split.py --prepare jobs.jsonl
     .build/.../NVMAIBench cpu35batch <snapshot> jobs.jsonl done.jsonl
     python3.13 benchmark/composite_split.py --score done.jsonl
+
+**Answer, measured twice: no.** Over the 47 facts that claimed the person's
+authority across two recorded runs, of which exactly 2 are genuinely
+mislabelled:
+
+| prompt | repaired | damaged |
+| --- | --- | --- |
+| value alone | 0 | 6 |
+| with the key, and told that wording may differ | 1 | 3 |
+
+The first run withheld the key, so the model was asked to attribute "brown"
+with no idea it was an eye colour; giving it the key and telling it that
+"the inn burns" and "burned" are the same thing halved the damage and bought
+one repair. It is still net negative, and the damage is concentrated exactly
+where the repairs were supposed to be: shown "Aldo: blue eyes, the mayor;
+unlocks the pre-decommission lighthouse records in chapter 64", which is
+half the person's and half the model's, it answers NONE rather than keeping
+the half that is theirs.
+
+So the side-engine does not solve this, and a third prompt would be tuning
+toward a desired answer on a set with two positives in it. The composite has
+to be prevented at the source rather than repaired afterwards. This file
+stays because the negative is worth keeping and re-running when either the
+model or the extraction changes.
 """
 from __future__ import annotations
 

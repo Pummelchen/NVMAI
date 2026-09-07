@@ -370,3 +370,38 @@ the label, which is being asked an unanswerable question.
 
 The book scores for these two runs were 94% and 92%, both inside the
 established noise band, so the labelling work costs nothing measurable.
+
+
+## The composite fact, and what the side-engine could not do (2026-09-08)
+
+Step 0 failed on Ornith because of composite facts: one key holding a clause
+the person wrote and a clause the model invented, labelled as the person's
+because half of it is.
+
+The obvious repair is to ask the small resident model which half is whose --
+a verification task, which is what the earlier measurements said a 2B is
+good for, and the CPU side-engine now exists to run one. It was tried, on
+all 47 facts that claimed the person's authority across both runs.
+
+| prompt | repaired | damaged |
+| --- | --- | --- |
+| the value alone | 0 | 6 |
+| the key too, and told that wording may differ | 1 | 3 |
+
+Net negative both times, and the damage falls exactly where the repairs were
+meant to. Shown "Aldo: blue eyes, the mayor; unlocks the pre-decommission
+lighthouse records in chapter 64" -- half the person's, half the model's --
+it answers NONE and throws away the half that is theirs. The first prompt
+was unfair, withholding the key so the model had to attribute "brown" with
+no idea it was an eye colour; fixing that halved the damage. A third attempt
+would be tuning toward a desired answer on a set containing two positives.
+
+**So the composite has to be prevented, not repaired.** The consolidation
+prompt already says "one fact per key" and the 35B violated it anyway. That
+is the next thing to work on if the guard is to be enabled: an extraction
+whose values have one source each, checked, rather than a repair pass over
+values that have two.
+
+`benchmark/composite_split.py` stays, because a measured negative is worth
+keeping and worth re-running when either the model or the extraction
+changes.
