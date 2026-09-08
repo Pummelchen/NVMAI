@@ -148,9 +148,25 @@ public struct MemoryConfiguration: Sendable, Equatable {
     public var consolidationMinimumCharacters: Int
     /// The precedence rule: a model-derived fact never silently supersedes
     /// one the person asserted; the disagreement is recorded and shown
-    /// instead. Off until the labelling it rests on has been measured -- a
-    /// mislabelled invention would be *protected*, which is worse than
-    /// today's behaviour rather than merely different.
+    /// instead.
+    ///
+    /// **On, since it was measured.** It was off while the labelling it
+    /// rests on was unproven, because a mislabelled invention would be
+    /// *protected*, which is worse than the old behaviour rather than merely
+    /// different. Three recorded runs and 104 facts claiming the person's
+    /// authority were then read by hand, and not one was an invention; a
+    /// composite value, which cannot have a single source, is refused
+    /// authority before the rule ever sees it.
+    ///
+    /// And it earns the default. On Ornith 4-bit the book scenario is the
+    /// one place memory has ever lost -- 98% without it, 94% with -- because
+    /// memory faithfully preserves that model's drift from the story bible.
+    /// With the guard on it is 97%, one point off the control and inside the
+    /// noise. It fired exactly once in that run, holding the bible's rule
+    /// about what Marcus may not learn before chapter 60.
+    ///
+    /// `NVMAI_MEMORY_GUARD=0` turns it off. It only applies where memory is
+    /// already on, which is itself opt-in.
     public var guardsUserFacts: Bool
 
     /// Serve memory from process-local storage when the journal cannot be written,
@@ -174,7 +190,7 @@ public struct MemoryConfiguration: Sendable, Equatable {
                 consolidationIdleSeconds: Double = 30,
                 consolidationMaximumTurns: Int = 40,
                 consolidationMinimumCharacters: Int = 150,
-                guardsUserFacts: Bool = false,
+                guardsUserFacts: Bool = true,
                 degradesToLocalStore: Bool = true) {
         self.isEnabled = isEnabled
         self.storage = storage

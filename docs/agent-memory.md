@@ -137,7 +137,7 @@ Environment variables, which is how the start scripts pass them:
 | `NVMAI_MEMORY_CONSOLIDATION` | `1` | `0` disables the engine writing memory at session boundaries |
 | `NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS` | `30` | Quiet time after a turn before a session is distilled |
 | `NVMAI_MEMORY_LOCAL_FALLBACK` | `1` | `0` disables memory instead of degrading |
-| `NVMAI_MEMORY_GUARD` | `0` | `1` stops a model-derived fact from silently superseding one the person asserted. Off until the labelling it rests on is measured; see below. |
+| `NVMAI_MEMORY_GUARD` | `1` | Stops a model-derived fact from silently superseding one the person asserted. `0` turns it off; see below for what it is worth. |
 
 ### The guard
 
@@ -149,10 +149,25 @@ is untouched, and a model write that agrees is stored rather than held --
 holding it would put a conflict in front of the next session over nothing.
 
 It rests entirely on the `source` field the consolidation prompt asks for,
-which is why it is off. The gate before enabling it anywhere is under 5%
-mislabelled and no mislabel at all on an invented fact: a mislabelled
-invention would be *protected*, which is worse than today's behaviour rather
+which is why it stayed off until that field was measured. The gate was under
+5% mislabelled and no mislabel at all on an invented fact: a mislabelled
+invention would be *protected*, which is worse than the old behaviour rather
 than merely different.
+
+**It is on now, and it earns the default.** On Ornith 1.5 at 4-bit the book
+scenario is the one place memory has ever lost — 98% without it and 94% with
+— because memory faithfully preserves that model's drift from the story
+bible. With the guard on it scores 97%, one point off the control and inside
+the noise. It fired exactly once in that run:
+
+```
+memory guard kept the user's fact, marked disputed: rules/marcus_knowledge
+```
+
+That is the bible's hard rule about what Marcus may not learn before chapter
+60, which the model tried to overwrite. One hold, three points. The offline
+simulator predicted it independently and specifically, putting an unguarded
+store at 61% of the answers on this install and a guarded one at 98%.
 
 `benchmark/guard_source_rate.py` is that measurement. It replays a recorded
 book run's facts against exactly what the person put in front of the model
