@@ -405,3 +405,47 @@ values that have two.
 `benchmark/composite_split.py` stays, because a measured negative is worth
 keeping and worth re-running when either the model or the extraction
 changes.
+
+
+## Authority requires one fact (2026-09-08)
+
+The composite was the obstacle, the side-engine could not repair one, so the
+guard stops relying on the extraction getting it right: **a value that holds
+more than one fact cannot carry the person's authority.** It is demoted to
+the model's before the guard sees it, in `ContinuityStore.author(of:)`, via
+`MemoryRecord.carriesUserAuthority`.
+
+Three signs of more than one fact, each measured on the 47 facts the two
+recorded runs labelled as the person's:
+
+| sign | catches, of 2 known bad | flags, of 45 that scored grounded |
+| --- | --- | --- |
+| a semicolon | 2 | 10 |
+| more than one sentence | 1 | 0 |
+| over 120 characters | 2 | 4 |
+
+The semicolon does the work, and four of the ten it flags turn out to be
+mislabels the word-overlap scorer missed — Aldo "unlocks the
+pre-decommission lighthouse records in chapter 64", Halvorsen "wrote a
+second, truthful certificate in chapter 63" — where the invented clause
+reused enough of the person's vocabulary to pass. So the true mislabel rate
+on Ornith was worse than the 10.5% first measured, and the rule removes all
+of it.
+
+With the rule, both gate conditions are met on both models:
+
+| Run | Labelled `user` | Demoted | Carrying authority | Mislabelled |
+| --- | --- | --- | --- | --- |
+| Qwen 3.6 8-bit | 28 | 0 | 28 | 0 |
+| Ornith 4-bit | 19 | 12 | 7 | 0 |
+
+**Two things this does not mean.** It does not mean the guard should be on
+by default: step 0 is one of the gates, and the rest — observation on a real
+workload — has not been run. And the rule was drawn from the same corpus it
+is scored on, so what is established is that it removes every composite
+*here*, not that the threshold generalises; it wants a run these numbers did
+not shape.
+
+Its failure mode is the safe one. A composite the person really did assert
+loses protection, which is today's behaviour; nothing gains protection it
+should not have.

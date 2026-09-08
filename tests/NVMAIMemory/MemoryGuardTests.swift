@@ -118,6 +118,65 @@ import Testing
         #expect(outcome == .stored)
     }
 
+    // MARK: authority needs one fact, not several
+
+    /// The measured failure that closed the guard's gate. Ornith wrote this
+    /// and labelled it the person's, because half of it is: "Rosa, hazel
+    /// eyes, keeps the inn" is from the story bible and chapter 65 is the
+    /// model's own invention. Protecting it protects the invention.
+    @Test func aCompositeValueCannotCarryTheUsersAuthority() async throws {
+        let (store, scope) = try await store()
+        let composite = "Rosa: hazel eyes, keeps the inn; raised a new inn from "
+            + "charred walls in chapter 65 while keeping the old hearth."
+        _ = try await store.set(try record("characters/rosa", composite, user: true),
+                                in: scope, guarding: true, flaggingReversions: true)
+        // The model may correct it, because nothing here is protected.
+        let outcome = try await store.set(
+            try record("characters/rosa", "Rosa: hazel eyes, keeps the inn.", user: false),
+            in: scope, guarding: true)
+        #expect(outcome == .stored)
+    }
+
+    /// And the same fact, atomically, is protected as before. This is the
+    /// pair that says the rule is about the value's shape and not about
+    /// weakening the guard.
+    @Test func anAtomicValueStillCarriesIt() async throws {
+        let (store, scope) = try await store()
+        _ = try await store.set(try record("characters/rosa/eyes", "hazel", user: true),
+                                in: scope, guarding: true, flaggingReversions: true)
+        let outcome = try await store.set(
+            try record("characters/rosa/eyes", "green", user: false),
+            in: scope, guarding: true)
+        #expect(outcome == .heldByGuard(existing: "hazel"))
+    }
+
+    /// Each sign earns its place on the recorded corpus; each is tested.
+    @Test func atomicityRecognisesEachShapeOfCompositeValue() {
+        #expect(MemoryRecord.isAtomic("hazel"))
+        #expect(MemoryRecord.isAtomic("The inn burned in chapter 34."),
+                "one sentence, and a trailing full stop is not a second")
+        #expect(MemoryRecord.isAtomic("Marcus, grey eyes, lighthouse keeper's son"),
+                "commas are not clause boundaries; plenty of single facts have them")
+
+        #expect(!MemoryRecord.isAtomic("Ines: green eyes; town archivist"),
+                "a semicolon caught every composite in the corpus")
+        #expect(!MemoryRecord.isAtomic("The inn burned. Rosa rebuilt it."),
+                "two sentences are two facts")
+        #expect(!MemoryRecord.isAtomic(String(repeating: "a", count: 121)),
+                "length is the backstop for a run-on with neither sign")
+    }
+
+    /// A fact the model wrote is unaffected by any of this: the rule governs
+    /// whether a *claim* of the person's authority stands, and the model
+    /// makes no such claim.
+    @Test func atomicityDoesNotTouchModelFacts() throws {
+        var model = try record("decisions/storage", "sqlite; with WAL; and a journal",
+                               user: false)
+        #expect(model.carriesUserAuthority == false)
+        model.isUserAsserted = true
+        #expect(model.carriesUserAuthority == false, "still composite")
+    }
+
     // MARK: every writer, not just consolidation
 
     /// The guard was first written for consolidation alone, and the model's

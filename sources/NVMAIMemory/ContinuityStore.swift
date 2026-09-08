@@ -251,7 +251,10 @@ public actor ContinuityStore: MemoryStore {
     /// only thing in a transcript that is not the model's own output, and
     /// the guard is built entirely on being able to tell them apart.
     static func author(of record: MemoryRecord) -> ProvenanceAuthor {
-        record.isUserAsserted ? .user : .model
+        // Not `isUserAsserted` directly: that is the extraction's claim, and
+        // a claim about a value holding several facts cannot be true. See
+        // `MemoryRecord.carriesUserAuthority`.
+        record.carriesUserAuthority ? .user : .model
     }
 
     /// The outcome of a guarded write, for the caller to log.

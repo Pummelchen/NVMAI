@@ -80,6 +80,21 @@ def significant(text: str) -> set[str]:
 SUFFIXES = ("ing", "ed", "es", "s", "d")
 
 
+def atomic(value: str) -> bool:
+    """Whether a value looks like one fact rather than several.
+
+    A mirror of `MemoryRecord.isAtomic`, because this measures what ships:
+    the store refuses to let a composite value carry the person's authority,
+    so a composite is not a candidate for mislabelling. If the two ever
+    disagree, this number stops describing the guard.
+    """
+    if ";" in value:
+        return False
+    if len(value) > 120:
+        return False
+    return re.search(r"[.!?]\s+\S", value) is None
+
+
 def stem(word: str) -> str:
     for suffix in SUFFIXES:
         if len(word) > len(suffix) + 2 and word.endswith(suffix):
@@ -173,7 +188,13 @@ def main() -> int:
             return None
         return len({w for w in words if stem(w) in said}) / len(words)
 
-    claimed = [f for f in written if f["user_asserted"]]
+    # Only the facts that would actually carry authority. A composite value
+    # cannot have one source, so the store demotes it before the guard ever
+    # sees it -- and scoring demoted facts would report a risk that is not
+    # taken.
+    labelled = [f for f in written if f["user_asserted"]]
+    claimed = [f for f in labelled if atomic(f["value"])]
+    demoted = len(labelled) - len(claimed)
     mislabelled, grounded = [], []
     for fact in claimed:
         overlap = score(fact)
@@ -193,9 +214,12 @@ def main() -> int:
 
     print(f"{label}: {journal.name}\n")
     print(f"  facts written                {len(written):5d}")
-    print(f"  labelled user                {len(claimed):5d}  "
-          f"({len(claimed) / len(written):.0%})")
-    print(f"  labelled model               {len(written) - len(claimed):5d}")
+    print(f"  labelled user                {len(labelled):5d}  "
+          f"({len(labelled) / len(written):.0%})")
+    print(f"  labelled model               {len(written) - len(labelled):5d}")
+    print(f"  demoted, value not atomic    {demoted:5d}  "
+          f"(a composite cannot have one source)")
+    print(f"  carrying authority           {len(claimed):5d}")
     if claimed:
         rate = len(mislabelled) / len(claimed)
         print(f"  of those, mislabelled        {len(mislabelled):5d}  ({rate:.1%})")

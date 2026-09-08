@@ -161,31 +161,41 @@ which the offline simulator already knows precisely -- and flags any fact
 claiming the person's authority whose substance is nowhere in the person's
 own words.
 
-| Run | Facts | Labelled `user` | Mislabelled | Gate |
-| --- | --- | --- | --- | --- |
-| Qwen 3.6 35B 8-bit, book, auto | 59 | 28 (47%) | 0 | met |
-| Ornith 1.5 35B 4-bit, book, auto | 45 | 19 (42%) | 2 (10.5%) | **not met** |
+| Run | Facts | Labelled `user` | Demoted | Carrying authority | Mislabelled |
+| --- | --- | --- | --- | --- | --- |
+| Qwen 3.6 35B 8-bit, book, auto | 59 | 28 | 0 | 28 | 0 |
+| Ornith 1.5 35B 4-bit, book, auto | 45 | 19 | 12 | 7 | 0 |
 
-**The gate is met on one model and failed on the other, so the guard stays
-off.** That split is the finding, not an inconvenience: the label's quality
-is a property of the model, and it lines up exactly with everything else
-measured here, where memory was a clean win on Qwen 8-bit and a loss on
-Ornith 4-bit.
+**Both gate conditions are met, and the demotion column is why.** Measured
+first without it, Ornith mislabelled 2 of 19 — 10.5%, a clear failure — and
+Qwen mislabelled none of 28. The split was the finding: the label's quality
+is a property of the model, and it lined up with everything else measured
+here, where memory was a clean win on Qwen 8-bit and a loss on Ornith 4-bit.
 
-Both of Ornith's mislabels are the same shape, and it is worth naming
-because it is not carelessness by the model. At session 7 it wrote
+Both of Ornith's failures were the same shape. At session 7 it wrote
 `characters/rosa` as "Rosa: hazel eyes, keeps the inn; raised a new inn from
 charred walls in chapter 65 while keeping the old hearth as a monument" and
-labelled it `user`. The first clause is the person's, from the bible. The
-second is the model's own chapter 65. One key, two sources, one label -- and
-the label cannot be right. The other case is the same: a summary of ten
-chapters the model itself wrote, filed under the person's authority because
-the person asked for chapters in that format.
+labelled it `user`. The first clause is the person's, from the bible; the
+second is the model's own chapter 65. One key, two sources, one label — and
+no label is right.
 
-So the composite fact is the real obstacle, and the consolidation prompt
-already tells the model "one fact per key". Until a value is reliably from
-one source, `source` cannot be reliable either, and a guard that protects a
-composite protects the invented half of it.
+So authority now requires an **atomic** value, and a composite is demoted to
+the model's before the guard ever sees it. That removes every composite in
+the corpus, including four whose invented clause reused enough of the
+person's vocabulary to slip past a word-overlap check. It costs nothing
+where the extraction already behaves — Qwen loses none of its 28 — and
+Ornith, which writes composites, keeps 7 of 19.
+
+**A caveat worth stating.** The rule was drawn from the same 47 facts it is
+scored on, so the honest claim is that it removes every composite *this
+corpus contains*, not that the threshold generalises. It wants confirming on
+a run these numbers did not shape. Its failure mode is the safe one: a
+composite the person really did assert loses protection, and nothing gains
+protection it should not have.
+
+The real fix is still upstream — an extraction whose values have one source
+each, which its own prompt already asks for. This is the guard refusing to
+depend on that until it is true.
 
 The control matters as much as the number. A scorer generous enough to
 ground anything would report a perfect run whatever the model did, so the

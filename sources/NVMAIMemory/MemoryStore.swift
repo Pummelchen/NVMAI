@@ -169,6 +169,60 @@ public struct MemoryRecord: Sendable, Codable, Equatable {
     /// stop.
     public var isUserAsserted: Bool = false
 
+    /// Whether this value may carry the person's authority.
+    ///
+    /// `isUserAsserted` is the extraction's *claim*; this is whether the
+    /// claim can be true of the value it is attached to. A value holding
+    /// several facts cannot have one source, and measured, that is exactly
+    /// how the guard's gate failed: Ornith wrote "Rosa: hazel eyes, keeps
+    /// the inn; raised a new inn from charred walls in chapter 65" and
+    /// labelled it the person's, because half of it is. Protecting that
+    /// protects the invented half.
+    ///
+    /// Three signs of more than one fact, and each earns its place on the
+    /// 47 facts two recorded runs labelled as the person's:
+    ///
+    ///   * a **semicolon**, which caught every composite in the corpus,
+    ///     including four whose invented clause reused enough of the
+    ///     person's vocabulary to pass a word-overlap check;
+    ///   * **more than one sentence**;
+    ///   * **length**, as a backstop for a run-on with neither.
+    ///
+    /// The failure mode is losing protection, never granting it wrongly,
+    /// which is the right direction for a rule that decides whether a fact
+    /// can be overwritten. And it costs nothing where the extraction already
+    /// behaves: on Qwen 3.6 all 28 such facts are atomic and none is
+    /// demoted, while Ornith, which writes composites, keeps 7 of 19.
+    ///
+    /// The real fix is upstream -- an extraction that writes one fact per
+    /// key, as its own prompt already tells it to. This is the guard
+    /// refusing to rely on that until it is true.
+    public var carriesUserAuthority: Bool {
+        guard isUserAsserted else { return false }
+        return Self.isAtomic(value)
+    }
+
+    /// Whether a value looks like one fact rather than several.
+    public static func isAtomic(_ value: String) -> Bool {
+        if value.contains(";") { return false }
+        if value.count > 120 { return false }
+        // A sentence ending, followed by more text: two statements in one
+        // value. A trailing full stop is fine.
+        var previousWasTerminator = false
+        var sawGapAfterTerminator = false
+        for character in value {
+            if previousWasTerminator, character == " " || character == "\n" {
+                sawGapAfterTerminator = true
+            } else if sawGapAfterTerminator, !character.isWhitespace {
+                return false
+            } else if !character.isWhitespace {
+                sawGapAfterTerminator = false
+            }
+            previousWasTerminator = character == "." || character == "!" || character == "?"
+        }
+        return true
+    }
+
     public init(key: MemoryKey,
                 value: String,
                 importance: Double? = nil,
