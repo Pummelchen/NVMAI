@@ -448,7 +448,11 @@ def validate() -> None:
             if not model:
                 continue
             for key in book.QUIZ_KEYS:
-                simulated = read(snapshots[session], key, session)
+                # Both sides through the same normaliser. Comparing a raw
+                # reader answer against a normalised model answer counted
+                # `False` and "false" as a disagreement, which is a
+                # difference in spelling and not in what either side thinks.
+                simulated = book.normalise(key, read(snapshots[session], key, session))
                 actual = book.normalise(key, model.get(key))
                 table[key][1] += 1
                 if simulated == actual:
