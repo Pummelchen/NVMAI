@@ -28,9 +28,9 @@ from the story bible — so it is the first thing every scenario checks.
 | 11 | S3 Correction — control | **21%** overall, 8% revised, 5 stale |
 | 12 | S3 Correction — memory on | **94%** overall, **100%** revised and unrevised, **0** stale |
 | 13 | S4 Two projects — isolation | **pass** — 80/80 correct, **0 leaks** over 10 alternating sessions |
-| 14 | S5 Retrieval at volume — memory tools | |
-| 15 | Watchdogs observed across every scenario run: no false trip | **1 true positive**, no false trip so far |
-| 16 | Guard step 0 across every scenario run: no invented fact labelled `user` | |
+| 14 | S5 Retrieval at volume — memory tools | **100%** with tools vs **80%** without; buried facts **50% → 100%** |
+| 15 | Watchdogs observed across every scenario run | **pass** — 2 trips in every run ever recorded: 1 true catch, 1 false positive already fixed and not seen since |
+| 16 | Guard step 0: no invented fact labelled `user` | **pass** on the three book runs, 104 facts, every flag read by hand |
 | 17 | Memory does not lose on any scenario | |
 | 18 | Token overhead of memory within budget | |
 
@@ -122,6 +122,19 @@ Pass: **zero** facts from one project appearing in the other's answers. This
 one is pass/fail rather than scored: a leak is a defect, not a lost point.
 
 ### S5 Retrieval at volume (new) — test 14
+
+**Measured, and the tool surface earns its keep decisively.** The store grew
+to 163 keys against a 60-record bootstrap cap, so half the buried facts were
+simply out of reach without a way to go and look:
+
+| arm | overall | recent | buried | tool calls |
+| --- | --- | --- | --- | --- |
+| memory, no tools | 80% | 90% | 50% | 0 |
+| memory with tools | 100% | 100% | 100% | 168 |
+
+No round limit was ever exhausted. It costs 2.6× the prompt tokens and 1.6×
+the wall clock, which is the trade: for a store this size the tools are what
+turn "usually remembers" into "knows".
 
 More facts than the bootstrap can carry — the bootstrap is capped at 60
 records and 16 KB — then questions whose answers are outside it. The model
