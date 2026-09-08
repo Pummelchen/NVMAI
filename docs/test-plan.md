@@ -11,18 +11,47 @@ elsewhere. This has happened once already — Ornith 4-bit went 94% to 87%
 with memory on, because memory faithfully preserved the model's own drift
 from the story bible — so it is the first thing every scenario checks.
 
+## Outcome
+
+All eighteen ran. Sixteen passed as written, one passed only after a change
+to the product, and one had its criterion replaced by the measurement that
+showed the criterion was wrong.
+
+Four defects were found by running them, and every one was invisible to the
+unit suite:
+
+1. **`X-NVMAI-Workspace` was documented in three places and read in none.**
+   Two projects sharing a server silently shared a memory store. Found by
+   the isolation scenario refusing to run.
+2. **The first fix for it compiled, shipped and did nothing** — the handler
+   clears its stored request head before the body handler runs, so the
+   lookup read nil every time, while the parser unit test passed throughout.
+3. **The memory fragment sent models looking for a filesystem.** With the
+   tool surface off it said "you have memory" and named a workspace but gave
+   nothing to call, and two sessions of eight were lost to models emitting
+   shell commands to go and find it. Saying what is *absent* was worth 34
+   points and a third of the run time.
+4. **The stub watchdog fired on "Say OK." answered with "OK."** A short
+   answer to a short question is an answer; the rule now needs something to
+   have been asked.
+
+Two features changed default as a result: the guard is on, because it is the
+only thing that closes memory's one loss, and the memory tool surface is
+worth turning on for a store larger than its bootstrap — 50% to 100% on
+facts that have fallen out of reach.
+
 ## Status
 
 | # | Test | State |
 | --- | --- | --- |
-| 1 | Swift unit suite green | **pass** — 1233 tests, 195 suites |
+| 1 | Swift unit suite green | **pass** — 1239 tests, 195 suites |
 | 2 | Lint clean | **pass** |
 | 3 | Watchdog corpus calibration: zero false positives | **pass** — 0 over 1032 replies and 311 exchanges, both known-bad replies caught |
 | 4 | Watchdog Swift/Python fixture agreement | **pass** — 8 cases, 0 mismatches |
 | 5 | Simulator ranks store policies correctly | **pass** — ordering holds on all 15 runs |
 | 6 | CPU engine parity with the numpy reference | **pass** — worst cosine 0.9999999, both widths |
 | 7 | S1 Book — control (memory off) | **98%** (123/126), Ornith 4-bit |
-| 8 | S1 Book — memory on | **94%** (119/126), same install — see 17 |
+| 8 | S1 Book — memory on | **94%** unguarded, **97%** guarded (122/126) — see 17 |
 | 9 | S2 Coder — control | **14%** (2/14) |
 | 10 | S2 Coder — memory on | **100%** (14/14) |
 | 11 | S3 Correction — control | **21%** overall, 8% revised, 5 stale |
