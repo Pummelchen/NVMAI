@@ -25,11 +25,11 @@ from the story bible — so it is the first thing every scenario checks.
 | 8 | S1 Book — memory on | **94%** (119/126), same install — see 17 |
 | 9 | S2 Coder — control | |
 | 10 | S2 Coder — memory on | |
-| 11 | S3 Correction — control | |
-| 12 | S3 Correction — memory on | |
+| 11 | S3 Correction — control | **21%** overall, 8% revised, 5 stale |
+| 12 | S3 Correction — memory on | **94%** overall, **100%** revised and unrevised, **0** stale |
 | 13 | S4 Two projects — isolation | |
 | 14 | S5 Retrieval at volume — memory tools | |
-| 15 | Watchdogs observed across every scenario run: no false trip | |
+| 15 | Watchdogs observed across every scenario run: no false trip | **1 true positive**, no false trip so far |
 | 16 | Guard step 0 across every scenario run: no invented fact labelled `user` | |
 | 17 | Memory does not lose on any scenario | |
 | 18 | Token overhead of memory within budget | |

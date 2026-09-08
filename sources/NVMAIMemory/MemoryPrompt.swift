@@ -40,6 +40,20 @@ public enum MemoryPrompt {
         } else {
             lines.append("What is already known here is listed below. Treat it as the record "
                          + "of earlier sessions in this workspace.")
+            // Measured: without this, a model told it "has memory" and given a
+            // workspace name goes looking for one. On the correction
+            // scenario, two sessions of eight were lost to a model that
+            // announced it would "retrieve what I know" and then emitted a
+            // shell command to list a directory, and to one that tried to
+            // write its decision to a file. Both produced no answer at all.
+            //
+            // Saying what is *absent* is the fix: there is nothing to call,
+            // and nothing to do.
+            lines.append("")
+            lines.append("There are no memory tools in this request. Everything memory has "
+                         + "for you is above -- there is nothing to fetch, and nothing to "
+                         + "save. It is kept for you between sessions automatically, so do "
+                         + "not read or write files to manage it.")
         }
         lines.append("")
         if tools.contains("memory_set") {

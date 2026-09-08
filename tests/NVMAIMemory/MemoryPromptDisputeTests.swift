@@ -52,4 +52,31 @@ import Testing
                                               totalBytes: 20, recent: [plain]))
         #expect(!text.contains("[disputed"))
     }
+
+    /// Measured on the correction scenario: two sessions of eight produced
+    /// no answer at all because the model, told it "has memory" and given a
+    /// workspace name but no tool to reach it with, went looking for a
+    /// filesystem — one announced it would retrieve what it knew and emitted
+    /// a shell command, the other tried to write its decision to a file.
+    ///
+    /// Saying what is absent is the fix, so the fragment has to say it.
+    @Test func withoutToolsTheFragmentSaysThereIsNothingToCall() throws {
+        let text = try prompt(MemoryBootstrap(
+            records: [try record("decisions/storage", "postgres", disputed: false)],
+            omittedCount: 0, totalBytes: 20))
+        #expect(text.contains("no memory tools in this request"))
+        #expect(text.contains("nothing to fetch"))
+        #expect(text.contains("do not read or write files"))
+    }
+
+    /// And it must not say that when there *are* tools, which would tell the
+    /// model to ignore the ones it was given.
+    @Test func withToolsTheFragmentDoesNotDenyThem() throws {
+        let text = MemoryPrompt.instructions(
+            scope: try MemoryScope(namespace: "t", user: "u", workspace: "w"),
+            session: MemorySession(id: "s-1"),
+            bootstrap: MemoryBootstrap(records: [], omittedCount: 0, totalBytes: 0),
+            tools: ["memory_get", "memory_set"])
+        #expect(!text.contains("no memory tools in this request"))
+    }
 }

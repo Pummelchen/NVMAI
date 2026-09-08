@@ -162,6 +162,19 @@ REVISED_AT = {
     "revisions_count": 4,
 }
 
+# Keys that are not stored facts but arithmetic over the history of them.
+#
+# `revisions_count` asks the model how many of its own earlier decisions have
+# since changed, and measured, it answers the session number: 4, 5, 6, 6, 6
+# where the truth is 1, 2, 3, 3, 3 — while getting every actual project fact
+# right in the same reply. That is a counting failure, not a memory one, and
+# pooling it into the revised score made a perfect run read as 71%.
+#
+# It stays in the quiz and stays reported, because "how much have I changed"
+# is a fair thing to want. It just does not belong in the number that says
+# whether the store held the latest value.
+DERIVED = {"revisions_count"}
+
 QUIZ = (
     "Finally, answer this quiz about the project as it stands right now, as a "
     "JSON object in a ```json block with exactly these keys: "
@@ -245,23 +258,45 @@ def model_id():
 def assert_arm_is_real(arm: str, prompt_tokens: int):
     """Refuses to measure an arm that is not the configuration it claims.
 
-    The session-1 prompt here is the brief plus the quiz: 1,400 characters,
-    so 350 to 420 tokens bare. The memory fragment adds roughly 200 on top of
-    that, measured on the pong scenario with the same server. The bands
-    overlap deliberately -- they are not a token budget, they are a check for
-    the failure that has actually happened, a server started without memory
-    or a release binary that was never rebuilt, producing two arms of numbers
-    that were the same arm. Widen them, do not delete them, if a real run
-    trips one.
+    The failure this exists for has actually happened on this project: two
+    arms of numbers that turned out to be the same arm, because the server
+    was started without memory or the release binary was never rebuilt.
+
+    **The server's own startup line is the evidence, not a token count.** The
+    first version of this check used a token band estimated from characters,
+    and it aborted a run where memory was verifiably on -- the log said
+    `memory enabled=true` and session one scored 10/10 -- because session one
+    has an *empty* store, so the only thing memory adds to that prompt is its
+    instructions fragment. The estimate was 480 tokens and the truth was 412.
+    A guessed threshold that stops a good run is worse than no threshold.
+
+    So: when the server log is available the check is exact. Without one it
+    falls back to a deliberately loose band, and says which it used.
     """
-    floor = {"control": 0, "auto": 480}[arm]
-    ceiling = {"control": 700, "auto": 3000}[arm]
+    log = os.environ.get("NVMAI_MEMVAL_SERVER_LOG")
+    if log and Path(log).exists():
+        enabled = "memory enabled=true" in Path(log).read_text(errors="replace")
+        wants = arm != "control"
+        if enabled != wants:
+            raise SystemExit(
+                f"ABORT: arm '{arm}' wants memory={'on' if wants else 'off'} and "
+                f"the server log says {'on' if enabled else 'off'}. Rebuild the "
+                f"release binary and check NVMAI_MEMORY.")
+        print(f"  arm '{arm}' verified against the server log "
+              f"(memory {'on' if enabled else 'off'})")
+        return
+    # No log: a band wide enough that only a genuinely wrong configuration
+    # trips it. The control cannot exceed the bare prompt by much; the memory
+    # arm cannot be at or below it.
+    floor = {"control": 0, "auto": 300}[arm]
+    ceiling = {"control": 700, "auto": 8000}[arm]
     if not floor <= prompt_tokens <= ceiling:
         raise SystemExit(
             f"ABORT: arm '{arm}' saw {prompt_tokens} prompt tokens in session 1; "
-            f"expected {floor}..{ceiling}. The server is not running what this "
-            f"arm claims. Rebuild the release binary and check NVMAI_MEMORY / "
-            f"NVMAI_MEMORY_TOOLS.")
+            f"expected {floor}..{ceiling}, and no server log was available to "
+            f"check exactly. Set NVMAI_MEMVAL_SERVER_LOG.")
+    print(f"  arm '{arm}' plausible on prompt size ({prompt_tokens} tokens); "
+          f"set NVMAI_MEMVAL_SERVER_LOG for an exact check")
 
 
 def extract_quiz(text: str) -> dict:
@@ -347,20 +382,30 @@ def bucket(key: str, session: int) -> str:
     to that point it is an ordinary carried fact and behaves like one. The
     revised bucket is empty for sessions 1 to 3 by construction.
     """
+    if key in DERIVED:
+        return "derived"
     return "revised" if REVISED_AT.get(key, SESSIONS + 1) <= session else "unrevised"
 
 
-def score(session: int, answers: dict) -> tuple[int, int, int, int]:
-    """Returns correct, total, revised_correct, revised_total."""
+def score(session: int, answers: dict) -> tuple[int, int, int, int, int, int]:
+    """Returns correct, total, revised_correct, revised_total, derived_correct,
+    derived_total. The derived pair is reported apart from the rest; see
+    `DERIVED`."""
     expected = truth(session)
     correct = revised_correct = revised_total = 0
+    derived_correct = derived_total = 0
     for key in QUIZ_KEYS:
         hit = normalise(key, answers.get(key)) == expected[key]
         correct += hit
-        if bucket(key, session) == "revised":
+        where = bucket(key, session)
+        if where == "revised":
             revised_total += 1
             revised_correct += hit
-    return correct, len(QUIZ_KEYS), revised_correct, revised_total
+        elif where == "derived":
+            derived_total += 1
+            derived_correct += hit
+    return (correct, len(QUIZ_KEYS), revised_correct, revised_total,
+            derived_correct, derived_total)
 
 
 def resurrected(session: int, answers: dict) -> list[str]:
@@ -424,7 +469,8 @@ def report():
     for arm in ARMS:
         for run, results in sorted(runs.get(arm, {}).items()):
             totals = dict(correct=0, total=0, revised_correct=0, revised_total=0,
-                          unrevised_correct=0, unrevised_total=0, stale=0)
+                          unrevised_correct=0, unrevised_total=0,
+                          derived_correct=0, derived_total=0, stale=0)
             prompt = completion = seconds = 0
             for result in results:
                 session = result["session"]
@@ -433,7 +479,8 @@ def report():
                 # Rescored from the stored answers, never from the numbers the
                 # run wrote down, so a scoring fix applies to every version
                 # identically.
-                correct, total, rev_correct, rev_total = score(session, answers)
+                (correct, total, rev_correct, rev_total,
+                 der_correct, der_total) = score(session, answers)
                 stale = resurrected(session, answers)
                 if not answers:
                     detail = "(no quiz answered)"
@@ -449,8 +496,10 @@ def report():
                 totals["total"] += total
                 totals["revised_correct"] += rev_correct
                 totals["revised_total"] += rev_total
-                totals["unrevised_correct"] += correct - rev_correct
-                totals["unrevised_total"] += total - rev_total
+                totals["derived_correct"] += der_correct
+                totals["derived_total"] += der_total
+                totals["unrevised_correct"] += correct - rev_correct - der_correct
+                totals["unrevised_total"] += total - rev_total - der_total
                 totals["stale"] += len(stale)
                 prompt += result["prompt_tokens"]
                 completion += result["completion_tokens"]
@@ -464,12 +513,13 @@ def report():
     # it replaced. The stale column counts those: an arm can lose the revised
     # half by guessing, but only a memory system loses it by remembering.
     print(f"\n{'arm':8s} {'run':>3s} {'overall':>8s} {'revised':>8s} {'unrevised':>10s} "
-          f"{'stale':>6s}")
+          f"{'derived':>8s} {'stale':>6s}")
     for arm, run, t, *_ in summary_rows:
         print(f"{arm:8s} {run:>3s} "
               f"{percent(t['correct'], t['total']):>8s} "
               f"{percent(t['revised_correct'], t['revised_total']):>8s} "
               f"{percent(t['unrevised_correct'], t['unrevised_total']):>10s} "
+              f"{percent(t['derived_correct'], t['derived_total']):>8s} "
               f"{t['stale']:6d}")
     print("\nPooled over runs:")
     for arm in ARMS:

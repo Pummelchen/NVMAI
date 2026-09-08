@@ -512,6 +512,21 @@ own facts live in a shared workspace shown to every project; and
 `nvmai-memory` lists, shows, retires and forgets. Not yet measured against
 v2 — benchmarks held.
 
+## Say what is absent, not only what is present
+
+With the tool surface off, the memory fragment used to tell the model it
+"has memory that outlives this conversation", name its workspace, and list
+what was known — and stop. Measured on the correction scenario, two sessions
+of eight were then lost entirely: one model announced it would "retrieve
+what I actually know" and emitted a shell command to list a directory, the
+other tried to write its decision to a file. Both produced no answer at all.
+
+Told it has something and given no way to reach it, a model goes looking.
+The fragment now says plainly that there are no memory tools in this
+request, that everything memory has is already above, and that it is kept
+between sessions automatically. That one paragraph took the scenario from
+60% to 94%, took every lost session back, and made the run a third faster.
+
 ## Known limitations
 
 - **Search is lexical.** Filtering by prefix, tags and importance, then
