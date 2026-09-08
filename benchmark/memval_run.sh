@@ -31,14 +31,25 @@ esac
 [[ -x "$START" ]] || { echo "no start script $START" >&2; exit 2; }
 LABEL="${NVMAI_MEMVAL_LABEL:-$MODEL-${QUANT}bit}"
 SCRATCH="${NVMAI_MEMVAL_SCRATCH:-$ROOT/.build/benchmark-logs/memval-scratch-$LABEL}"
-LOGS="$ROOT/.build/benchmark-logs/memory-$( [[ "$BENCH" == pong ]] && echo value || echo book )-$LABEL"
+# One results directory per benchmark and install. `pong` and `book` keep the
+# names their recorded runs already carry, because tools that read those runs
+# -- the simulator, the watchdog calibration -- glob for them.
+case "$BENCH" in
+  pong)  BENCH_DIR=value ;;
+  book|smoke) BENCH_DIR=book ;;
+  *)     BENCH_DIR="$BENCH" ;;
+esac
+LOGS="$ROOT/.build/benchmark-logs/memory-$BENCH_DIR-$LABEL"
 mkdir -p "$LOGS" "$SCRATCH"
 
 case "$BENCH" in
-  smoke) SCRIPT="$ROOT/benchmark/memory_smoke.py"; ARMS=(auto) ;;   # no tools: consolidation is the only writer
-  pong)  SCRIPT="$ROOT/benchmark/memory_value.py"; ARMS=(control auto minimal full) ;;
-  book)  SCRIPT="$ROOT/benchmark/memory_book.py";  ARMS=(summary auto minimal full) ;;
-  *) echo "usage: $0 smoke|pong|book [arm]" >&2; exit 2 ;;
+  smoke)   SCRIPT="$ROOT/benchmark/memory_smoke.py";    ARMS=(auto) ;;   # no tools: consolidation is the only writer
+  pong)    SCRIPT="$ROOT/benchmark/memory_value.py";    ARMS=(control auto minimal full) ;;
+  book)    SCRIPT="$ROOT/benchmark/memory_book.py";     ARMS=(summary auto minimal full) ;;
+  correct) SCRIPT="$ROOT/benchmark/memory_correct.py";  ARMS=(control auto) ;;
+  projects) SCRIPT="$ROOT/benchmark/memory_projects.py"; ARMS=(control auto) ;;
+  volume)  SCRIPT="$ROOT/benchmark/memory_volume.py";   ARMS=(control auto full) ;;
+  *) echo "usage: $0 smoke|pong|book|correct|projects|volume [arm]" >&2; exit 2 ;;
 esac
 [[ -n "$ONLY" ]] && ARMS=("$ONLY")
 if [[ -n "${NVMAI_MEMVAL_ARMS:-}" && "$BENCH" != smoke ]]; then

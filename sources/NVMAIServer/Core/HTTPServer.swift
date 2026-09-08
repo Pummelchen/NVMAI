@@ -124,6 +124,31 @@ public actor NVMAIHTTPServer {
     }
 }
 
+/// The workspace a request names, from `X-NVMAI-Workspace`.
+///
+/// This is how one server serves several checkouts, and it was documented in
+/// three places and read in none: `ValidatedChatRequest.workspace` had no
+/// caller at all, so two projects sharing a server silently shared a memory
+/// store — the exact cross-project mixing the workspace design exists to
+/// prevent.
+///
+/// Only the shape is checked here. Whether the name is *allowed* — the
+/// reserved shared workspace, characters a scope forbids — belongs to the
+/// memory layer, which already refuses those and disables memory for the
+/// request rather than failing it. A bad workspace must never cost someone
+/// their answer.
+enum WorkspaceHeader {
+    static let name = "x-nvmai-workspace"
+
+    static func value(in head: HTTPRequestHead?) -> String? {
+        guard let raw = head?.headers.first(name: name) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        // A proxy that adds the header with nothing after it must not create
+        // a workspace called "".
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 /// unchecked-invariant: NIO calls every ChannelInboundHandler method on the
 /// channel's own event loop, so the handler's per-request state is already
 /// serialised. The one exception is `activeTask`, which the SSE drainer and the
@@ -353,6 +378,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 decoded, modelID: modelID, maxContext: backend.maximumContext,
                 reasoningProfile: reasoningProfile,
                 sampling: backend.samplingDefaults)
+                .withWorkspace(WorkspaceHeader.value(in: head))
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -497,6 +523,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 chatRequest, modelID: modelID, maxContext: backend.maximumContext,
                 reasoningProfile: reasoningProfile,
                 sampling: backend.samplingDefaults)
+                .withWorkspace(WorkspaceHeader.value(in: head))
             let responseID = ResponsesAPIBuilder.responseID()
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)

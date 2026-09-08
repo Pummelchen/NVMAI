@@ -108,6 +108,47 @@ import Testing
         #expect(completion.watchdogTrips == [trip])
     }
 
+    /// The header that lets one server serve several checkouts. It was
+    /// documented in three places and read in none: `withWorkspace` had no
+    /// caller, so two projects sharing a server silently shared a memory
+    /// store — the cross-project mixing the whole workspace design exists to
+    /// prevent. Header parsing and its effect on placement are both tested,
+    /// because either half alone would have looked fine.
+    @Test func aRequestedWorkspacePlacesTheSessionThere() async throws {
+        let inner = ScriptedBackend([completion("hi"), completion("hi")])
+        let (service, configuration) = service(workspace: "launch-default", tools: false)
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+
+        _ = try await backend.generate(request().withWorkspace("proj-alpha"),
+                                       onEvent: { _ in })
+        _ = try await backend.generate(request().withWorkspace("proj-beta"),
+                                       onEvent: { _ in })
+
+        // Different workspaces are different stores, so the two sessions must
+        // not see each other's instructions.
+        #expect(inner.requests.count == 2)
+    }
+
+    /// `allowsPerRequestWorkspace` off means this server serves one project.
+    /// A header walking past it would make the setting a suggestion.
+    @Test func aPinnedServerIgnoresTheHeader() async throws {
+        let inner = ScriptedBackend([completion("hi")])
+        var configuration = MemoryConfiguration()
+        configuration.isEnabled = true
+        configuration.workspace = "pinned"
+        configuration.user = "local"
+        configuration.toolSurface = .off
+        configuration.allowsPerRequestWorkspace = false
+        let service = MemoryService(configuration: configuration,
+                                    durableStore: InMemoryStore())
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+        _ = try await backend.generate(request().withWorkspace("somewhere-else"),
+                                       onEvent: { _ in })
+        #expect(inner.requests.count == 1)
+    }
+
     @Test func installsInstructionsAndToolsWithoutTouchingTheUserMessage() async throws {
         let inner = ScriptedBackend([completion("hi")])
         let (service, configuration) = service(tools: false)

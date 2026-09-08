@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import NIOHTTP1
 @testable import NVMAI
 @testable import NVMAIServerCore
 
@@ -514,5 +515,22 @@ struct ServerArgumentTests {
                 "--reasoning-effort", "high",
             ])
         }
+    }
+
+    /// Header parsing, on its own. Trimming and the empty case matter
+    /// because a proxy that adds `X-NVMAI-Workspace:` with nothing after it
+    /// must not create a workspace called "".
+    @Test func workspaceHeaderIsReadAndTrimmed() {
+        func head(_ value: String?) -> HTTPRequestHead {
+            var headers = HTTPHeaders()
+            if let value { headers.add(name: "X-NVMAI-Workspace", value: value) }
+            return HTTPRequestHead(version: .http1_1, method: .POST,
+                                   uri: "/v1/chat/completions", headers: headers)
+        }
+        #expect(WorkspaceHeader.value(in: head("proj-alpha")) == "proj-alpha")
+        #expect(WorkspaceHeader.value(in: head("  proj-beta  ")) == "proj-beta")
+        #expect(WorkspaceHeader.value(in: head("   ")) == nil)
+        #expect(WorkspaceHeader.value(in: head(nil)) == nil)
+        #expect(WorkspaceHeader.value(in: nil) == nil)
     }
 }
