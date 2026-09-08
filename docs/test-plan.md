@@ -21,8 +21,8 @@ from the story bible — so it is the first thing every scenario checks.
 | 4 | Watchdog Swift/Python fixture agreement | **pass** — 8 cases, 0 mismatches |
 | 5 | Simulator ranks store policies correctly | **pass** — ordering holds on all 15 runs |
 | 6 | CPU engine parity with the numpy reference | **pass** — worst cosine 0.9999999, both widths |
-| 7 | S1 Book — control (memory off) | |
-| 8 | S1 Book — memory on | |
+| 7 | S1 Book — control (memory off) | **98%** (123/126), Ornith 4-bit |
+| 8 | S1 Book — memory on | **94%** (119/126), same install — see 17 |
 | 9 | S2 Coder — control | |
 | 10 | S2 Coder — memory on | |
 | 11 | S3 Correction — control | |
