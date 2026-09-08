@@ -304,8 +304,13 @@ def assert_projects_are_separate():
     placed = placements_logged()
     if placed:
         scopes = {scope for scope, _ in placed}
-        sources = {via for _, via in placed}
-        if sources != {"header"}:
+        # Only *this scenario's* requests have to be header-placed. The
+        # harness sends a "Say OK." readiness probe before the scenario
+        # starts, with no header, and it lands in the same log -- so
+        # demanding that nothing was ever placed by launch fails on the
+        # probe rather than on anything the run did.
+        sources = {via for scope, via in placed if scope in workspaces}
+        if sources and sources != {"header"}:
             raise SystemExit(
                 f"ABORT: the server placed sessions via {sorted(sources)}, not "
                 f"'header'. X-NVMAI-Workspace is not reaching the placement "

@@ -28,6 +28,29 @@ private actor ScriptedServerBackend: ServerInferenceBackend {
     }
 }
 
+/// Records the workspace each request arrived with, so a test can assert
+/// what actually reached the generation path rather than what a parser
+/// returned in isolation.
+///
+/// unchecked-invariant: `seen` is only touched under `lock`.
+private final class WorkspaceRecordingBackend: ServerInferenceBackend, @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [String?] = []
+
+    var workspaces: [String?] { lock.withLock { seen } }
+
+    func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        lock.withLock { seen.append(request.workspace) }
+        onEvent(.content("ok"))
+        return ServerCompletion(
+            content: "ok", toolCalls: [], finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2))
+    }
+}
+
 private actor MultipleToolBackend: ServerInferenceBackend {
     func generate(
         _ request: ValidatedChatRequest,
@@ -644,6 +667,46 @@ struct HTTPServerTests {
 
         try await server.shutdown()
     }
+
+    /// `X-NVMAI-Workspace` has to reach the generation path, over a real
+    /// socket, on both API surfaces.
+    ///
+    /// A unit test on the header parser is not enough and was not: the
+    /// parser was correct and the feature still did nothing, because the
+    /// handler clears its stored request head when the body ends and the
+    /// lookup ran after that, reading nil every time. Only a request that
+    /// travels the whole way catches that.
+    @Test func theWorkspaceHeaderReachesTheBackend() async throws {
+        let backend = WorkspaceRecordingBackend()
+        let server = NVMAIHTTPServer(
+            modelID: "test-model", queueLimit: 2, backend: backend)
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        func send(_ path: String, body: String, workspace: String?) async throws {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            if let workspace {
+                request.setValue(workspace, forHTTPHeaderField: "X-NVMAI-Workspace")
+            }
+            request.httpBody = Data(body.utf8)
+            _ = try await URLSession.shared.data(for: request)
+        }
+
+        let chat = #"{"model":"test-model","messages":[{"role":"user","content":"hi"}]}"#
+        try await send("/v1/chat/completions", body: chat, workspace: "proj-alpha")
+        try await send("/v1/chat/completions", body: chat, workspace: nil)
+        // `input` is a list of items on this surface, not a bare string.
+        try await send(
+            "/v1/responses",
+            body: #"{"model":"test-model","input":[{"role":"user","content":"hi"}]}"#,
+            workspace: "proj-beta")
+
+        #expect(backend.workspaces == ["proj-alpha", nil, "proj-beta"])
+        try await server.shutdown()
+    }
+
 }
 
 private enum RawSocketError: Error {

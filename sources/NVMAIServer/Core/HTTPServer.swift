@@ -322,7 +322,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
             handleCompletion(
                 body: body,
-                context: context)
+                context: context,
+                // From the *local* head: `self.head` is cleared when `.end`
+                // arrives, before this runs. Reading it here returned nil
+                // every time, which is a fix that compiles, ships and does
+                // nothing -- caught only because the isolation scenario
+                // refuses to run until it sees the header take effect.
+                workspace: WorkspaceHeader.value(in: head))
         case (.POST, "/v1/responses"):
             guard head.headers.first(name: "content-type")?
                 .lowercased().hasPrefix("application/json") == true else {
@@ -333,7 +339,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             }
             handleResponses(
                 body: body,
-                context: context)
+                context: context,
+                workspace: WorkspaceHeader.value(in: head))
         case (.POST, "/v1/models/unload"):
             handleUnload(context: context)
         case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"), (_, "/v1/models/unload"):
@@ -368,7 +375,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
 
     private func handleCompletion(body: ByteBuffer,
-                                  context: ChannelHandlerContext) {
+                                  context: ChannelHandlerContext,
+                                  workspace: String? = nil) {
         do {
             // One copy out of the ByteBuffer, not two: a [UInt8] hop would
             // duplicate a body of up to `maximumBodyBytes` before decoding.
@@ -378,7 +386,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 decoded, modelID: modelID, maxContext: backend.maximumContext,
                 reasoningProfile: reasoningProfile,
                 sampling: backend.samplingDefaults)
-                .withWorkspace(WorkspaceHeader.value(in: head))
+                .withWorkspace(workspace)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -509,7 +517,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     /// current Codex CLI versions (which only speak the Responses API) talk
     /// to NVMAI directly.
     private func handleResponses(body: ByteBuffer,
-                                 context: ChannelHandlerContext) {
+                                 context: ChannelHandlerContext,
+                                 workspace: String? = nil) {
         do {
             let decoded = try JSONDecoder().decode(
                 ResponsesAPIRequest.self, from: Data(body.readableBytesView))
@@ -523,7 +532,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 chatRequest, modelID: modelID, maxContext: backend.maximumContext,
                 reasoningProfile: reasoningProfile,
                 sampling: backend.samplingDefaults)
-                .withWorkspace(WorkspaceHeader.value(in: head))
+                .withWorkspace(workspace)
             let responseID = ResponsesAPIBuilder.responseID()
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
