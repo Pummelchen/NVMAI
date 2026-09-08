@@ -60,6 +60,12 @@ fi
 # a real client does. NVMAI_MEMVAL_TEMPERATURE=0 pins it for a determinism
 # check.
 RUNS="${NVMAI_MEMVAL_RUNS:-3}"
+# Where the run numbering starts. Repeats of one configuration have to be
+# interleaved with the others to be worth anything -- three of A then three
+# of B measures the order as much as the arms -- and interleaving means
+# invoking this script once per run, which would otherwise overwrite run 1
+# every time.
+FIRST_RUN="${NVMAI_MEMVAL_FIRST_RUN:-1}"
 [[ "$BENCH" == smoke ]] && RUNS=1
 # The server distils a session after this much quiet. Two minutes in
 # production; here the harness waits for the log line, so keep it short.
@@ -136,7 +142,7 @@ wait_ready() {
 
 trap stop_server EXIT
 
-for RUN in $(seq 1 "$RUNS"); do
+for RUN in $(seq "$FIRST_RUN" $(( FIRST_RUN + RUNS - 1 ))); do
 for ARM in "${ARMS[@]}"; do
   case "$ARM" in
     control|summary) MEMORY=0; TOOLS=off ;;
@@ -161,7 +167,7 @@ for ARM in "${ARMS[@]}"; do
     cd "$ROOT"
     NVMAI_PORT="$PORT" NVMAI_MEMORY="$MEMORY" NVMAI_MEMORY_TOOLS="$TOOLS" \
     NVMAI_MEMORY_DIR="$MEMDIR" NVMAI_MEMORY_JOURNAL=1 \
-    NVMAI_MEMORY_GUARD="${NVMAI_MEMORY_GUARD:-0}" \
+    NVMAI_MEMORY_GUARD="${NVMAI_MEMORY_GUARD:-1}" \
     NVMAI_MEMORY_CONSOLIDATION=1 NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS="$IDLE" \
       exec "$START" codex full default off
   ) >"$SERVER_LOG" 2>&1 &
