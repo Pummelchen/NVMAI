@@ -21,8 +21,19 @@ substance is nowhere in the user's own words is a mislabel.
     python3.13 benchmark/guard_source_rate.py --label guard-step0
     python3.13 benchmark/guard_source_rate.py --show             # each fact
 
-The gate, from `docs/plan-memory-guard-and-shadow.md`: under 5% mislabelled,
-and no invented fact labelled `user` at all.
+**This finds candidates; it does not decide.** Word overlap cannot judge a
+fact whose claim lives in its key and whose value is a boolean --
+`continuity/marcus_knows_photo = false` is the bible's hard rule and neither
+word appears in what the person wrote. Scored on the value alone it reported
+nine mislabels on a run that had none; scored on key and value together it
+reported six across three runs, and hand review found all six correct. The
+flags are worth reading and the count is not worth trusting.
+
+So the gate is: run this, read every flag, and record the verdict. The list
+is small -- two to nine per run -- which is what makes that practical.
+
+The gate itself, from `docs/plan-memory-guard-and-shadow.md`: under 5%
+mislabelled, and no invented fact labelled `user` at all.
 
 The scoring is deliberately generous to the model. A fact counts as
 grounded if its *distinctive* words -- the ones carrying the claim, not the
@@ -182,8 +193,19 @@ def main() -> int:
         return 1
 
     def score(fact: dict) -> float | None:
+        """How much of a fact is traceable to the person's own words.
+
+        The **address and the value together**, because a fact is both. The
+        first version of this scored the value alone and reported nine
+        mislabels on a run that had none: every one was a boolean whose key
+        carries the claim -- `rules/marcus_must_not_learn_photo_before_
+        chapter_60 = true` is the person's rule from the story bible, and
+        "true" appears nowhere in what they wrote. Scoring half a fact
+        measures nothing.
+        """
         said = stems(significant(sim.user_text(fact["session"])))
-        words = significant(fact["value"])
+        words = significant(fact["address"].replace("/", " ").replace("_", " "))
+        words |= significant(fact["value"])
         if not words:
             return None
         return len({w for w in words if stem(w) in said}) / len(words)
@@ -229,10 +251,8 @@ def main() -> int:
                   f"({derived_grounded / len(derived_scores):.0%})")
             print("  (a rate near the user rate would mean the test does not "
                   "discriminate)")
-        print(f"\n  gate: under 5% mislabelled -- "
-              f"{'MET' if rate < 0.05 else 'NOT MET'}")
-        print(f"  gate: no invented fact labelled user -- "
-              f"{'MET' if not mislabelled else 'NOT MET'}")
+        print(f"\n  {len(mislabelled)} candidate(s) below the grounding "
+              f"threshold -- read them; the count is not the verdict")
     else:
         print("\n  nothing was labelled user; the guard would never fire, "
               "and the gate cannot be judged from this run")

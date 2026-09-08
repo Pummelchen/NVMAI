@@ -186,12 +186,26 @@ person's vocabulary to slip past a word-overlap check. It costs nothing
 where the extraction already behaves — Qwen loses none of its 28 — and
 Ornith, which writes composites, keeps 7 of 19.
 
-**A caveat worth stating.** The rule was drawn from the same 47 facts it is
-scored on, so the honest claim is that it removes every composite *this
-corpus contains*, not that the threshold generalises. It wants confirming on
-a run these numbers did not shape. Its failure mode is the safe one: a
-composite the person really did assert loses protection, and nothing gains
-protection it should not have.
+**A third run, which these numbers did not shape, changed the conclusion
+about the *measurement* rather than about the model.** Ornith 4-bit again:
+41 facts, 22 labelled as the person's, and the scorer flagged nine. All nine
+were correct — every one a boolean whose claim lives in its key, like
+`rules/marcus_must_not_learn_photo_before_chapter_60 = true`, where the
+value carries no words at all. Scoring the key as well as the value cut the
+flags to four, and those four were correct too.
+
+So across three runs and 104 facts claiming the person's authority, hand
+review finds **no invented fact wearing the person's label**. The labelling
+is good on both models. What is not good is the automatic scorer: word
+overlap cannot tell a boolean rule from an invention, and tuning what it
+reads flips its verdict. It finds candidates worth reading; it does not
+decide.
+
+The two genuine composites it did find on the first Ornith run are still
+genuine — chapter 65 and the ten-chapter summary are the model's own output
+under the person's label — so the atomicity rule keeps its justification.
+Its failure mode is the safe one: a composite the person really did assert
+loses protection, and nothing gains protection it should not have.
 
 The real fix is still upstream — an extraction whose values have one source
 each, which its own prompt already asks for. This is the guard refusing to
