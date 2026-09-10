@@ -383,11 +383,20 @@ import ContinuityCore
                 Issue.record("the write failed: \(result)")
                 return
             }
+            // A restart is a new process, and the kernel drops the journal's
+            // exclusive lock when the old one exits. In one process the
+            // service has to be told, or its background work can keep the
+            // lock held a moment longer -- which, under full-suite load, made
+            // the second service fall back to empty local storage and read as
+            // a lost fact rather than a held lock.
+            await service.shutDown()
         }
 
         // A second service over the same directory is a restart.
         let service = MemoryService(configuration: configuration)
         let context = try #require(await service.beginSession(id: "s2"))
+        #expect(await service.isDurable,
+                "the restarted service must own the journal, or nothing below means anything")
         #expect(context.bootstrap.records.count == 1)
         #expect(context.bootstrap.records.first?.key.rawValue == "decisions/storage")
         #expect(context.bootstrap.records.first?.value == "native swift, same process")
@@ -411,10 +420,13 @@ import ContinuityCore
                                      model: "qwen35b", promptTokens: 12,
                                      completionTokens: 40, latencyMilliseconds: 900,
                                      stopReason: "stop")
+            // As above: a restart releases the lock; one process has to ask.
+            await service.shutDown()
         }
 
         let service = MemoryService(configuration: configuration)
         _ = await service.beginSession(id: "s2")
+        #expect(await service.isDurable)
         let journal = try #require(await service.journalStore())
         let scope = try #require(configuration.scope())
         let sessions = await journal.sessions(limit: 10, in: scope)
