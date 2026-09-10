@@ -7,8 +7,9 @@ because that is what the CPU engine reads. Every other install is a `.gturbo`
 directory with a manifest, a layout, and a path-bound `verified-install.json`
 receipt. This plan makes the dense models consistent with the rest.
 
-Status: **design only, not implemented.** The reconnaissance below was done on
-2026-09-11 against `main`; every claim carries the source it came from.
+Status: **design settled, not implemented.** The family decision is made (a new
+dense value, below). The reconnaissance was done on 2026-09-11 against `main`;
+every claim carries the source it came from.
 
 ## Why it was not done at the time
 
@@ -42,12 +43,8 @@ Feasible, and no architectural blocker. Each row is checked against source:
    `moeIntermediateSize = 0`, `intermediateSize = intermediate_size`.
    The sparse-indexer and hyper-connection fields stay at their defaults; a
    dense model has none.
-2. **A family case.** `RepackModelFamily` needs a dense value mirrored into
-   `manifest.json -> arch.family`, and the runtime's `ModelFamily` must accept
-   it — or the manifest's family must be the existing `qwen36` with the CPU
-   engine chosen by directory shape instead. **This is the one genuine design
-   decision and it should be made deliberately**, because `ModelFamily` is what
-   the GPU loader dispatches on.
+2. **Two family cases**, decided above: `ModelFamily.qwen35Dense` mirrored
+   into `manifest.json -> arch.family`, and the repacker's matching value.
 3. **A `.gturbo`-backed weight source.** A second initializer on
    `AffineSnapshot` (or a protocol behind it) that reads `manifest.json` →
    `ArchInfo`-equivalent → `Configuration`, and `ResidentIndex` → `Matrix`.
@@ -60,6 +57,59 @@ Feasible, and no architectural blocker. Each row is checked against source:
 5. **Converter/installer wiring.** `convert_qwen35` in `install_models.sh`
    becomes a convert *and* repack, so the receipt path is the same one every
    other model uses.
+
+## The family decision
+
+**Decided: a new dense value, not a reuse of `qwen36`.**
+
+`ModelFamily` (raw value mirrored into `manifest.json -> arch.family`) gains
+`qwen35Dense = "qwen3_5_dense"`, matching the `model_type` the converter
+already writes and `CPUModelFamily.qwen35Dense` already parses. `qwen36` would
+have been the cheaper wiring, but it is wrong: `ModelFamily` is what the GPU
+loader dispatches on, so a dense model wearing the MoE family's name would be
+handed to `Model.load` and its `qwen36` schema validation — which requires
+affine tensors at MoE shapes — before the CPU engine ever saw it.
+
+Nine places ask about a family. Four must learn the new answer; the rest must
+simply not mistake it for a GPU one:
+
+| Site | Needs |
+| --- | --- |
+| `ModelTypes.swift` (`ModelFamily`) | the new case |
+| `ArchInfo.swift` (`RepackModelFamily`) | the new case, `isDraftHead` false |
+| `ReasoningControl.swift` | binary thinking, like `qwen36` |
+| `Sampler.swift` (`forFamily`) | house defaults — 0.6 for Qwen 3.5 |
+| `TensorSchema.swift` (`schema(for:)`) | not reached by the CPU path; must still compile, so return the dense schema or refuse explicitly |
+| `ManifestReader.validateQuant` | dense has no router at a MoE width; reader must accept the embedded/router widths the converter writes |
+| `Model.swift` (`validate*Schema`) | **not reached** — the CPU engine loads a dense `.gturbo` through its own path. If it were reached, the `qwen36` MoE checks would reject the model |
+| `ModelSessionPlan` (display id) | a display name for the dense family |
+| `AppModelInstallDescriptor` | `nil`, like the MTP heads — the app does not install these |
+| `ModelCatalog.probeInstall` | **the routing change**: an install whose family is dense returns `.cpu(.qwen35Dense)`, not `.gpu(family)` |
+
+`ModelCatalog.probeInstall` currently hard-codes `kind: .gpu(identity.family)`
+(`ModelCatalog.swift:205`). That one line is what makes a `.gturbo` dense
+install reach `CPUModelBackend`.
+
+## Staged order, highest risk first
+
+The risk here is byte-level, not architectural, so the stages are arranged to
+test the bytes before anything is migrated.
+
+1. **Repack without a reader.** Add the `ArchInfo` dense branch, the two family
+   cases and the CLI path, then repack the 2B and **diff the produced
+   resident bytes against the snapshot they came from**. A repack is a byte
+   copy, so this is an exact comparison and it exercises the whole
+   planner/writer path. If this stage is wrong, nothing downstream matters and
+   nothing has been migrated.
+2. **Teach the CPU engine to read it.** The `.gturbo`-backed weight source,
+   then the equivalence check: same model, both paths, token-for-token greedy.
+   Only now does a wrong mapping have anywhere to hide.
+3. **Migrate.** `install_models.sh` converts *and* repacks; repack the 4B and
+   the 9B and re-run both checks; drop the snapshot caveat from the docs.
+
+Stage 1 is the cheap one and it is where a wrong `ArchInfo` — one field
+misread, one mask entry wrong — shows up immediately as a byte difference or
+a planner refusal rather than as fluent nonsense three stages later.
 
 ## The risk, stated plainly
 
