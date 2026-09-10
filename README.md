@@ -54,6 +54,12 @@ tools/start-qwen3.8-4bit.sh       tools/start-qwen3.8-8bit.sh
   tools the engine answers itself. It runs inside the server process, so there
   is no database to install and nothing to start. Off by default; see
   [docs/agent-memory.md](docs/agent-memory.md).
+- **Three client protocols on one server:** OpenAI Chat Completions, the
+  OpenAI Responses API (stored responses, `previous_response_id`, the full
+  event grammar) and the Anthropic Messages API (`/v1/messages`,
+  `count_tokens`, streaming), so Codex, Claude Code and the OpenAI and
+  Anthropic SDKs all talk to the same model; see
+  [docs/server-api.md](docs/server-api.md).
 - **Tested coding CLIs:** The launch workflow supports Codex, Qwen Code, and
   OpenCode against the local server.
 - **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI

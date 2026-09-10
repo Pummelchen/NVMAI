@@ -15,7 +15,7 @@ import NVMAIMemory
 /// server's own tools are the client's, and no client knows about NVMAI
 /// memory. A memory tool the client would have to run is a memory tool
 /// nothing runs.
-public actor MemoryBackend: ServerInferenceBackend {
+public actor MemoryBackend: ServerInferenceBackend, PromptTokenCounting {
     private let inner: any ServerInferenceBackend
     private let service: MemoryService
     private let configuration: MemoryConfiguration
@@ -78,6 +78,17 @@ public actor MemoryBackend: ServerInferenceBackend {
 
     public nonisolated var maximumContext: Int { inner.maximumContext }
     public nonisolated var samplingDefaults: GenerationDefaults.Sampling { inner.samplingDefaults }
+
+    /// Counts the request as the client sent it. The memory fragment and
+    /// bootstrap are not included: they are added per session at generation
+    /// time, and a count endpoint that guessed at them would be wrong more
+    /// often than it was useful.
+    public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        guard let counting = inner as? any PromptTokenCounting else {
+            throw ServerRequestError.unsupportedOperation("count_tokens")
+        }
+        return try await counting.countPromptTokens(request)
+    }
 
     public func generate(
         _ request: ValidatedChatRequest,
