@@ -1,12 +1,13 @@
 import Foundation
 
-/// Qwen3.5's dense models (2B and 4B) on the CPU, one token at a time.
+/// Qwen3.5's dense models (2B, 4B and 9B) on the CPU, one token at a time.
 ///
-/// Every dimension comes from the snapshot's config. The two sizes differ in
-/// more than width: the 2B has as many delta-rule value heads as key heads,
-/// the 4B has twice as many; attention is 8 query heads over 2 KV heads in
-/// the 2B and 16 over 4 in the 4B. Both ratios are read, never assumed, and
-/// the head-sharing tests pin the mapping for each.
+/// Every dimension comes from the snapshot's config. The sizes differ in more
+/// than width: the 2B has as many delta-rule value heads as key heads, the
+/// 4B and 9B have twice as many; attention is 8 query heads over 2 KV heads
+/// in the 2B and 16 over 4 in the other two. Both ratios are read, never
+/// assumed, and the head-sharing tests pin the mapping for each. The 9B also
+/// does not tie its output to the embedding, which `headWeightName` handles.
 ///
 /// The side-engine's model: small enough to stay resident beside a 35B, and
 /// run on cores the main engine leaves idle. It is a decode-only engine —
@@ -139,9 +140,10 @@ public final class CPUQwen35 {
 
     /// One token, optionally without the output head.
     ///
-    /// The head is the tied embedding: 248,320 rows over the hidden width,
-    /// half a gigabyte of the 2B's 1.9 at 8 bits, read in full for every
-    /// token. A prompt token's logits are thrown away — only the last one's
+    /// For the 2B and 4B the head is the tied embedding: 248,320 rows over
+    /// the hidden width, half a gigabyte of the 2B's 1.9 at 8 bits, read in
+    /// full for every token. The 9B reads its own `lm_head` of the same
+    /// shape. A prompt token's logits are thrown away — only the last one's
     /// are used — so computing them costs about a third of each prompt token
     /// for nothing.
     @discardableResult
@@ -212,11 +214,25 @@ public final class CPUQwen35 {
         return dequantize(row: token, of: table)
     }
 
-    /// The tied head: the embedding table is the output projection, so the
-    /// logits are one GEMV over 248320 rows — and the largest single read of
+    /// The output projection. The 2B and 4B tie it to the embedding table, so
+    /// the logits are one GEMV over 248320 rows — the largest single read of
     /// every token, which is why it dominates the 1.9 GB per-token figure.
+    ///
+    ///
+    /// The 9B is the vision-language build and does **not** tie: it ships its
+    /// own `lm_head.weight`, which the converter carries through at
+    /// `language_model.lm_head.weight` — note, without the `.model.` the
+    /// embedding prefix carries. Reading the table there would produce
+    /// plausible-looking but wrong logits, so the flag is honoured rather
+    /// than assumed.
+    private func headWeightName() -> String {
+        snapshot.configuration.tiedEmbedding
+            ? "\(prefix)embed_tokens.weight"
+            : "language_model.lm_head.weight"
+    }
+
     private func head(_ h: [Float]) throws -> [Float] {
-        project(try matrix("\(prefix)embed_tokens.weight"), h)
+        project(try matrix(headWeightName()), h)
     }
 
     private func mlp(layer: Int, x: [Float]) throws -> [Float] {

@@ -30,6 +30,12 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 - **Qwen-AgentWorld 35B-A3B**
 - **Ornith 1.5 35B-A3B**
 - **Qwen 3.6 35B-A3B**
+- **Qwen 3.5 2B / 4B / 9B** — dense models on the CPU engine, at 4-bit and
+  8-bit, converted from Qwen's own bf16 release by this project's converter
+  (`tools/install_models.sh qwen35-2b|qwen35-4b|qwen35-9b`). The 9B is the
+  vision-language build and is converted text-only, like every model here.
+  These install as affine snapshots — the format the CPU engine reads — not as
+  `.gturbo` installs, so they carry no verification receipt.
 
 
 ### Usage

@@ -13,6 +13,19 @@ enum ServerLog {
         write("request \(id) queued")
     }
 
+    /// A request asked for a reasoning level the served model cannot render,
+    /// and was answered with the nearest it can.
+    ///
+    /// Logged rather than returned: the whole point is that the agent keeps
+    /// working, so this must not be an error, but an operator staring at a
+    /// model that "ignores" `xhigh` deserves to see why. One line per
+    /// request, and only when something actually changed.
+    static func reasoningFallback(id: String, notes: [String]) {
+        for note in notes {
+            write("request \(id) reasoning: \(note)")
+        }
+    }
+
     static func generating(id: String) {
         write("request \(id) generating")
     }

@@ -56,7 +56,7 @@ below. They are exactly what the installer does.
 | Ornith 1.5 35B-A3B, 8-bit | about 37 GB |
 | Qwen 3.6 35B-A3B, 8-bit | about 37 GB |
 | Qwen 3.8 Flash Next 125B-A6B, 4-bit | about 174 GB |
-| Qwen 3.5 2B (runs on the CPU) | about 1.3–2 GB |
+| Qwen 3.5 2B / 4B / 9B (run on the CPU) | about 1.3 GB – 9.9 GB |
 
 **Add room to spare** — a few gigabytes for the build itself and for macOS
 to work comfortably. The 125B model is a serious commitment: check your free
@@ -168,13 +168,16 @@ Good to know while it runs:
   as the message tells you to. You do not need an account for the default
   model.
 
-A note on the small CPU models: the Qwen 3.5 2B and 4B are much smaller
-(about 1.3–4.5 GB) and run on the processor rather than the graphics chip,
-which makes them a lovely way to get a feel for NVMAI without a long
-download. They are not in the one-command installer yet — they are built
-from a snapshot first — so for a first run the 35B path above is the
-smoother one. [Choosing a model](04-choosing-a-model.md) explains what they
-are good for and how they get installed.
+A note on the small CPU models: the Qwen 3.5 2B, 4B and 9B are much smaller
+(about 1.3–9 GB) and run on the processor rather than the graphics chip, which
+makes them a lovely way to get a feel for NVMAI without a long download. They
+install through the same script:
+
+```bash
+tools/install_models.sh qwen35-2b        # also qwen35-4b, qwen35-9b
+```
+
+[Choosing a model](04-choosing-a-model.md) explains what each one is good for.
 
 ## Step 5 — Check the install
 

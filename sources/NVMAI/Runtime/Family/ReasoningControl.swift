@@ -91,6 +91,13 @@ extension ModelFamily {
 /// renders differently; the others are refused rather than mapped to a
 /// neighbour, because a level that does not change the prompt does not
 /// change the model's behaviour either.
+///
+/// That refusal is right for a *configurator*, where a mistyped level should
+/// be caught. It is wrong for a *request*: a coding agent that asks for
+/// `xhigh` on a model with no effort levels must still get an answer. So the
+/// request path maps a level to the nearest one the model renders, through
+/// `ReasoningFallback.effectiveLevel` on the server, and `requested(_:)`
+/// below is what turns a client's free-text spelling into a level.
 public enum ReasoningLevel: String, CaseIterable, Sendable, Codable {
     case off, on, minimal, low, medium, high, xhigh, max
 
@@ -106,6 +113,58 @@ public enum ReasoningLevel: String, CaseIterable, Sendable, Codable {
         case .medium: self = .medium
         case .xhigh: self = .xhigh
         }
+    }
+
+    /// Position on the one effort ladder, `off` lowest. Used to choose the
+    /// nearest level a model does support.
+    var rank: Int {
+        switch self {
+        case .off: return 0
+        case .on, .minimal: return 1
+        case .low: return 2
+        case .medium: return 3
+        case .high: return 4
+        case .xhigh: return 5
+        case .max: return 6
+        }
+    }
+}
+
+extension ReasoningLevel {
+    /// The level a client asked for, as free text.
+    ///
+    /// Coding agents send vocabulary this project never defined (`ultra`,
+    /// `none`, `extra-high`, `x-high`, `thinking`, `auto`). They all mean
+    /// something on the ladder, so they are mapped rather than rejected, and
+    /// an unknown word is reported instead of failing the request.
+    public static func requested(_ raw: String) -> ReasoningLevel? {
+        let word = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch word {
+        case "": return nil
+        case "0", "off", "false", "no", "none", "disabled", "nothink", "no_think":
+            return .off
+        case "1", "on", "true", "yes", "enabled", "think", "thinking", "auto", "adaptive", "default":
+            return .on
+        case "minimal", "min", "least", "tiny":
+            return .minimal
+        case "low", "light":
+            return .low
+        case "medium", "med", "moderate", "normal", "standard", "balanced":
+            return .medium
+        case "high", "hard":
+            return .high
+        case "xhigh", "extra-high", "extra_high", "extra high", "x-high", "very-high", "highest":
+            return .xhigh
+        case "max", "maximum", "ultra", "extreme", "unlimited":
+            return .max
+        default:
+            return ReasoningLevel(rawValue: word)
+        }
+    }
+
+    /// The template effort this level names, if it names one.
+    public var effort: ModelReasoningEffort? {
+        ModelReasoningEffort(rawValue: rawValue)
     }
 }
 
@@ -134,7 +193,10 @@ extension ModelReasoningControl {
     /// template here (Qwen3.8) accepts; it raises on any other value. A
     /// second effort family with a different set would need its own list in
     /// the control case.
-    var supportedLevels: [ReasoningLevel] {
+    /// Public because the server's request path maps a client's level to the
+    /// nearest one the served model renders, and names the set it chose from
+    /// in its log line.
+    public var supportedLevels: [ReasoningLevel] {
         switch self {
         case .binaryThinking:
             return [.off, .on]

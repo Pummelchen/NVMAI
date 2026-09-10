@@ -436,54 +436,82 @@ struct ServerArgumentTests {
         """.utf8))
     }
 
-    @Test func reasoningEffortIsRejectedForBinaryFamilies() throws {
+    /// A coding agent that names a level this model cannot render must keep
+    /// working. Before this policy, `reasoning_effort` on a binary-thinking
+    /// model was a 400, which broke OpenCode, Zed and Qoder for the rest of
+    /// the session; now the nearest supported level is applied and reported.
+    @Test func reasoningEffortIsClampedForBinaryFamilies() throws {
         let request = try Self.effortRequest("low")
         // The default profile is the compatible Qwen3.5-MoE baseline, whose
-        // template defines no effort levels.
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(request, modelID: "m")
-        }
+        // template defines only the binary switch.
+        let validated = try OpenAIRequestValidator.validate(request, modelID: "m")
+        #expect(validated.reasoningNotes.count == 1,
+                "the clamp is reported rather than silent")
+        #expect(validated.reasoningNotes[0].contains("low"))
     }
 
-    @Test func reasoningEffortMustMatchTheLoadTimeProfile() throws {
+    /// The agent keeps its work: the request validates, and the note says
+    /// what the model will actually do instead.
+    @Test func reasoningEffortReportsWhatWasApplied() throws {
         let profile = ServerReasoningProfile(family: .qwen38flash,
                                              thinkingMode: .on,
                                              reasoningEffort: nil)
-        // With no override the template default xhigh is the active level.
-        _ = try OpenAIRequestValidator.validate(
+        // With no override the template default xhigh is the active level, so
+        // asking for it is exact and silent.
+        let exact = try OpenAIRequestValidator.validate(
             try Self.effortRequest("xhigh"), modelID: "m",
             reasoningProfile: profile)
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(
-                try Self.effortRequest("low"), modelID: "m",
-                reasoningProfile: profile)
-        }
+        #expect(exact.reasoningNotes.isEmpty)
+
+        // The template defines low, medium and xhigh. It does not define
+        // `high`; it must land on the nearest it has, not fail. `high` sits
+        // between `medium` and `xhigh`, and the router's rule sends an
+        // equidistant level to the cheaper one, so this is `medium`.
+        let high = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("high"), modelID: "m",
+            reasoningProfile: profile)
+        #expect(!high.reasoningNotes.isEmpty)
+        #expect(high.reasoningNotes[0].contains("medium"))
+
+        // `max` is above every effort the template defines, so it is not a
+        // tie: the top of the ladder is the nearest thing to it.
+        let max = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("max"), modelID: "m",
+            reasoningProfile: profile)
+        #expect(!max.reasoningNotes.isEmpty)
+        #expect(max.reasoningNotes[0].contains("extra high"))
+
         let lowProfile = ServerReasoningProfile(family: .qwen38flash,
                                                 thinkingMode: .on,
                                                 reasoningEffort: .low)
-        _ = try OpenAIRequestValidator.validate(
+        let low = try OpenAIRequestValidator.validate(
             try Self.effortRequest("low"), modelID: "m",
             reasoningProfile: lowProfile)
+        #expect(low.reasoningNotes.isEmpty)
     }
 
-    @Test func reasoningEffortRequiresThinkingOnAndAKnownLevel() throws {
-        let offProfile = ServerReasoningProfile(family: .qwen38flash,
-                                                thinkingMode: .off,
-                                                reasoningEffort: nil)
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(
-                try Self.effortRequest("low"), modelID: "m",
-                reasoningProfile: offProfile)
+    /// Every spelling a coding agent might send means something on the
+    /// ladder, so none of them is a failure.
+    @Test func unfamiliarReasoningVocabularyIsAccepted() throws {
+        let profile = ServerReasoningProfile(family: .qwen38flash,
+                                             thinkingMode: .on,
+                                             reasoningEffort: nil)
+        for word in ["ultra", "none", "extra-high", "thinking", "auto",
+                     "max", "minimal", "EXTRA HIGH", "highest"] {
+            let validated = try OpenAIRequestValidator.validate(
+                try Self.effortRequest(word), modelID: "m",
+                reasoningProfile: profile)
+            // Either it mapped exactly (silent) or it was clamped (noted);
+            // what it must never do is throw.
+            #expect(validated.reasoningNotes.count <= 1)
         }
-        let onProfile = ServerReasoningProfile(family: .qwen38flash,
-                                               thinkingMode: .on,
-                                               reasoningEffort: nil)
-        // The template defines low, medium, and xhigh; "high" does not exist.
-        #expect(throws: ServerRequestError.self) {
-            try OpenAIRequestValidator.validate(
-                try Self.effortRequest("high"), modelID: "m",
-                reasoningProfile: onProfile)
-        }
+        // A word with no meaning on any ladder is still not fatal: the
+        // model's own default applies.
+        let unknown = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("galaxy-brain"), modelID: "m",
+            reasoningProfile: profile)
+        #expect(unknown.reasoningNotes.count == 1)
+        #expect(unknown.reasoningNotes[0].contains("not recognised"))
     }
 
     @Test func responsesReasoningEffortMapsIntoTheChatRequest() throws {

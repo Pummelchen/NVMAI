@@ -29,6 +29,14 @@ CATALOGUE=(
   "qwen38flash-mtp|qwen3.8-flash-next_125B_A6B_MTP_4Bit|4|convert_qwen38_mtp"
   "agentworld|qwen-agentworld_35B_A3B_4Bit|4|convert_qwen35moe"
   "agentworld-8bit|qwen-agentworld_35B_A3B_8Bit|8|convert_qwen35moe"
+  # The dense Qwen 3.5 models. Small enough to run on the CPU, and the only
+  # installs that do: the 2B beside a big GPU model, the 9B on its own.
+  "qwen35-2b|qwen3.5_2B_4Bit|4|convert_qwen35"
+  "qwen35-2b-8bit|qwen3.5_2B_8Bit|8|convert_qwen35"
+  "qwen35-4b|qwen3.5_4B_4Bit|4|convert_qwen35"
+  "qwen35-4b-8bit|qwen3.5_4B_8Bit|8|convert_qwen35"
+  "qwen35-9b|qwen3.5_9B_4Bit|4|convert_qwen35"
+  "qwen35-9b-8bit|qwen3.5_9B_8Bit|8|convert_qwen35"
 )
 
 usage() {
@@ -38,6 +46,8 @@ Coverage
   Ornith 1.5 35B-A3B      4-bit, 8-bit, MTP draft
   Qwen 3.6 35B-A3B        4-bit, 8-bit, MTP draft
   Qwen3.8-Flash-Next      4-bit, 8-bit, MTP draft
+  Qwen-AgentWorld 35B-A3B 4-bit, 8-bit
+  Qwen 3.5 2B / 4B / 9B   4-bit, 8-bit (CPU models)
 
 Sources
 
@@ -50,6 +60,11 @@ Sources
 
   convert_qwen35moe   tools/prepare_agentworld.py --model {ornith15,qwen36,agentworld}
                       One ~70 GB download yields both widths.
+  convert_qwen35      tools/prepare_qwen35.py --size {2b,4b,9b}. One fetch
+                      yields both widths. These are the dense models, and the
+                      only ones the CPU engine runs; the 9B is the
+                      vision-language build, converted text-only like the
+                      others.
   convert             tools/prepare_qwen38.py, one 360 GB fetch per width.
                       Qwen's own FP8 build is not used either: it quantizes
                       only the routed experts, in [128, 128] blocks that do
@@ -191,6 +206,39 @@ install_one() {
         echo "installing $name -> models/$dir"
         "$BIN" --input-snapshot .build/ornith-mtp-affine \
             --model-id ornith-1.5-35b-a3b-mtp-4bit --output "$MODELS/$dir"
+        ;;
+      convert_qwen35)
+        # The dense Qwen 3.5 models, from Qwen's own bf16 release. One
+        # download yields both widths, so the other width installs without a
+        # second fetch.
+        #
+        # These are *snapshots*, not .gturbo installs, and that is the whole
+        # difference from every other row here. The CPU engine serves an
+        # affine snapshot directory directly, reading its config.json; the
+        # repacker is the GPU path and its ArchInfo understands only the MoE
+        # shapes, so `NVMAIRepack --input-snapshot` refuses a dense model with
+        # "no text_config". Adding a fourth shape there to reach a receipt
+        # would duplicate a loader the CPU engine already has. So the
+        # converter writes the snapshot straight into models/, where the
+        # catalog finds it by its own `model_id` and `display_name` — exactly
+        # how the 2B and 4B here were already installed by hand.
+        local preset="${name%-8bit}" size_key model_id
+        case "$preset" in
+          qwen35-2b) size_key=2b; model_id="qwen3.5-2b" ;;
+          qwen35-4b) size_key=4b; model_id="qwen3.5-4b" ;;
+          qwen35-9b) size_key=9b; model_id="qwen3.5-9b" ;;
+          *) echo "unknown Qwen 3.5 size: $preset" >&2; return 2 ;;
+        esac
+        # The 9B checkpoint is the vision-language build; the converter drops
+        # the model.visual.* tower and writes the text model, so the install
+        # is text-only like every other model here.
+        if [[ ! -f "$MODELS/$dir/config.json" ]]; then
+          echo "converting Qwen 3.5 ${size_key} -> models/$dir"
+          python3.13 tools/prepare_qwen35.py --size "$size_key" --bits "$width" \
+              --output "$MODELS/$dir" \
+              --work ".build/${preset}-shards" || return 1
+        fi
+        echo "installed $name -> models/$dir ($(basename "$model_id") snapshot)"
         ;;
       unsupported)
         cat <<EOF

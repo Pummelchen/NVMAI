@@ -7,8 +7,9 @@ import Foundation
 /// count, head counts, head widths, the attention interval, the convolution
 /// kernel — so a second model in the same family needs no code. What it
 /// cannot read from a config is the *shape* of a layer: a Gated DeltaNet
-/// with full attention every fourth layer, a gated MLP, and a tied head.
-/// That is what this enumerates.
+/// with full attention every fourth layer, a gated MLP, and how the output
+/// head attaches — tied to the embedding for the 2B and 4B, a separate
+/// `lm_head` for the 9B. That is what this enumerates.
 ///
 /// A model outside it is refused by name rather than run wrongly. This
 /// project has shipped a converter whose folded norms were silently wrong

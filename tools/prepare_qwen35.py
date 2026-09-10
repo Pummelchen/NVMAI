@@ -11,10 +11,13 @@ exist:
   * **Dense feed-forward.** `mlp.{gate,up,down}_proj` in every layer, where
     the 35B has a router, 256 routed experts and a shared expert. Nothing
     here fuses or splits an expert tensor.
-  * **Tied output.** Neither checkpoint ships an `lm_head`; the card says the
-    LM output is tied to the token embedding. The snapshot records that
-    rather than duplicating 508M (2B) or 636M (4B) parameters, so the reader
-    must honour the tie.
+  * **Tied output, except the 9B.** The 2B and 4B ship no `lm_head`; their
+    card says the LM output is tied to the token embedding, and the snapshot
+    records that rather than duplicating 508M (2B) or 636M (4B) parameters,
+    so the reader must honour the tie. The 9B is the vision-language build
+    and does ship a root-level `lm_head.weight`, which is carried through as
+    `language_model.lm_head.weight` and marked untied. Either way the head
+    itself is kept at 8 bits in both build widths.
   * **Streamed.** It is run beside a resident model that holds most of the
     machine's memory, so no tensor is ever held whole: every matrix is read
     and quantized in row chunks, and each output shard's header is planned
@@ -23,15 +26,20 @@ exist:
     the 4B embedding alone is 1.3 GB at bf16 and would be 2.5 GB as the
     float32 the quantizer works in.
 
-The two sizes differ in shape, not kind, and every dimension the runtime
+The three sizes differ in shape, not kind, and every dimension the runtime
 needs is read from the config this writes:
 
     size  layers  hidden  attention q/kv  delta-rule k/v heads  source shards
     2b      24     2048       8 / 2            16 / 16                1
     4b      32     2560      16 / 4            16 / 32                2
+    9b      32     4096      16 / 4            16 / 32                4
 
 The 4B's 32 value heads over 16 key heads is the one shape the 2B never
-exercised; the engine's head-sharing tests pin it.
+exercised; the engine's head-sharing tests pin it, and the 9B repeats it at
+a wider hidden size rather than adding a fourth shape. The 9B is the
+vision-language build: its checkpoint nests the text model under
+`text_config` and ships a `model.visual.*` tower that this converter drops,
+so it produces the same text-only snapshot as the other two.
 
 Verified against each checkpoint before converting it, not assumed:
 `input_layernorm`, `post_attention_layernorm`, `q_norm`, `k_norm` and the
@@ -51,8 +59,13 @@ figures first recorded here, +0.096 and so on, were single tensors: layer
     python3.13 tools/prepare_qwen35.py --size 2b --bits 8 \\
         --output .build/qwen35-2b-affine-8bit --work .build/qwen35-2b-shards
 
+`tools/install_models.sh qwen35-2b|qwen35-4b|qwen35-9b` runs exactly this
+and then imports the snapshot, so the result is a verified `.gturbo` install
+rather than a bare snapshot the catalog cannot list.
+
 Disk while running: the shard being converted and the one downloading behind
-it (4B: 5.3 + 4.0 GB), plus the outputs (4B: 2.7 GB at 4-bit, 4.5 GB at 8).
+it (4B: 5.3 + 4.0 GB; 9B: 10.6 + 8.0 GB), plus the outputs (4B: 2.7 GB at
+4-bit, 4.5 GB at 8; 9B: 6.1 GB at 4-bit, 9.5 GB at 8).
 """
 from __future__ import annotations
 
@@ -93,13 +106,26 @@ class Size(NamedTuple):
     # The installed GPU models are named `qwen3.6-35b-a3b_8-Bit`; the CPU
     # ones follow, so a catalog lists both kinds in one style.
     model_id_stem: str
+    # 2B and 4B ship no `lm_head` and tie the output to `embed_tokens`; the
+    # 9B is the vision-language build and carries a separate root-level
+    # `lm_head.weight`. The snapshot records which it is, and the reader
+    # honours it, so the head is never duplicated for the tied sizes.
+    tied_output: bool
 
 
 SIZES = {
     "2b": Size("Qwen/Qwen3.5-2B", "15852e8c16360a2fea060d615a32b45270f8a8fc",
-               24, 2048, "Qwen 3.5 2B", "qwen3.5-2b"),
+               24, 2048, "Qwen 3.5 2B", "qwen3.5-2b", True),
     "4b": Size("Qwen/Qwen3.5-4B", "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
-               32, 2560, "Qwen 3.5 4B", "qwen3.5-4b"),
+               32, 2560, "Qwen 3.5 4B", "qwen3.5-4b", True),
+    # 9B is the vision-language build: its config nests the text model under
+    # `text_config` and carries a `model.visual.*` tower, which `skipped()`
+    # drops, so it converts with the same code path as the two text-only
+    # sizes. Its text geometry is 4B's attention shape at 9B's width --
+    # 16 query heads over 4 key heads, 32 value heads -- so it exercises the
+    # same head-sharing the 4B pinned, not a new one.
+    "9b": Size("Qwen/Qwen3.5-9B", "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+               32, 4096, "Qwen 3.5 9B", "qwen3.5-9b", False),
 }
 
 # Module-level, because the transport and config writers read them and the
@@ -221,6 +247,11 @@ def rename(name: str) -> str:
     """Checkpoint name -> the MLX spelling this family is repacked from."""
     if name.startswith("mtp."):
         return "mtp." + name[len("mtp."):]
+    # The untied 9B keeps its output head at the archive root, where the
+    # reader's `lmHead` slot expects it; only the 2B and 4B tie it to the
+    # embedding. Same mapping prepare_agentworld.py uses.
+    if name == "lm_head.weight":
+        return "language_model.lm_head.weight"
     prefix = "model.language_model."
     if name.startswith(prefix):
         return "language_model.model." + name[len(prefix):]
@@ -283,8 +314,8 @@ def quant_bits(name: str, width: int) -> int | None:
         return None
     if kept_bf16(name):
         return None
-    if name.endswith("embed_tokens.weight"):
-        return HEAD_BITS                              # tied: this is the head too
+    if name.endswith("embed_tokens.weight") or name.endswith("lm_head.weight"):
+        return HEAD_BITS                              # 8-bit: the head, tied or not
     if PROMOTE and width < BITS_8:
         stem = name[: -len(".weight")]
         if stem.endswith(PROMOTE_TO_8BIT):
@@ -516,7 +547,10 @@ def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
     it under a vision-language wrapper this snapshot does not carry. The tie
     is recorded rather than resolved: the reader uses the embedding as the
     output projection, and a reader that cannot must be told, not silently
-    handed the embedding's parameters twice.
+    handed the embedding's parameters twice. The 9B is the untied case -- it
+    ships its own `lm_head.weight`, carried through as
+    `language_model.lm_head.weight` -- so the flag is written from the size
+    rather than hard-coded.
 
     `model_id` and `display_name` make the directory a catalog entry on its
     own: a server finds a CPU model as a directory under `models/` whose
@@ -527,7 +561,7 @@ def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
             **config.get("text_config", config)}
     text["model_type"] = "qwen3_5_dense"
     text["architectures"] = ["Qwen3_5DenseForCausalLM"]
-    text["tie_word_embeddings"] = True
+    text["tie_word_embeddings"] = SIZE.tied_output
     text["source_repo"] = REPO
     text["source_commit"] = COMMIT
     # Written at the top level, where the runtime reads them. The checkpoint

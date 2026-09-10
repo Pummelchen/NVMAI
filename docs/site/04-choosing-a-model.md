@@ -44,6 +44,7 @@ a random model from the internet will not load. What works:
 | **Qwen 3.8 Flash Next 125B-A6B** | 4-bit (~174 GB), 8-bit (~236 GB) | GPU | The "biggest brain locally" option. Slow, enormous, impressive. |
 | **Qwen 3.5 2B** | 4-bit (~1.3 GB), 8-bit (~2 GB) | **CPU** | Fast, light, runs *alongside* a big model. See below. |
 | **Qwen 3.5 4B** | 4-bit (~2.7 GB), 8-bit (~4.5 GB) | **CPU** | Same idea, a little more capable. |
+| **Qwen 3.5 9B** | 4-bit (~6.4 GB), 8-bit (~9.9 GB) | **CPU** | The largest CPU model. Capable on its own, no graphics chip needed. |
 
 The 125B model's numbers are not a typo, and a large part of them is its
 hashed n-gram table — about **95 GiB** on its own, which is well over half of
@@ -68,9 +69,23 @@ small worker beside the big one** — the shape a memory feature wants. That is
 [Memory that remembers](08-memory-that-remembers.md), and it is the most
 interesting idea in the project.
 
-One caveat for now: they are not in the one-command installer yet, because
-they are built from a snapshot by a Python tool. They are supported and they
-run, but the 35B path is the smoother first install today.
+They install with the same command as everything else. The project's own
+converter builds them from Qwen's published 16-bit weights and quantizes them
+here, then writes the result straight into `models/`:
+
+```bash
+tools/install_models.sh qwen35-2b     # or qwen35-4b, qwen35-9b
+```
+
+Add `-8bit` for the 8-bit build (`qwen35-2b-8bit`), and note that each one
+runs on the processor rather than the graphics chip.
+
+One difference worth knowing: the 35B models install as `.gturbo` files with a
+verification receipt, while these are **snapshots** — the format the CPU
+engine reads directly. The converter still had to produce them correctly, but
+there is no receipt to check afterwards, and `--verify-install` does not apply
+to them. Everything you run is quantized from Qwen's own release, never a
+third-party repack.
 
 ## Which should you pick?
 

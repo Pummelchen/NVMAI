@@ -458,6 +458,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             reasoningProfile: target.reasoningProfile,
             sampling: target.sampling)
             .withModel(target.id)
+        // Best-effort reasoning: say what was applied when a client asked for
+        // a level this model cannot render. Never an error — see
+        // `ReasoningFallback`.
+        if !validated.reasoningNotes.isEmpty {
+            ServerLog.reasoningFallback(id: target.id, notes: validated.reasoningNotes)
+        }
         responseModelID = target.id
         return validated
     }

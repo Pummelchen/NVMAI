@@ -512,6 +512,53 @@ import Testing
                 "the strided pairing must be distinguishable, or this proves nothing")
     }
 
+    /// The 2B and 4B tie the output to the embedding; the 9B does not, and
+    /// ships its own `lm_head` under `language_model.lm_head.weight` — note,
+    /// without the `.model.` the embedding prefix carries. An engine that
+    /// read the embedding there anyway would produce fluent nonsense rather
+    /// than fail, so the head is made a *distinct* matrix: the untied logits
+    /// must differ from the tied ones, and must move when only the head
+    /// moves, which an ignored head cannot do.
+    @Test func anUntiedModelReadsItsOwnHead() throws {
+        var rng = SplitMix(state: 21)
+        let hidden = 64, dim = 16
+        let p = Self.tinyPrefix + "layers.0.self_attn."
+        // Full attention, so the mixer is the plain q/k/v the other attention
+        // tests use; the head is orthogonal to which mixer runs. `q_proj` is
+        // hidden + 4*dim because it carries the fused output gate.
+        var base = tinyModel(interval: 1, &rng)
+        base.matrices[p + "q_proj"] = Rows.random(hidden + 4 * dim, hidden, &rng)
+        base.matrices[p + "o_proj"] = Rows.random(hidden, 4 * dim, &rng)
+        base.matrices[p + "k_proj"] = Rows.random(2 * dim, hidden, &rng)
+        base.matrices[p + "v_proj"] = Rows.random(2 * dim, hidden, &rng)
+        base.floats[p + "q_norm.weight"] = ([dim], randomFloats(dim, 0.5...1.5, &rng))
+        base.floats[p + "k_norm.weight"] = ([dim], randomFloats(dim, 0.5...1.5, &rng))
+
+        func logits(tied: Bool, head: Rows?) throws -> [Float] {
+            var model = base
+            model.config["tie_word_embeddings"] = tied
+            if let head { model.matrices["language_model.lm_head"] = head }
+            let directory = try writeTinyModel(model)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let engine = try CPUQwen35(snapshot: try AffineSnapshot(directory: directory),
+                                       threads: 1)
+            return try [3, 1, 4, 1, 5].flatMap { try engine.step(token: $0) }
+        }
+
+        let tiedLogits = try logits(tied: true, head: nil)
+        // Untied, head M: the engine must read M, not the embedding.
+        let headM = Rows.random(8, hidden, &rng)
+        let headA = try logits(tied: false, head: headM)
+        #expect(largestDifference(headA, tiedLogits) > 1e-3,
+                "the untied head must be read, not the embedding")
+        // The same model with a different head must move the logits: the only
+        // way an ignored head passes both checks is by coincidence.
+        let headB = Rows.random(8, hidden, &rng)
+        let headBLogits = try logits(tied: false, head: headB)
+        #expect(largestDifference(headBLogits, headA) > 1e-3,
+                "changing the head must change the logits")
+    }
+
     /// A head ratio that is not whole would floor into a wrong mapping;
     /// the engine refuses the snapshot instead of running it.
     @Test func aFractionalHeadRatioIsRefused() throws {

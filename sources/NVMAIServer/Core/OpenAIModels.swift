@@ -332,6 +332,14 @@ public struct ValidatedChatRequest: Sendable {
     /// loads it; a single-model backend serves what it has and ignores it.
     /// Nil for the engine's own requests, which run on whatever is resident.
     public let model: String?
+    /// Request fields that asked for something the served model cannot do and
+    /// were answered by the nearest thing it can. Empty on the common path.
+    ///
+    /// These are never errors: a coding agent that names a reasoning level
+    /// this project never defined keeps working, and the server says what it
+    /// applied in its log. Additive and defaulted so every existing caller is
+    /// unchanged.
+    public let reasoningNotes: [String]
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
@@ -342,7 +350,8 @@ public struct ValidatedChatRequest: Sendable {
                 stripCLIPrompt: Bool = false,
                 workspace: String? = nil,
                 isEngineInternal: Bool = false,
-                model: String? = nil) {
+                model: String? = nil,
+                reasoningNotes: [String] = []) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
@@ -353,6 +362,7 @@ public struct ValidatedChatRequest: Sendable {
         self.workspace = workspace
         self.isEngineInternal = isEngineInternal
         self.model = model
+        self.reasoningNotes = reasoningNotes
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -377,7 +387,8 @@ public struct ValidatedChatRequest: Sendable {
             stripCLIPrompt: stripCLIPrompt,
             workspace: workspace,
             isEngineInternal: isEngineInternal,
-            model: model)
+            model: model,
+            reasoningNotes: reasoningNotes)
     }
 
     /// The memory workspace this request names, from the X-NVMAI-Workspace
@@ -394,7 +405,8 @@ public struct ValidatedChatRequest: Sendable {
             stripCLIPrompt: stripCLIPrompt,
             workspace: workspace,
             isEngineInternal: isEngineInternal,
-            model: model)
+            model: model,
+            reasoningNotes: reasoningNotes)
     }
 
     /// The same request, bound to the catalog model it was validated for.
@@ -409,7 +421,8 @@ public struct ValidatedChatRequest: Sendable {
             stripCLIPrompt: stripCLIPrompt,
             workspace: workspace,
             isEngineInternal: isEngineInternal,
-            model: model)
+            model: model,
+            reasoningNotes: reasoningNotes)
     }
 }
 
@@ -446,30 +459,47 @@ public enum OpenAIRequestValidator {
             throw invalid("frequency_penalty must be zero", "frequency_penalty", "unsupported_value")
         }
         // Reasoning effort is defined per family and fixed at model load
-        // because it changes the rendered prompt. A request may restate the
-        // active level; anything else is rejected instead of silently faked.
+        // because it changes the rendered prompt. A request may not be able
+        // to switch it, but it must never be refused for asking: coding
+        // agents send vocabularies this project never defined (`xhigh` on a
+        // model with no effort levels, `ultra`, `none`, `extra-high`), and
+        // failing those breaks the agent for the rest of the session. So the
+        // request is mapped to the nearest level the served model renders,
+        // and the difference is recorded below rather than turned into an
+        // error.
+        var reasoningNotes: [String] = []
         if let effortRaw = request.reasoningEffort {
-            switch reasoningProfile.family.reasoningControl {
-            case .binaryThinking:
-                throw invalid("reasoning_effort is not supported: the served model's "
-                              + "chat template defines only the binary thinking switch",
-                              "reasoning_effort", "unsupported_value")
-            case .thinkingWithEffortLevels:
-                guard let requested = ModelReasoningEffort(rawValue: effortRaw) else {
-                    throw invalid("reasoning_effort must be low, medium, or xhigh",
-                                  "reasoning_effort", "invalid_value")
+            let control = reasoningProfile.family.reasoningControl
+            let supported = control.supportedLevels
+            if let requested = ReasoningLevel.requested(effortRaw) {
+                // The same mapping the server-wide level goes through, so a
+                // request and `--reasoning` cannot disagree about what a
+                // model does with a level it lacks.
+                let efforts = supported.filter { $0 != .off && $0 != .on }
+                let applied = ReasoningFallback.effectiveLevel(
+                    requested, supported: supported,
+                    whenOn: efforts.last)
+                // Thinking is a load-time switch, so an effort on a server
+                // loaded with thinking off cannot be honoured by mapping it
+                // to `on` — the prompt is already rendered without the think
+                // block. Say what will actually happen instead of claiming a
+                // level that is not in force.
+                if applied != .off, !reasoningProfile.thinkingMode.isEnabled {
+                    reasoningNotes.append(
+                        "reasoning level '\(effortRaw)' needs thinking on, which this "
+                        + "server did not load; the answer is produced without a "
+                        + "thinking block (restart with --reasoning on to enable it)")
+                } else if applied != requested {
+                    reasoningNotes.append(
+                        "reasoning level '\(effortRaw)' is not supported by this model; "
+                        + "applied \(applied.displayName) instead (supports: "
+                        + supported.map(\.displayName).joined(separator: ", ") + ")")
                 }
-                guard let active = reasoningProfile.effectiveEffort else {
-                    throw invalid("reasoning_effort requires the server's thinking mode "
-                                  + "on; restart with --thinking on",
-                                  "reasoning_effort", "unsupported_value")
-                }
-                guard requested == active else {
-                    throw invalid("reasoning effort is a load-time control; this server "
-                                  + "is running \(active.rawValue). Restart with "
-                                  + "--reasoning-effort \(requested.rawValue)",
-                                  "reasoning_effort", "unsupported_value")
-                }
+            } else {
+                reasoningNotes.append(
+                    "reasoning level '\(effortRaw)' was not recognised; "
+                    + "the model's own default applies (supports: "
+                    + supported.map(\.displayName).joined(separator: ", ") + ")")
             }
         }
         guard request.parallelToolCalls != false else {
@@ -584,7 +614,8 @@ public enum OpenAIRequestValidator {
                                     includeUsage: request.streamOptions?.includeUsage ?? false,
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum,
-                                    stripCLIPrompt: stripCLIPrompt)
+                                    stripCLIPrompt: stripCLIPrompt,
+                                    reasoningNotes: reasoningNotes)
     }
 
     private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {

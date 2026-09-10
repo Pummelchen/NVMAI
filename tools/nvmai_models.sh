@@ -42,8 +42,12 @@ nvmai_resolve_model() {
       NVMAI_MODEL_KEY=qwen35-4b
       NVMAI_MODEL_STEM="qwen3.5_4B"
       NVMAI_MODEL_LABEL="Qwen 3.5 4B" ;;
+    qwen35-9b|qwen3.5-9b)
+      NVMAI_MODEL_KEY=qwen35-9b
+      NVMAI_MODEL_STEM="qwen3.5_9B"
+      NVMAI_MODEL_LABEL="Qwen 3.5 9B" ;;
     *)
-      echo "unknown AI model: ${1:-} (ornith|qwen36|agentworld|qwen38|qwen35-2b|qwen35-4b)" >&2
+      echo "unknown AI model: ${1:-} (ornith|qwen36|agentworld|qwen38|qwen35-2b|qwen35-4b|qwen35-9b)" >&2
       return 2 ;;
   esac
 }
