@@ -102,8 +102,33 @@ EVENTS = {
 }
 
 
-def job(task: str, prompt: str, truth: str, note: str, authored: bool = False):
-    return {"chat": True, "system": SYSTEMS[task], "prompt": prompt,
+# Two T1 labels the grounding check gets wrong. It counts a clause as the
+# person's when half its words appear in what they wrote, and these borrow
+# the words without the meaning: "archive" and "Marcus" are in the bible,
+# spreading the archive and keeping promises are not, and nobody said
+# chapters 61-70 were written. Every T1 clause was read by hand against the
+# person's text on 2026-09-11; these two are the only labels that change.
+# Two borderline ones stand as the check set them: "in hiding for years"
+# embellishes what was said, and "anyone_left_ashgrove false" follows from
+# a rule but was not said.
+HAND_LABELS = {
+    "characters/ines = spreads the archive openly and keeps promises to Marcus.": "NO",
+    "chapters.photo/ch61-70 = Chapters 61-70 written": "NO",
+}
+
+
+def truth_of(row: dict) -> str:
+    """A row's ground truth, with the hand corrections applied, so results
+    recorded before a correction are scored against it too."""
+    if row["task"] == "T1":
+        statement = row["prompt"].rpartition("STATEMENT: ")[2].split("\n")[0]
+        return HAND_LABELS.get(statement, row["truth"])
+    return row["truth"]
+
+
+def job(task: str, prompt: str, truth: str, note: str, authored: bool = False,
+        system: str | None = None):
+    return {"chat": True, "system": system or SYSTEMS[task], "prompt": prompt,
             "max": 8, "task": task, "truth": truth, "note": note,
             "authored": authored}
 
@@ -133,7 +158,8 @@ def cases() -> list[dict]:
                     f"WHAT THE PERSON WROTE:\n{sim.user_text(fact['session'])}\n\n"
                     f"STATEMENT: {fact['address']} = {clause}\n"
                     f"Did the person state this?",
-                    "YES" if truth >= 0.5 else "NO",
+                    HAND_LABELS.get(f"{fact['address']} = {clause}",
+                                    "YES" if truth >= 0.5 else "NO"),
                     f"{fact['address']} / {label}"))
 
     # T2: durable against not. The positives are the bible's own facts; the
@@ -249,6 +275,86 @@ VARIANTS = {
 }
 
 
+# The second draft, from reading what the first got wrong. The 2B answered
+# one word every time on T2, T4, T5 and T6, and missed nine T1 clauses
+# written as shorthand. What those have in common is form, not difficulty:
+# the facts reached it as key paths and name_attribute pairs, and it could
+# not match them against prose. T3 and T7, which never ask it to, passed.
+# So v2 changes how a fact arrives -- as a sentence -- and spells out each
+# boundary it collapsed on. T3, T6 and T7 keep their wording.
+SYSTEMS_V2 = {
+    **SYSTEMS,
+    "T1": ("You decide whether one statement came from the person or not. "
+           "Answer with exactly one word: YES or NO. YES means the person "
+           "wrote it or clearly implied it, however the statement is "
+           "written: shorthand such as name_attribute value counts. NO means "
+           "it does not appear in what they wrote, however true it might "
+           "be. " + ONE_WORD),
+    "T2": ("You decide whether one note is worth keeping after this session "
+           "ends. Answer with exactly one word: YES or NO. YES for decisions "
+           "and the reasons behind them, fixed attributes, rules, "
+           "constraints, and current state. NO for a line of the story "
+           "itself, for anything about the writing -- what was written, what "
+           "comes next, what could be better -- and for conversation, "
+           "reasoning, code, and anything true only right now. " + ONE_WORD),
+    "T4": ("Something has changed about one fact. You decide which kind of "
+           "change it is. Answer with exactly one word: UPDATE or CONFLICT. "
+           "UPDATE means the world moved on and the newer one is the current "
+           "state. CONFLICT means the two cannot both have been true, and "
+           "one of them is wrong. A change the rule forbids is always "
+           "CONFLICT. " + ONE_WORD),
+    "T5": ("You decide whether two facts say the same thing. Answer with "
+           "exactly one word: YES or NO. YES means a reader learns nothing "
+           "from the second that the first did not already tell them, "
+           "however differently it is worded. NO means the second adds "
+           "something, or is about something else. " + ONE_WORD),
+}
+# T4's CONFLICT cases rest on this rule, and v1 never showed it: an eye
+# colour changing is only wrong if you know it may not. The person's own
+# words, from the bible.
+RULE = "RULE: eye colour is fixed and must never change."
+
+
+def sentence(key: str, value: str) -> str:
+    """A stored fact without its filing path: `characters/marcus/eyes =
+    grey` becomes "Marcus's eyes: grey." Mechanical on purpose -- the engine
+    would have to render every key it ever stores this way, with no model
+    in the loop and no hand-written prose."""
+    value = value.rstrip(".")
+    namespace, *parts = [p.replace("_", " ") for p in key.split("/")]
+    if namespace in ("session", "notes"):
+        return value[:1].upper() + value[1:] + "."   # already prose
+    if len(parts) >= 2:
+        return f"{parts[0].title()}'s {' '.join(parts[1:])}: {value}."
+    return f"{parts[0].capitalize()}: {value}."
+
+
+def as_sentences(prompt: str) -> str:
+    """The prompt with each `LABEL: key = value` line rendered by `sentence`,
+    so v2 asks exactly v1's cases and only the form changes. The upper-case
+    label test keeps the person's own text, which has `name: value` lines of
+    its own, untouched."""
+    lines = []
+    for line in prompt.split("\n"):
+        label, colon, rest = line.partition(": ")
+        key, equals, value = rest.partition(" = ")
+        if colon and equals and "/" in key and label.isupper():
+            line = f"{label}: {sentence(key, value)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def v2_cases() -> list[dict]:
+    jobs = []
+    for case in cases():
+        prompt = as_sentences(case["prompt"])
+        if case["task"] == "T4":
+            prompt = f"{RULE}\n{prompt}"
+        jobs.append(dict(case, prompt=prompt, system=SYSTEMS_V2[case["task"]],
+                         variant="v2"))
+    return jobs
+
+
 def confidence_cases() -> list[dict]:
     """T1's cases again, under each variant, so the three are comparable."""
     jobs = []
@@ -280,8 +386,8 @@ def score_variants(path: Path) -> int:
         for row in group:
             answer = (row.get("completion") or "").strip().upper()
             word = answer.split()[0].strip(".,:;\"'") if answer else ""
-            entry = halves.setdefault(row["truth"], [0, 0])
-            entry[0] += word == row["truth"]
+            entry = halves.setdefault(truth_of(row), [0, 0])
+            entry[0] += word == truth_of(row)
             entry[1] += 1
         correct = sum(v[0] for v in halves.values())
         total = sum(v[1] for v in halves.values())
@@ -302,7 +408,7 @@ def score_variants(path: Path) -> int:
         if len(parts) < 2 or not parts[1].isdigit():
             unparsed += 1
             continue
-        hit = parts[0].strip(".,:;") == row["truth"]
+        hit = parts[0].strip(".,:;") == truth_of(row)
         value = int(parts[1])
         band = "100" if value >= 100 else ("90-99" if value >= 90 else
                                            ("70-89" if value >= 70 else "under 70"))
@@ -350,7 +456,7 @@ def score(path: Path) -> int:
         for row in group:
             answer = (row.get("completion") or "").strip().upper()
             answer = answer.split()[0].strip(".,:;\"'") if answer else ""
-            expected = row["truth"]
+            expected = truth_of(row)
             legal = {"YES", "NO"} if expected in ("YES", "NO") else {"UPDATE", "CONFLICT"}
             if answer not in legal:
                 unparseable += 1
@@ -387,9 +493,17 @@ def main() -> int:
                     help="T1 again under stakes framing and with a confidence "
                          "figure, to test two beliefs about prompting")
     ap.add_argument("--score-variants", type=Path)
+    ap.add_argument("--prepare-v2", type=Path,
+                    help="every case again with facts as sentences and the "
+                         "second-draft prompts; score with --score")
     args = ap.parse_args()
     if args.prepare:
         return prepare(args.prepare)
+    if args.prepare_v2:
+        jobs = v2_cases()
+        args.prepare_v2.write_text("\n".join(json.dumps(j) for j in jobs) + "\n")
+        print(f"{len(jobs)} cases -> {args.prepare_v2}")
+        return 0
     if args.prepare_variants:
         jobs = confidence_cases()
         args.prepare_variants.write_text(
