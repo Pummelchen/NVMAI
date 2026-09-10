@@ -42,4 +42,36 @@ public enum CPUModelFamily: String, Sendable, CaseIterable {
             + "config: the dimensions come from the snapshot, the shape does "
             + "not."
     }
+
+    /// Qwen3.5's template defines only the binary `enable_thinking` switch
+    /// (and, unlike Qwen 3.6, treats an absent switch as off; the tokenizer
+    /// always sets it, so that default never decides anything here).
+    var reasoningControl: ModelReasoningControl {
+        switch self {
+        case .qwen35Dense: return .binaryThinking
+        }
+    }
+
+    /// Levels this family's chat template actually honours, `.off` first.
+    public var supportedReasoningLevels: [ReasoningLevel] {
+        reasoningControl.supportedLevels
+    }
+
+    /// Runtime settings for a level; throws for a level the family does not
+    /// support.
+    public func runtimeReasoning(for level: ReasoningLevel) throws
+        -> (thinking: ModelThinkingMode, effort: ModelReasoningEffort?) {
+        try reasoningControl.runtimeReasoning(for: level, family: rawValue)
+    }
+
+    /// The Qwen 3.5 series runs at temperature 0.6 / top-p 0.95; top-k is the
+    /// house value. Stated here rather than borrowed from `house`, which
+    /// holds the same numbers today, so a house change cannot move it.
+    public var samplingDefaults: GenerationDefaults.Sampling {
+        switch self {
+        case .qwen35Dense:
+            return GenerationDefaults.Sampling(
+                temperature: 0.6, topK: GenerationDefaults.topK, topP: 0.95)
+        }
+    }
 }

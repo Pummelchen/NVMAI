@@ -49,6 +49,25 @@ import Testing
         #expect(q36.sampling == GenerationDefaults.house)
     }
 
+    @Test func samplingRowsFollowTheirSeries() {
+        let qwen36Series = GenerationDefaults.Sampling(temperature: 0.6, topK: GenerationDefaults.topK, topP: 0.95)
+        let qwen38Series = GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95)
+        let expected: [(String, ModelFamily, GenerationDefaults.Sampling)] = [
+            ("qwen3.6-35b-a3b", .qwen36, qwen36Series),
+            ("qwen-agentworld", .qwen36, qwen36Series),
+            ("qwen3.8-flash-next", .qwen38flash, qwen38Series),
+            // Not a Qwen-named series: it keeps the house values until its own
+            // card is checked.
+            ("ornith-1.5-35b-a3b", .qwen36, GenerationDefaults.house),
+        ]
+        for (id, family, sampling) in expected {
+            for bits in [4, 8] {
+                let p = ModelProfile.resolve(modelID: id, family: family, weightBits: bits, environment: [:])
+                #expect(p.sampling == sampling, "\(id) \(bits)-bit")
+            }
+        }
+    }
+
     @Test func unknownModelFallsBackToItsFamily() {
         let p = ModelProfile.resolve(modelID: "qwen3.6-35b-a3b-mtp-4bit", family: .qwen36MTP, weightBits: 4, environment: [:])
         #expect(!p.isTabled)

@@ -6,7 +6,9 @@ import Foundation
 /// Qwen3.8-Flash-Next template additionally defines `reasoning_effort`
 /// low|medium|xhigh (default xhigh) while thinking is on. Verified against
 /// the pinned upstream `chat_template.jinja` on 2026-08-27; see
-/// docs/qwen38-flash-next-port.md.
+/// docs/qwen38-flash-next-port.md. Re-verified 2026-09-11 against every
+/// installed template (Qwen 3.6, AgentWorld, Ornith 1.5, Qwen3.8, and the
+/// CPU engine's Qwen3.5): ReasoningLevelTemplateTests renders each one.
 public enum ModelReasoningControl: Sendable, Equatable {
     case binaryThinking
     case thinkingWithEffortLevels(defaultEffort: ModelReasoningEffort)
@@ -68,6 +70,95 @@ extension ModelFamily {
                 throw ModelReasoningControlError.effortRequiresThinkingOn(
                     effort: effort)
             }
+        }
+    }
+
+    /// Levels this family's chat template actually honours, `.off` first.
+    public var supportedReasoningLevels: [ReasoningLevel] {
+        reasoningControl.supportedLevels
+    }
+
+    /// Runtime settings for a level; throws for a level the family does not
+    /// support.
+    public func runtimeReasoning(for level: ReasoningLevel) throws
+        -> (thinking: ModelThinkingMode, effort: ModelReasoningEffort?) {
+        try reasoningControl.runtimeReasoning(for: level, family: rawValue)
+    }
+}
+
+/// One vocabulary of thinking levels for every family, so a configurator can
+/// offer a single picker. Each family answers which of these its template
+/// renders differently; the others are refused rather than mapped to a
+/// neighbour, because a level that does not change the prompt does not
+/// change the model's behaviour either.
+public enum ReasoningLevel: String, CaseIterable, Sendable, Codable {
+    case off, on, minimal, low, medium, high, xhigh, max
+
+    public var displayName: String {
+        self == .xhigh ? "extra high" : rawValue
+    }
+
+    init(effort: ModelReasoningEffort) {
+        // Exhaustive on purpose: a new effort case must be given its level
+        // here before it can compile.
+        switch effort {
+        case .low: self = .low
+        case .medium: self = .medium
+        case .xhigh: self = .xhigh
+        }
+    }
+}
+
+public enum ReasoningLevelError: Error, Equatable, CustomStringConvertible {
+    case unsupported(family: String, level: ReasoningLevel,
+                     supported: [ReasoningLevel])
+
+    public var description: String {
+        switch self {
+        case .unsupported(let family, let level, let supported):
+            return "thinking level \(level.displayName) is not supported: the "
+                + "\(family) chat template renders only "
+                + supported.map(\.displayName).joined(separator: ", ")
+        }
+    }
+}
+
+extension ModelReasoningControl {
+    /// A binary template renders two prompts: the closed and the open think
+    /// block. An effort template renders off plus one prompt per effort it
+    /// accepts. Plain `.on` is not a level there: it selects the template's
+    /// default effort and renders byte-identically to naming that effort, so
+    /// offering both would put two entries on one prompt.
+    ///
+    /// `ModelReasoningEffort` enumerates exactly what the one effort
+    /// template here (Qwen3.8) accepts; it raises on any other value. A
+    /// second effort family with a different set would need its own list in
+    /// the control case.
+    var supportedLevels: [ReasoningLevel] {
+        switch self {
+        case .binaryThinking:
+            return [.off, .on]
+        case .thinkingWithEffortLevels:
+            return [.off] + ModelReasoningEffort.allCases.map(ReasoningLevel.init(effort:))
+        }
+    }
+
+    /// Shared by the GPU and CPU families so the two cannot disagree on what
+    /// a level means.
+    func runtimeReasoning(for level: ReasoningLevel, family: String) throws
+        -> (thinking: ModelThinkingMode, effort: ModelReasoningEffort?) {
+        let supported = supportedLevels
+        guard supported.contains(level) else {
+            throw ReasoningLevelError.unsupported(
+                family: family, level: level, supported: supported)
+        }
+        switch level {
+        case .off: return (.off, nil)
+        case .on: return (.on, nil)
+        default:
+            // Every supported level other than off/on is an effort level by
+            // construction of `supportedLevels`, and shares its raw value.
+            return (.on, ModelReasoningEffort(rawValue: level.rawValue))
         }
     }
 }
