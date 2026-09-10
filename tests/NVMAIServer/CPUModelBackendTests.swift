@@ -117,16 +117,18 @@ import Testing
         var all: [ServerInferenceEvent] { lock.withLock { events } }
     }
 
-    private func request() -> ValidatedChatRequest {
-        ValidatedChatRequest(messages: [GFTokenizer.Message(role: .user, content: "hi")],
-                             tools: [], stream: true, includeUsage: false,
-                             generationConfig: GenerationConfig(maxNewTokens: 32, temperature: 0),
-                             maximumCompletionTokens: 32)
+    private func request(stops: [String] = []) -> ValidatedChatRequest {
+        var configuration = GenerationConfig(maxNewTokens: 32, temperature: 0)
+        configuration.stopStrings = stops
+        return ValidatedChatRequest(messages: [GFTokenizer.Message(role: .user, content: "hi")],
+                                    tools: [], stream: true, includeUsage: false,
+                                    generationConfig: configuration,
+                                    maximumCompletionTokens: 32)
     }
 
     /// Runs the scripted model through the backend: after the prompt it
     /// says "hm", closes its thought, says "ok", and ends the turn.
-    private func generate(thinking: ModelThinkingMode) async throws
+    private func generate(thinking: ModelThinkingMode, stops: [String] = []) async throws
         -> (completion: ServerCompletion, events: [ServerInferenceEvent], tokens: [Int32]) {
         let fixture = try TokenizerFixture.folder()
         let tok = try await GFTokenizer.load(from: fixture, thinkingMode: thinking)
@@ -146,8 +148,20 @@ import Testing
         let backend = try await CPUModelBackend(snapshotDirectory: directory, resident: false,
                                                 thinkingMode: thinking)
         let sink = Sink()
-        let completion = try await backend.generate(request()) { sink.append($0) }
+        let completion = try await backend.generate(request(stops: stops)) { sink.append($0) }
         return (completion, sink.all, spoken)
+    }
+
+    /// A client stop string that ends the answer is named on the completion,
+    /// as the GPU path names it, so a Messages client is told `stop_sequence`
+    /// and which one. The CPU path used to end the turn and forget which.
+    @Test func aStopStringThatEndsTheAnswerIsNamed() async throws {
+        let run = try await generate(thinking: .on, stops: ["k"])
+        #expect(run.completion.content == "o")
+        #expect(run.completion.stopSequence == "k")
+        #expect(run.completion.finishReason == "stop")
+        let unstopped = try await generate(thinking: .on)
+        #expect(unstopped.completion.stopSequence == nil)
     }
 
     /// Thinking on, the rendered prompt ends inside `<think>`: the model's

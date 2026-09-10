@@ -45,6 +45,29 @@ import Testing
                      configuration: observing) != .fine)
     }
 
+    /// A model can think in circles until its budget is gone. Since thinking
+    /// left the answer channel the answer's detector never sees it, so
+    /// reasoning has a loop detector of its own, and says where it tripped.
+    @Test func aLoopInReasoningTrips() {
+        var set = WatchdogSet(configuration: observing)
+        for character in String(repeating: looped, count: 8) {
+            set.observeReasoning(String(character))
+        }
+        #expect(set.trips.map(\.kind) == [.loop])
+        #expect(set.trips.first?.message.hasPrefix("in reasoning: ") == true)
+    }
+
+    /// An answer that restates its thought is not a loop. Four repeats in
+    /// the thought and four in the answer would be eight in one window --
+    /// a trip -- so this holds only because the two are watched apart.
+    @Test func anAnswerThatRepeatsItsThoughtIsNotALoop() {
+        var set = WatchdogSet(configuration: observing)
+        let said = String(repeating: looped, count: 4)
+        for character in said { set.observeReasoning(String(character)) }
+        for character in said { set.observe(String(character)) }
+        #expect(set.trips.isEmpty)
+    }
+
     /// A handful of repeats is not a loop. Prose repeats a sentence for
     /// emphasis and code repeats a call, and a threshold that fired on
     /// either would be useless. Four was the plan's proposed threshold and

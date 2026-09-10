@@ -20,16 +20,21 @@ struct AssistantOutput {
     private var stopMatcher: StreamingStopMatcher
     private let onEvent: @Sendable (ServerInferenceEvent) -> Void
     private let observeVisible: (String) -> Void
+    private let observeReasoning: (String) -> Void
     private(set) var content = ""
     private(set) var reasoning = ""
     private(set) var calls: [ParsedToolCall] = []
 
+    /// `observeReasoning` sees the thought text and nothing else -- on the
+    /// GPU path, the loop detector that watches reasoning on its own.
     init(stops: [String],
          onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void,
-         observeVisible: @escaping (String) -> Void = { _ in }) {
+         observeVisible: @escaping (String) -> Void = { _ in },
+         observeReasoning: @escaping (String) -> Void = { _ in }) {
         self.stopMatcher = StreamingStopMatcher(stops: stops)
         self.onEvent = onEvent
         self.observeVisible = observeVisible
+        self.observeReasoning = observeReasoning
     }
 
     /// True once a client stop string has matched; generation should end.
@@ -50,6 +55,7 @@ struct AssistantOutput {
             case .reasoning(let text):
                 reasoning += text
                 onEvent(.reasoning(text))
+                observeReasoning(text)
             case .toolCall(let call):
                 calls.append(call)
                 onEvent(.toolCall(call))

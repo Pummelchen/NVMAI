@@ -216,17 +216,20 @@ public actor MemoryBackend: ServerInferenceBackend, PromptTokenCounting, Residen
     ///
     /// Rebuilding the completion must not drop what the watchdogs saw: this
     /// path runs for every memory-enabled request, so forgetting it here
-    /// once silenced the whole feature whenever memory was on.
-    private static func settled(_ completion: ServerCompletion,
-                                content: String,
-                                reasoning: String,
-                                toolCalls: [ParsedToolCall],
-                                finishReason: String? = nil) -> ServerCompletion {
+    /// once silenced the whole feature whenever memory was on. The stop
+    /// string that ended the last round is kept for the same reason: without
+    /// it a Messages client saw `end_turn` for a turn its stop sequence ended.
+    static func settled(_ completion: ServerCompletion,
+                        content: String,
+                        reasoning: String,
+                        toolCalls: [ParsedToolCall],
+                        finishReason: String? = nil) -> ServerCompletion {
         ServerCompletion(content: content,
                          toolCalls: toolCalls,
                          finishReason: finishReason ?? completion.finishReason,
                          usage: completion.usage,
                          watchdogTrips: completion.watchdogTrips,
+                         stopSequence: completion.stopSequence,
                          reasoning: reasoning)
     }
 
