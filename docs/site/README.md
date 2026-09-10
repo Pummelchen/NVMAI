@@ -30,20 +30,24 @@ Status: ⬜ not started · ✍️ drafted · ✅ published
 
 | # | Title | Category | Wiki source | Status |
 | --- | --- | --- | --- | --- |
-| 01 | What NVMAI is, and what it is made for | Guides | Home + Features | ✍️ drafted (`docs/site/01-what-is-nvmai.md`) |
-| 02 | Getting Started: install and first run | Guides | Getting-Started | ⬜ |
-| 03 | SSD expert streaming: how it works | Guides | System-Design (expert streaming) + v4.1/v4.2 docs | ⬜ |
-| 04 | The RAM budget and bounded expert cache | Guides | System-Design (memory) + Runtime-Controls | ⬜ |
-| 05 | Installs and verified receipts | Guides | Getting-Started (receipts) + AGENTS.md rules | ⬜ |
-| 06 | The OpenAI-compatible server | Guides | OpenAI-Compatible-Server | ⬜ |
-| 07 | Runtime controls | Guides | Runtime-Controls | ⬜ |
-| 08 | Long context: RoPE and YaRN, KV compression | Guides | Runtime-Controls (context) + v4.5 docs | ⬜ |
-| 09 | ANE prefill and the Metal engine | Guides | v4.5-ane-prefill + v4.6-optimization-inventory | ⬜ |
-| 10 | Agent memory | Guides | agent-memory.md | ⬜ |
-| 11 | Benchmarking: how to measure | Reference | Benchmarking-Guide + Benchmarks | ⬜ |
-| 12 | System design (overview) | Reference | System-Design + v4-core-design | ⬜ |
-| 13 | FAQ | General | FAQ | ⬜ |
-| 14 | Release notes | Reference | Changelog + release-notes-v5.x | ⬜ |
+| 01 | What NVMAI is, and what it is made for | Guides | Home + Features | ✍️ drafted (`01-what-is-nvmai.md`) |
+| 02 | Getting Started: install and first run | Guides | Getting-Started | ✍️ drafted (`02-getting-started.md`) |
+| 03 | SSD expert streaming: how it works | Guides | System-Design (streaming) + v4.1/v4.2 | ✍️ drafted (`03-ssd-expert-streaming.md`) |
+| 04 | The RAM budget and bounded expert cache | Guides | Runtime-Controls + System-Design | ✍️ drafted (`04-ram-budget.md`) |
+| 05 | Installs and verified receipts | Guides | System-Design (format) + Getting-Started + FAQ | ✍️ drafted (`05-installs-and-receipts.md`) |
+| 06 | The OpenAI-compatible server | Guides | OpenAI-Compatible-Server | ✍️ drafted (`06-openai-server.md`) |
+| 07 | Runtime controls | Guides | Runtime-Controls | ✍️ drafted (`07-runtime-controls.md`) |
+| 08 | Long context: RoPE/YaRN and KV cache | Guides | Runtime-Controls (context) + System-Design | ✍️ drafted (`08-long-context-kv.md`) |
+| 09 | ANE prefill and the Metal engine | Guides | v4.5-ane-prefill + Features | ✍️ drafted (`09-ane-prefill.md`) |
+| 10 | Agent memory | Guides | agent-memory.md + plan-memory-guard | ✍️ drafted (`10-agent-memory.md`) |
+| 11 | Benchmarking: how to measure | Reference | Benchmarking-Guide + Benchmarks | ✍️ drafted (`11-benchmarking.md`) |
+| 12 | System design (overview) | Reference | System-Design + v4-core-design | ⬜ (overlaps 03/04/09; may fold into a single Reference post) |
+| 13 | FAQ | General | FAQ | ⬜ (candidate: a sticky Q&A topic rather than a page) |
+| 14 | Release notes / changelog | Reference | Changelog + release-notes-v5.x | ⬜ |
+
+> **Cross-links.** Drafts use placeholder anchors like `(#03)` in the "Where to go next" sections. At publish time these become real topic URLs (we know each topic's slug/ID once it's posted). The plan's publish step replaces the anchors with URLs, one pass per article.
+>
+> **Publish order.** Post in reading order (01 → 11) so each article's "where to go next" points at an already-existing topic. 01 is the front door and should be pinned to Guides once the series is live.
 
 ## Workflow
 
