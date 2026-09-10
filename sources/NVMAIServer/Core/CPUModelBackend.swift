@@ -153,6 +153,9 @@ public actor CPUModelBackend: ServerInferenceBackend {
                                completionTokens: produced,
                                totalTokens: prompt.count + produced,
                                cachedTokens: 0),
+            // Named, as the GPU path names it: a Messages client is told
+            // which of its stop sequences ended the turn.
+            stopSequence: output.matchedStop,
             reasoning: output.reasoning)
     }
 

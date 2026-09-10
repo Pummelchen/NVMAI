@@ -296,11 +296,16 @@ struct ResponsesReasoningTests {
         var all: [ServerInferenceEvent] { lock.withLock { events } }
     }
 
-    @Test func stopStringsAndWatchersApplyToTheAnswerOnly() {
+    /// Stop strings apply to the answer alone, and each watcher sees only
+    /// its own text: the answer's detectors the answer, the reasoning loop
+    /// detector the thought.
+    @Test func stopStringsApplyToTheAnswerAndEachWatcherSeesItsOwnText() {
         let sink = Sink()
         var observed: [String] = []
+        var thought: [String] = []
         var output = AssistantOutput(stops: ["STOP"], onEvent: { sink.append($0) },
-                                     observeVisible: { observed.append($0) })
+                                     observeVisible: { observed.append($0) },
+                                     observeReasoning: { thought.append($0) })
         output.publish([.reasoning("I could say STOP here.")])
         #expect(!output.isStopped, "a stop string in a thought does not end the answer")
         output.publish([.content("Fine. STOP and more")])
@@ -309,6 +314,7 @@ struct ResponsesReasoningTests {
         #expect(output.reasoning == "I could say STOP here.")
         #expect(output.content == "Fine. ")
         #expect(observed == ["Fine. "])
+        #expect(thought == ["I could say STOP here."])
         #expect(sink.all == [.reasoning("I could say STOP here."), .content("Fine. ")])
     }
 }

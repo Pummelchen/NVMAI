@@ -63,6 +63,11 @@ public final class WatchdogSupervisor: @unchecked Sendable {
         lock.withLock { set.observe(chunk, at: instant) }
     }
 
+    public func observeReasoning(_ chunk: String, at instant: ContinuousClock.Instant = .now) {
+        guard isActive else { return }
+        lock.withLock { set.observeReasoning(chunk, at: instant) }
+    }
+
     public func check(at instant: ContinuousClock.Instant = .now) {
         lock.withLock { set.check(at: instant) }
     }

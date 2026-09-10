@@ -1113,11 +1113,12 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
             promptIDs: promptIDs,
             allowedTools: needsToolTemplate ? Set(request.tools.map(\.name)) : nil)
         // The stall clock starts at the first visible token, so a long
-        // thought before the answer cannot trip it; the watchdogs only ever
-        // see the answer.
+        // thought before the answer cannot trip it. Reasoning is watched for
+        // loops alone, in a window of its own.
         var output = AssistantOutput(stops: request.generationConfig.stopStrings,
                                      onEvent: onEvent,
-                                     observeVisible: { watchdogs.observe($0) })
+                                     observeVisible: { watchdogs.observe($0) },
+                                     observeReasoning: { watchdogs.observeReasoning($0) })
         var decodingError: Error?
         var shouldStop = false
 

@@ -109,6 +109,22 @@ import Testing
         #expect(completion.watchdogTrips == [trip])
     }
 
+    /// The same rebuild dropped the stop string that ended the turn, so with
+    /// memory on a Messages client was told `end_turn` for a turn its own
+    /// stop sequence ended.
+    @Test func rebuildingTheCompletionKeepsTheStopSequence() async throws {
+        let stopped = ServerCompletion(
+            content: "hi", toolCalls: [], finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2),
+            stopSequence: "END")
+        let (service, configuration) = service(tools: false)
+        let backend = MemoryBackend(wrapping: ScriptedBackend([stopped]), service: service,
+                                    configuration: configuration)
+
+        let completion = try await backend.generate(request(), onEvent: { _ in })
+        #expect(completion.stopSequence == "END")
+    }
+
     /// A backend with a model to release, standing in for the router.
     private actor ResidentBackend: ServerInferenceBackend, ResidencyManaging {
         private(set) var unloads = 0

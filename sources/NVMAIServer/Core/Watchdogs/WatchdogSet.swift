@@ -24,6 +24,10 @@ public struct WatchdogSet: Sendable {
 
     public let configuration: WatchdogConfiguration
     private var loop: LoopWatchdog
+    /// A second loop detector, for the model's reasoning. Its own window,
+    /// because an answer that restates the end of its thought is not a loop,
+    /// and one shared window would see it as one.
+    private var reasoningLoop: LoopWatchdog
     private var stall: StallWatchdog
     private var stub: StubWatchdog
     public private(set) var trips: [Trip] = []
@@ -34,6 +38,7 @@ public struct WatchdogSet: Sendable {
     public init(configuration: WatchdogConfiguration) {
         self.configuration = configuration
         loop = LoopWatchdog(configuration: configuration)
+        reasoningLoop = LoopWatchdog(configuration: configuration)
         stall = StallWatchdog(configuration: configuration)
         stub = StubWatchdog(configuration: configuration)
     }
@@ -58,6 +63,17 @@ public struct WatchdogSet: Sendable {
         record(StallWatchdog.kind, stall.observe(chunk, at: instant))
     }
 
+    /// Reasoning is watched for loops only. A model can think in circles
+    /// until its token budget is gone, and since thinking left the answer
+    /// channel nothing saw it. Stall and stub stay on the answer: a long
+    /// thought before a short reply is the model working, not stalling.
+    public mutating func observeReasoning(_ chunk: String,
+                                          at instant: ContinuousClock.Instant = .now) {
+        guard configuration.isEnabled else { return }
+        record(LoopWatchdog.kind, reasoningLoop.observe(chunk, at: instant),
+               where: "in reasoning")
+    }
+
     public mutating func check(at instant: ContinuousClock.Instant = .now) {
         guard configuration.isEnabled else { return }
         record(StallWatchdog.kind, stall.check(at: instant))
@@ -80,8 +96,10 @@ public struct WatchdogSet: Sendable {
         trips.append(Trip(kind: PingPongWatchdog.kind, message: message, acted: false))
     }
 
-    private mutating func record(_ kind: WatchdogKind, _ verdict: WatchdogVerdict) {
-        guard let message = verdict.message else { return }
+    private mutating func record(_ kind: WatchdogKind, _ verdict: WatchdogVerdict,
+                                 where place: String? = nil) {
+        guard let found = verdict.message else { return }
+        let message = place.map { "\($0): \(found)" } ?? found
         let acts = configuration.acts(kind)
         trips.append(Trip(kind: kind, message: message, acted: acts))
         if acts, stopMessage == nil {
