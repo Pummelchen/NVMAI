@@ -3,7 +3,7 @@
 
 Two jobs, and the second is the reason it exists.
 
-**It checks the converter.** `prepare_qwen35_2b.py` writes a snapshot from
+**It checks the converter.** `prepare_qwen35.py` writes a snapshot from
 the bf16 original with a great deal of quiet folding -- +1 into 148 norms, a
 fused output gate, a tied embedding, K/V promoted to 8 bits inside the
 4-bit build -- and until something runs a forward pass, none of that has

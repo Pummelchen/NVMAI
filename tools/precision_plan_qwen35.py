@@ -52,7 +52,7 @@ GROUP = 64
 # The converter's own quantiser, so this measures what will be shipped
 # rather than a re-implementation that might round differently.
 _spec = importlib.util.spec_from_file_location(
-    "prep", ROOT / "tools/prepare_qwen35_2b.py")
+    "prep", ROOT / "tools/prepare_qwen35.py")
 prep = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(prep)
 
