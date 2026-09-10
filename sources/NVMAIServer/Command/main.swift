@@ -17,7 +17,10 @@ do {
 do {
     let signals = ServerTerminationSignals()
     let modelURL = URL(fileURLWithPath: arguments.model).standardizedFileURL
-    let plan = ModelSessionPlan(
+    // Built lazily: the CPU engine serves an affine snapshot, which has no
+    // manifest and would be rejected by a plan that expects an install.
+    // Constructing it eagerly printed that rejection on every CPU launch.
+    let makePlan = { ModelSessionPlan(
         modelDirectory: modelURL,
         maxContext: arguments.maxContext,
         promptCacheMode: arguments.promptCacheMode,
@@ -37,13 +40,49 @@ do {
         mtpModelDirectory: arguments.mtpModel.map {
             URL(fileURLWithPath: $0).standardizedFileURL
         },
-        mtpMemoryMiB: arguments.mtpMemoryMiB)
+        mtpMemoryMiB: arguments.mtpMemoryMiB) }
 
     let backend: any ServerInferenceBackend
     let facts: ModelSessionFacts
     var managed: ManagedModelBackend?
+    // The reasoning profile comes from an install's manifest, which a CPU
+    // snapshot does not have. These models carry no reasoning-effort control
+    // either, so the profile is the family's plain default.
+    var reasoningProfile: ServerReasoningProfile?
 
-    if arguments.managesResidency {
+    if arguments.cpu {
+        // A different engine entirely: no Metal context, no expert
+        // streaming, no prompt cache. Everything above it -- both API
+        // surfaces, the memory subsystem, the watchdogs -- is unchanged,
+        // which is the point of putting it behind the same protocol.
+        let directory = URL(fileURLWithPath: arguments.model).standardizedFileURL
+        let started = ContinuousClock.now
+        let cpuBackend = try await CPUModelBackend(
+            snapshotDirectory: directory,
+            maximumContext: arguments.maxContext,
+            resident: arguments.cpuResident)
+        backend = cpuBackend
+        let elapsed = started.duration(to: .now)
+        let seconds = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        let identifier = arguments.modelIDOverride
+            ?? directory.lastPathComponent
+        facts = ModelSessionFacts(
+            modelID: identifier,
+            prefillChunkTokens: 0,
+            promptCacheMode: .off,
+            expertCacheSlots: 0)
+        print(String(format: "CPU engine: %@ %@in %.1fs, %d threads",
+                     identifier,
+                     cpuBackend.residentBytes > 0
+                        ? "\(cpuBackend.residentBytes / 1_000_000) MB resident, " : "",
+                     seconds, cpuBackend.threads))
+        reasoningProfile = ServerReasoningProfile(
+            family: .qwen36,
+            thinkingMode: arguments.thinkingMode,
+            reasoningEffort: nil)
+    } else if arguments.managesResidency {
+        let plan = makePlan()
         // Reads manifest.json only; a bad --model still fails here at launch
         // rather than on the first request.
         facts = try plan.previewFacts(modelIDOverride: arguments.modelIDOverride)
@@ -55,6 +94,7 @@ do {
         managed = residency
         backend = residency
     } else {
+        let plan = makePlan()
         let session = try await plan.makeSession()
         backend = session
         facts = ModelSessionFacts(
@@ -72,7 +112,7 @@ do {
         modelID: facts.modelID,
         queueLimit: arguments.queueLimit,
         backend: servingBackend,
-        reasoningProfile: try plan.reasoningProfile())
+        reasoningProfile: try reasoningProfile ?? makePlan().reasoningProfile())
     _ = try await server.start(port: arguments.port)
     let diskCache = facts.promptCacheMode == .off
         ? "off" : arguments.promptCacheDiskDirectory ?? "off"

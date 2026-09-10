@@ -118,6 +118,41 @@ public struct SafeTensorsFile: Sendable {
         entries = parsed
     }
 
+    /// Pull the whole file into memory and keep it there.
+    ///
+    /// Mapping alone leaves residency to the page cache, which is usually
+    /// right — this file is read end to end every token, so it stays warm on
+    /// its own. It is not right when something else needs the memory: a 35B
+    /// streaming experts off SSD will evict a 2 GB side model between
+    /// requests, and the first token after that pays for the whole thing
+    /// again.
+    ///
+    /// So a model served CPU-only is faulted in once, up front, and the cost
+    /// is paid where it is visible. `MADV_WILLNEED` asks the kernel to read
+    /// ahead; the touch loop is what actually makes the pages resident,
+    /// because the advice is a hint and this is not.
+    ///
+    /// Returns the bytes touched, so a caller can say what it did.
+    @discardableResult
+    public func makeResident() -> Int {
+        madvise(UnsafeMutableRawPointer(mutating: mapping.base),
+                mapping.length, MADV_WILLNEED)
+        let pageSize = Int(getpagesize())
+        var checksum: UInt64 = 0
+        var offset = 0
+        while offset < mapping.length {
+            checksum &+= UInt64(mapping.base.load(fromByteOffset: offset, as: UInt8.self))
+            offset += pageSize
+        }
+        // The sum is never used; it exists so the reads cannot be optimized
+        // away, which would leave the pages exactly as cold as before.
+        Self.residencyChecksum = checksum
+        return mapping.length
+    }
+
+    /// Written only by `makeResident`, and never read for meaning.
+    nonisolated(unsafe) private static var residencyChecksum: UInt64 = 0
+
     public func entry(_ name: String) throws -> Entry {
         guard let entry = entries[name] else { throw Failure.missing(name) }
         return entry

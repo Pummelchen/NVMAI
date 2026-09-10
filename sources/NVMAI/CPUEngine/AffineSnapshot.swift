@@ -49,6 +49,10 @@ public struct AffineSnapshot: Sendable {
         public let ropeTheta: Float
         public let partialRotaryFactor: Double
         public let tiedEmbedding: Bool
+        /// The context the checkpoint claims. A CPU engine will not want all
+        /// of it -- attention here is a plain loop over the cache -- but the
+        /// ceiling belongs to the model, not to the server.
+        public let maxPositions: Int
 
         /// Dimensions of the rotation, which is partial here: 64 of 256.
         /// Rotating the whole head is the single most plausible way to get a
@@ -105,8 +109,10 @@ public struct AffineSnapshot: Sendable {
             normEpsilon: Float(double("rms_norm_eps", 1e-6)),
             ropeTheta: Float(double("rope_theta", 10_000_000)),
             partialRotaryFactor: double("partial_rotary_factor", 0.25),
-            tiedEmbedding: (config["tie_word_embeddings"] as? Bool) ?? true)
+            tiedEmbedding: (config["tie_word_embeddings"] as? Bool) ?? true,
+            maxPositions: try integer("max_position_embeddings", 32_768))
 
+        modelType = config["model_type"] as? String
         guard let quantization = config["quantization"] as? [String: Any],
               let bits = quantization["bits"] as? Int,
               let group = quantization["group_size"] as? Int else {
@@ -138,6 +144,21 @@ public struct AffineSnapshot: Sendable {
     }
 
     public func bits(forStem stem: String) -> Int { widths[stem] ?? baseBits }
+
+    /// Fault every shard in, so the model is in memory rather than in the
+    /// page cache's good graces. Returns the bytes made resident.
+    @discardableResult
+    public func makeResident() -> Int {
+        shards.values.reduce(0) { $0 + $1.makeResident() }
+    }
+
+    /// The family this snapshot's layer shape belongs to, or nil when the
+    /// CPU engine does not implement it.
+    public var family: CPUModelFamily? {
+        CPUModelFamily.resolve(modelType: modelType)
+    }
+
+    public let modelType: String?
 
     private func shard(_ name: String) throws -> SafeTensorsFile {
         guard let file = placement[name], let shard = shards[file] else {

@@ -377,3 +377,79 @@ import Testing
         #expect(abs(CPUOps.softplus(0) - logf(2)) < 1e-6)
     }
 }
+
+/// The CPU serving path: which architectures it will take, how it samples,
+/// and the ceilings it enforces rather than promises.
+@Suite struct CPUServingTests {
+
+    /// A snapshot outside the family is refused by name. A forward pass on
+    /// the wrong layer shape does not crash — it produces fluent nonsense,
+    /// which is the same failure as a bad converter with a longer feedback
+    /// loop.
+    @Test func onlyKnownArchitecturesAreServed() {
+        #expect(CPUModelFamily.resolve(modelType: "qwen3_5_dense") == .qwen35Dense)
+        #expect(CPUModelFamily.resolve(modelType: "qwen3_5_text") == .qwen35Dense)
+        #expect(CPUModelFamily.resolve(modelType: "llama") == nil)
+        #expect(CPUModelFamily.resolve(modelType: nil) == nil)
+
+        let refusal = CPUModelFamily.refusal(modelType: "llama")
+        #expect(refusal.contains("llama"), "say which one was refused")
+        #expect(refusal.contains("qwen3_5_dense"), "and which are served")
+    }
+
+    /// Greedy is the default and has to be exactly greedy: the memory work
+    /// compares runs against each other, which only means anything if the
+    /// same prompt gives the same answer.
+    @Test func greedyPicksTheMaximumEveryTime() {
+        let sampler = CPUSampler()
+        #expect(sampler.isGreedy)
+        let logits: [Float] = [0.1, 5.0, -2, 4.9, 0]
+        let generator = sampler.makeGenerator()
+        for _ in 0..<20 {
+            #expect(sampler.pick(logits, using: generator) == 1)
+        }
+    }
+
+    /// Top-k of one is greedy however hot the temperature, which is the
+    /// property that makes the two knobs composable.
+    @Test func topKOfOneIsGreedy() {
+        let sampler = CPUSampler(temperature: 2, topP: 1, topK: 1, seed: 7)
+        let logits: [Float] = [0.1, 5.0, -2, 4.9, 0]
+        let generator = sampler.makeGenerator()
+        for _ in 0..<20 {
+            #expect(sampler.pick(logits, using: generator) == 1)
+        }
+    }
+
+    /// Sampling stays inside the distribution it was given: nothing outside
+    /// the top-k may ever be chosen, however the random draw falls.
+    @Test func samplingNeverEscapesTopK() {
+        let sampler = CPUSampler(temperature: 1.5, topP: 1, topK: 2, seed: 99)
+        let logits: [Float] = [0.1, 5.0, -2, 4.9, 0]
+        let generator = sampler.makeGenerator()
+        var seen = Set<Int>()
+        for _ in 0..<200 { seen.insert(sampler.pick(logits, using: generator)) }
+        #expect(seen.isSubset(of: [1, 3]), "chose from outside the top two: \(seen)")
+    }
+
+    /// A seeded sampler repeats itself, so a run can be reproduced.
+    @Test func aSeededSamplerIsReproducible() {
+        let logits: [Float] = [1, 2, 3, 2, 1]
+        func draw() -> [Int] {
+            let sampler = CPUSampler(temperature: 1, topP: 1, topK: 0, seed: 42)
+            let generator = sampler.makeGenerator()
+            return (0..<30).map { _ in sampler.pick(logits, using: generator) }
+        }
+        #expect(draw() == draw())
+    }
+
+    /// Top-p trims by mass. With almost all of it on one token, a small p
+    /// leaves only that token.
+    @Test func topPKeepsOnlyTheMass() {
+        let sampler = CPUSampler(temperature: 0.5, topP: 0.5, topK: 0, seed: 3)
+        let logits: [Float] = [0, 10, 0, 0]
+        let generator = sampler.makeGenerator()
+        for _ in 0..<20 { #expect(sampler.pick(logits, using: generator) == 1) }
+    }
+
+}

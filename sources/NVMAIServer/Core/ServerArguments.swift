@@ -24,6 +24,18 @@ public struct ServerArguments: Equatable, Sendable {
     /// the template default. Family support is validated at startup against
     /// the installed manifest.
     public let reasoningEffort: ModelReasoningEffort?
+    /// Serve on the CPU instead of the GPU, from an affine snapshot rather
+    /// than an install.
+    ///
+    /// For models small enough that a GPU is not the point: a 2B reads about
+    /// 1.9 GB per token, which the CPU does at twenty tokens a second on
+    /// four performance cores. It leaves the GPU entirely free, which is why
+    /// the same engine can run a side model beside a 35B.
+    public let cpu: Bool
+    /// Keep the whole snapshot faulted into memory rather than leaving
+    /// residency to the page cache. On by default with `--cpu`, because a
+    /// model that gets evicted between requests pays to fault itself back in.
+    public let cpuResident: Bool
     public let expertCacheSlots: Int?
     /// Bytes the routed-expert cache may use. Slots are derived from it and the
     /// model's own expert stride, so this is the knob and the slot count is the
@@ -106,6 +118,16 @@ public struct ServerArguments: Equatable, Sendable {
                              next request reloads transparently. Implies
                              --lazy-load. Pair with --prompt-cache-disk, since
                              unloading discards the in-memory prefix cache.
+      --cpu                  Serve on the CPU from an affine snapshot instead
+                             of the GPU from an install. --model then points at
+                             a snapshot directory. For models small enough that
+                             a GPU is not the point: a 2B runs at about twenty
+                             tokens a second on the performance cores and
+                             leaves the GPU entirely free.
+      --no-cpu-resident      With --cpu, leave residency to the page cache
+                             instead of faulting the snapshot in at startup.
+                             Only worth it on a machine too small to hold the
+                             model, where the alternative is swapping.
       --help                 Show this help.
     """
 
@@ -135,6 +157,8 @@ public struct ServerArguments: Equatable, Sendable {
         var thinkingMode = ModelThinkingMode.resolved(environment: environment)
         var reasoningEffort = ModelReasoningEffort.resolved(environment: environment)
         var expertCacheSlots: Int?
+        var cpu = false
+        var cpuResident = true
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
         var idleUnloadSeconds = 0
@@ -147,6 +171,16 @@ public struct ServerArguments: Equatable, Sendable {
             // as this flag's value and then reject it as unknown.
             if flag == "--lazy-load" {
                 lazyLoad = true
+                index += 1
+                continue
+            }
+            if flag == "--cpu" {
+                cpu = true
+                index += 1
+                continue
+            }
+            if flag == "--no-cpu-resident" {
+                cpuResident = false
                 index += 1
                 continue
             }
@@ -313,7 +347,9 @@ public struct ServerArguments: Equatable, Sendable {
                                ropeScalingMode: ropeScalingMode,
                                thinkingMode: thinkingMode,
                                reasoningEffort: reasoningEffort,
-                               expertCacheSlots: expertCacheSlots,
+                               cpu: cpu,
+                cpuResident: cpuResident,
+                expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,
                                idleUnloadSeconds: idleUnloadSeconds)
