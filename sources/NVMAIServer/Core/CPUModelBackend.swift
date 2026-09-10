@@ -49,11 +49,15 @@ public actor CPUModelBackend: ServerInferenceBackend {
     /// a promise that is quietly broken.
     public static let contextCeiling = 32_768
 
+    /// `thinkingMode` is baked into the tokenizer's generation prompt, as it
+    /// is on the GPU path: the template renders the thinking switch, so it is
+    /// a load-time setting, not a per-request one.
     public init(snapshotDirectory: URL,
                 maximumContext: Int = CPUModelBackend.contextCeiling,
-                resident: Bool = true) async throws {
+                resident: Bool = true,
+                thinkingMode: ModelThinkingMode = .off) async throws {
         let snapshot = try AffineSnapshot(directory: snapshotDirectory)
-        guard snapshot.family != nil else {
+        guard let family = snapshot.family else {
             throw CPUBackendError.unsupported(
                 CPUModelFamily.refusal(modelType: snapshot.modelType))
         }
@@ -61,13 +65,13 @@ public actor CPUModelBackend: ServerInferenceBackend {
         let engine = try CPUQwen35(snapshot: snapshot)
         threads = engine.threads
         model = engine
-        tokenizer = try await GFTokenizer.load(from: snapshotDirectory)
+        tokenizer = try await GFTokenizer.load(from: snapshotDirectory,
+                                               thinkingMode: thinkingMode)
         context = min(maximumContext, snapshot.configuration.maxPositions,
                       Self.contextCeiling)
-        // The house settings: this family ships no card of its own, and a
-        // client that sends nothing should get what the server would give
-        // any other model.
-        defaults = GenerationDefaults.house
+        // The family's own, which is what the catalog advertises for it, so
+        // a launcher showing the defaults shows what a request will get.
+        defaults = family.samplingDefaults
     }
 
     public enum CPUBackendError: Error, CustomStringConvertible {
@@ -149,5 +153,14 @@ public actor CPUModelBackend: ServerInferenceBackend {
                                completionTokens: produced,
                                totalTokens: prompt.count + produced,
                                cachedTokens: 0))
+    }
+}
+
+/// The Messages API's count_tokens, from the same rendering `generate` uses,
+/// so a client sizing its context against a CPU model gets the real number.
+extension CPUModelBackend: PromptTokenCounting {
+    public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        let rendered = try tokenizer.applyChatTemplate(request.messages)
+        return tokenizer.encode(rendered, addBOS: false).count
     }
 }

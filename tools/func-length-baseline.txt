@@ -1,1 +1,0 @@
-sources/NVMAIServer/Core/HTTPServer.swift:handleResponses:merged from api-compat at 120 lines; the X-NVMAI-Workspace line that the Anthropic merge had to add crossed it. Split it after the dynamic-model router lands, since that work rewrites the same handler and a refactor now would only conflict.

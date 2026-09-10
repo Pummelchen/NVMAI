@@ -22,6 +22,9 @@ public actor NVMAIHTTPServer {
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let reasoningProfile: ServerReasoningProfile
+    /// Set when the server routes between catalog models; nil keeps the
+    /// single-model server exactly as it was.
+    private let router: (any ModelRouting)?
     private let childChannels = ChildChannelRegistry(
         maximumChannels: maximumConcurrentConnections)
     /// Finished /v1/responses kept for previous_response_id and retrieval.
@@ -34,13 +37,15 @@ public actor NVMAIHTTPServer {
                 backend: any ServerInferenceBackend,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 reasoningProfile: ServerReasoningProfile = .default,
-                group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
+                group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1),
+                router: (any ModelRouting)? = nil) {
         self.group = group
         self.modelID = modelID
         self.backend = backend
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
         self.reasoningProfile = reasoningProfile
+        self.router = router
     }
 
     public func start(port: Int) async throws -> Channel {
@@ -49,6 +54,7 @@ public actor NVMAIHTTPServer {
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
         let reasoningProfile = self.reasoningProfile
+        let router = self.router
         let childChannels = self.childChannels
         let responseStore = self.responseStore
         let bootstrap = ServerBootstrap(group: group)
@@ -66,6 +72,7 @@ public actor NVMAIHTTPServer {
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
                         reasoningProfile: reasoningProfile,
+                        router: router,
                         childChannels: childChannels,
                         responseStore: responseStore))
                 }
@@ -155,9 +162,10 @@ enum WorkspaceHeader {
 
 /// unchecked-invariant: NIO calls every ChannelInboundHandler method on the
 /// channel's own event loop, so the handler's per-request state is already
-/// serialised. The one exception is `activeTask`, which the SSE drainer and the
+/// serialised. The exceptions are `activeTask`, which the SSE drainer and the
 /// backpressure path touch from the cooperative pool -- that field is guarded by
-/// `taskLock`.
+/// `taskLock` -- and `responseModelID`, which the response builders read from
+/// the generation task and which is guarded by `responseModelLock`.
 private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -180,9 +188,21 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let reasoningProfile: ServerReasoningProfile
+    private let router: (any ModelRouting)?
     private let childChannels: ChildChannelRegistry
     private let responseStore: ResponseStore
     private var head: HTTPRequestHead?
+
+    /// The model the current request was validated for, echoed in every
+    /// response object it produces. One request is in flight per connection
+    /// (pipelining assistance holds the next head until this response ends),
+    /// but the echo sites run on the cooperative pool, hence the lock.
+    private let responseModelLock = NSLock()
+    private var _responseModelID: String
+    private var responseModelID: String {
+        get { responseModelLock.withLock { _responseModelID } }
+        set { responseModelLock.withLock { _responseModelID = newValue } }
+    }
     private var body = ByteBuffer()
     private var oversized = false
 
@@ -207,9 +227,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
          reasoningProfile: ServerReasoningProfile,
+         router: (any ModelRouting)?,
          childChannels: ChildChannelRegistry,
          responseStore: ResponseStore) {
         self.modelID = modelID
+        self._responseModelID = modelID
+        self.router = router
         self.reasoningProfile = reasoningProfile
         self.backend = backend
         self.coordinator = coordinator
@@ -315,6 +338,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         case (.GET, "/health"):
             writeJSON(context, status: .ok, object: ["status": "ok"])
         case (.GET, "/v1/models"):
+            if let router {
+                writeModelList(router.servedModels, anthropic: anthropic, context: context)
+                return
+            }
             // Advertise the base model plus the "<model>-fast" alias, which
             // serves the same weights with the CLI-strip heuristic enabled.
             if anthropic {
@@ -404,6 +431,56 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                           status: .unsupportedMediaType, surface: surface)
     }
 
+    /// The model a request names. Resolved before validation, so omitted
+    /// sampling and the max_tokens bound come from that model rather than
+    /// whichever one is resident. Without a router this is the one model,
+    /// answered from the backend as before, and the validator still refuses
+    /// any other name.
+    private func servedModel(named name: String) throws -> ServedModel {
+        guard let router else {
+            return ServedModel(id: modelID, displayName: modelID,
+                               maximumContext: backend.maximumContext,
+                               sampling: backend.samplingDefaults,
+                               reasoningProfile: reasoningProfile)
+        }
+        guard let model = router.servedModel(named: name) else {
+            throw ServerRequestError.unknownModel
+        }
+        return model
+    }
+
+    /// Validates against `target` and binds the request to it, so the router
+    /// loads the model that was validated and the response names it.
+    private func validate(_ request: OpenAIChatRequest,
+                          for target: ServedModel) throws -> ValidatedChatRequest {
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: target.id, maxContext: target.maximumContext,
+            reasoningProfile: target.reasoningProfile,
+            sampling: target.sampling)
+            .withModel(target.id)
+        responseModelID = target.id
+        return validated
+    }
+
+    /// Every catalog model in the shape the client speaks. The "-fast"
+    /// aliases are accepted but not listed: doubling a catalog into twice as
+    /// many menu entries helps nobody choose between models.
+    private func writeModelList(_ models: [ServedModel], anthropic: Bool,
+                                context: ChannelHandlerContext) {
+        if anthropic {
+            writeJSON(context, status: .ok,
+                      object: AnthropicBuilder.modelList(
+                          models: models.map { (id: $0.id, displayName: $0.displayName) }),
+                      surface: .anthropic)
+            return
+        }
+        writeCodable(context, status: .ok, OpenAIModelList(
+            object: "list",
+            data: models.map {
+                .init(id: $0.id, object: "model", created: nil, ownedBy: "nvmai")
+            }))
+    }
+
     /// `GET /v1/models/{id}` in either shape.
     private func handleModel(id: String, method: HTTPMethod, anthropic: Bool,
                              context: ChannelHandlerContext) {
@@ -414,12 +491,24 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                               status: .methodNotAllowed, surface: surface)
             return
         }
-        guard id == modelID || id == modelID + "-fast" else {
-            writeRequestError(context, .unknownModel, status: .notFound, surface: surface)
-            return
+        let displayName: String
+        if let router {
+            guard let model = router.servedModel(named: id) else {
+                writeRequestError(context, .unknownModel, status: .notFound, surface: surface)
+                return
+            }
+            displayName = model.displayName
+        } else {
+            guard id == modelID || id == modelID + "-fast" else {
+                writeRequestError(context, .unknownModel, status: .notFound, surface: surface)
+                return
+            }
+            displayName = id
         }
         if anthropic {
-            writeJSON(context, status: .ok, object: AnthropicBuilder.modelObject(id: id), surface: .anthropic)
+            writeJSON(context, status: .ok,
+                      object: AnthropicBuilder.modelObject(id: id, displayName: displayName),
+                      surface: .anthropic)
         } else {
             writeCodable(context, status: .ok,
                          OpenAIModelList.Model(id: id, object: "model", created: nil, ownedBy: "nvmai"))
@@ -502,10 +591,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // duplicate a body of up to `maximumBodyBytes` before decoding.
             let decoded = try JSONDecoder().decode(
                 OpenAIChatRequest.self, from: Data(body.readableBytesView))
-            let request = try OpenAIRequestValidator.validate(
-                decoded, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile,
-                sampling: backend.samplingDefaults)
+            let request = try validate(decoded, for: try servedModel(named: decoded.model))
                 .withWorkspace(workspace)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
@@ -701,6 +787,35 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
+    /// The API reports a failed generation as a response object in state
+    /// "failed" carrying the error, then ends the stream.
+    private func responsesFailureFrames(
+        id: String, created: Int, echo: ResponsesAPIEcho, itemState: ResponsesStreamState
+    ) -> @Sendable (OpenAIErrorEnvelope) -> [Data] {
+        { envelope in
+            let failed = ResponsesAPIBuilder.responseObject(
+                id: id, created: created, model: self.responseModelID,
+                status: "failed", output: [], usage: nil, echo: echo,
+                error: (envelope.error.code, envelope.error.message))
+            let event = ResponsesAPIBuilder.event(
+                "response.failed", sequence: itemState.nextSequence(), ["response": failed])
+            return Self.eventFrame(name: "response.failed", object: event).map { [$0] } ?? []
+        }
+    }
+
+    /// The stored conversation `previous_response_id` continues, or none.
+    private func priorConversation(
+        _ request: ResponsesAPIRequest
+    ) throws -> [ResponsesAPIRequest.Item] {
+        guard let previous = request.previousResponseID else { return [] }
+        guard let entry = responseStore.get(previous) else {
+            throw ServerRequestError.notFound(
+                message: "Previous response with id '\(previous)' not found.",
+                param: "previous_response_id")
+        }
+        return entry.conversation
+    }
+
     /// OpenAI Responses API endpoint (`POST /v1/responses`). The request is
     /// mapped onto the chat-completions path (see ResponsesAPIMapper) and the
     /// generation is streamed back as Responses-API SSE events (or returned
@@ -713,25 +828,15 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             let decoded = try JSONDecoder().decode(
                 ResponsesAPIRequest.self, from: Data(body.readableBytesView))
-            var prior: [ResponsesAPIRequest.Item] = []
-            if let previous = decoded.previousResponseID {
-                guard let entry = responseStore.get(previous) else {
-                    throw ServerRequestError.notFound(
-                        message: "Previous response with id '\(previous)' not found.",
-                        param: "previous_response_id")
-                }
-                prior = entry.conversation
-            }
+            let target = try servedModel(named: decoded.model)
+            let prior = try priorConversation(decoded)
             let inputItems = resolveReferences(decoded.inputItems)
             let chatRequest = try ResponsesAPIMapper.chatRequest(
                 decoded, priorItems: prior, inputItems: inputItems)
-            let request = try OpenAIRequestValidator.validate(
-                chatRequest, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile,
-                sampling: backend.samplingDefaults)
+            let request = try validate(chatRequest, for: target)
                 .withWorkspace(workspace)
             let echo = ResponsesAPIEcho(request: decoded,
-                                        effectiveEffort: reasoningProfile.effectiveEffort)
+                                        effectiveEffort: target.reasoningProfile.effectiveEffort)
             let responseID = ResponsesAPIBuilder.responseID()
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
@@ -817,19 +922,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     self.handleAsyncFailure(
                         error, context: contextBox.value, id: responseID,
                         phase: phaseState.value, stream: request.stream, outbox: outbox,
-                        surface: .responses) { envelope in
-                            // The API reports a failed generation as a
-                            // response object in state "failed" carrying the
-                            // error, then ends the stream.
-                            let failed = ResponsesAPIBuilder.responseObject(
-                                id: responseID, created: created, model: self.modelID,
-                                status: "failed", output: [], usage: nil, echo: echo,
-                                error: (envelope.error.code, envelope.error.message))
-                            let event = ResponsesAPIBuilder.event(
-                                "response.failed", sequence: itemState.nextSequence(),
-                                ["response": failed])
-                            return Self.eventFrame(name: "response.failed", object: event).map { [$0] } ?? []
-                        }
+                        surface: .responses,
+                        failureFrames: self.responsesFailureFrames(
+                            id: responseID, created: created, echo: echo, itemState: itemState))
                 }
                 if let drainer {
                     await Self.awaitDrainer(drainer)
@@ -879,7 +974,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
         let terminal = ResponsesAPIBuilder.terminalStatus(for: completion)
         return ResponsesAPIBuilder.responseObject(
-            id: id, created: created, model: modelID, status: terminal.status,
+            id: id, created: created, model: responseModelID, status: terminal.status,
             output: output, usage: completion.usage, echo: echo,
             incompleteReason: terminal.reason,
             completedAt: Int(Date().timeIntervalSince1970))
@@ -904,7 +999,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                       echo: ResponsesAPIEcho,
                                       itemState: ResponsesStreamState) -> EventLoopFuture<Void> {
         let response = ResponsesAPIBuilder.responseObject(
-            id: id, created: created, model: modelID, status: "in_progress",
+            id: id, created: created, model: responseModelID, status: "in_progress",
             output: [], usage: nil, echo: echo)
         var frames = Data()
         for name in ["response.created", "response.in_progress"] {
@@ -1096,12 +1191,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             let decoded = try JSONDecoder().decode(
                 AnthropicMessagesRequest.self, from: Data(body.readableBytesView))
+            let target = try servedModel(named: decoded.model)
             let chatRequest = try AnthropicMapper.chatRequest(
-                decoded, profile: reasoningProfile, maxContext: backend.maximumContext)
-            let request = try OpenAIRequestValidator.validate(
-                chatRequest, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile,
-                sampling: backend.samplingDefaults)
+                decoded, profile: target.reasoningProfile, maxContext: target.maximumContext)
+            let request = try validate(chatRequest, for: target)
                 .withWorkspace(workspace)
             let messageID = AnthropicBuilder.messageID()
             let contextBox = SendableContext(context)
@@ -1171,7 +1264,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         self.writeJSON(
                             contextBox.value, status: .ok,
                             object: AnthropicBuilder.messageObject(
-                                id: messageID, model: self.modelID,
+                                id: messageID, model: self.responseModelID,
                                 content: AnthropicBuilder.contentBlocks(completion),
                                 stopReason: stop.reason, stopSequence: stop.sequence,
                                 usage: AnthropicBuilder.usageObject(completion.usage)),
@@ -1208,11 +1301,10 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         do {
             let decoded = try JSONDecoder().decode(
                 AnthropicCountTokensRequest.self, from: Data(body.readableBytesView))
-            let chatRequest = try AnthropicMapper.chatRequest(counting: decoded, profile: reasoningProfile)
-            let request = try OpenAIRequestValidator.validate(
-                chatRequest, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile,
-                sampling: backend.samplingDefaults)
+            let target = try servedModel(named: decoded.model)
+            let chatRequest = try AnthropicMapper.chatRequest(counting: decoded,
+                                                              profile: target.reasoningProfile)
+            let request = try validate(chatRequest, for: target)
             guard let counting = backend as? any PromptTokenCounting else {
                 throw ServerRequestError.unsupportedOperation("count_tokens")
             }
@@ -1250,7 +1342,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                       id: String,
                                       requestID: String) -> EventLoopFuture<Void> {
         let message = AnthropicBuilder.messageObject(
-            id: id, model: modelID, content: [], stopReason: nil, stopSequence: nil,
+            id: id, model: responseModelID, content: [], stopReason: nil, stopSequence: nil,
             usage: ["input_tokens": 0, "output_tokens": 0,
                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0])
         let frame = Self.anthropicFrame(["type": "message_start", "message": message]) ?? Data()
@@ -1479,7 +1571,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion",
             "created": created,
-            "model": modelID,
+            "model": responseModelID,
             "choices": [[
                 "index": 0,
                 "message": message,
@@ -1564,7 +1656,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                "id": id,
                "object": "chat.completion.chunk",
                "created": created,
-               "model": modelID,
+               "model": responseModelID,
                "choices": [],
                "usage": usageObject(completion.usage),
            ]) {
@@ -1582,7 +1674,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": modelID,
+            "model": responseModelID,
             "choices": [[
                 "index": 0,
                 "delta": delta,

@@ -328,6 +328,10 @@ public struct ValidatedChatRequest: Sendable {
     /// are meant to be terse, which is the shape the detectors hunt, and no
     /// person is waiting on the result.
     public let isEngineInternal: Bool
+    /// The catalog id the request was validated against. The routing backend
+    /// loads it; a single-model backend serves what it has and ignores it.
+    /// Nil for the engine's own requests, which run on whatever is resident.
+    public let model: String?
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
@@ -337,7 +341,8 @@ public struct ValidatedChatRequest: Sendable {
                 maximumCompletionTokens: Int,
                 stripCLIPrompt: Bool = false,
                 workspace: String? = nil,
-                isEngineInternal: Bool = false) {
+                isEngineInternal: Bool = false,
+                model: String? = nil) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
@@ -347,6 +352,7 @@ public struct ValidatedChatRequest: Sendable {
         self.stripCLIPrompt = stripCLIPrompt
         self.workspace = workspace
         self.isEngineInternal = isEngineInternal
+        self.model = model
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -370,7 +376,8 @@ public struct ValidatedChatRequest: Sendable {
             maximumCompletionTokens: maximumCompletionTokens,
             stripCLIPrompt: stripCLIPrompt,
             workspace: workspace,
-            isEngineInternal: isEngineInternal)
+            isEngineInternal: isEngineInternal,
+            model: model)
     }
 
     /// The memory workspace this request names, from the X-NVMAI-Workspace
@@ -386,7 +393,23 @@ public struct ValidatedChatRequest: Sendable {
             maximumCompletionTokens: maximumCompletionTokens,
             stripCLIPrompt: stripCLIPrompt,
             workspace: workspace,
-            isEngineInternal: isEngineInternal)
+            isEngineInternal: isEngineInternal,
+            model: model)
+    }
+
+    /// The same request, bound to the catalog model it was validated for.
+    public func withModel(_ model: String) -> ValidatedChatRequest {
+        ValidatedChatRequest(
+            messages: messages,
+            tools: tools,
+            stream: stream,
+            includeUsage: includeUsage,
+            generationConfig: generationConfig,
+            maximumCompletionTokens: maximumCompletionTokens,
+            stripCLIPrompt: stripCLIPrompt,
+            workspace: workspace,
+            isEngineInternal: isEngineInternal,
+            model: model)
     }
 }
 
