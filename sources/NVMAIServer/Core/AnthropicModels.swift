@@ -552,17 +552,22 @@ public enum AnthropicBuilder {
 
     /// `GET /v1/models` in the Anthropic shape.
     public static func modelList(ids: [String]) -> [String: Any] {
-        let created = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 0))
-        return [
-            "data": ids.map { ["type": "model", "id": $0, "display_name": $0, "created_at": created] },
+        modelList(models: ids.map { (id: $0, displayName: $0) })
+    }
+
+    /// The same list where each model has a human name of its own, as
+    /// catalog models do.
+    public static func modelList(models: [(id: String, displayName: String)]) -> [String: Any] {
+        [
+            "data": models.map { modelObject(id: $0.id, displayName: $0.displayName) },
             "has_more": false,
-            "first_id": ids.first.map { $0 as Any } ?? NSNull(),
-            "last_id": ids.last.map { $0 as Any } ?? NSNull(),
+            "first_id": models.first.map { $0.id as Any } ?? NSNull(),
+            "last_id": models.last.map { $0.id as Any } ?? NSNull(),
         ]
     }
 
-    public static func modelObject(id: String) -> [String: Any] {
-        ["type": "model", "id": id, "display_name": id,
+    public static func modelObject(id: String, displayName: String? = nil) -> [String: Any] {
+        ["type": "model", "id": id, "display_name": displayName ?? id,
          "created_at": ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 0))]
     }
 }
