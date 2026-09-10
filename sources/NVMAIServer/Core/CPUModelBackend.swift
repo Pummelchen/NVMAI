@@ -160,6 +160,13 @@ public actor CPUModelBackend: ServerInferenceBackend {
 /// so a client sizing its context against a CPU model gets the real number.
 extension CPUModelBackend: PromptTokenCounting {
     public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        try Self.promptTokenCount(request, tokenizer: tokenizer)
+    }
+
+    /// The count from a tokenizer alone, which is how the router answers for
+    /// a CPU model that is not the one loaded.
+    static func promptTokenCount(_ request: ValidatedChatRequest,
+                                 tokenizer: GFTokenizer) throws -> Int {
         let rendered = try tokenizer.applyChatTemplate(request.messages)
         return tokenizer.encode(rendered, addBOS: false).count
     }

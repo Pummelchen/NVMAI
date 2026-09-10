@@ -143,6 +143,19 @@ extension ModelReasoningControl {
         }
     }
 
+    /// What plain "thinking on" loads: the switch itself for a binary
+    /// template, the template's default effort for one with levels. The
+    /// router maps a server-wide `on` through this so it means the same as
+    /// `--thinking on` on a single-model server.
+    public var levelWhenOn: ReasoningLevel {
+        switch self {
+        case .binaryThinking:
+            return .on
+        case .thinkingWithEffortLevels(let defaultEffort):
+            return ReasoningLevel(effort: defaultEffort)
+        }
+    }
+
     /// Shared by the GPU and CPU families so the two cannot disagree on what
     /// a level means.
     func runtimeReasoning(for level: ReasoningLevel, family: String) throws

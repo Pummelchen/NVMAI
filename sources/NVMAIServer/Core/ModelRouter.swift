@@ -59,15 +59,24 @@ public struct ReasoningChoice: Sendable, Equatable {
 /// would make `--reasoning` useless with a mixed catalog, so each model gets
 /// the closest thing its template defines.
 public enum ReasoningFallback {
+    /// `whenOn` is what the model's template does when thinking is switched
+    /// on with no effort named; `ModelCatalog.Kind.levelWhenOn` supplies it.
     public static func effectiveLevel(_ requested: ReasoningLevel,
-                                      supported: [ReasoningLevel]) -> ReasoningLevel {
+                                      supported: [ReasoningLevel],
+                                      whenOn: ReasoningLevel? = nil) -> ReasoningLevel {
         if supported.contains(requested) || requested == .off { return requested }
         let efforts = supported.filter { $0 != .off && $0 != .on }
         // An on/off model: any effort means "think".
         guard !efforts.isEmpty else { return supported.contains(.on) ? .on : .off }
-        // "On" for an effort model: the middle of what it offers, neither the
-        // cheapest nor the most expensive reading of an unqualified request.
-        if requested == .on { return efforts[(efforts.count - 1) / 2] }
+        // "On" for an effort model: the template's own default, extra high
+        // for Qwen3.8. That is what --thinking on has always loaded on a
+        // single-model server, and the same flag must not think less because
+        // the server was started with a catalog. The middle effort is left
+        // only for a caller that cannot say what the template does.
+        if requested == .on {
+            if let whenOn, efforts.contains(whenOn) { return whenOn }
+            return efforts[(efforts.count - 1) / 2]
+        }
         // An effort the model lacks: the nearest one it has, ties to the
         // cheaper, since a client that wanted more can ask for it by name.
         let order = ReasoningLevel.allCases
@@ -81,7 +90,8 @@ public enum ReasoningFallback {
 
     public static func choice(for kind: ModelCatalog.Kind,
                               requested: ReasoningLevel) throws -> ReasoningChoice {
-        let effective = effectiveLevel(requested, supported: kind.supportedReasoningLevels)
+        let effective = effectiveLevel(requested, supported: kind.supportedReasoningLevels,
+                                       whenOn: kind.levelWhenOn)
         let runtime = try kind.runtimeReasoning(for: effective)
         return ReasoningChoice(requested: requested, effective: effective,
                                thinking: runtime.thinking, effort: runtime.effort)
@@ -117,6 +127,10 @@ public actor ModelRouter: ServerInferenceBackend, ResidencyManaging, PromptToken
     /// tested against stubs without a model on disk.
     public typealias Loader =
         @Sendable (ModelCatalog.Entry, ReasoningChoice) async throws -> any ServerInferenceBackend
+    /// Counts a request's prompt tokens for a model that is not resident,
+    /// from its tokenizer alone. Injectable for the same reason.
+    public typealias Counter =
+        @Sendable (ModelCatalog.Entry, ReasoningChoice, ValidatedChatRequest) async throws -> Int
 
     public nonisolated let servedModels: [ServedModel]
     public nonisolated let initialModelID: String
@@ -124,6 +138,7 @@ public actor ModelRouter: ServerInferenceBackend, ResidencyManaging, PromptToken
     private nonisolated let entries: [String: ModelCatalog.Entry]
     private nonisolated let choices: [String: ReasoningChoice]
     private let loader: Loader
+    private let counter: Counter
 
     /// The protocol's single-model view, answered for the model loaded first.
     /// The HTTP layer asks `servedModel(named:)` instead once it routes.
@@ -155,7 +170,8 @@ public actor ModelRouter: ServerInferenceBackend, ResidencyManaging, PromptToken
                 initialModelID: String,
                 reasoning: ReasoningLevel,
                 maximumContext: Int,
-                loader: @escaping Loader) throws {
+                loader: @escaping Loader,
+                counter: @escaping Counter = ModelRouter.standardCounter) throws {
         var served: [ServedModel] = []
         var choices: [String: ReasoningChoice] = [:]
         var entries: [String: ModelCatalog.Entry] = [:]
@@ -179,6 +195,7 @@ public actor ModelRouter: ServerInferenceBackend, ResidencyManaging, PromptToken
         self.entries = entries
         self.choices = choices
         self.loader = loader
+        self.counter = counter
     }
 
     /// Mirrors `CPUModelBackend`'s own clamp, so validation bounds max_tokens
@@ -219,7 +236,15 @@ public actor ModelRouter: ServerInferenceBackend, ResidencyManaging, PromptToken
         return try await active.generate(request, onEvent: onEvent)
     }
 
+    /// A count is a question about text, not a reason to switch. One naming
+    /// a model that is not resident is answered from that model's tokenizer
+    /// and the resident model stays loaded; routing it like a generation
+    /// made the next generation pay a full reload for a number.
     public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        let target = request.model ?? resident?.id ?? initialModelID
+        if target != resident?.id, let entry = entries[target], let choice = choices[target] {
+            return try await counter(entry, choice, request)
+        }
         let active = try await acquire(request.model)
         defer { release() }
         guard let counting = active as? any PromptTokenCounting else {
@@ -398,6 +423,27 @@ extension ModelRouter {
                     resident: arguments.cpuResident,
                     thinkingMode: reasoning.thinking)
             }
+        }
+    }
+}
+
+extension ModelRouter {
+    /// Counts with the named model's tokenizer, rendered as its engine
+    /// renders a prompt, without loading any weights.
+    public static let standardCounter: Counter = { entry, choice, request in
+        switch entry.kind {
+        case .gpu:
+            guard let folder = GFTokenizer.tokenizerFolder(forModelDirectory: entry.path) else {
+                throw GFTokenizerError.missingToolTemplate
+            }
+            let tokenizer = try await GFTokenizer.load(from: folder,
+                                                       thinkingMode: choice.thinking,
+                                                       reasoningEffort: choice.effort)
+            return try ServerModelSession.promptTokenCount(request, tokenizer: tokenizer)
+        case .cpu:
+            let tokenizer = try await GFTokenizer.load(from: entry.path,
+                                                       thinkingMode: choice.thinking)
+            return try CPUModelBackend.promptTokenCount(request, tokenizer: tokenizer)
         }
     }
 }

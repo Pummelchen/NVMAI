@@ -15,7 +15,7 @@ import NVMAIMemory
 /// server's own tools are the client's, and no client knows about NVMAI
 /// memory. A memory tool the client would have to run is a memory tool
 /// nothing runs.
-public actor MemoryBackend: ServerInferenceBackend, PromptTokenCounting {
+public actor MemoryBackend: ServerInferenceBackend, PromptTokenCounting, ResidencyManaging {
     private let inner: any ServerInferenceBackend
     private let service: MemoryService
     private let configuration: MemoryConfiguration
@@ -88,6 +88,15 @@ public actor MemoryBackend: ServerInferenceBackend, PromptTokenCounting {
             throw ServerRequestError.unsupportedOperation("count_tokens")
         }
         return try await counting.countPromptTokens(request)
+    }
+
+    /// Forwards to the model underneath. The unload endpoint asks the
+    /// outermost backend whether it manages residency, and with memory on
+    /// that is this decorator: before it forwarded the question the endpoint
+    /// answered false and the model stayed in memory.
+    public func unload() async -> Bool {
+        guard let managing = inner as? any ResidencyManaging else { return false }
+        return await managing.unload()
     }
 
     public func generate(

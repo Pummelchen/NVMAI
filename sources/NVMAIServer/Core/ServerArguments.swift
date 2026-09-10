@@ -94,8 +94,9 @@ public struct ServerArguments: Equatable, Sendable {
                              medium, high, xhigh or max, applied to whichever
                              model is loaded. A model without that level gets
                              the closest it has: an effort on an on/off model
-                             is on, on for an effort model is its middle
-                             effort, off is always off. Replaces --thinking and
+                             is on, on for an effort model is its template's
+                             default effort (extra high for Qwen3.8), off is
+                             always off. Replaces --thinking and
                              --reasoning-effort, which keep working.
       --mtp-model <dir>      Optional native Qwen/Ornith MTP sidecar directory.
       --mtp-memory-mib <MiB> Strict incremental MTP budget, 256...512

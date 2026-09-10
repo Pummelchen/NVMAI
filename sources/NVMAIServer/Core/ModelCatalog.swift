@@ -40,6 +40,13 @@ public struct ModelCatalog: Sendable {
             }
         }
 
+        public var levelWhenOn: ReasoningLevel {
+            switch self {
+            case .gpu(let family): family.reasoningControl.levelWhenOn
+            case .cpu(let family): family.levelWhenOn
+            }
+        }
+
         public func runtimeReasoning(
             for level: ReasoningLevel
         ) throws -> (thinking: ModelThinkingMode, effort: ModelReasoningEffort?) {

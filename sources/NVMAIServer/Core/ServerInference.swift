@@ -1366,6 +1366,13 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition]
     ) -> Bool {
+        Self.usesToolTemplate(messages: messages, tools: tools)
+    }
+
+    private static func usesToolTemplate(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) -> Bool {
         !tools.isEmpty || messages.contains {
             $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
         }
@@ -1374,12 +1381,29 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
     /// Prompt tokens of a request as the chat template would render it. The
     /// same encoding generation uses, minus the generation.
     public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        try Self.promptTokenCount(request, tokenizer: tokenizer)
+    }
+
+    /// The count from a tokenizer alone, which is how the router answers for
+    /// a GPU model that is not the one loaded.
+    static func promptTokenCount(_ request: ValidatedChatRequest,
+                                 tokenizer: GFTokenizer) throws -> Int {
         try encodePrompt(
-            messages: request.messages, tools: request.tools,
+            tokenizer: tokenizer, messages: request.messages, tools: request.tools,
             usesToolTemplate: usesToolTemplate(messages: request.messages, tools: request.tools)).count
     }
 
     private func encodePrompt(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        usesToolTemplate: Bool
+    ) throws -> [Int32] {
+        try Self.encodePrompt(tokenizer: tokenizer, messages: messages, tools: tools,
+                              usesToolTemplate: usesToolTemplate)
+    }
+
+    private static func encodePrompt(
+        tokenizer: GFTokenizer,
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition],
         usesToolTemplate: Bool

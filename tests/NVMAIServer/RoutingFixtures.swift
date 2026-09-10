@@ -123,13 +123,21 @@ enum RoutingFixture {
                        gates: [String: RoutingGate] = [:],
                        failing: Set<String> = [],
                        delay: Duration? = nil) throws -> ModelRouter {
-        try ModelRouter(catalog: catalog, initialModelID: initial, reasoning: reasoning,
-                        maximumContext: configuredContext) { entry, choice in
-            log.append("load \(entry.id)")
-            log.choose(entry.id, choice)
-            if failing.contains(entry.id) { throw RoutingStubFailure() }
-            return RoutedStubModel(id: entry.id, log: log, gate: gates[entry.id], delay: delay)
-        }
+        try ModelRouter(
+            catalog: catalog, initialModelID: initial, reasoning: reasoning,
+            maximumContext: configuredContext,
+            loader: { entry, choice in
+                log.append("load \(entry.id)")
+                log.choose(entry.id, choice)
+                if failing.contains(entry.id) { throw RoutingStubFailure() }
+                return RoutedStubModel(id: entry.id, log: log, gate: gates[entry.id], delay: delay)
+            },
+            // A different number from the loaded stub's 7, so a test can
+            // tell which of the two answered.
+            counter: { entry, _, _ in
+                log.append("tokenize \(entry.id)")
+                return 5
+            })
     }
 
     static func request(_ model: String?) -> ValidatedChatRequest {

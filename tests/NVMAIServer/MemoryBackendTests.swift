@@ -108,6 +108,42 @@ import Testing
         #expect(completion.watchdogTrips == [trip])
     }
 
+    /// A backend with a model to release, standing in for the router.
+    private actor ResidentBackend: ServerInferenceBackend, ResidencyManaging {
+        private(set) var unloads = 0
+
+        func generate(_ request: ValidatedChatRequest,
+                      onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws
+            -> ServerCompletion {
+            ServerCompletion(content: "", toolCalls: [], finishReason: "stop",
+                             usage: OpenAIUsage(promptTokens: 0, completionTokens: 0, totalTokens: 0))
+        }
+
+        func unload() async -> Bool {
+            unloads += 1
+            return true
+        }
+    }
+
+    /// The unload endpoint checks the outermost backend, which with memory on
+    /// is this decorator. It used to have no residency to manage, so the
+    /// endpoint said nothing was unloaded and the model stayed resident.
+    @Test func unloadReachesTheModelUnderneath() async throws {
+        let inner = ResidentBackend()
+        let (service, configuration) = service(tools: false)
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+        let erased: any ServerInferenceBackend = backend
+        #expect(erased is any ResidencyManaging)
+        #expect(await backend.unload())
+        #expect(await inner.unloads == 1)
+
+        // Nothing underneath to release: the decorator says so.
+        let plain = MemoryBackend(wrapping: ScriptedBackend([]), service: service,
+                                  configuration: configuration)
+        #expect(await plain.unload() == false)
+    }
+
     /// The header that lets one server serve several checkouts. It was
     /// documented in three places and read in none: `withWorkspace` had no
     /// caller, so two projects sharing a server silently shared a memory

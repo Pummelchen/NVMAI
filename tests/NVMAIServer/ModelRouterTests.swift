@@ -128,11 +128,28 @@ struct ModelRouterTests {
         #expect(await router.unload() == false)
     }
 
-    @Test func tokenCountingRoutesLikeGeneration() async throws {
+    /// A count names a model but must not switch to it. The resident model
+    /// answers for itself; any other is counted from its tokenizer and the
+    /// resident model stays loaded. Counting used to route like generation,
+    /// so sizing a prompt cost the next request a full reload.
+    @Test func tokenCountingNeverSwitchesModels() async throws {
         let log = RoutingEventLog()
         let router = try Fixture.router(log: log)
-        #expect(try await router.countPromptTokens(Fixture.request(Fixture.small.id)) == 7)
-        #expect(log.events == ["load small-2b", "count small-2b"])
+        try await router.preload()
+        #expect(try await router.countPromptTokens(Fixture.request(Fixture.small.id)) == 5)
+        #expect(try await router.countPromptTokens(Fixture.request(Fixture.alpha.id)) == 7)
+        #expect(log.events == ["load alpha_4-Bit", "tokenize small-2b", "count alpha_4-Bit"])
+        #expect(await router.residentModelID == Fixture.alpha.id)
+        #expect(await router.inFlightCount == 0)
+    }
+
+    /// With nothing resident, not even the initial model is loaded to count.
+    @Test func countingWithNothingResidentLoadsNothing() async throws {
+        let log = RoutingEventLog()
+        let router = try Fixture.router(log: log)
+        #expect(try await router.countPromptTokens(Fixture.request(nil)) == 5)
+        #expect(log.events == ["tokenize alpha_4-Bit"])
+        #expect(await router.residentModelID == nil)
     }
 
     @Test func eachModelAdvertisesItsOwnDefaultsAndContext() throws {
@@ -155,7 +172,7 @@ struct ModelRouterTests {
         let router = try Fixture.router(reasoning: .on, log: log)
         let flash = try #require(router.servedModel(named: Fixture.flash.id)).reasoningProfile
         #expect(flash.thinkingMode == .on)
-        #expect(flash.effectiveEffort == .medium)
+        #expect(flash.effectiveEffort == .xhigh)
         let alpha = try #require(router.servedModel(named: Fixture.alpha.id)).reasoningProfile
         #expect(alpha.thinkingMode == .on)
         #expect(alpha.effectiveEffort == nil)
@@ -163,8 +180,8 @@ struct ModelRouterTests {
         _ = try await router.generate(Fixture.request(Fixture.flash.id)) { _ in }
         let choice = try #require(log.choices[Fixture.flash.id])
         #expect(choice.requested == .on)
-        #expect(choice.effective == .medium)
-        #expect(choice.effort == .medium)
+        #expect(choice.effective == .xhigh)
+        #expect(choice.effort == .xhigh)
     }
 }
 
@@ -179,7 +196,22 @@ struct ReasoningFallbackTests {
         }
     }
 
-    @Test func onForAnEffortModelBecomesItsMiddleEffort() {
+    /// `on` must load what `--thinking on` loads on a single-model server:
+    /// the template's default effort, which for Qwen3.8 is extra high. It
+    /// used to be the middle effort, so the same flag thought less on a
+    /// routed server than on a single-model one.
+    @Test func onForAnEffortModelIsItsTemplateDefault() throws {
+        let qwen38 = ModelCatalog.Kind.gpu(.qwen38flash)
+        #expect(qwen38.levelWhenOn == .xhigh)
+        let choice = try ReasoningFallback.choice(for: qwen38, requested: .on)
+        #expect(choice.effective == .xhigh)
+        #expect(choice.thinking == .on)
+        #expect(choice.effort == .xhigh)
+        #expect(ModelCatalog.Kind.gpu(.qwen36).levelWhenOn == .on)
+        #expect(ModelCatalog.Kind.cpu(.qwen35Dense).levelWhenOn == .on)
+    }
+
+    @Test func onWithoutATemplateDefaultFallsToTheMiddleEffort() {
         #expect(ReasoningFallback.effectiveLevel(.on, supported: efforts) == .medium)
     }
 
@@ -203,7 +235,7 @@ struct ReasoningFallbackTests {
     @Test func theChoiceCarriesTheRuntimeSettings() throws {
         let flash = try ReasoningFallback.choice(for: .gpu(.qwen38flash), requested: .on)
         #expect(flash.thinking == .on)
-        #expect(flash.effort == .medium)
+        #expect(flash.effort == .xhigh)
         let cpu = try ReasoningFallback.choice(for: .cpu(.qwen35Dense), requested: .high)
         #expect(cpu.effective == .on)
         #expect(cpu.thinking == .on)

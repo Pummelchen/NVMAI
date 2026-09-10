@@ -9,7 +9,7 @@
 # seconds-per-answer chat speed; the base id keeps the CLI's agentic tool
 # loop), then hands the terminal over to the CLI.
 #
-#   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [ornith|qwen36|agentworld|qwen38] [4|8] [default|concise] [off|on]
+#   tools/cli_launcher.sh [codex|qwen|opencode] [fast|full] [ornith|qwen36|agentworld|qwen38|qwen35-2b|qwen35-4b] [4|8] [default|concise] [off|on]
 #
 # With no arguments, prompts for each in turn. Every choice has a default
 # (codex / full / ornith / 8-bit / standard / thinking off), so pressing

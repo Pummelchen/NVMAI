@@ -12,7 +12,8 @@
 #
 # <model> is a catalog id (e.g. ornith-1.5-35b-a3b_8-Bit, which names its
 # own width, so 4|8 may be left out after it) or an install key --
-# ornith|qwen36|agentworld|qwen38 -- followed by the width. <thinking> is
+# ornith|qwen36|agentworld|qwen38, or qwen35-2b|qwen35-4b for the CPU
+# models -- followed by the width. <thinking> is
 # off, on, or any level the chosen model lists (minimal, low, medium, high,
 # xhigh, max). The first position still takes codex|qwen|opencode and reads
 # them as openai, because the start scripts and the memory harness pass
@@ -155,7 +156,7 @@ if [[ -n "$model_arg" ]]; then
     esac
   else
     if ! nvmai_resolve_model "$model_arg" 2>/dev/null; then
-      echo "unknown model: $model_arg (a model id, or ornith|qwen36|agentworld|qwen38)" >&2
+      echo "unknown model: $model_arg (a model id, or ornith|qwen36|agentworld|qwen38|qwen35-2b|qwen35-4b)" >&2
       if (( dynamic )); then
         echo "installed: ${NVMAI_CAT_ID[*]}" >&2
       fi
@@ -346,12 +347,11 @@ export NVMAI_THINKING_MODE="$thinking_mode"
 # Pinned for GPU models; the per-install tuning comes from the profile.
 gpu_runtime=(--max-context 262144 --rope-scaling none --prompt-cache-mode multi-prefix --prompt-cache-memory-mib 256 --kv-bits 8)
 if (( dynamic )); then
-  server_cmd=("$BINARY" --models-dir "$MODELS_DIR" --model "$MODEL_ID" --reasoning "$thinking_level" --port "$PORT")
-  if [[ "$MODEL_BACKEND" == cpu ]]; then
-    server_cmd+=(--cpu)
-  else
-    server_cmd+=("${gpu_runtime[@]}")
-  fi
+  # No --cpu: the catalog knows which engine each model uses, and the server
+  # refuses the flag here. The GPU flags go in even when the first model is a
+  # CPU one, because a client can switch to a GPU model later and that load
+  # takes them from this command line; a CPU load ignores them.
+  server_cmd=("$BINARY" --models-dir "$MODELS_DIR" --model "$MODEL_ID" --reasoning "$thinking_level" --port "$PORT" "${gpu_runtime[@]}")
 else
   # A binary without --catalog has no --models-dir or --reasoning either;
   # this is the single-model command line it has always accepted.
@@ -390,6 +390,11 @@ print_setup() {
     echo "  ANTHROPIC_API_KEY=nvmai   (any value; the server does not authenticate)"
     echo "  Model:      $api_model $api_model_note"
     echo "  Endpoint:   POST /v1/messages"
+    echo "  Claude Code names a model for its background tasks too; without these it"
+    echo "  asks for a claude-* id this server does not have and gets a 404:"
+    echo "  ANTHROPIC_MODEL=$api_model"
+    echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL=$api_model"
+    echo "  ANTHROPIC_SMALL_FAST_MODEL=$api_model   (older Claude Code releases)"
   else
     echo "OpenAI API setup — point any OpenAI-compatible client at this:"
     echo "  Base URL:   http://127.0.0.1:${PORT}/v1"

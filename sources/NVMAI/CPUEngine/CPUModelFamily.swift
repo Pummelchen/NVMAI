@@ -64,6 +64,9 @@ public enum CPUModelFamily: String, Sendable, CaseIterable {
         try reasoningControl.runtimeReasoning(for: level, family: rawValue)
     }
 
+    /// What plain "thinking on" loads for this family.
+    public var levelWhenOn: ReasoningLevel { reasoningControl.levelWhenOn }
+
     /// The Qwen 3.5 series runs at temperature 0.6 / top-p 0.95; top-k is the
     /// house value. Stated here rather than borrowed from `house`, which
     /// holds the same numbers today, so a house change cannot move it.

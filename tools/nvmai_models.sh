@@ -32,8 +32,18 @@ nvmai_resolve_model() {
       NVMAI_MODEL_KEY=qwen38
       NVMAI_MODEL_STEM="qwen3.8-flash-next_125B_A6B"
       NVMAI_MODEL_LABEL="Qwen3.8-Flash-Next 125B-A6B" ;;
+    # The CPU models. They exist only in the server's catalog, so these
+    # resolve there and never in the built-in GPU list below.
+    qwen35-2b|qwen3.5-2b)
+      NVMAI_MODEL_KEY=qwen35-2b
+      NVMAI_MODEL_STEM="qwen3.5_2B"
+      NVMAI_MODEL_LABEL="Qwen 3.5 2B" ;;
+    qwen35-4b|qwen3.5-4b)
+      NVMAI_MODEL_KEY=qwen35-4b
+      NVMAI_MODEL_STEM="qwen3.5_4B"
+      NVMAI_MODEL_LABEL="Qwen 3.5 4B" ;;
     *)
-      echo "unknown AI model: ${1:-} (ornith|qwen36|agentworld|qwen38)" >&2
+      echo "unknown AI model: ${1:-} (ornith|qwen36|agentworld|qwen38|qwen35-2b|qwen35-4b)" >&2
       return 2 ;;
   esac
 }
