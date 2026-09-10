@@ -1,39 +1,79 @@
 #!/usr/bin/env bash
-# Start the NVMAIServer for the chosen model, quantization and mode
-# (interactive TUI or positional). Asks the same six question blocks as
-# tools/cli_launcher.sh — CLI, mode, AI model, quantization, NVMAI mode,
-# thinking — so the two launchers behave identically. Model, quantization,
-# mode and thinking drive the server; the CLI/fast answers pick the
-# cli_launcher.sh command to connect a coding CLI afterwards.
+# Start NVMAIServer on one port with every installed model reachable by
+# name (interactive TUI or positional). Asks which API the client speaks,
+# full agent loop or fast chat, which model to load first (one list of
+# every installed model and quantization, GPU and CPU, read from the
+# server's own catalog), standard or concise, and the thinking level the
+# chosen model should use. The server speaks OpenAI and Anthropic at once,
+# so the API answer changes nothing it runs: it only picks which client
+# setup is printed once the server is up.
 #
-#   tools/server_launcher.sh [codex|qwen|opencode] [fast|full] [ornith|qwen36|agentworld|qwen38] [4|8] [default|concise] [off|on]
+#   tools/server_launcher.sh [openai|anthropic] [fast|full] [<model>] [4|8] [default|concise] [<thinking>]
+#
+# <model> is a catalog id (e.g. ornith-1.5-35b-a3b_8-Bit, which names its
+# own width, so 4|8 may be left out after it) or an install key --
+# ornith|qwen36|agentworld|qwen38, or qwen35-2b|qwen35-4b for the CPU
+# models -- followed by the width. <thinking> is
+# off, on, or any level the chosen model lists (minimal, low, medium, high,
+# xhigh, max). The first position still takes codex|qwen|opencode and reads
+# them as openai, because the start scripts and the memory harness pass
+# codex. The old five-argument form without the model still means Ornith.
 #
 # With no arguments, prompts for each in turn. Every choice has a default
-# (codex / full / ornith / 8-bit / standard / thinking off), so pressing
-# Enter through the prompts launches that configuration. The old five-
-# argument form without the AI model still works and means Ornith.
+# (openai / full / Ornith 8-bit, or the first model listed / standard /
+# thinking off), so pressing Enter through the prompts launches that.
 #
-# The server runtime is pinned to native 262,144-token context, a 256 MiB
-# multi-prefix prompt cache, 8-bit KV, and MTP off. Everything tuned per
-# model and quantization -- the routed-expert cache budget, expert prefetch
-# and its disk I/O tier, the prefill chunk and the sampling defaults -- is
-# deliberately NOT set here: the runtime resolves it from the install's
-# tuning profile (ModelProfile, one row per model and width, clamped to
-# this machine's RAM), so the launcher never overrides a measured optimum.
+# The server runs in dynamic mode: --models-dir plus the model to load
+# first, so a client that names another installed model gets it, the server
+# swapping models on demand with one resident at a time. GPU models run
+# pinned to native 262,144-token context, a 256 MiB multi-prefix prompt
+# cache, 8-bit KV, and MTP off. Everything tuned per model and quantization
+# -- the routed-expert cache budget, expert prefetch and its disk I/O tier,
+# the prefill chunk and the sampling defaults -- is deliberately NOT set
+# here: the runtime resolves it from the install's tuning profile
+# (ModelProfile, one row per model and width, clamped to this machine's
+# RAM), so the launcher never overrides a measured optimum. CPU models get
+# --cpu and none of the pinned flags: that backend has no prompt cache and
+# no quantized KV, and clamps the context to what four cores can walk.
+#
+# If the catalog cannot be read -- a binary that predates --catalog, no
+# python3 -- the launcher says so, offers the built-in list of GPU installs,
+# and starts the single-model command line such a binary accepts.
+#
 # Stops any stale NVMAIServer on the port and starts a fresh one in the
-# foreground (Ctrl-C to stop). Once the server is up it
-# prints the OpenAI API setup (base URL, API key, the chosen model ID) so
-# any OpenAI-compatible client can be pointed at it. The server binds to
-# 127.0.0.1.
-# Overrides: NVMAI_PORT, NVMAI_CONCISE_MODE, NVMAI_THINKING_MODE.
+# foreground (Ctrl-C to stop). One port for every model, 8080; the server
+# binds to 127.0.0.1 only.
+# Overrides: NVMAI_PORT, NVMAI_THINKING_MODE (the default thinking answer),
+# NVMAI_CATALOG_JSON (read the catalog from a file, not the binary),
+# NVMAI_LAUNCHER_DRY_RUN=1 (print the server command and client setup;
+# start nothing, stop nothing).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BASE_DIR="${SCRIPT_DIR}/.."
+BASE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
-# One catalogue for the model list, the install paths and the ports.
+MODELS_DIR="$BASE_DIR/models"
+# One catalogue for the model list, the install paths and the port.
 # shellcheck source=tools/nvmai_models.sh
 source "$SCRIPT_DIR/nvmai_models.sh"
+
+# A dry run asks and checks everything that decides the command, then
+# prints it instead of running it. It never stops a server either, so it is
+# safe to run beside one somebody is using.
+DRY_RUN=0
+if [[ "${NVMAI_LAUNCHER_DRY_RUN:-0}" == 1 ]]; then DRY_RUN=1; fi
+
+# Before the questions, not after them: a missing build is the one answer
+# that makes every other answer moot.
+if [[ ! -x "$BINARY" ]]; then
+  if (( DRY_RUN )); then
+    echo "(dry run: no NVMAIServer binary at $BINARY yet)" >&2
+  else
+    echo "ERROR: NVMAIServer binary not found at $BINARY" >&2
+    echo "Build it first: swift build -c release" >&2
+    exit 1
+  fi
+fi
 
 # Old five-argument form (no AI model): insert the default so the positions
 # below line up.
@@ -41,28 +81,33 @@ case "${3:-}" in
   4|8|4bit|8bit) set -- "${1:-}" "${2:-}" ornith "$3" "${4:-}" "${5:-}" ;;
 esac
 
-# --- 1) coding CLI: codex (default) / qwen / opencode ---
-cli="${1:-}"
-if [[ -z "$cli" ]]; then
-  echo "Which coding CLI do you want to launch?"
-  echo "  1) Codex"
-  echo "  2) Qwen Code"
-  echo "  3) OpenCode"
-  printf "Choice [1-3] (default 1): "
-  read -r cli_choice || exit 1
-  case "${cli_choice:-1}" in
-    1) cli=codex ;;
-    2) cli=qwen ;;
-    3) cli=opencode ;;
-    *) echo "invalid choice: $cli_choice" >&2; exit 2 ;;
+backend_label() {
+  case "$1" in cpu) echo CPU ;; *) echo GPU ;; esac
+}
+
+# --- 1) API: openai (default) / anthropic ---
+api="${1:-}"
+if [[ -z "$api" ]]; then
+  echo "Which API will your client use?"
+  echo "  1) OpenAI (default)"
+  echo "  2) Anthropic"
+  printf "Choice [1-2] (default 1): "
+  read -r api_choice || exit 1
+  case "${api_choice:-1}" in
+    1) api=openai ;;
+    2) api=anthropic ;;
+    *) echo "invalid choice: $api_choice" >&2; exit 2 ;;
   esac
 fi
-case "$cli" in
-  codex|qwen|opencode) : ;;
-  *) echo "unknown CLI: $cli (codex|qwen|opencode)" >&2; exit 2 ;;
+case "$api" in
+  openai|anthropic) : ;;
+  # The coding-CLI answers from before the server spoke two APIs. All three
+  # CLIs talk OpenAI.
+  codex|qwen|opencode) api=openai ;;
+  *) echo "unknown API: $api (openai|anthropic)" >&2; exit 2 ;;
 esac
 
-# --- 2) model: full (default, agentic tool loop) or fast (strip boilerplate) ---
+# --- 2) full (default, agentic tool loop) or fast (strip boilerplate) ---
 if [[ -n "${2:-}" ]]; then
   case "$2" in
     fast|1) model_word=fast ;;
@@ -71,7 +116,7 @@ if [[ -n "${2:-}" ]]; then
   esac
 else
   echo ""
-  echo "Which model?"
+  echo "Full agent loop or fast chat?"
   echo "  1) Full (keep agent tools; multi-thousand-token prefill, slower)"
   echo "  2) Fast (strip CLI boilerplate, seconds-per-answer chat)"
   printf "Choice [1-2] (default 1): "
@@ -83,46 +128,84 @@ else
   esac
 fi
 
-# --- 3) AI model: ornith (default) / qwen36 / agentworld / qwen38 ---
-ai_model="${3:-}"
-if [[ -z "$ai_model" ]]; then
-  echo ""
-  echo "Which AI model?"
-  echo "  1) Ornith 1.5 35B-A3B (default)"
-  echo "  2) Qwen 3.6 35B-A3B"
-  echo "  3) Qwen-AgentWorld 35B-A3B"
-  echo "  4) Qwen3.8-Flash-Next 125B-A6B"
-  printf "Choice [1-4] (default 1): "
-  read -r ai_choice || exit 1
-  case "${ai_choice:-1}" in
-    1) ai_model=ornith ;;
-    2) ai_model=qwen36 ;;
-    3) ai_model=agentworld ;;
-    4) ai_model=qwen38 ;;
-    *) echo "invalid choice: $ai_choice" >&2; exit 2 ;;
-  esac
+# --- the installed models: the server's catalog, or the built-in list ---
+if nvmai_load_catalog "$BINARY" "$MODELS_DIR"; then
+  dynamic=1
+else
+  dynamic=0
+  echo "" >&2
+  echo "NOTE: the model catalog is unavailable ($NVMAI_CATALOG_ERROR)." >&2
+  echo "      Offering the built-in list of GPU installs instead; the server will" >&2
+  echo "      serve only the model chosen here, and switching needs a restart." >&2
+  nvmai_static_catalog "$MODELS_DIR"
 fi
-nvmai_resolve_model "$ai_model" || exit 2
-ai_model="$NVMAI_MODEL_KEY"
-MODEL_STEM="$NVMAI_MODEL_STEM"
 
-# --- 4) quantization: 8-bit (default) / 4-bit ---  (6-bit withdrawn)
-quant="${4:-}"
-if [[ -z "$quant" ]]; then
+# --- 3) model: one list, every installed model and quantization ---
+model_arg="${3:-}"
+if [[ -n "$model_arg" ]]; then
+  if idx="$(nvmai_catalog_find_id "$model_arg")"; then
+    case "${4:-}" in
+      4|8|4bit|8bit)
+        if [[ "${4%bit}" != "${NVMAI_CAT_QUANT[$idx]}" ]]; then
+          echo "$model_arg is ${NVMAI_CAT_QUANT[$idx]}-bit, not ${4%bit}-bit" >&2
+          exit 2
+        fi ;;
+      # An id names its own width; with none after it, shift the rest
+      # into the positions they have in the key form.
+      *) set -- "$1" "$2" "$3" "" "${4:-}" "${5:-}" ;;
+    esac
+  else
+    if ! nvmai_resolve_model "$model_arg" 2>/dev/null; then
+      echo "unknown model: $model_arg (a model id, or ornith|qwen36|agentworld|qwen38|qwen35-2b|qwen35-4b)" >&2
+      if (( dynamic )); then
+        echo "installed: ${NVMAI_CAT_ID[*]}" >&2
+      fi
+      exit 2
+    fi
+    # No width after a key means 8-bit, the old quantization default.
+    nvmai_resolve_quant "${4:-8}" || exit 2
+    if ! idx="$(nvmai_catalog_find_dir "${NVMAI_MODEL_STEM}_${NVMAI_QUANT_DIR}")"; then
+      echo "ERROR: $NVMAI_MODEL_LABEL $NVMAI_QUANT is not installed (the catalog has no ${NVMAI_MODEL_STEM}_${NVMAI_QUANT_DIR})" >&2
+      echo "Install it first: tools/install_models.sh (see --help for the target names)" >&2
+      exit 1
+    fi
+  fi
+else
+  count=${#NVMAI_CAT_ID[@]}
+  default_idx="$(nvmai_catalog_find_dir ornith-1.5_35B_A3B_8Bit)" || default_idx=0
   echo ""
-  echo "Which quantization?"
-  echo "  1) 8-bit (default)"
-  echo "  2) 4-bit"
-  printf "Choice [1-2] (default 1): "
-  read -r quant_choice || exit 1
-  case "${quant_choice:-1}" in
-    1) quant=8bit ;;
-    2) quant=4bit ;;
-    *) echo "invalid choice: $quant_choice" >&2; exit 2 ;;
-  esac
+  if (( dynamic )); then
+    echo "Which model? (loaded first; every other one stays available by name)"
+  else
+    echo "Which model?"
+  fi
+  for (( i = 0; i < count; i++ )); do
+    size=""
+    if [[ "${NVMAI_CAT_SIZE[$i]}" != "-" ]]; then size="${NVMAI_CAT_SIZE[$i]} GB"; fi
+    id_column=""
+    if (( dynamic )); then id_column="${NVMAI_CAT_ID[$i]}"; fi
+    note=""
+    if (( i == default_idx )); then note="  (default)"; fi
+    if (( ! dynamic )) && [[ ! -e "${NVMAI_CAT_PATH[$i]}" ]]; then note="$note  (not installed)"; fi
+    printf "  %2d) %-28s %s-bit  %s  %8s  %s%s\n" "$((i + 1))" "${NVMAI_CAT_NAME[$i]}" \
+      "${NVMAI_CAT_QUANT[$i]}" "$(backend_label "${NVMAI_CAT_BACKEND[$i]}")" "$size" "$id_column" "$note"
+  done
+  printf "Choice [1-%d] (default %d): " "$count" "$((default_idx + 1))"
+  read -r pick || exit 1
+  pick="${pick:-$((default_idx + 1))}"
+  if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= count )); then
+    idx=$((pick - 1))
+  else
+    echo "invalid choice: $pick" >&2
+    exit 2
+  fi
 fi
-nvmai_resolve_quant "$quant" || exit 2
-quant="$NVMAI_QUANT"
+MODEL_ID="${NVMAI_CAT_ID[$idx]}"
+MODEL_NAME="${NVMAI_CAT_NAME[$idx]}"
+MODEL_QUANT="${NVMAI_CAT_QUANT[$idx]}"
+MODEL_BACKEND="${NVMAI_CAT_BACKEND[$idx]}"
+MODEL_DIR="${NVMAI_CAT_PATH[$idx]}"
+IFS=',' read -r -a levels <<< "${NVMAI_CAT_THINKING[$idx]}"
 
 # --- 5) NVMAI mode: standard (default) or concise ---
 if [[ -n "${5:-}" ]]; then
@@ -145,57 +228,221 @@ else
   esac
 fi
 
-# --- 6) thinking: off (default) or on ---
-thinking_default="${NVMAI_THINKING_MODE:-off}"
-case "$thinking_default" in
-  0|off|false|no) thinking_default=off ; default_think_choice=1 ;;
-  1|on|true|yes) thinking_default=on ; default_think_choice=2 ;;
-  *) echo "invalid NVMAI_THINKING_MODE: $thinking_default (off|on)" >&2; exit 2 ;;
-esac
-if [[ -n "${6:-}" ]]; then
-  case "$6" in
-    nothink|0|off) thinking_mode=off ; think_word=off ;;
-    think|1|on) thinking_mode=on ; think_word=on ;;
-    *) echo "unknown thinking mode: $6 (off|on)" >&2; exit 2 ;;
+# --- 6) thinking: only the levels this model lists, off first and default ---
+thinking_label() {
+  case "$1" in xhigh) echo "extra high" ;; *) echo "$1" ;; esac
+}
+has_level() {
+  local level
+  for level in "${levels[@]}"; do
+    if [[ "$level" == "$1" ]]; then return 0; fi
+  done
+  return 1
+}
+# Any spelling of the old on/off switch, or a level by name.
+normalize_level() {
+  local word
+  word="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$word" in
+    0|off|nothink|false|no) echo off ;;
+    1|on|think|true|yes) echo on ;;
+    minimal|low|medium|high|max) echo "$word" ;;
+    xhigh|extra-high|"extra high") echo xhigh ;;
+    *) return 1 ;;
   esac
+}
+# A normalized level -> the level this model uses for it. "on" has no
+# exact match on a model with effort levels (the old --thinking on left the
+# effort to the chat template), so it takes medium, the middle of every
+# effort scale here, or failing that the first level above off.
+level_for_model() {
+  if has_level "$1"; then echo "$1"; return 0; fi
+  if [[ "$1" == on ]] && (( ${#levels[@]} > 1 )); then
+    if has_level medium; then echo medium; else echo "${levels[1]}"; fi
+    return 0
+  fi
+  return 1
+}
+level_names() {
+  local level out=""
+  for level in "${levels[@]}"; do out="${out:+$out, }$(thinking_label "$level")"; done
+  echo "$out"
+}
+
+thinking_default="${NVMAI_THINKING_MODE:-off}"
+if ! default_word="$(normalize_level "$thinking_default")"; then
+  echo "invalid NVMAI_THINKING_MODE: $thinking_default (off|on|minimal|low|medium|high|xhigh|max)" >&2
+  exit 2
+fi
+# The variable applies to every model, so a level this one lacks falls back
+# to off here rather than refusing to start.
+default_level="$(level_for_model "$default_word")" || default_level="${levels[0]}"
+
+if [[ -n "${6:-}" ]]; then
+  if ! word="$(normalize_level "$6")"; then
+    echo "unknown thinking level: $6 (off|on|minimal|low|medium|high|xhigh|max)" >&2
+    exit 2
+  fi
+  if ! thinking_level="$(level_for_model "$word")"; then
+    echo "$MODEL_NAME ${MODEL_QUANT}-bit has no thinking level $6; it has: $(level_names)" >&2
+    exit 2
+  fi
+  if [[ "$word" != "$thinking_level" ]]; then
+    echo "Thinking on -> $(thinking_label "$thinking_level"): $MODEL_NAME takes an effort level, not on/off." >&2
+  fi
+elif (( ${#levels[@]} == 1 )); then
+  thinking_level="${levels[0]}"
 else
   echo ""
-  echo "Reasoning (thinking)?"
-  echo "  1) Off (direct answers, default)"
-  echo "  2) On (model reasons before answering)"
-  printf "Choice [1-2] (default %s): " "$default_think_choice"
+  if [[ "${levels[*]}" == "off on" ]]; then
+    echo "Reasoning (thinking)?"
+  else
+    echo "Reasoning effort?"
+  fi
+  default_choice=1
+  for (( i = 0; i < ${#levels[@]}; i++ )); do
+    level="${levels[$i]}"
+    note=""
+    case "$level" in
+      off) note="direct answers" ;;
+      on) note="model reasons before answering" ;;
+    esac
+    if [[ "$level" == "$default_level" ]]; then
+      default_choice=$((i + 1))
+      note="${note:+$note, }default"
+    fi
+    printf "  %d) %s%s\n" "$((i + 1))" "$(thinking_label "$level")" "${note:+ ($note)}"
+  done
+  printf "Choice [1-%d] (default %d): " "${#levels[@]}" "$default_choice"
   read -r think_choice || exit 1
-  case "${think_choice:-$default_think_choice}" in
-    1) thinking_mode=off ; think_word=off ;;
-    2) thinking_mode=on ; think_word=on ;;
-    *) echo "invalid choice: $think_choice" >&2; exit 2 ;;
-  esac
+  think_choice="${think_choice:-$default_choice}"
+  if [[ "$think_choice" =~ ^[0-9]+$ ]] && (( think_choice >= 1 && think_choice <= ${#levels[@]} )); then
+    thinking_level="${levels[$((think_choice - 1))]}"
+  else
+    echo "invalid choice: $think_choice" >&2
+    exit 2
+  fi
 fi
+think_word="$(thinking_label "$thinking_level")"
+# The on/off projection of the level: what NVMAI_THINKING_MODE and the old
+# --thinking flag understand.
+if [[ "$thinking_level" == off ]]; then thinking_mode=off; else thinking_mode=on; fi
 
-# --- resolve model + quantization -> model directory / port ---
-# Each (model, quantization) has its own port, so two can run at once.
-MODEL_DIR="$BASE_DIR/models/${MODEL_STEM}_${NVMAI_QUANT_DIR}"
-PORT="${NVMAI_PORT:-$(nvmai_model_port)}"
+# --- one port for every model ---
+PORT="${NVMAI_PORT:-$NVMAI_DEFAULT_PORT}"
 
 if [[ "$mode_suffix" == "_concise" ]]; then
   export NVMAI_CONCISE_MODE=1
-  concise_label="concise + "
+  concise_label="concise, "
 else
   unset NVMAI_CONCISE_MODE
   concise_label=""
 fi
-# Thinking mode: off (default) or on. The server reads this once at load;
-# on opens a <think> block in the generation prompt so the model reasons
-# before answering (costs wall time and tokens); off gives direct answers.
+# The server reads this once at load. A level beyond on travels in
+# --reasoning; this keeps anything that still reads the variable agreeing
+# with it.
 export NVMAI_THINKING_MODE="$thinking_mode"
 
-if [[ ! -f "$BINARY" ]]; then
-  echo "ERROR: NVMAIServer binary not found at $BINARY" >&2
-  echo "Build it first: swift build -c release" >&2
-  exit 1
+# --- the server command ---
+# Pinned for GPU models; the per-install tuning comes from the profile.
+gpu_runtime=(--max-context 262144 --rope-scaling none --prompt-cache-mode multi-prefix --prompt-cache-memory-mib 256 --kv-bits 8)
+if (( dynamic )); then
+  # No --cpu: the catalog knows which engine each model uses, and the server
+  # refuses the flag here. The GPU flags go in even when the first model is a
+  # CPU one, because a client can switch to a GPU model later and that load
+  # takes them from this command line; a CPU load ignores them.
+  server_cmd=("$BINARY" --models-dir "$MODELS_DIR" --model "$MODEL_ID" --reasoning "$thinking_level" --port "$PORT" "${gpu_runtime[@]}")
+else
+  # A binary without --catalog has no --models-dir or --reasoning either;
+  # this is the single-model command line it has always accepted.
+  server_cmd=("$BINARY" --model "$MODEL_DIR" --port "$PORT" "${gpu_runtime[@]}" --thinking "$thinking_mode")
 fi
-if [[ ! -d "$MODEL_DIR" ]]; then
-  echo "ERROR: $ai_model $quant model not found at $MODEL_DIR" >&2
+
+if [[ "$MODEL_BACKEND" == cpu ]]; then
+  runtime_note="CPU backend | no prompt cache | context clamped by the backend | sampling from the model"
+else
+  runtime_note="context 262144 | KV 8-bit | cache on | MTP off | expert cache, prefetch, sampling from the model profile"
+fi
+
+# The API id is what the catalog calls the install (it ends in the
+# routed-expert width, e.g. ornith-1.5-35b-a3b_8-Bit; the bare name is not
+# accepted). The "<id>-fast" alias serves the same weights with the
+# CLI-strip heuristic (chat-only speed) instead of the agentic tool loop.
+set_api_model() {
+  if [[ "$model_word" == fast ]]; then
+    api_model="${1}-fast"
+    api_model_note="(fast alias, seconds-per-answer chat)"
+  else
+    api_model="$1"
+    api_model_note="(full agent loop)"
+  fi
+}
+
+print_setup() {
+  echo ""
+  echo "============================================================"
+  echo " NVMAIServer ready — $MODEL_NAME ${MODEL_QUANT}-bit ($(backend_label "$MODEL_BACKEND")), ${concise_label}thinking $think_word"
+  echo "============================================================"
+  echo ""
+  if [[ "$api" == anthropic ]]; then
+    echo "Anthropic API setup — point any Anthropic Messages client at this:"
+    echo "  ANTHROPIC_BASE_URL=http://127.0.0.1:${PORT}"
+    echo "  ANTHROPIC_API_KEY=nvmai   (any value; the server does not authenticate)"
+    echo "  Model:      $api_model $api_model_note"
+    echo "  Endpoint:   POST /v1/messages"
+    echo "  Claude Code names a model for its background tasks too; without these it"
+    echo "  asks for a claude-* id this server does not have and gets a 404:"
+    echo "  ANTHROPIC_MODEL=$api_model"
+    echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL=$api_model"
+    echo "  ANTHROPIC_SMALL_FAST_MODEL=$api_model   (older Claude Code releases)"
+  else
+    echo "OpenAI API setup — point any OpenAI-compatible client at this:"
+    echo "  Base URL:   http://127.0.0.1:${PORT}/v1"
+    echo "  API key:    any value (the server does not authenticate)"
+    echo "  Model:      $api_model $api_model_note"
+    echo "  Endpoints:  POST /v1/chat/completions, POST /v1/responses"
+  fi
+  echo ""
+  if (( dynamic )); then
+    echo "Every installed model is available by name through the API: send any"
+    echo "id from GET /v1/models and the server switches to it on demand, keeping"
+    echo "one model resident at a time (a switch reloads weights)."
+  else
+    echo "Single-model mode (no catalog): this server serves only the model above;"
+    echo "switching models needs a restart."
+  fi
+  echo "  Runtime:    $runtime_note"
+  echo ""
+  echo "Model: $MODEL_DIR | Thinking: $think_word | Ctrl-C to stop"
+  echo "============================================================"
+  echo ""
+}
+
+# Persistent memory, when NVMAI_MEMORY=1. The workspace is the directory
+# this was launched from, so each repository keeps its own memory.
+nvmai_export_memory_environment "$PWD"
+
+if (( DRY_RUN )); then
+  if (( dynamic )); then
+    set_api_model "$MODEL_ID"
+  else
+    set_api_model "<the id GET /v1/models reports>"
+  fi
+  echo ""
+  echo "DRY RUN (NVMAI_LAUNCHER_DRY_RUN=1): nothing started, nothing stopped."
+  echo "Environment: NVMAI_THINKING_MODE=$NVMAI_THINKING_MODE${NVMAI_CONCISE_MODE:+ NVMAI_CONCISE_MODE=$NVMAI_CONCISE_MODE} NVMAI_MEMORY=$NVMAI_MEMORY"
+  echo "Server command:"
+  printf '  '
+  printf '%q ' "${server_cmd[@]}"
+  echo ""
+  echo ""
+  echo "Once the server is up, the launcher prints:"
+  print_setup
+  exit 0
+fi
+
+if [[ ! -e "$MODEL_DIR" ]]; then
+  echo "ERROR: $MODEL_NAME ${MODEL_QUANT}-bit not found at $MODEL_DIR" >&2
   echo "Install it first: tools/install_models.sh (see --help for the target names)" >&2
   exit 1
 fi
@@ -224,76 +471,44 @@ if lsof -i :"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   fi
 fi
 
-# Persistent memory, when NVMAI_MEMORY=1. The workspace is the directory
-# this was launched from, so each repository keeps its own memory.
-nvmai_export_memory_environment "$PWD"
 if [[ "${NVMAI_MEMORY:-0}" == "1" ]]; then
   echo "Memory: on (in-process, ${NVMAI_MEMORY_DIR}${NVMAI_MEMORY_CACHE_MIB:+, cap ${NVMAI_MEMORY_CACHE_MIB} MiB}, workspace $(basename "$PWD"))"
 fi
 
-echo "Starting NVMAIServer ($ai_model $quant, $mode_word, $think_word)..."
+echo "Starting NVMAIServer ($MODEL_NAME ${MODEL_QUANT}-bit $(backend_label "$MODEL_BACKEND"), $model_word, $mode_word, thinking $think_word)..."
 # No RAM-budget, expert-slot, prefill-chunk or sampling flags here:
 # the runtime takes them from the install's tuning profile (logged at load
 # under NVMAI_RUNNER_STATS=1 as "NVMAI profile ...").
-"$BINARY" \
-  --model "$MODEL_DIR" \
-  --port "$PORT" \
-  --max-context 262144 \
-  --rope-scaling none \
-  --prompt-cache-mode multi-prefix \
-  --prompt-cache-memory-mib 256 \
-  --kv-bits 8 \
-  --thinking "$thinking_mode" &
+"${server_cmd[@]}" &
 server_pid=$!
 
 for _ in $(seq 1 120); do
   curl -s --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1 && break
   sleep 5
 done
-if ! curl -s --max-time 2 "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; then
+if ! models_json="$(curl -s --max-time 5 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null)" || [[ -z "$models_json" ]]; then
   echo "ERROR: NVMAIServer did not come up on port $PORT" >&2
   kill "$server_pid" 2>/dev/null || true
   exit 1
 fi
 
-# The API id is whatever the server advertises for this install (it ends
-# in the routed-expert width, e.g. ornith-1.5-35b-a3b_8-Bit; the bare name
-# is not accepted). The "<id>-fast" alias serves the same weights with the
-# CLI-strip heuristic (chat-only speed) instead of the agentic tool loop.
-MODEL="$(curl -s --max-time 5 "http://127.0.0.1:${PORT}/v1/models" \
-  | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' \
-  | grep -v -- '-fast$' | head -1)"
-if [[ -z "$MODEL" ]]; then
-  echo "ERROR: could not read the model id from /v1/models" >&2
-  kill "$server_pid" 2>/dev/null || true
-  exit 1
-fi
-FAST_MODEL="${MODEL}-fast"
-if [[ "$model_word" == fast ]]; then
-  api_model="$FAST_MODEL"
-  api_model_note="(fast alias, seconds-per-answer chat)"
+if (( dynamic )); then
+  # A dynamic server lists every installed model, so the first id is not
+  # necessarily the one just loaded; the catalog already named it.
+  MODEL="$MODEL_ID"
+  if ! grep -qF "\"$MODEL\"" <<< "$models_json"; then
+    echo "WARNING: /v1/models does not list $MODEL" >&2
+  fi
 else
-  api_model="$MODEL"
-  api_model_note="(full agent loop)"
+  MODEL="$(grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' <<< "$models_json" \
+    | sed -E 's/.*"([^"]+)"$/\1/' | grep -v -- '-fast$' | head -1)"
+  if [[ -z "$MODEL" ]]; then
+    echo "ERROR: could not read the model id from /v1/models" >&2
+    kill "$server_pid" 2>/dev/null || true
+    exit 1
+  fi
 fi
-
-echo ""
-echo "============================================================"
-echo " NVMAIServer ready — $ai_model $quant + ${concise_label}cache ON + MTP OFF"
-echo "============================================================"
-echo ""
-echo "OpenAI API setup — point any OpenAI-compatible client at this:"
-echo "  Base URL:   http://127.0.0.1:${PORT}/v1"
-echo "  API key:    any value (the server does not authenticate)"
-echo "  Model:      $api_model $api_model_note"
-echo "  Endpoints:  POST /v1/chat/completions, POST /v1/responses"
-echo "  Runtime:    context 262144 | KV 8-bit | cache on | MTP off | expert cache, prefetch, sampling from the model profile"
-echo ""
-echo "Or let the CLI launcher wire Codex / Qwen Code / OpenCode for you:"
-echo "  tools/cli_launcher.sh $cli $model_word $ai_model $quant $mode_word $think_word"
-echo ""
-echo "Model: $MODEL_DIR | Thinking: $think_word | Ctrl-C to stop"
-echo "============================================================"
-echo ""
+set_api_model "$MODEL"
+print_setup
 
 wait "$server_pid"

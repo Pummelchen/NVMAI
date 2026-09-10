@@ -29,6 +29,7 @@ import Testing
                                         usage: OpenAIUsage(promptTokens: 0, completionTokens: 0,
                                                            totalTokens: 0))
             }
+            if !completion.reasoning.isEmpty { onEvent(.reasoning(completion.reasoning)) }
             if !completion.content.isEmpty { onEvent(.content(completion.content)) }
             for call in completion.toolCalls { onEvent(.toolCall(call)) }
             return completion
@@ -106,6 +107,42 @@ import Testing
 
         let completion = try await backend.generate(request(), onEvent: { _ in })
         #expect(completion.watchdogTrips == [trip])
+    }
+
+    /// A backend with a model to release, standing in for the router.
+    private actor ResidentBackend: ServerInferenceBackend, ResidencyManaging {
+        private(set) var unloads = 0
+
+        func generate(_ request: ValidatedChatRequest,
+                      onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws
+            -> ServerCompletion {
+            ServerCompletion(content: "", toolCalls: [], finishReason: "stop",
+                             usage: OpenAIUsage(promptTokens: 0, completionTokens: 0, totalTokens: 0))
+        }
+
+        func unload() async -> Bool {
+            unloads += 1
+            return true
+        }
+    }
+
+    /// The unload endpoint checks the outermost backend, which with memory on
+    /// is this decorator. It used to have no residency to manage, so the
+    /// endpoint said nothing was unloaded and the model stayed resident.
+    @Test func unloadReachesTheModelUnderneath() async throws {
+        let inner = ResidentBackend()
+        let (service, configuration) = service(tools: false)
+        let backend = MemoryBackend(wrapping: inner, service: service,
+                                    configuration: configuration)
+        let erased: any ServerInferenceBackend = backend
+        #expect(erased is any ResidencyManaging)
+        #expect(await backend.unload())
+        #expect(await inner.unloads == 1)
+
+        // Nothing underneath to release: the decorator says so.
+        let plain = MemoryBackend(wrapping: ScriptedBackend([]), service: service,
+                                  configuration: configuration)
+        #expect(await plain.unload() == false)
     }
 
     /// The header that lets one server serve several checkouts. It was
@@ -428,6 +465,43 @@ import Testing
         #expect(turn.droppedBytes > 1_000)
         #expect(turn.byteCount < 5_120)
         #expect(turn.stopReason == "stop")
+    }
+
+    /// A thinking model's thoughts pass through memory mode to the client,
+    /// across every round of the memory loop, but memory itself only ever
+    /// reads the answer: the journaled reply and the assistant turn replayed
+    /// to the next round are visible text alone.
+    @Test func reasoningReachesTheClientButNeverMemory() async throws {
+        let journal = InMemoryJournal()
+        let (_, configuration) = service()
+        let lookup = memoryCall("memory_search", ["query": .string("race")])
+        let first = ServerCompletion(
+            content: "", toolCalls: [lookup], finishReason: "tool_calls",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2),
+            reasoning: "check memory first. ")
+        let second = ServerCompletion(
+            content: "The race is in the sync layer.", toolCalls: [], finishReason: "stop",
+            usage: OpenAIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2),
+            reasoning: "found it.")
+        let inner = ScriptedBackend([first, second])
+        let backend = MemoryBackend(
+            wrapping: inner,
+            service: MemoryService(configuration: configuration, durableStore: InMemoryStore(),
+                                   journal: journal),
+            configuration: configuration)
+        let sink = EventSink()
+
+        let completion = try await backend.generate(request("Why?"), onEvent: { sink.append($0) })
+
+        #expect(completion.reasoning == "check memory first. found it.")
+        #expect(completion.content == "The race is in the sync layer.")
+        #expect(sink.all.contains(.reasoning("check memory first. ")))
+        #expect(sink.all.contains(.reasoning("found it.")))
+        let replayed = try #require(inner.requests.last).messages
+        #expect(!replayed.contains { ($0.content ?? "").contains("check memory") })
+        let scope = try MemoryScope(namespace: "nvmai", user: "local", workspace: "repo-a")
+        let turn = try #require(await journal.allTurns(in: scope).first)
+        #expect(turn.reply == "The race is in the sync layer.")
     }
 
     @Test func journalNeverReachesThePrompt() async throws {

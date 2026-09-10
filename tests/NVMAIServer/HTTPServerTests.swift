@@ -702,8 +702,14 @@ struct HTTPServerTests {
             "/v1/responses",
             body: #"{"model":"test-model","input":[{"role":"user","content":"hi"}]}"#,
             workspace: "proj-beta")
+        // And the Anthropic surface, which arrived on a branch written before
+        // the header was wired at all.
+        try await send(
+            "/v1/messages",
+            body: #"{"model":"test-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+            workspace: "proj-gamma")
 
-        #expect(backend.workspaces == ["proj-alpha", nil, "proj-beta"])
+        #expect(backend.workspaces == ["proj-alpha", nil, "proj-beta", "proj-gamma"])
         try await server.shutdown()
     }
 

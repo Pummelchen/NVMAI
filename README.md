@@ -37,10 +37,16 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 - **OpenAI-compatible server:** A loopback Chat Completions and Responses API
   includes launch scripts for starting NVMAI and connecting supported coding
   clients.
+- **One server, one port:** `tools/server_launcher.sh` asks which API your
+  client uses (OpenAI or Anthropic — the server speaks both), which model to
+  load first from one list of every installed model and quantization, GPU and
+  CPU, and the thinking level that model supports, then serves on
+  `127.0.0.1:8080` (`NVMAI_PORT` overrides it). Every other installed model
+  stays available by name through the API; the server switches on demand,
+  keeping one model resident at a time.
 - **One start script per model and quantization:** `tools/start-<model>-<bits>.sh`
-  starts the server for that install with no questions asked, each on its own
-  port, with the model's own tuning applied. `tools/server_launcher.sh` asks
-  instead, and `tools/cli_launcher.sh` also wires up a coding CLI.
+  does the same with no questions asked, with the model's own tuning applied,
+  and `tools/cli_launcher.sh` also wires up a coding CLI.
 
 ```bash
 tools/start-ornith-4bit.sh        tools/start-ornith-8bit.sh
@@ -54,6 +60,12 @@ tools/start-qwen3.8-4bit.sh       tools/start-qwen3.8-8bit.sh
   tools the engine answers itself. It runs inside the server process, so there
   is no database to install and nothing to start. Off by default; see
   [docs/agent-memory.md](docs/agent-memory.md).
+- **Three client protocols on one server:** OpenAI Chat Completions, the
+  OpenAI Responses API (stored responses, `previous_response_id`, the full
+  event grammar) and the Anthropic Messages API (`/v1/messages`,
+  `count_tokens`, streaming), so Codex, Claude Code and the OpenAI and
+  Anthropic SDKs all talk to the same model; see
+  [docs/server-api.md](docs/server-api.md).
 - **Tested coding CLIs:** The launch workflow supports Codex, Qwen Code, and
   OpenCode against the local server.
 - **Mac app and tools:** NVMAI also provides a native Mac app, direct CLI

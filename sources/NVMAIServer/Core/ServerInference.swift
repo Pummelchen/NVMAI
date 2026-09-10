@@ -41,11 +41,19 @@ func defaultPrefillChunkTokens(family: ModelFamily, fallback: Int) -> Int {
 
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
+    /// Thought text from inside the model's `<think>` block. Kept apart from
+    /// `content` so each surface can put it where its clients look for
+    /// reasoning, and so nothing that judges the answer ever reads it.
+    case reasoning(String)
     case toolCall(ParsedToolCall)
 }
 
 public struct ServerCompletion: Equatable, Sendable {
     public let content: String
+    /// Everything the model thought, in order; empty with thinking off.
+    /// `usage.completionTokens` already counts these tokens, as it always
+    /// has -- only where the text goes has changed.
+    public let reasoning: String
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
@@ -53,18 +61,34 @@ public struct ServerCompletion: Equatable, Sendable {
     /// completion so the HTTP layer, which owns the request id, can log them
     /// on the one line that already reports how the request ended.
     public let watchdogTrips: [WatchdogSet.Trip]
+    /// The client stop string that ended generation, when one did. OpenAI
+    /// folds this into finish_reason "stop"; the Anthropic Messages API
+    /// distinguishes it as stop_reason "stop_sequence" and names the string.
+    public let stopSequence: String?
 
     public init(content: String,
                 toolCalls: [ParsedToolCall],
                 finishReason: String,
                 usage: OpenAIUsage,
-                watchdogTrips: [WatchdogSet.Trip] = []) {
+                watchdogTrips: [WatchdogSet.Trip] = [],
+                stopSequence: String? = nil,
+                reasoning: String = "") {
         self.content = content
+        self.reasoning = reasoning
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
         self.watchdogTrips = watchdogTrips
+        self.stopSequence = stopSequence
     }
+}
+
+/// A backend that can count the prompt tokens a request would occupy
+/// without generating. Kept apart from `ServerInferenceBackend` so wrappers
+/// and test doubles that cannot count are not forced to pretend; the
+/// Anthropic `count_tokens` endpoint answers 501 when the backend lacks it.
+public protocol PromptTokenCounting: Sendable {
+    func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int
 }
 
 // MARK: - Structured Output Diagnostics (#90)
@@ -500,7 +524,7 @@ private struct RunnerCounterSnapshot {
     let expertStreaming: ExpertStreamingStatistics
 }
 
-public actor ServerModelSession: ServerInferenceBackend {
+public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
     /// Manifest-derived API model identifier used when --model-id is absent.
     public nonisolated let defaultModelID: String
     /// The session's configured context window; the HTTP layer validates
@@ -1081,14 +1105,19 @@ public actor ServerModelSession: ServerInferenceBackend {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
-            ? StructuredAssistantDecoder(
-                tokenizer: tokenizer,
-                allowedTools: Set(request.tools.map(\.name)))
-            : nil
-        var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
-        var content = ""
-        var calls: [ParsedToolCall] = []
+        // The full render, not the cache-trimmed suffix, decides whether the
+        // generation prompt left a thought open; both end in the same
+        // generation prompt, but only the render is always whole.
+        let decoder = StructuredAssistantDecoder.forGeneration(
+            tokenizer: tokenizer,
+            promptIDs: promptIDs,
+            allowedTools: needsToolTemplate ? Set(request.tools.map(\.name)) : nil)
+        // The stall clock starts at the first visible token, so a long
+        // thought before the answer cannot trip it; the watchdogs only ever
+        // see the answer.
+        var output = AssistantOutput(stops: request.generationConfig.stopStrings,
+                                     onEvent: onEvent,
+                                     observeVisible: { watchdogs.observe($0) })
         var decodingError: Error?
         var shouldStop = false
 
@@ -1105,21 +1134,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         let activePromptIDs = activeProducer is StreamingMTPDecoder
             ? promptIDs : effectivePromptIDs
         func publish(_ events: [StructuredAssistantEvent]) {
-            for event in events {
-                switch event {
-                case .content(let text):
-                    let visible = stopMatcher.push(text)
-                    if !visible.isEmpty {
-                        content += visible
-                        onEvent(.content(visible))
-                        watchdogs.observe(visible)
-                    }
-                    if stopMatcher.isStopped { shouldStop = true }
-                case .toolCall(let call):
-                    calls.append(call)
-                    onEvent(.toolCall(call))
-                }
-            }
+            output.publish(events)
+            if output.isStopped { shouldStop = true }
         }
         let result = try await runRawCompletion(
             producer: activeProducer,
@@ -1173,9 +1189,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                     effectivePromptIDs: effectivePromptIDs,
                     result: result,
                     maxCompletionTokens: config.maxNewTokens,
-                    decodedCalls: calls.count,
-                    visibleBytes: content.utf8.count,
-                    stopStringMatched: stopMatcher.isStopped,
+                    decodedCalls: output.calls.count,
+                    visibleBytes: output.content.utf8.count,
+                    stopStringMatched: output.isStopped,
                     toolStartID: tokenizer.toolCallStartID,
                     toolEndID: tokenizer.toolCallEndID,
                     toolResponseID: tokenizer.toolResponseID,
@@ -1193,14 +1209,12 @@ public actor ServerModelSession: ServerInferenceBackend {
                 kind: .decoderFinish,
                 cause: .classify(error))
         }
-        if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
+        if needsToolTemplate, result.reason == .toolCalls, output.calls.isEmpty {
             throw structuredFailure(kind: .orphanToolResponse, cause: .none)
         }
-        let tail = stopMatcher.finish()
-        if !tail.isEmpty {
-            content += tail
-            onEvent(.content(tail))
-        }
+        output.finish()
+        var content = output.content
+        let calls = output.calls
         var reason: String
         if !calls.isEmpty {
             reason = "tool_calls"
@@ -1235,7 +1249,7 @@ public actor ServerModelSession: ServerInferenceBackend {
             content: generated,
             calls: calls,
             result: result,
-            stopStringFiltered: stopMatcher.isStopped)
+            stopStringFiltered: output.isStopped)
         completed = true
         return ServerCompletion(
             content: content,
@@ -1249,7 +1263,9 @@ public actor ServerModelSession: ServerInferenceBackend {
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
                                cachedTokens: result.cachedPromptTokens),
-            watchdogTrips: watchdogs.trips)
+            watchdogTrips: watchdogs.trips,
+            stopSequence: output.matchedStop,
+            reasoning: output.reasoning)
     }
 
     /// Publish this turn's KV range to the prompt cache, and persist a snapshot
@@ -1351,12 +1367,44 @@ public actor ServerModelSession: ServerInferenceBackend {
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition]
     ) -> Bool {
+        Self.usesToolTemplate(messages: messages, tools: tools)
+    }
+
+    private static func usesToolTemplate(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition]
+    ) -> Bool {
         !tools.isEmpty || messages.contains {
             $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
         }
     }
 
+    /// Prompt tokens of a request as the chat template would render it. The
+    /// same encoding generation uses, minus the generation.
+    public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        try Self.promptTokenCount(request, tokenizer: tokenizer)
+    }
+
+    /// The count from a tokenizer alone, which is how the router answers for
+    /// a GPU model that is not the one loaded.
+    static func promptTokenCount(_ request: ValidatedChatRequest,
+                                 tokenizer: GFTokenizer) throws -> Int {
+        try encodePrompt(
+            tokenizer: tokenizer, messages: request.messages, tools: request.tools,
+            usesToolTemplate: usesToolTemplate(messages: request.messages, tools: request.tools)).count
+    }
+
     private func encodePrompt(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        usesToolTemplate: Bool
+    ) throws -> [Int32] {
+        try Self.encodePrompt(tokenizer: tokenizer, messages: messages, tools: tools,
+                              usesToolTemplate: usesToolTemplate)
+    }
+
+    private static func encodePrompt(
+        tokenizer: GFTokenizer,
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition],
         usesToolTemplate: Bool

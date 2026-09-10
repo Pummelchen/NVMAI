@@ -1,6 +1,6 @@
 import Foundation
 
-/// The side-engine's view of a snapshot written by `prepare_qwen35_2b.py`.
+/// The side-engine's view of a snapshot written by `tools/prepare_qwen35.py`.
 ///
 /// One directory: a `config.json` carrying the architecture and the
 /// quantization block, an index naming which shard holds what, and the

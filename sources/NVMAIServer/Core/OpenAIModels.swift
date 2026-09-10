@@ -270,6 +270,12 @@ public enum ServerRequestError: Error, Equatable, Sendable {
     case invalid(message: String, param: String?, code: String)
     case unknownModel
     case queueFull
+    /// A well-formed request for something this backend cannot do at all
+    /// (a token count without a tokenizer, for instance): 501, not 400.
+    case unsupportedOperation(String)
+    /// A stored response named by `previous_response_id` or a path that
+    /// does not exist: 404.
+    case notFound(message: String, param: String?)
 
     public var envelope: OpenAIErrorEnvelope {
         switch self {
@@ -282,6 +288,22 @@ public enum ServerRequestError: Error, Equatable, Sendable {
             OpenAIErrorEnvelope(message: "generation queue is full",
                                 code: "queue_full",
                                 type: "rate_limit_error")
+        case .unsupportedOperation(let operation):
+            OpenAIErrorEnvelope(message: "\(operation) is not supported by this backend",
+                                code: "unsupported_operation",
+                                type: "server_error")
+        case .notFound(let message, let param):
+            OpenAIErrorEnvelope(message: message, param: param, code: "not_found")
+        }
+    }
+
+    /// The HTTP status each error maps to, shared by every API surface.
+    public var httpStatus: Int {
+        switch self {
+        case .invalid: 400
+        case .unknownModel, .notFound: 404
+        case .queueFull: 429
+        case .unsupportedOperation: 501
         }
     }
 }
@@ -306,6 +328,10 @@ public struct ValidatedChatRequest: Sendable {
     /// are meant to be terse, which is the shape the detectors hunt, and no
     /// person is waiting on the result.
     public let isEngineInternal: Bool
+    /// The catalog id the request was validated against. The routing backend
+    /// loads it; a single-model backend serves what it has and ignores it.
+    /// Nil for the engine's own requests, which run on whatever is resident.
+    public let model: String?
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
@@ -315,7 +341,8 @@ public struct ValidatedChatRequest: Sendable {
                 maximumCompletionTokens: Int,
                 stripCLIPrompt: Bool = false,
                 workspace: String? = nil,
-                isEngineInternal: Bool = false) {
+                isEngineInternal: Bool = false,
+                model: String? = nil) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
@@ -325,6 +352,7 @@ public struct ValidatedChatRequest: Sendable {
         self.stripCLIPrompt = stripCLIPrompt
         self.workspace = workspace
         self.isEngineInternal = isEngineInternal
+        self.model = model
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -348,7 +376,8 @@ public struct ValidatedChatRequest: Sendable {
             maximumCompletionTokens: maximumCompletionTokens,
             stripCLIPrompt: stripCLIPrompt,
             workspace: workspace,
-            isEngineInternal: isEngineInternal)
+            isEngineInternal: isEngineInternal,
+            model: model)
     }
 
     /// The memory workspace this request names, from the X-NVMAI-Workspace
@@ -364,7 +393,23 @@ public struct ValidatedChatRequest: Sendable {
             maximumCompletionTokens: maximumCompletionTokens,
             stripCLIPrompt: stripCLIPrompt,
             workspace: workspace,
-            isEngineInternal: isEngineInternal)
+            isEngineInternal: isEngineInternal,
+            model: model)
+    }
+
+    /// The same request, bound to the catalog model it was validated for.
+    public func withModel(_ model: String) -> ValidatedChatRequest {
+        ValidatedChatRequest(
+            messages: messages,
+            tools: tools,
+            stream: stream,
+            includeUsage: includeUsage,
+            generationConfig: generationConfig,
+            maximumCompletionTokens: maximumCompletionTokens,
+            stripCLIPrompt: stripCLIPrompt,
+            workspace: workspace,
+            isEngineInternal: isEngineInternal,
+            model: model)
     }
 }
 

@@ -42,8 +42,8 @@ enum ServerModelIdentity {
     }
 
     /// The id with any quantization the manifest already spelled removed, so
-    /// the suffix is added exactly once.
-    private static func base(manifestModelID: String,
+    /// the suffix is added exactly once. The catalog names installs by it.
+    static func base(manifestModelID: String,
                              family: ModelFamily) -> String {
         for suffix in ["-4bit", "-8bit", "-6bit"]
         where manifestModelID.hasSuffix(suffix) {

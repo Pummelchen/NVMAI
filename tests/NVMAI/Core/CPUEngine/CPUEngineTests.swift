@@ -303,6 +303,228 @@ import Testing
     /// the same call.
     private final class Busy: @unchecked Sendable { var value = false }
 
+    // MARK: - head sharing, the shape the 4B adds
+
+    /// The 2B has as many delta-rule value heads as key heads and shares each
+    /// KV head among four query heads; the 4B has twice as many value heads
+    /// as key heads. Its whole-model check needs a real snapshot, so the
+    /// mapping is pinned here by an equivalence that needs no reference: a
+    /// model whose heads are shared must compute exactly what the same model
+    /// computes with each shared head written out once per user.
+    ///
+    /// Sharing is by consecutive heads (transformers repeats in place). Each
+    /// test also builds the strided alternative -- head `i` paired with
+    /// `i % count` -- and requires it to differ, so the check can fail.
+
+    /// Weights drawn from a fixed seed, so every variant of a model is built
+    /// from the same draw and differs only where a test says it does.
+    private struct SplitMix: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    /// An 8-bit matrix kept as rows of levels, scales and biases, so a row
+    /// can be copied into another model bit for bit.
+    private struct Rows {
+        var levels: [[UInt8]] = []
+        var scales: [[Float]] = []
+        var biases: [[Float]] = []
+
+        static func random(_ rows: Int, _ columns: Int, _ rng: inout SplitMix) -> Rows {
+            var out = Rows()
+            for _ in 0..<rows {
+                out.levels.append((0..<columns).map { _ in UInt8.random(in: 0...255, using: &rng) })
+                let scales = (0..<(columns / 64)).map { _ in
+                    Float.random(in: 0.0005...0.002, using: &rng)
+                }
+                out.scales.append(scales)
+                out.biases.append(scales.map { -127.5 * $0 })   // centred on zero
+            }
+            return out
+        }
+
+        func picking(_ rows: [Int]) -> Rows {
+            Rows(levels: rows.map { levels[$0] }, scales: rows.map { scales[$0] },
+                 biases: rows.map { biases[$0] })
+        }
+    }
+
+    private struct TinyModel {
+        var config: [String: Any]
+        var matrices: [String: Rows] = [:]
+        var floats: [String: (shape: [Int], values: [Float])] = [:]
+    }
+
+    private static let tinyPrefix = "language_model.model."
+
+    private func randomFloats(_ count: Int, _ range: ClosedRange<Float>,
+                              _ rng: inout SplitMix) -> [Float] {
+        (0..<count).map { _ in Float.random(in: range, using: &rng) }
+    }
+
+    /// One layer of the family at 64 wide: the embedding, the norms and the
+    /// MLP around a mixer the caller adds. `interval` 1 makes layer 0 full
+    /// attention, 4 makes it gated DeltaNet.
+    private func tinyModel(interval: Int, _ rng: inout SplitMix) -> TinyModel {
+        let p = Self.tinyPrefix, hidden = 64
+        var model = TinyModel(config: [
+            "hidden_size": hidden, "num_hidden_layers": 1, "num_attention_heads": 4,
+            "num_key_value_heads": 2, "head_dim": 16, "full_attention_interval": interval,
+            "linear_num_key_heads": 2, "linear_num_value_heads": 4,
+            "linear_key_head_dim": 16, "linear_value_head_dim": 16,
+            "linear_conv_kernel_dim": 4, "intermediate_size": hidden, "vocab_size": 8,
+            "rms_norm_eps": 1e-6, "rope_theta": 10_000.0, "partial_rotary_factor": 0.25,
+            "quantization": ["bits": 8, "group_size": 64, "mode": "affine"],
+        ])
+        model.matrices[p + "embed_tokens"] = Rows.random(8, hidden, &rng)
+        for name in ["gate_proj", "up_proj", "down_proj"] {
+            model.matrices[p + "layers.0.mlp." + name] = Rows.random(hidden, hidden, &rng)
+        }
+        for name in ["layers.0.input_layernorm", "layers.0.post_attention_layernorm", "norm"] {
+            model.floats[p + name + ".weight"] = ([hidden], randomFloats(hidden, 0.8...1.2, &rng))
+        }
+        return model
+    }
+
+    private func writeTinyModel(_ model: TinyModel) throws -> URL {
+        var tensors: [(name: String, dtype: String, shape: [Int], bytes: [UInt8])] = []
+        for (stem, rows) in model.matrices.sorted(by: { $0.key < $1.key }) {
+            let count = rows.levels.count, columns = rows.levels[0].count
+            // Four 8-bit lanes per word, low first: little-endian, the word's
+            // bytes are the levels in order.
+            tensors.append((stem + ".weight", "U32", [count, columns / 4],
+                            rows.levels.flatMap { $0 }))
+            tensors.append((stem + ".scales", "BF16", [count, columns / 64],
+                            bf16(rows.scales.flatMap { $0 })))
+            tensors.append((stem + ".biases", "BF16", [count, columns / 64],
+                            bf16(rows.biases.flatMap { $0 })))
+        }
+        for (name, tensor) in model.floats.sorted(by: { $0.key < $1.key }) {
+            tensors.append((name, "BF16", tensor.shape, bf16(tensor.values)))
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tiny-model-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        try FileManager.default.moveItem(
+            at: try writeShard(tensors), to: directory.appendingPathComponent("model.safetensors"))
+        try JSONSerialization.data(withJSONObject: model.config)
+            .write(to: directory.appendingPathComponent("config.json"))
+        let map = Dictionary(uniqueKeysWithValues: tensors.map { ($0.name, "model.safetensors") })
+        try JSONSerialization.data(withJSONObject: ["weight_map": map])
+            .write(to: directory.appendingPathComponent("model.safetensors.index.json"))
+        return directory
+    }
+
+    /// Logits at every position of a short sequence, so the carried state --
+    /// the KV cache, the convolution tail, the delta-rule state -- is
+    /// compared along with the first token.
+    private func sequenceLogits(_ model: TinyModel) throws -> [Float] {
+        let directory = try writeTinyModel(model)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = try CPUQwen35(snapshot: try AffineSnapshot(directory: directory),
+                                   threads: 1)
+        return try [3, 1, 4, 1, 5].flatMap { try engine.step(token: $0) }
+    }
+
+    private func largestDifference(_ a: [Float], _ b: [Float]) -> Float {
+        zip(a, b).reduce(0) { max($0, abs($1.0 - $1.1)) }
+    }
+
+    /// Hv = 2·Hk, the 4B's delta rule: value heads 0 and 1 read key head 0,
+    /// 2 and 3 read key head 1. Written out, that is a model with four key
+    /// heads laid out [0, 0, 1, 1] -- query and key channels copied, with
+    /// their convolution taps -- and nothing else changed.
+    @Test func deltaRuleValueHeadsShareConsecutiveKeyHeads() throws {
+        var rng = SplitMix(state: 4)
+        let p = Self.tinyPrefix + "layers.0.linear_attn.", hidden = 64
+        let dk = 16, keyHeads = 2, valueHeads = 4, valueWidth = valueHeads * 16
+        var base = tinyModel(interval: 4, &rng)
+        let qkv = Rows.random(2 * keyHeads * dk + valueWidth, hidden, &rng)
+        let taps = (0..<(2 * keyHeads * dk + valueWidth)).map { _ in
+            randomFloats(4, -0.6...0.6, &rng)
+        }
+        base.matrices[p + "in_proj_z"] = Rows.random(valueWidth, hidden, &rng)
+        base.matrices[p + "out_proj"] = Rows.random(hidden, valueWidth, &rng)
+        base.floats[p + "in_proj_a.weight"] = ([valueHeads, hidden],
+                                              randomFloats(valueHeads * hidden, -0.1...0.1, &rng))
+        base.floats[p + "in_proj_b.weight"] = ([valueHeads, hidden],
+                                              randomFloats(valueHeads * hidden, -0.1...0.1, &rng))
+        base.floats[p + "A_log"] = ([valueHeads], randomFloats(valueHeads, -1...0.5, &rng))
+        base.floats[p + "dt_bias"] = ([valueHeads], randomFloats(valueHeads, -0.5...0.5, &rng))
+        base.floats[p + "norm.weight"] = ([16], randomFloats(16, 0.5...1.5, &rng))
+
+        /// The model with key heads laid out as `layout`, each entry naming
+        /// one of the two drawn key heads.
+        func variant(_ layout: [Int]) -> TinyModel {
+            var model = base
+            let query = layout.flatMap { Array(($0 * dk)..<($0 * dk + dk)) }
+            let key = layout.flatMap { Array((keyHeads * dk + $0 * dk)..<(keyHeads * dk + $0 * dk + dk)) }
+            let channels = query + key + Array((2 * keyHeads * dk)..<(2 * keyHeads * dk + valueWidth))
+            model.matrices[p + "in_proj_qkv"] = qkv.picking(channels)
+            model.floats[p + "conv1d.weight"] = ([channels.count, 1, 4], channels.flatMap { taps[$0] })
+            model.config["linear_num_key_heads"] = layout.count
+            return model
+        }
+        let shared = try sequenceLogits(variant([0, 1]))
+        let consecutive = try sequenceLogits(variant([0, 0, 1, 1]))
+        let strided = try sequenceLogits(variant([0, 1, 0, 1]))
+        #expect(largestDifference(shared, consecutive) < 1e-4,
+                "32 value heads over 16 key heads must read key head h / 2")
+        #expect(largestDifference(shared, strided) > 1e-3,
+                "the strided pairing must be distinguishable, or this proves nothing")
+    }
+
+    /// Sixteen query heads over four KV heads, the 4B's attention, is the
+    /// same claim at a group of four; here a group of two, over the same
+    /// code path. Written out, KV heads [0, 0, 1, 1], one per query head.
+    @Test func queryHeadsShareConsecutiveKeyValueHeads() throws {
+        var rng = SplitMix(state: 16)
+        let p = Self.tinyPrefix + "layers.0.self_attn.", hidden = 64, dim = 16
+        var base = tinyModel(interval: 1, &rng)
+        base.matrices[p + "q_proj"] = Rows.random(4 * 2 * dim, hidden, &rng)
+        base.matrices[p + "o_proj"] = Rows.random(hidden, 4 * dim, &rng)
+        let keys = Rows.random(2 * dim, hidden, &rng)
+        let values = Rows.random(2 * dim, hidden, &rng)
+        base.floats[p + "q_norm.weight"] = ([dim], randomFloats(dim, 0.5...1.5, &rng))
+        base.floats[p + "k_norm.weight"] = ([dim], randomFloats(dim, 0.5...1.5, &rng))
+
+        func variant(_ layout: [Int]) -> TinyModel {
+            var model = base
+            let rows = layout.flatMap { Array(($0 * dim)..<($0 * dim + dim)) }
+            model.matrices[p + "k_proj"] = keys.picking(rows)
+            model.matrices[p + "v_proj"] = values.picking(rows)
+            model.config["num_key_value_heads"] = layout.count
+            return model
+        }
+        let shared = try sequenceLogits(variant([0, 1]))
+        let consecutive = try sequenceLogits(variant([0, 0, 1, 1]))
+        let strided = try sequenceLogits(variant([0, 1, 0, 1]))
+        #expect(largestDifference(shared, consecutive) < 1e-4,
+                "query head h must read KV head h / (heads / kvHeads)")
+        #expect(largestDifference(shared, strided) > 1e-3,
+                "the strided pairing must be distinguishable, or this proves nothing")
+    }
+
+    /// A head ratio that is not whole would floor into a wrong mapping;
+    /// the engine refuses the snapshot instead of running it.
+    @Test func aFractionalHeadRatioIsRefused() throws {
+        var rng = SplitMix(state: 3)
+        var model = tinyModel(interval: 4, &rng)
+        model.config["linear_num_key_heads"] = 3
+        let directory = try writeTinyModel(model)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(throws: SafeTensorsFile.Failure.self) {
+            try CPUQwen35(snapshot: try AffineSnapshot(directory: directory))
+        }
+    }
+
     // MARK: - the arithmetic between the GEMVs
 
     @Test func rmsNormScalesToUnitRootMeanSquare() {

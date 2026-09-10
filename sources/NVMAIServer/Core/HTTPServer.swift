@@ -22,8 +22,13 @@ public actor NVMAIHTTPServer {
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let reasoningProfile: ServerReasoningProfile
+    /// Set when the server routes between catalog models; nil keeps the
+    /// single-model server exactly as it was.
+    private let router: (any ModelRouting)?
     private let childChannels = ChildChannelRegistry(
         maximumChannels: maximumConcurrentConnections)
+    /// Finished /v1/responses kept for previous_response_id and retrieval.
+    private let responseStore = ResponseStore()
     private var channel: Channel?
     private var shutdownTask: Task<Void, any Error>?
 
@@ -32,13 +37,15 @@ public actor NVMAIHTTPServer {
                 backend: any ServerInferenceBackend,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 reasoningProfile: ServerReasoningProfile = .default,
-                group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
+                group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1),
+                router: (any ModelRouting)? = nil) {
         self.group = group
         self.modelID = modelID
         self.backend = backend
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
         self.reasoningProfile = reasoningProfile
+        self.router = router
     }
 
     public func start(port: Int) async throws -> Channel {
@@ -47,7 +54,9 @@ public actor NVMAIHTTPServer {
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
         let reasoningProfile = self.reasoningProfile
+        let router = self.router
         let childChannels = self.childChannels
+        let responseStore = self.responseStore
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 16)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -63,7 +72,9 @@ public actor NVMAIHTTPServer {
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
                         reasoningProfile: reasoningProfile,
-                        childChannels: childChannels))
+                        router: router,
+                        childChannels: childChannels,
+                        responseStore: responseStore))
                 }
             }
             // S29: so_reuseaddr belongs on the listening socket only, not on
@@ -151,9 +162,10 @@ enum WorkspaceHeader {
 
 /// unchecked-invariant: NIO calls every ChannelInboundHandler method on the
 /// channel's own event loop, so the handler's per-request state is already
-/// serialised. The one exception is `activeTask`, which the SSE drainer and the
+/// serialised. The exceptions are `activeTask`, which the SSE drainer and the
 /// backpressure path touch from the cooperative pool -- that field is guarded by
-/// `taskLock`.
+/// `taskLock` -- and `responseModelID`, which the response builders read from
+/// the generation task and which is guarded by `responseModelLock`.
 private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -176,8 +188,21 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
     private let reasoningProfile: ServerReasoningProfile
+    private let router: (any ModelRouting)?
     private let childChannels: ChildChannelRegistry
+    private let responseStore: ResponseStore
     private var head: HTTPRequestHead?
+
+    /// The model the current request was validated for, echoed in every
+    /// response object it produces. One request is in flight per connection
+    /// (pipelining assistance holds the next head until this response ends),
+    /// but the echo sites run on the cooperative pool, hence the lock.
+    private let responseModelLock = NSLock()
+    private var _responseModelID: String
+    private var responseModelID: String {
+        get { responseModelLock.withLock { _responseModelID } }
+        set { responseModelLock.withLock { _responseModelID = newValue } }
+    }
     private var body = ByteBuffer()
     private var oversized = false
 
@@ -202,13 +227,25 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
          reasoningProfile: ServerReasoningProfile,
-         childChannels: ChildChannelRegistry) {
+         router: (any ModelRouting)?,
+         childChannels: ChildChannelRegistry,
+         responseStore: ResponseStore) {
         self.modelID = modelID
+        self._responseModelID = modelID
+        self.router = router
         self.reasoningProfile = reasoningProfile
         self.backend = backend
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
         self.childChannels = childChannels
+        self.responseStore = responseStore
+    }
+
+    /// Which API's wire shapes a request speaks. Error envelopes, stream
+    /// terminators and heartbeat frames differ per surface; the generation
+    /// underneath does not.
+    private enum APISurface: Sendable {
+        case chat, responses, anthropic
     }
 
     func channelActive(context: ChannelHandlerContext) {
@@ -290,12 +327,29 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
         let path = head.uri.split(separator: "?", maxSplits: 1,
                                   omittingEmptySubsequences: false).first.map(String.init) ?? head.uri
+        // A client that sends anthropic-version is speaking the Messages API;
+        // the shared paths (/v1/models, 404s) answer in its shape.
+        let anthropic = head.headers.first(name: "anthropic-version") != nil
+            || path.hasPrefix("/v1/messages")
+        let segments = path.split(separator: "/").map(String.init)
+        let jsonBody = head.headers.first(name: "content-type")?
+            .lowercased().hasPrefix("application/json") == true
         switch (head.method, path) {
         case (.GET, "/health"):
             writeJSON(context, status: .ok, object: ["status": "ok"])
         case (.GET, "/v1/models"):
+            if let router {
+                writeModelList(router.servedModels, anthropic: anthropic, context: context)
+                return
+            }
             // Advertise the base model plus the "<model>-fast" alias, which
             // serves the same weights with the CLI-strip heuristic enabled.
+            if anthropic {
+                writeJSON(context, status: .ok,
+                          object: AnthropicBuilder.modelList(ids: [modelID, modelID + "-fast"]),
+                          surface: .anthropic)
+                return
+            }
             let response = OpenAIModelList(
                 object: "list",
                 data: [
@@ -313,11 +367,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // S28: HEAD is answered with headers only.
             writeHeadOnly(context, status: .ok)
         case (.POST, "/v1/chat/completions"):
-            guard head.headers.first(name: "content-type")?
-                .lowercased().hasPrefix("application/json") == true else {
-                writeError(context, status: .unsupportedMediaType,
-                           OpenAIErrorEnvelope(message: "content-type must be application/json",
-                                               code: "unsupported_media_type"))
+            guard jsonBody else {
+                writeUnsupportedMediaType(context, surface: .chat)
                 return
             }
             handleCompletion(
@@ -330,27 +381,185 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 // refuses to run until it sees the header take effect.
                 workspace: WorkspaceHeader.value(in: head))
         case (.POST, "/v1/responses"):
-            guard head.headers.first(name: "content-type")?
-                .lowercased().hasPrefix("application/json") == true else {
-                writeError(context, status: .unsupportedMediaType,
-                           OpenAIErrorEnvelope(message: "content-type must be application/json",
-                                               code: "unsupported_media_type"))
+            guard jsonBody else {
+                writeUnsupportedMediaType(context, surface: .responses)
                 return
             }
             handleResponses(
                 body: body,
                 context: context,
                 workspace: WorkspaceHeader.value(in: head))
+        case (.POST, "/v1/messages"):
+            guard jsonBody else {
+                writeUnsupportedMediaType(context, surface: .anthropic)
+                return
+            }
+            handleMessages(body: body, context: context,
+                           workspace: WorkspaceHeader.value(in: head))
+        case (.POST, "/v1/messages/count_tokens"):
+            guard jsonBody else {
+                writeUnsupportedMediaType(context, surface: .anthropic)
+                return
+            }
+            handleCountTokens(body: body, context: context)
         case (.POST, "/v1/models/unload"):
             handleUnload(context: context)
-        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"), (_, "/v1/models/unload"):
-            writeError(context, status: .methodNotAllowed,
-                       OpenAIErrorEnvelope(message: "method not allowed",
-                                           code: "method_not_allowed"))
+        case (_, "/health"), (_, "/v1/models"), (_, "/v1/chat/completions"), (_, "/v1/responses"),
+             (_, "/v1/models/unload"), (_, "/v1/messages"), (_, "/v1/messages/count_tokens"):
+            writeRequestError(context, .invalid(message: "method not allowed", param: nil,
+                                                code: "method_not_allowed"),
+                              status: .methodNotAllowed,
+                              surface: anthropic ? .anthropic : .chat)
         default:
-            writeError(context, status: .notFound,
-                       OpenAIErrorEnvelope(message: "route not found",
-                                           code: "not_found"))
+            if segments.count == 3, segments[0] == "v1", segments[1] == "models" {
+                handleModel(id: segments[2], method: head.method, anthropic: anthropic, context: context)
+            } else if segments.count >= 3, segments[0] == "v1", segments[1] == "responses" {
+                handleStoredResponse(segments: Array(segments.dropFirst(2)),
+                                     method: head.method, context: context)
+            } else {
+                writeRequestError(context, .notFound(message: "route not found", param: nil),
+                                  status: .notFound,
+                                  surface: anthropic ? .anthropic : .chat)
+            }
+        }
+    }
+
+    private func writeUnsupportedMediaType(_ context: ChannelHandlerContext, surface: APISurface) {
+        writeRequestError(context,
+                          .invalid(message: "content-type must be application/json",
+                                   param: nil, code: "unsupported_media_type"),
+                          status: .unsupportedMediaType, surface: surface)
+    }
+
+    /// The model a request names. Resolved before validation, so omitted
+    /// sampling and the max_tokens bound come from that model rather than
+    /// whichever one is resident. Without a router this is the one model,
+    /// answered from the backend as before, and the validator still refuses
+    /// any other name.
+    private func servedModel(named name: String) throws -> ServedModel {
+        guard let router else {
+            return ServedModel(id: modelID, displayName: modelID,
+                               maximumContext: backend.maximumContext,
+                               sampling: backend.samplingDefaults,
+                               reasoningProfile: reasoningProfile)
+        }
+        guard let model = router.servedModel(named: name) else {
+            throw ServerRequestError.unknownModel
+        }
+        return model
+    }
+
+    /// Validates against `target` and binds the request to it, so the router
+    /// loads the model that was validated and the response names it.
+    private func validate(_ request: OpenAIChatRequest,
+                          for target: ServedModel) throws -> ValidatedChatRequest {
+        let validated = try OpenAIRequestValidator.validate(
+            request, modelID: target.id, maxContext: target.maximumContext,
+            reasoningProfile: target.reasoningProfile,
+            sampling: target.sampling)
+            .withModel(target.id)
+        responseModelID = target.id
+        return validated
+    }
+
+    /// Every catalog model in the shape the client speaks. The "-fast"
+    /// aliases are accepted but not listed: doubling a catalog into twice as
+    /// many menu entries helps nobody choose between models.
+    private func writeModelList(_ models: [ServedModel], anthropic: Bool,
+                                context: ChannelHandlerContext) {
+        if anthropic {
+            writeJSON(context, status: .ok,
+                      object: AnthropicBuilder.modelList(
+                          models: models.map { (id: $0.id, displayName: $0.displayName) }),
+                      surface: .anthropic)
+            return
+        }
+        writeCodable(context, status: .ok, OpenAIModelList(
+            object: "list",
+            data: models.map {
+                .init(id: $0.id, object: "model", created: nil, ownedBy: "nvmai")
+            }))
+    }
+
+    /// `GET /v1/models/{id}` in either shape.
+    private func handleModel(id: String, method: HTTPMethod, anthropic: Bool,
+                             context: ChannelHandlerContext) {
+        let surface: APISurface = anthropic ? .anthropic : .chat
+        guard method == .GET else {
+            writeRequestError(context, .invalid(message: "method not allowed", param: nil,
+                                                code: "method_not_allowed"),
+                              status: .methodNotAllowed, surface: surface)
+            return
+        }
+        let displayName: String
+        if let router {
+            guard let model = router.servedModel(named: id) else {
+                writeRequestError(context, .unknownModel, status: .notFound, surface: surface)
+                return
+            }
+            displayName = model.displayName
+        } else {
+            guard id == modelID || id == modelID + "-fast" else {
+                writeRequestError(context, .unknownModel, status: .notFound, surface: surface)
+                return
+            }
+            displayName = id
+        }
+        if anthropic {
+            writeJSON(context, status: .ok,
+                      object: AnthropicBuilder.modelObject(id: id, displayName: displayName),
+                      surface: .anthropic)
+        } else {
+            writeCodable(context, status: .ok,
+                         OpenAIModelList.Model(id: id, object: "model", created: nil, ownedBy: "nvmai"))
+        }
+    }
+
+    /// `GET|DELETE /v1/responses/{id}`, `POST /v1/responses/{id}/cancel`,
+    /// `GET /v1/responses/{id}/input_items`: the stored side of the
+    /// Responses API. Nothing here runs the model.
+    private func handleStoredResponse(segments: [String], method: HTTPMethod,
+                                      context: ChannelHandlerContext) {
+        let id = segments[0]
+        let notFound = ServerRequestError.notFound(
+            message: "Response with id '\(id)' not found.", param: "id")
+        switch (method, segments.count, segments.count > 1 ? segments[1] : "") {
+        case (.GET, 1, _):
+            guard let entry = responseStore.get(id) else {
+                writeRequestError(context, notFound, status: .notFound, surface: .responses); return
+            }
+            writeData(context, status: .ok, data: entry.responseJSON)
+        case (.DELETE, 1, _):
+            guard responseStore.delete(id) else {
+                writeRequestError(context, notFound, status: .notFound, surface: .responses); return
+            }
+            writeJSON(context, status: .ok, object: ["id": id, "object": "response", "deleted": true])
+        case (.POST, 2, "cancel"):
+            guard responseStore.get(id) != nil else {
+                writeRequestError(context, notFound, status: .notFound, surface: .responses); return
+            }
+            // Every response this server produces is foreground and already
+            // finished by the time it has an id to cancel.
+            writeRequestError(context, .invalid(
+                message: "Only responses created with background=true can be cancelled.",
+                param: "id", code: "invalid_request"), status: .badRequest, surface: .responses)
+        case (.GET, 2, "input_items"):
+            guard let entry = responseStore.get(id) else {
+                writeRequestError(context, notFound, status: .notFound, surface: .responses); return
+            }
+            do {
+                writeData(context, status: .ok,
+                          data: try ResponsesAPIBuilder.inputItemsList(entry.inputItems))
+            } catch {
+                writeData(context, status: .internalServerError, data: Self.minimalErrorData)
+            }
+        case (_, 1, _), (_, 2, "cancel"), (_, 2, "input_items"):
+            writeRequestError(context, .invalid(message: "method not allowed", param: nil,
+                                                code: "method_not_allowed"),
+                              status: .methodNotAllowed, surface: .responses)
+        default:
+            writeRequestError(context, .notFound(message: "route not found", param: nil),
+                              status: .notFound, surface: .responses)
         }
     }
 
@@ -382,10 +591,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             // duplicate a body of up to `maximumBodyBytes` before decoding.
             let decoded = try JSONDecoder().decode(
                 OpenAIChatRequest.self, from: Data(body.readableBytesView))
-            let request = try OpenAIRequestValidator.validate(
-                decoded, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile,
-                sampling: backend.samplingDefaults)
+            let request = try validate(decoded, for: try servedModel(named: decoded.model))
                 .withWorkspace(workspace)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
@@ -433,23 +639,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         ServerLog.generating(id: responseID)
                         return try await self.backend.generate(request) { event in
                             guard request.stream, let outbox else { return }
-                            switch event {
-                            case .content(let text):
-                                self.enqueueStreamChunk(
-                                    self.chunk(id: responseID, created: created,
-                                               delta: ["content": text],
-                                               finishReason: nil),
-                                    outbox: outbox,
-                                    context: contextBox.value)
-                            case .toolCall(let call):
-                                self.enqueueToolCallChunks(
-                                    id: responseID,
-                                    created: created,
-                                    toolIndex: streamState.nextToolIndex(),
-                                    call: call,
-                                    outbox: outbox,
-                                    context: contextBox.value)
-                            }
+                            self.enqueueChatEvent(event, id: responseID, created: created,
+                                                  streamState: streamState,
+                                                  outbox: outbox, context: contextBox.value)
                         }
                     }
                     ServerLog.completed(id: responseID,
@@ -471,12 +663,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     }
                 } catch {
                     streamState.stop()
-                    self.handleAsyncError(error,
-                                          context: contextBox.value,
-                                          id: responseID,
-                                          phase: phaseState.value,
-                                          stream: request.stream,
-                                          outbox: outbox)
+                    self.handleAsyncFailure(error,
+                                            context: contextBox.value,
+                                            id: responseID,
+                                            phase: phaseState.value,
+                                            stream: request.stream,
+                                            outbox: outbox,
+                                            surface: .chat)
                 }
                 if let drainer {
                     await Self.awaitDrainer(drainer)
@@ -493,14 +686,80 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
-    /// Streaming item bookkeeping for one /v1/responses turn (message item
-    /// announced, function-call output indices).
-    /// unchecked-invariant: one instance per request, created on the event
-    /// loop and mutated only from the request's own generation task. It is
-    /// never shared between requests, so its counters need no locking.
-    private final class ResponsesItemState: @unchecked Sendable {
-        var messageAnnounced = false
-        var toolCount = 0
+    /// Per-request bookkeeping for a /v1/responses stream: the event sequence
+    /// number and the output indices handed to items in the order the model
+    /// produced them, so the streamed items and the final object agree.
+    /// unchecked-invariant: every field is guarded by `lock`; the sequence is
+    /// read from the queued callback (event loop) and the generation task.
+    private final class ResponsesStreamState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sequence = 0
+        private var nextOutput = 0
+        private var _messageIndex: Int?
+        private var _callIndices: [Int] = []
+
+        func nextSequence() -> Int {
+            lock.withLock {
+                defer { sequence += 1 }
+                return sequence
+            }
+        }
+
+        var messageIndex: Int? { lock.withLock { _messageIndex } }
+        var callIndices: [Int] { lock.withLock { _callIndices } }
+
+        /// The message item's output index, allocated on first use.
+        func announceMessage() -> (index: Int, first: Bool) {
+            lock.withLock {
+                if let index = _messageIndex { return (index, false) }
+                let index = nextOutput
+                nextOutput += 1
+                _messageIndex = index
+                return (index, true)
+            }
+        }
+
+        /// A function-call item's output index and its ordinal among calls.
+        func allocateCall() -> (index: Int, ordinal: Int) {
+            lock.withLock {
+                let index = nextOutput
+                nextOutput += 1
+                _callIndices.append(index)
+                return (index, _callIndices.count - 1)
+            }
+        }
+
+        /// Every reasoning item so far, by output index, with its whole text:
+        /// the done events and the final object both need the full thought.
+        private var _reasoning: [(index: Int, text: String)] = []
+        private var openReasoning: Int?
+
+        var reasoningItems: [(index: Int, text: String)] { lock.withLock { _reasoning } }
+
+        /// Appends to the open reasoning item, opening one when none is.
+        /// The ordinal numbers the item among reasoning items, for its id.
+        func appendReasoning(_ text: String) -> (index: Int, ordinal: Int, first: Bool) {
+            lock.withLock {
+                if let ordinal = openReasoning {
+                    _reasoning[ordinal].text += text
+                    return (_reasoning[ordinal].index, ordinal, false)
+                }
+                let index = nextOutput
+                nextOutput += 1
+                _reasoning.append((index, text))
+                openReasoning = _reasoning.count - 1
+                return (index, _reasoning.count - 1, true)
+            }
+        }
+
+        /// Close the open reasoning item, returning it if there was one.
+        func closeReasoning() -> (index: Int, ordinal: Int, text: String)? {
+            lock.withLock {
+                guard let ordinal = openReasoning else { return nil }
+                openReasoning = nil
+                return (_reasoning[ordinal].index, ordinal, _reasoning[ordinal].text)
+            }
+        }
     }
 
     private static func eventFrame(name: String, object: [String: Any]) -> Data? {
@@ -510,35 +769,100 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         return Self.sseFrame("event: " + name + "\ndata: " + String(decoding: data, as: UTF8.self))
     }
 
+    /// The frames that end a stream after a failure, in the surface's shape:
+    /// chat sends an error object then [DONE]; the Responses API and the
+    /// Messages API send a typed `error` event and no terminator.
+    private static func failureFrames(_ envelope: OpenAIErrorEnvelope,
+                                      surface: APISurface,
+                                      requestID: String? = nil) -> [Data] {
+        switch surface {
+        case .chat:
+            return errorFrame(envelope).map { [$0, doneFrame()] } ?? [doneFrame()]
+        case .responses:
+            let object: [String: Any] = [
+                "type": "error", "code": envelope.error.code,
+                "message": envelope.error.message,
+                "param": envelope.error.param.map { $0 as Any } ?? NSNull(),
+            ]
+            return eventFrame(name: "error", object: object).map { [$0] } ?? []
+        case .anthropic:
+            let detail = AnthropicErrorEnvelope(
+                type: envelope.error.type == "server_error" ? "api_error" : envelope.error.type,
+                message: envelope.error.message, requestID: requestID)
+            guard let data = try? JSONEncoder().encode(detail) else { return [] }
+            return [sseFrame("event: error\ndata: " + String(decoding: data, as: UTF8.self))]
+        }
+    }
+
+    /// An `item_reference` names an output item of a stored response; the
+    /// item itself takes its place in the input. Unknown ids stay as they
+    /// are and the mapper refuses them by id.
+    private func resolveReferences(_ items: [ResponsesAPIRequest.Item]) -> [ResponsesAPIRequest.Item] {
+        items.map { item in
+            guard item.resolvedType == "item_reference", let id = item.id,
+                  let stored = responseStore.item(withID: id) else { return item }
+            return stored
+        }
+    }
+
+    /// The API reports a failed generation as a response object in state
+    /// "failed" carrying the error, then ends the stream.
+    private func responsesFailureFrames(
+        id: String, created: Int, echo: ResponsesAPIEcho, itemState: ResponsesStreamState
+    ) -> @Sendable (OpenAIErrorEnvelope) -> [Data] {
+        { envelope in
+            let failed = ResponsesAPIBuilder.responseObject(
+                id: id, created: created, model: self.responseModelID,
+                status: "failed", output: [], usage: nil, echo: echo,
+                error: (envelope.error.code, envelope.error.message))
+            let event = ResponsesAPIBuilder.event(
+                "response.failed", sequence: itemState.nextSequence(), ["response": failed])
+            return Self.eventFrame(name: "response.failed", object: event).map { [$0] } ?? []
+        }
+    }
+
+    /// The stored conversation `previous_response_id` continues, or none.
+    private func priorConversation(
+        _ request: ResponsesAPIRequest
+    ) throws -> [ResponsesAPIRequest.Item] {
+        guard let previous = request.previousResponseID else { return [] }
+        guard let entry = responseStore.get(previous) else {
+            throw ServerRequestError.notFound(
+                message: "Previous response with id '\(previous)' not found.",
+                param: "previous_response_id")
+        }
+        return entry.conversation
+    }
+
     /// OpenAI Responses API endpoint (`POST /v1/responses`). The request is
     /// mapped onto the chat-completions path (see ResponsesAPIMapper) and the
     /// generation is streamed back as Responses-API SSE events (or returned
-    /// as a single response object when stream is false). This is what lets
-    /// current Codex CLI versions (which only speak the Responses API) talk
-    /// to NVMAI directly.
+    /// as a single response object when stream is false). A finished response
+    /// is stored (unless store=false) so a later request can continue it by
+    /// previous_response_id and the retrieval endpoints can serve it.
     private func handleResponses(body: ByteBuffer,
                                  context: ChannelHandlerContext,
                                  workspace: String? = nil) {
         do {
             let decoded = try JSONDecoder().decode(
                 ResponsesAPIRequest.self, from: Data(body.readableBytesView))
-            if decoded.store == true {
-                throw ServerRequestError.invalid(
-                    message: "store is not supported",
-                    param: "store", code: "unsupported_value")
-            }
-            let chatRequest = try ResponsesAPIMapper.chatRequest(decoded)
-            let request = try OpenAIRequestValidator.validate(
-                chatRequest, modelID: modelID, maxContext: backend.maximumContext,
-                reasoningProfile: reasoningProfile,
-                sampling: backend.samplingDefaults)
+            let target = try servedModel(named: decoded.model)
+            let prior = try priorConversation(decoded)
+            let inputItems = resolveReferences(decoded.inputItems)
+            let chatRequest = try ResponsesAPIMapper.chatRequest(
+                decoded, priorItems: prior, inputItems: inputItems)
+            let request = try validate(chatRequest, for: target)
                 .withWorkspace(workspace)
+            let echo = ResponsesAPIEcho(request: decoded,
+                                        effectiveEffort: target.reasoningProfile.effectiveEffort)
             let responseID = ResponsesAPIBuilder.responseID()
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)
             let streamState = StreamState()
-            let itemState = ResponsesItemState()
+            let itemState = ResponsesStreamState()
             let phaseState = requestPhaseState
+            let storedInput = prior + inputItems
+            let stores = decoded.stores
             let startStream: @Sendable () -> Void = {
                 guard request.stream,
                       streamState.start(eventLoop: contextBox.value.eventLoop,
@@ -547,11 +871,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                           self.writeHeartbeat(contextBox.value)
                       }) else { return }
                 let future = self.beginResponsesStream(
-                    contextBox.value,
-                    id: responseID,
-                    created: created,
-                    request: request,
-                    store: decoded.store)
+                    contextBox.value, id: responseID, created: created,
+                    echo: echo, itemState: itemState)
                 streamState.setStartFuture(future)
             }
             let onQueued: @Sendable () -> Void = {
@@ -581,94 +902,695 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         ServerLog.generating(id: responseID)
                         return try await self.backend.generate(request) { event in
                             guard request.stream, let outbox else { return }
-                            switch event {
-                            case .content(let text):
-                                self.enqueueResponsesContentDelta(
-                                    id: responseID, created: created,
-                                    request: request, text: text,
-                                    itemState: itemState,
-                                    outbox: outbox, context: contextBox.value)
-                            case .toolCall(let call):
-                                self.enqueueResponsesToolDelta(
-                                    id: responseID, created: created,
-                                    request: request, call: call,
-                                    itemState: itemState,
-                                    outbox: outbox, context: contextBox.value)
-                            }
+                            self.enqueueResponsesEvent(event, id: responseID, echo: echo,
+                                                       itemState: itemState,
+                                                       outbox: outbox, context: contextBox.value)
                         }
                     }
                     ServerLog.completed(id: responseID,
                                         duration: started.duration(to: .now),
                                         completion: completion)
+                    let final: [String: Any]
                     if request.stream, let outbox {
                         streamState.stop()
-                        self.finishResponsesStream(
-                            contextBox.value, id: responseID, created: created,
-                            request: request, completion: completion,
-                            itemState: itemState, outbox: outbox)
+                        final = self.finishResponsesStream(
+                            contextBox.value, id: responseID, created: created, echo: echo,
+                            completion: completion, itemState: itemState, outbox: outbox)
                     } else {
-                        self.writeResponses(
-                            contextBox.value, id: responseID, created: created,
-                            request: request, completion: completion)
+                        final = self.finalResponsesObject(
+                            id: responseID, created: created, echo: echo,
+                            completion: completion, itemState: nil)
+                        self.writeJSON(contextBox.value, status: .ok, object: final)
+                    }
+                    if stores {
+                        self.storeResponse(id: responseID, object: final,
+                                           input: storedInput, completion: completion,
+                                           namespaces: echo.namespaces)
                     }
                 } catch {
                     streamState.stop()
-                    self.handleAsyncError(error,
-                                          context: contextBox.value,
-                                          id: responseID,
-                                          phase: phaseState.value,
-                                          stream: request.stream,
-                                          outbox: outbox)
+                    self.handleAsyncFailure(
+                        error, context: contextBox.value, id: responseID,
+                        phase: phaseState.value, stream: request.stream, outbox: outbox,
+                        surface: .responses,
+                        failureFrames: self.responsesFailureFrames(
+                            id: responseID, created: created, echo: echo, itemState: itemState))
                 }
                 if let drainer {
                     await Self.awaitDrainer(drainer)
                 }
             }
         } catch let error as ServerRequestError {
-            writeError(context,
-                       status: error == .unknownModel ? .notFound : .badRequest,
-                       error.envelope)
+            writeRequestError(context, error,
+                              status: HTTPResponseStatus(statusCode: error.httpStatus),
+                              surface: .responses)
         } catch {
-            writeError(context, status: .badRequest,
-                       OpenAIErrorEnvelope(message: "malformed JSON request",
-                                           code: "invalid_json"))
+            writeRequestError(context, .invalid(message: "malformed JSON request",
+                                                param: nil, code: "invalid_json"),
+                              status: .badRequest, surface: .responses)
         }
+    }
+
+    /// The response object of a finished generation. In a stream the output
+    /// order is the order items were announced; otherwise message first.
+    private func finalResponsesObject(id: String,
+                                      created: Int,
+                                      echo: ResponsesAPIEcho,
+                                      completion: ServerCompletion,
+                                      itemState: ResponsesStreamState?) -> [String: Any] {
+        let ids = ResponsesAPIBuilder.itemIDs(responseID: id, completion: completion)
+        var output: [[String: Any]]
+        if let itemState {
+            var slots: [Int: [String: Any]] = [:]
+            for (ordinal, item) in itemState.reasoningItems.enumerated() {
+                slots[item.index] = ResponsesAPIBuilder.reasoningItem(
+                    id: ResponsesAPIBuilder.reasoningItemID(responseID: id, index: ordinal),
+                    text: item.text)
+            }
+            if let index = itemState.messageIndex {
+                slots[index] = ResponsesAPIBuilder.messageItem(
+                    id: ids.message, role: "assistant", text: completion.content, status: "completed")
+            }
+            for (ordinal, index) in itemState.callIndices.enumerated()
+            where ordinal < completion.toolCalls.count {
+                let call = completion.toolCalls[ordinal]
+                slots[index] = ResponsesAPIBuilder.functionCallItem(
+                    id: ids.calls[ordinal], name: call.name, arguments: call.argumentsJSON,
+                    callID: call.id, status: "completed", namespace: echo.namespaces[call.name])
+            }
+            output = slots.keys.sorted().compactMap { slots[$0] }
+        } else {
+            output = ResponsesAPIBuilder.outputItems(completion: completion, responseID: id,
+                                                     namespaces: echo.namespaces)
+        }
+        if output.isEmpty {
+            output = [ResponsesAPIBuilder.messageItem(
+                id: ids.message, role: "assistant", text: "", status: "completed")]
+        }
+        let terminal = ResponsesAPIBuilder.terminalStatus(for: completion)
+        return ResponsesAPIBuilder.responseObject(
+            id: id, created: created, model: responseModelID, status: terminal.status,
+            output: output, usage: completion.usage, echo: echo,
+            incompleteReason: terminal.reason,
+            completedAt: Int(Date().timeIntervalSince1970))
+    }
+
+    private func storeResponse(id: String,
+                               object: [String: Any],
+                               input: [ResponsesAPIRequest.Item],
+                               completion: ServerCompletion,
+                               namespaces: [String: String]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        responseStore.put(id: id, entry: ResponseStore.Entry(
+            responseJSON: data, inputItems: input,
+            outputItems: ResponsesAPIMapper.outputAsInput(
+                completion: completion, responseID: id, namespaces: namespaces),
+            created: Date()))
     }
 
     private func beginResponsesStream(_ context: ChannelHandlerContext,
                                       id: String,
                                       created: Int,
-                                      request: ValidatedChatRequest,
-                                      store: Bool?) -> EventLoopFuture<Void> {
+                                      echo: ResponsesAPIEcho,
+                                      itemState: ResponsesStreamState) -> EventLoopFuture<Void> {
         let response = ResponsesAPIBuilder.responseObject(
-            id: id, created: created, model: modelID, status: "in_progress",
-            output: [], usage: nil, store: store ?? false,
-            reasoningEffort: reasoningProfile.effectiveEffort)
-        let createdEvent = ResponsesAPIBuilder.responseObject(
-            id: id, created: created, model: modelID, status: "in_progress",
-            output: [], usage: nil, store: store ?? false,
-            reasoningEffort: reasoningProfile.effectiveEffort)
+            id: id, created: created, model: responseModelID, status: "in_progress",
+            output: [], usage: nil, echo: echo)
         var frames = Data()
-        if let frame = Self.eventFrame(name: "response.created",
-                                       object: ["type": "response.created", "response": response]),
-           let second = Self.eventFrame(name: "response.in_progress",
-                                        object: ["type": "response.in_progress", "response": createdEvent]) {
-            frames.append(frame)
-            frames.append(second)
+        for name in ["response.created", "response.in_progress"] {
+            let event = ResponsesAPIBuilder.event(name, sequence: itemState.nextSequence(),
+                                                  ["response": response])
+            if let frame = Self.eventFrame(name: name, object: event) {
+                frames.append(frame)
+            }
         }
-        let framesSnapshot = frames
+        return writeStreamHead(context, initialFrames: frames, extraHeaders: [])
+    }
+
+    /// Enqueue one Responses-API event, numbering it in stream order.
+    private func responsesEvent(_ type: String,
+                                _ fields: [String: Any],
+                                itemState: ResponsesStreamState,
+                                outbox: SSEOutbox,
+                                context: ChannelHandlerContext) {
+        let object = ResponsesAPIBuilder.event(type, sequence: itemState.nextSequence(), fields)
+        guard let frame = Self.eventFrame(name: type, object: object) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream response could not be encoded",
+                       code: "internal_error", surface: .responses)
+            return
+        }
+        guard outbox.enqueue(frame) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream backpressure limit exceeded; client is too slow",
+                       code: "stream_overflow", surface: .responses)
+            return
+        }
+    }
+
+    private func enqueueResponsesEvent(_ event: ServerInferenceEvent,
+                                       id: String,
+                                       echo: ResponsesAPIEcho,
+                                       itemState: ResponsesStreamState,
+                                       outbox: SSEOutbox,
+                                       context: ChannelHandlerContext) {
+        switch event {
+        case .content(let text):
+            enqueueResponsesContentDelta(id: id, text: text, itemState: itemState,
+                                         outbox: outbox, context: context)
+        case .reasoning(let text):
+            enqueueResponsesReasoningDelta(id: id, text: text, itemState: itemState,
+                                           outbox: outbox, context: context)
+        case .toolCall(let call):
+            enqueueResponsesToolCall(id: id, call: call, itemState: itemState,
+                                     namespace: echo.namespaces[call.name],
+                                     outbox: outbox, context: context)
+        }
+    }
+
+    /// Thoughts stream as a reasoning item's summary text, ahead of the
+    /// message, the way the API's own reasoning models order them.
+    private func enqueueResponsesReasoningDelta(id: String,
+                                                text: String,
+                                                itemState: ResponsesStreamState,
+                                                outbox: SSEOutbox,
+                                                context: ChannelHandlerContext) {
+        let (index, ordinal, first) = itemState.appendReasoning(text)
+        let itemID = ResponsesAPIBuilder.reasoningItemID(responseID: id, index: ordinal)
+        if first {
+            responsesEvent("response.output_item.added",
+                           ["output_index": index,
+                            "item": ["id": itemID, "type": "reasoning", "summary": []]],
+                           itemState: itemState, outbox: outbox, context: context)
+            responsesEvent("response.reasoning_summary_part.added",
+                           ["item_id": itemID, "output_index": index, "summary_index": 0,
+                            "part": ResponsesAPIBuilder.summaryTextPart("")],
+                           itemState: itemState, outbox: outbox, context: context)
+        }
+        responsesEvent("response.reasoning_summary_text.delta",
+                       ["item_id": itemID, "output_index": index, "summary_index": 0,
+                        "delta": text],
+                       itemState: itemState, outbox: outbox, context: context)
+    }
+
+    /// Finish the open reasoning item, if any: the model has moved on to its
+    /// answer or a call, and a client renders the thought as complete.
+    private func closeResponsesReasoning(id: String,
+                                         itemState: ResponsesStreamState,
+                                         outbox: SSEOutbox,
+                                         context: ChannelHandlerContext) {
+        guard let (index, ordinal, text) = itemState.closeReasoning() else { return }
+        let itemID = ResponsesAPIBuilder.reasoningItemID(responseID: id, index: ordinal)
+        responsesEvent("response.reasoning_summary_text.done",
+                       ["item_id": itemID, "output_index": index, "summary_index": 0,
+                        "text": text],
+                       itemState: itemState, outbox: outbox, context: context)
+        responsesEvent("response.reasoning_summary_part.done",
+                       ["item_id": itemID, "output_index": index, "summary_index": 0,
+                        "part": ResponsesAPIBuilder.summaryTextPart(text)],
+                       itemState: itemState, outbox: outbox, context: context)
+        responsesEvent("response.output_item.done",
+                       ["output_index": index,
+                        "item": ResponsesAPIBuilder.reasoningItem(id: itemID, text: text)],
+                       itemState: itemState, outbox: outbox, context: context)
+    }
+
+    private func enqueueResponsesContentDelta(id: String,
+                                              text: String,
+                                              itemState: ResponsesStreamState,
+                                              outbox: SSEOutbox,
+                                              context: ChannelHandlerContext) {
+        closeResponsesReasoning(id: id, itemState: itemState, outbox: outbox, context: context)
+        let itemID = ResponsesAPIBuilder.messageItemID(responseID: id)
+        let (index, first) = itemState.announceMessage()
+        if first {
+            responsesEvent("response.output_item.added",
+                           ["output_index": index,
+                            "item": ["id": itemID, "type": "message", "role": "assistant",
+                                     "status": "in_progress", "content": []]],
+                           itemState: itemState, outbox: outbox, context: context)
+            responsesEvent("response.content_part.added",
+                           ["item_id": itemID, "output_index": index, "content_index": 0,
+                            "part": ResponsesAPIBuilder.outputTextPart("")],
+                           itemState: itemState, outbox: outbox, context: context)
+        }
+        responsesEvent("response.output_text.delta",
+                       ["item_id": itemID, "output_index": index, "content_index": 0,
+                        "delta": text, "logprobs": []],
+                       itemState: itemState, outbox: outbox, context: context)
+    }
+
+    /// A tool call arrives complete from the decoder, so its whole item life
+    /// cycle is streamed at once: added, argument deltas, done, item done.
+    private func enqueueResponsesToolCall(id: String,
+                                          call: ParsedToolCall,
+                                          itemState: ResponsesStreamState,
+                                          namespace: String?,
+                                          outbox: SSEOutbox,
+                                          context: ChannelHandlerContext) {
+        closeResponsesReasoning(id: id, itemState: itemState, outbox: outbox, context: context)
+        let (index, ordinal) = itemState.allocateCall()
+        let itemID = ResponsesAPIBuilder.functionCallItemID(responseID: id, index: ordinal)
+        responsesEvent("response.output_item.added",
+                       ["output_index": index,
+                        "item": ResponsesAPIBuilder.functionCallItem(
+                            id: itemID, name: call.name, arguments: "", callID: call.id,
+                            status: "in_progress", namespace: namespace)],
+                       itemState: itemState, outbox: outbox, context: context)
+        for fragment in utf8Fragments(call.argumentsJSON, maximumBytes: 1024) {
+            responsesEvent("response.function_call_arguments.delta",
+                           ["item_id": itemID, "output_index": index, "delta": fragment],
+                           itemState: itemState, outbox: outbox, context: context)
+        }
+        responsesEvent("response.function_call_arguments.done",
+                       ["item_id": itemID, "output_index": index, "name": call.name,
+                        "arguments": call.argumentsJSON],
+                       itemState: itemState, outbox: outbox, context: context)
+        responsesEvent("response.output_item.done",
+                       ["output_index": index,
+                        "item": ResponsesAPIBuilder.functionCallItem(
+                            id: itemID, name: call.name, arguments: call.argumentsJSON,
+                            callID: call.id, status: "completed", namespace: namespace)],
+                       itemState: itemState, outbox: outbox, context: context)
+    }
+
+    /// Close the message item, then end the stream with the terminal object:
+    /// `response.completed`, or `response.incomplete` when the output cap
+    /// cut the generation. Returns the object so it can be stored.
+    private func finishResponsesStream(_ context: ChannelHandlerContext,
+                                       id: String,
+                                       created: Int,
+                                       echo: ResponsesAPIEcho,
+                                       completion: ServerCompletion,
+                                       itemState: ResponsesStreamState,
+                                       outbox: SSEOutbox) -> [String: Any] {
+        let itemID = ResponsesAPIBuilder.messageItemID(responseID: id)
+        // A turn cut off mid-thought still finishes its reasoning item.
+        closeResponsesReasoning(id: id, itemState: itemState, outbox: outbox, context: context)
+        // A turn with no text and no calls still has one (empty) message
+        // item, as the API's own output does.
+        if itemState.messageIndex == nil, completion.toolCalls.isEmpty {
+            enqueueResponsesContentDelta(id: id, text: "", itemState: itemState,
+                                         outbox: outbox, context: context)
+        }
+        if let index = itemState.messageIndex {
+            responsesEvent("response.output_text.done",
+                           ["item_id": itemID, "output_index": index, "content_index": 0,
+                            "text": completion.content, "logprobs": []],
+                           itemState: itemState, outbox: outbox, context: context)
+            responsesEvent("response.content_part.done",
+                           ["item_id": itemID, "output_index": index, "content_index": 0,
+                            "part": ResponsesAPIBuilder.outputTextPart(completion.content)],
+                           itemState: itemState, outbox: outbox, context: context)
+            responsesEvent("response.output_item.done",
+                           ["output_index": index,
+                            "item": ResponsesAPIBuilder.messageItem(
+                                id: itemID, role: "assistant",
+                                text: completion.content, status: "completed")],
+                           itemState: itemState, outbox: outbox, context: context)
+        }
+        let final = finalResponsesObject(id: id, created: created, echo: echo,
+                                         completion: completion, itemState: itemState)
+        let name = (final["status"] as? String) == "incomplete"
+            ? "response.incomplete" : "response.completed"
+        responsesEvent(name, ["response": final],
+                       itemState: itemState, outbox: outbox, context: context)
+        // The Responses API has no [DONE] terminator; the final event is it.
+        outbox.enqueueTerminal([], closeWhenDrained: false)
+        return final
+    }
+
+    // MARK: Anthropic Messages API
+
+    /// Content-block bookkeeping for one /v1/messages stream.
+    /// unchecked-invariant: guarded by `lock`, for the same reason as the
+    /// Responses state above.
+    private final class AnthropicStreamState: @unchecked Sendable {
+        /// The two kinds of block that stream as deltas. A tool_use block
+        /// arrives whole and is never left open.
+        enum Kind {
+            case text
+            case thinking
+        }
+
+        struct Block {
+            let index: Int
+            let kind: Kind
+        }
+
+        private let lock = NSLock()
+        private var nextIndex = 0
+        private var open: Block?
+        private var _announced = false
+
+        /// True once a text or tool_use block has been opened. Thinking does
+        /// not count: a message whose only block is a thought still gets its
+        /// (empty) text block, as the non-streamed content does.
+        var announced: Bool { lock.withLock { _announced } }
+
+        /// The open block of `kind`, opening one when none is. Returns the
+        /// block of the other kind it had to close first, for the caller to
+        /// stop, since a thought and the answer never share a block.
+        func block(_ kind: Kind) -> (index: Int, first: Bool, closed: Block?) {
+            lock.withLock {
+                if kind == .text { _announced = true }
+                if let block = open, block.kind == kind { return (block.index, false, nil) }
+                let closed = open
+                let index = nextIndex
+                nextIndex += 1
+                open = Block(index: index, kind: kind)
+                return (index, true, closed)
+            }
+        }
+
+        /// Close the open block, returning it if there was one.
+        func close() -> Block? {
+            lock.withLock {
+                defer { open = nil }
+                return open
+            }
+        }
+
+        func allocate() -> Int {
+            lock.withLock {
+                _announced = true
+                defer { nextIndex += 1 }
+                return nextIndex
+            }
+        }
+    }
+
+    private static func anthropicFrame(_ object: [String: Any]) -> Data? {
+        guard let type = object["type"] as? String else { return nil }
+        return eventFrame(name: type, object: object)
+    }
+
+    /// Anthropic Messages API endpoint (`POST /v1/messages`). Mapped onto the
+    /// same validated chat request as the OpenAI paths; answered in the
+    /// Messages API's own object and event shapes.
+    private func handleMessages(body: ByteBuffer,
+                                context: ChannelHandlerContext,
+                                workspace: String? = nil) {
+        let requestID = AnthropicBuilder.requestID()
+        do {
+            let decoded = try JSONDecoder().decode(
+                AnthropicMessagesRequest.self, from: Data(body.readableBytesView))
+            let target = try servedModel(named: decoded.model)
+            let chatRequest = try AnthropicMapper.chatRequest(
+                decoded, profile: target.reasoningProfile, maxContext: target.maximumContext)
+            let request = try validate(chatRequest, for: target)
+                .withWorkspace(workspace)
+            let messageID = AnthropicBuilder.messageID()
+            let contextBox = SendableContext(context)
+            let streamState = StreamState()
+            let blockState = AnthropicStreamState()
+            let phaseState = requestPhaseState
+            let startStream: @Sendable () -> Void = {
+                guard request.stream,
+                      streamState.start(eventLoop: contextBox.value.eventLoop,
+                                        interval: self.heartbeatInterval,
+                                        ping: {
+                          self.writeAnthropicPing(contextBox.value)
+                      }) else { return }
+                let future = self.beginAnthropicStream(
+                    contextBox.value, id: messageID, requestID: requestID)
+                streamState.setStartFuture(future)
+            }
+            let onQueued: @Sendable () -> Void = {
+                phaseState.set("queued")
+                ServerLog.queued(id: messageID)
+                startStream()
+            }
+            activeTask = childChannels.startTask {
+                defer { streamState.stop() }
+                let started = ContinuousClock.now
+                ServerLog.accepted(id: messageID, streaming: request.stream)
+                let outbox: SSEOutbox? = request.stream
+                    ? SSEOutbox(capacity: Self.maximumPendingStreamChunks)
+                    : nil
+                let drainer = outbox.map { outbox in
+                    Task { [self] in
+                        await self.drainOutbox(contextBox.value, outbox: outbox)
+                    }
+                }
+                do {
+                    let completion = try await self.coordinator.run(onQueued: onQueued) {
+                        try Task.checkCancellation()
+                        startStream()
+                        try await streamState.waitUntilStarted()
+                        try Task.checkCancellation()
+                        phaseState.set("generating")
+                        ServerLog.generating(id: messageID)
+                        return try await self.backend.generate(request) { event in
+                            guard request.stream, let outbox else { return }
+                            switch event {
+                            case .content(let text):
+                                self.enqueueAnthropicDelta(
+                                    .text, text, blockState: blockState,
+                                    outbox: outbox, context: contextBox.value)
+                            case .reasoning(let text):
+                                self.enqueueAnthropicDelta(
+                                    .thinking, text, blockState: blockState,
+                                    outbox: outbox, context: contextBox.value)
+                            case .toolCall(let call):
+                                self.enqueueAnthropicToolUse(
+                                    call, blockState: blockState,
+                                    outbox: outbox, context: contextBox.value)
+                            }
+                        }
+                    }
+                    ServerLog.completed(id: messageID,
+                                        duration: started.duration(to: .now),
+                                        completion: completion)
+                    if request.stream, let outbox {
+                        streamState.stop()
+                        self.finishAnthropicStream(
+                            contextBox.value, completion: completion,
+                            blockState: blockState, outbox: outbox)
+                    } else {
+                        let stop = AnthropicBuilder.stopReason(for: completion)
+                        self.writeJSON(
+                            contextBox.value, status: .ok,
+                            object: AnthropicBuilder.messageObject(
+                                id: messageID, model: self.responseModelID,
+                                content: AnthropicBuilder.contentBlocks(completion),
+                                stopReason: stop.reason, stopSequence: stop.sequence,
+                                usage: AnthropicBuilder.usageObject(completion.usage)),
+                            surface: .anthropic, requestID: requestID)
+                    }
+                } catch {
+                    streamState.stop()
+                    self.handleAsyncFailure(
+                        error, context: contextBox.value, id: messageID,
+                        phase: phaseState.value, stream: request.stream, outbox: outbox,
+                        surface: .anthropic, requestID: requestID)
+                }
+                if let drainer {
+                    await Self.awaitDrainer(drainer)
+                }
+            }
+        } catch let error as ServerRequestError {
+            writeRequestError(context, error,
+                              status: HTTPResponseStatus(statusCode: error.httpStatus),
+                              surface: .anthropic, requestID: requestID)
+        } catch {
+            writeRequestError(context, .invalid(message: "malformed JSON request",
+                                                param: nil, code: "invalid_json"),
+                              status: .badRequest, surface: .anthropic, requestID: requestID)
+        }
+    }
+
+    /// `POST /v1/messages/count_tokens`: the prompt tokens the request would
+    /// occupy, from the backend's own tokenizer. 501 when the backend has
+    /// none to count with.
+    private func handleCountTokens(body: ByteBuffer,
+                                   context: ChannelHandlerContext) {
+        let requestID = AnthropicBuilder.requestID()
+        do {
+            let decoded = try JSONDecoder().decode(
+                AnthropicCountTokensRequest.self, from: Data(body.readableBytesView))
+            let target = try servedModel(named: decoded.model)
+            let chatRequest = try AnthropicMapper.chatRequest(counting: decoded,
+                                                              profile: target.reasoningProfile)
+            let request = try validate(chatRequest, for: target)
+            guard let counting = backend as? any PromptTokenCounting else {
+                throw ServerRequestError.unsupportedOperation("count_tokens")
+            }
+            let contextBox = SendableContext(context)
+            activeTask = childChannels.startTask {
+                do {
+                    let count = try await counting.countPromptTokens(request)
+                    self.writeJSON(contextBox.value, status: .ok, object: ["input_tokens": count],
+                                   surface: .anthropic, requestID: requestID)
+                } catch let error as ServerRequestError {
+                    self.writeRequestError(contextBox.value, error,
+                                           status: HTTPResponseStatus(statusCode: error.httpStatus),
+                                           surface: .anthropic, requestID: requestID)
+                } catch {
+                    ServerLog.failed(id: requestID, phase: "counting", status: 500, error: error)
+                    self.writeCodable(contextBox.value, status: .internalServerError,
+                                      AnthropicErrorEnvelope(type: "api_error",
+                                                             message: "token counting failed",
+                                                             requestID: requestID),
+                                      extraHeaders: [("request-id", requestID)])
+                }
+            }
+        } catch let error as ServerRequestError {
+            writeRequestError(context, error,
+                              status: HTTPResponseStatus(statusCode: error.httpStatus),
+                              surface: .anthropic, requestID: requestID)
+        } catch {
+            writeRequestError(context, .invalid(message: "malformed JSON request",
+                                                param: nil, code: "invalid_json"),
+                              status: .badRequest, surface: .anthropic, requestID: requestID)
+        }
+    }
+
+    private func beginAnthropicStream(_ context: ChannelHandlerContext,
+                                      id: String,
+                                      requestID: String) -> EventLoopFuture<Void> {
+        let message = AnthropicBuilder.messageObject(
+            id: id, model: responseModelID, content: [], stopReason: nil, stopSequence: nil,
+            usage: ["input_tokens": 0, "output_tokens": 0,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0])
+        let frame = Self.anthropicFrame(["type": "message_start", "message": message]) ?? Data()
+        return writeStreamHead(context, initialFrames: frame, extraHeaders: [("request-id", requestID)])
+    }
+
+    private func anthropicEvent(_ object: [String: Any],
+                                outbox: SSEOutbox,
+                                context: ChannelHandlerContext) {
+        guard let frame = Self.anthropicFrame(object) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream response could not be encoded",
+                       code: "internal_error", surface: .anthropic)
+            return
+        }
+        guard outbox.enqueue(frame) else {
+            failStream(outbox: outbox, context: context,
+                       message: "stream backpressure limit exceeded; client is too slow",
+                       code: "stream_overflow", surface: .anthropic)
+            return
+        }
+    }
+
+    /// Text or thinking, into the open block of that kind. A thought streams
+    /// as its own `thinking` block ahead of the text, with `thinking_delta`s,
+    /// as the Messages API streams extended thinking.
+    private func enqueueAnthropicDelta(_ kind: AnthropicStreamState.Kind,
+                                       _ text: String,
+                                       blockState: AnthropicStreamState,
+                                       outbox: SSEOutbox,
+                                       context: ChannelHandlerContext) {
+        let (index, first, closed) = blockState.block(kind)
+        if let closed {
+            stopAnthropicBlock(closed, outbox: outbox, context: context)
+        }
+        if first {
+            let start: [String: Any] = kind == .text
+                ? ["type": "text", "text": ""]
+                : ["type": "thinking", "thinking": "",
+                   "signature": AnthropicBuilder.thinkingSignature]
+            anthropicEvent(["type": "content_block_start", "index": index,
+                            "content_block": start],
+                           outbox: outbox, context: context)
+        }
+        let delta: [String: Any] = kind == .text
+            ? ["type": "text_delta", "text": text]
+            : ["type": "thinking_delta", "thinking": text]
+        anthropicEvent(["type": "content_block_delta", "index": index, "delta": delta],
+                       outbox: outbox, context: context)
+    }
+
+    /// End a streamed block. A thinking block is signed first, as the API
+    /// always does just before its stop, so a client that assembles the
+    /// block from its deltas ends up with the same object as the
+    /// non-streamed content (see `AnthropicBuilder.thinkingSignature`).
+    private func stopAnthropicBlock(_ block: AnthropicStreamState.Block,
+                                    outbox: SSEOutbox,
+                                    context: ChannelHandlerContext) {
+        if block.kind == .thinking {
+            anthropicEvent(["type": "content_block_delta", "index": block.index,
+                            "delta": ["type": "signature_delta",
+                                      "signature": AnthropicBuilder.thinkingSignature]],
+                           outbox: outbox, context: context)
+        }
+        anthropicEvent(["type": "content_block_stop", "index": block.index],
+                       outbox: outbox, context: context)
+    }
+
+    private func enqueueAnthropicToolUse(_ call: ParsedToolCall,
+                                         blockState: AnthropicStreamState,
+                                         outbox: SSEOutbox,
+                                         context: ChannelHandlerContext) {
+        if let open = blockState.close() {
+            stopAnthropicBlock(open, outbox: outbox, context: context)
+        }
+        let index = blockState.allocate()
+        anthropicEvent(["type": "content_block_start", "index": index,
+                        "content_block": ["type": "tool_use", "id": call.id,
+                                          "name": call.name, "input": [:]]],
+                       outbox: outbox, context: context)
+        for fragment in utf8Fragments(call.argumentsJSON, maximumBytes: 1024) {
+            anthropicEvent(["type": "content_block_delta", "index": index,
+                            "delta": ["type": "input_json_delta", "partial_json": fragment]],
+                           outbox: outbox, context: context)
+        }
+        anthropicEvent(["type": "content_block_stop", "index": index],
+                       outbox: outbox, context: context)
+    }
+
+    private func finishAnthropicStream(_ context: ChannelHandlerContext,
+                                       completion: ServerCompletion,
+                                       blockState: AnthropicStreamState,
+                                       outbox: SSEOutbox) {
+        // A message always carries at least one text or tool_use block.
+        if !blockState.announced {
+            enqueueAnthropicDelta(.text, "", blockState: blockState, outbox: outbox,
+                                  context: context)
+        }
+        if let open = blockState.close() {
+            stopAnthropicBlock(open, outbox: outbox, context: context)
+        }
+        let stop = AnthropicBuilder.stopReason(for: completion)
+        anthropicEvent(["type": "message_delta",
+                        "delta": ["stop_reason": stop.reason,
+                                  "stop_sequence": stop.sequence.map { $0 as Any } ?? NSNull()],
+                        "usage": AnthropicBuilder.usageObject(completion.usage)],
+                       outbox: outbox, context: context)
+        anthropicEvent(["type": "message_stop"], outbox: outbox, context: context)
+        outbox.enqueueTerminal([], closeWhenDrained: false)
+    }
+
+    private func writeAnthropicPing(_ context: ChannelHandlerContext) {
+        let buffer = context.channel.allocator.buffer(string: "event: ping\ndata: {\"type\": \"ping\"}\n\n")
+        context.writeAndFlush(
+            wrapOutboundOut(.body(.byteBuffer(buffer))),
+            promise: nil)
+    }
+
+    // MARK: Shared response plumbing
+
+    /// Start an SSE response: the head, then whatever frames the surface
+    /// opens with.
+    private func writeStreamHead(_ context: ChannelHandlerContext,
+                                 initialFrames: Data,
+                                 extraHeaders: [(String, String)]) -> EventLoopFuture<Void> {
         var headers = HTTPHeaders()
         headers.add(name: "content-type", value: "text/event-stream")
         headers.add(name: "cache-control", value: "no-cache")
         headers.add(name: "connection", value: "keep-alive")
         headers.add(name: Self.openAIVersionHeader.0, value: Self.openAIVersionHeader.1)
+        for (name, value) in extraHeaders {
+            headers.add(name: name, value: value)
+        }
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         let contextBox = SendableContext(context)
         let promise = context.eventLoop.makePromise(of: Void.self)
         context.eventLoop.execute {
             contextBox.value.write(self.wrapOutboundOut(.head(head)), promise: nil)
-            var buffer = contextBox.value.channel.allocator.buffer(capacity: framesSnapshot.count)
-            buffer.writeBytes(framesSnapshot)
+            var buffer = contextBox.value.channel.allocator.buffer(capacity: initialFrames.count)
+            buffer.writeBytes(initialFrames)
             contextBox.value.writeAndFlush(
                 self.wrapOutboundOut(.body(.byteBuffer(buffer))),
                 promise: promise)
@@ -676,158 +1598,122 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         return promise.futureResult
     }
 
-    private func enqueueResponsesEvent(name: String,
-                                       object: [String: Any],
-                                       outbox: SSEOutbox,
-                                       context: ChannelHandlerContext) {
-        guard let frame = Self.eventFrame(name: name, object: object) else {
-            failStream(outbox: outbox, context: context,
-                       message: "stream response could not be encoded",
-                       code: "internal_error")
+    /// A request error in the surface's envelope, with the status the error
+    /// maps to.
+    private func writeRequestError(_ context: ChannelHandlerContext,
+                                   _ error: ServerRequestError,
+                                   status: HTTPResponseStatus,
+                                   surface: APISurface,
+                                   requestID: String? = nil) {
+        switch surface {
+        case .chat, .responses:
+            writeCodable(context, status: status, error.envelope)
+        case .anthropic:
+            let id = requestID ?? AnthropicBuilder.requestID()
+            writeCodable(context, status: status,
+                         AnthropicErrorEnvelope.from(error, requestID: id),
+                         extraHeaders: [("request-id", id)])
+        }
+    }
+
+    private func writeJSON(_ context: ChannelHandlerContext,
+                           status: HTTPResponseStatus,
+                           object: Any,
+                           surface: APISurface,
+                           requestID: String? = nil) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            writeData(context, status: .internalServerError, data: Self.minimalErrorData)
             return
         }
-        guard outbox.enqueue(frame) else {
-            failStream(outbox: outbox, context: context,
-                       message: "stream backpressure limit exceeded; client is too slow",
-                       code: "stream_overflow")
+        let headers: [(String, String)] = surface == .anthropic
+            ? [("request-id", requestID ?? AnthropicBuilder.requestID())] : []
+        writeData(context, status: status, data: data, extraHeaders: headers)
+    }
+
+    /// A generation that failed after the request was accepted. Streams get
+    /// the surface's failure frames and are closed; a cancelled stream (the
+    /// client left, or shutdown) just ends. Non-streaming requests get the
+    /// error envelope with its status.
+    private func handleAsyncFailure(_ error: Error,
+                                    context: ChannelHandlerContext,
+                                    id: String,
+                                    phase: String,
+                                    stream: Bool,
+                                    outbox: SSEOutbox?,
+                                    surface: APISurface,
+                                    requestID: String? = nil,
+                                    failureFrames: (@Sendable (OpenAIErrorEnvelope) -> [Data])? = nil) {
+        let envelope: OpenAIErrorEnvelope
+        let status: HTTPResponseStatus
+        if let requestError = error as? ServerRequestError {
+            status = HTTPResponseStatus(statusCode: requestError.httpStatus)
+            envelope = requestError.envelope
+        } else {
+            status = .internalServerError
+            envelope = OpenAIErrorEnvelope(
+                message: "generation failed; see NVMAIServer stderr",
+                code: "internal_error",
+                type: "server_error")
+        }
+        if !(error is CancellationError) {
+            ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
+        }
+        if stream, let outbox {
+            // S5/S20: never leave a streaming client without a terminal frame.
+            if error is CancellationError {
+                outbox.enqueueTerminal(surface == .chat ? [Self.doneFrame()] : [],
+                                       closeWhenDrained: true)
+            } else {
+                let frames = failureFrames?(envelope)
+                    ?? Self.failureFrames(envelope, surface: surface, requestID: requestID)
+                outbox.enqueueTerminal(frames, closeWhenDrained: true)
+            }
             return
         }
-    }
-
-    private func enqueueResponsesContentDelta(id: String,
-                                              created: Int,
-                                              request: ValidatedChatRequest,
-                                              text: String,
-                                              itemState: ResponsesItemState,
-                                              outbox: SSEOutbox,
-                                              context: ChannelHandlerContext) {
-        if !itemState.messageAnnounced {
-            itemState.messageAnnounced = true
-            enqueueResponsesEvent(
-                name: "response.output_item.added",
-                object: ["type": "response.output_item.added", "output_index": 0,
-                         "item": ["id": id + "_msg0", "type": "message",
-                                  "role": "assistant", "status": "in_progress",
-                                  "content": []]],
-                outbox: outbox, context: context)
-            enqueueResponsesEvent(
-                name: "response.content_part.added",
-                object: ["type": "response.content_part.added", "item_id": id + "_msg0",
-                         "output_index": 0, "content_index": 0,
-                         "part": ["type": "output_text", "text": "", "annotations": []]],
-                outbox: outbox, context: context)
+        if error is CancellationError {
+            // S20: the client disconnected or the server is shutting down;
+            // there is no one to write to. Do not emit a misleading 500.
+            return
         }
-        enqueueResponsesEvent(
-            name: "response.output_text.delta",
-            object: ["type": "response.output_text.delta", "item_id": id + "_msg0",
-                     "output_index": 0, "content_index": 0, "delta": text],
-            outbox: outbox, context: context)
-        enqueueResponsesEvent(
-            name: "response.content_part.delta",
-            object: ["type": "response.content_part.delta", "item_id": id + "_msg0",
-                     "output_index": 0, "content_index": 0,
-                     "delta": ["type": "output_text", "text": text, "annotations": []]],
-            outbox: outbox, context: context)
-    }
-
-    private func enqueueResponsesToolDelta(id: String,
-                                           created: Int,
-                                           request: ValidatedChatRequest,
-                                           call: ParsedToolCall,
-                                           itemState: ResponsesItemState,
-                                           outbox: SSEOutbox,
-                                           context: ChannelHandlerContext) {
-        let index = itemState.toolCount
-        itemState.toolCount += 1
-        let outputIndex = index + 1
-        let itemID = id + "_fc\(index)"
-        enqueueResponsesEvent(
-            name: "response.output_item.added",
-            object: ["type": "response.output_item.added", "output_index": outputIndex,
-                     "item": ["id": itemID, "type": "function_call",
-                              "status": "in_progress", "name": call.name,
-                              "arguments": "", "call_id": call.id,
-                              "output_index": outputIndex]],
-            outbox: outbox, context: context)
-        let fragments = utf8Fragments(call.argumentsJSON, maximumBytes: 1024)
-        for fragment in fragments {
-            enqueueResponsesEvent(
-                name: "response.function_call_arguments.delta",
-                object: ["type": "response.function_call_arguments.delta",
-                         "item_id": itemID, "output_index": outputIndex, "delta": fragment],
-                outbox: outbox, context: context)
+        if let requestError = error as? ServerRequestError {
+            writeRequestError(context, requestError, status: status, surface: surface,
+                              requestID: requestID)
+        } else if surface == .anthropic {
+            let id = requestID ?? AnthropicBuilder.requestID()
+            writeCodable(context, status: status,
+                         AnthropicErrorEnvelope(type: "api_error", message: envelope.error.message,
+                                                requestID: id),
+                         extraHeaders: [("request-id", id)])
+        } else {
+            writeError(context, status: status, envelope)
         }
     }
 
-    private func finishResponsesStream(_ context: ChannelHandlerContext,
-                                       id: String,
-                                       created: Int,
-                                       request: ValidatedChatRequest,
-                                       completion: ServerCompletion,
-                                       itemState: ResponsesItemState,
-                                       outbox: SSEOutbox) {
-        if itemState.messageAnnounced {
-            enqueueResponsesEvent(
-                name: "response.content_part.done",
-                object: ["type": "response.content_part.done", "item_id": id + "_msg0",
-                         "output_index": 0, "content_index": 0,
-                         "part": ["type": "output_text", "text": completion.content,
-                                  "annotations": []]],
+    /// One streamed chat event as its chunk. Reasoning rides in
+    /// `delta.reasoning_content`, the vLLM and DeepSeek convention that
+    /// Qwen Code, OpenCode and their kind read; a client that knows no
+    /// such field ignores it and sees the answer alone.
+    private func enqueueChatEvent(_ event: ServerInferenceEvent,
+                                  id: String,
+                                  created: Int,
+                                  streamState: StreamState,
+                                  outbox: SSEOutbox,
+                                  context: ChannelHandlerContext) {
+        switch event {
+        case .content(let text):
+            enqueueStreamChunk(
+                chunk(id: id, created: created, delta: ["content": text], finishReason: nil),
                 outbox: outbox, context: context)
-            enqueueResponsesEvent(
-                name: "response.output_item.done",
-                object: ["type": "response.output_item.done", "output_index": 0,
-                         "item": ResponsesAPIBuilder.messageItem(
-                            id: id + "_msg0", role: "assistant",
-                            text: completion.content, status: "completed")],
+        case .reasoning(let text):
+            enqueueStreamChunk(
+                chunk(id: id, created: created, delta: ["reasoning_content": text],
+                      finishReason: nil),
                 outbox: outbox, context: context)
+        case .toolCall(let call):
+            enqueueToolCallChunks(id: id, created: created,
+                                  toolIndex: streamState.nextToolIndex(), call: call,
+                                  outbox: outbox, context: context)
         }
-        for (index, call) in completion.toolCalls.enumerated() {
-            let outputIndex = index + 1
-            let itemID = id + "_fc\(index)"
-            enqueueResponsesEvent(
-                name: "response.function_call_arguments.done",
-                object: ["type": "response.function_call_arguments.done",
-                         "item_id": itemID, "output_index": outputIndex,
-                         "arguments": call.argumentsJSON],
-                outbox: outbox, context: context)
-            enqueueResponsesEvent(
-                name: "response.output_item.done",
-                object: ["type": "response.output_item.done", "output_index": outputIndex,
-                         "item": ResponsesAPIBuilder.functionCallItem(
-                            id: itemID, name: call.name,
-                            arguments: call.argumentsJSON, callID: call.id,
-                            outputIndex: outputIndex, status: "completed")],
-                outbox: outbox, context: context)
-        }
-        var output = ResponsesAPIBuilder.outputItems(completion: completion, idPrefix: id)
-        if output.isEmpty {
-            output.append(ResponsesAPIBuilder.messageItem(
-                id: id + "_msg0", role: "assistant", text: "", status: "completed"))
-        }
-        if let frame = Self.eventFrame(
-            name: "response.completed",
-            object: ["type": "response.completed",
-                     "response": ResponsesAPIBuilder.responseObject(
-                        id: id, created: created, model: modelID, status: "completed",
-                        output: output, usage: completion.usage,
-                        reasoningEffort: reasoningProfile.effectiveEffort)]) {
-            _ = outbox.enqueue(frame)
-        }
-        outbox.enqueueTerminal([Self.doneFrame()], closeWhenDrained: false)
-    }
-
-    private func writeResponses(_ context: ChannelHandlerContext,
-                                id: String,
-                                created: Int,
-                                request: ValidatedChatRequest,
-                                completion: ServerCompletion) {
-        let output = ResponsesAPIBuilder.outputItems(completion: completion, idPrefix: id)
-        writeJSON(context, status: .ok, object:
-                  ResponsesAPIBuilder.responseObject(
-                    id: id, created: created, model: modelID, status: "completed",
-                    output: output, usage: completion.usage,
-                    reasoningEffort: reasoningProfile.effectiveEffort))
     }
 
     private func writeCompletion(_ context: ChannelHandlerContext,
@@ -842,6 +1728,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "role": "assistant",
             "content": encodedContent,
         ]
+        // Absent rather than empty with thinking off, so that response is
+        // byte for byte what it was.
+        if !completion.reasoning.isEmpty {
+            message["reasoning_content"] = completion.reasoning
+        }
         if !completion.toolCalls.isEmpty {
             message["tool_calls"] = completion.toolCalls.map(toolCallObject)
         }
@@ -849,7 +1740,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion",
             "created": created,
-            "model": modelID,
+            "model": responseModelID,
             "choices": [[
                 "index": 0,
                 "message": message,
@@ -934,7 +1825,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                "id": id,
                "object": "chat.completion.chunk",
                "created": created,
-               "model": modelID,
+               "model": responseModelID,
                "choices": [],
                "usage": usageObject(completion.usage),
            ]) {
@@ -952,7 +1843,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "id": id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": modelID,
+            "model": responseModelID,
             "choices": [[
                 "index": 0,
                 "delta": delta,
@@ -991,13 +1882,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private func failStream(outbox: SSEOutbox,
                             context: ChannelHandlerContext,
                             message: String,
-                            code: String) {
+                            code: String,
+                            surface: APISurface = .chat) {
         let envelope = OpenAIErrorEnvelope(message: message,
                                            code: code,
                                            type: "server_error")
-        outbox.enqueueTerminal(
-            Self.errorFrame(envelope).map { [$0, Self.doneFrame()] } ?? [Self.doneFrame()],
-            closeWhenDrained: true)
+        outbox.enqueueTerminal(Self.failureFrames(envelope, surface: surface),
+                               closeWhenDrained: true)
         activeTask?.cancel()
     }
 
@@ -1068,53 +1959,6 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             promise: nil)
     }
 
-    private func handleAsyncError(_ error: Error,
-                                  context: ChannelHandlerContext,
-                                  id: String,
-                                  phase: String,
-                                  stream: Bool,
-                                  outbox: SSEOutbox?) {
-        let envelope: OpenAIErrorEnvelope
-        let status: HTTPResponseStatus
-        if let requestError = error as? ServerRequestError {
-            switch requestError {
-            case .queueFull: status = .tooManyRequests
-            case .unknownModel: status = .notFound
-            default: status = .badRequest
-            }
-            envelope = requestError.envelope
-        } else {
-            status = .internalServerError
-            envelope = OpenAIErrorEnvelope(
-                message: "generation failed; see NVMAIServer stderr",
-                code: "internal_error",
-                type: "server_error")
-        }
-        if !(error is CancellationError) {
-            ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
-        }
-        if stream, let outbox {
-            // S5/S20: never leave a streaming client without a terminal frame.
-            // Cancellation (client disconnect / shutdown) ends the stream
-            // cleanly with [DONE]; real failures emit an error event first and
-            // the connection is closed after the frames drain.
-            if error is CancellationError {
-                outbox.enqueueTerminal([Self.doneFrame()], closeWhenDrained: true)
-            } else {
-                outbox.enqueueTerminal(
-                    Self.errorFrame(envelope).map { [$0, Self.doneFrame()] } ?? [Self.doneFrame()],
-                    closeWhenDrained: true)
-            }
-            return
-        }
-        if error is CancellationError {
-            // S20: the client disconnected or the server is shutting down;
-            // there is no one to write to. Do not emit a misleading 500.
-            return
-        }
-        writeError(context, status: status, envelope)
-    }
-
     private func writeHeadOnly(_ context: ChannelHandlerContext,
                                status: HTTPResponseStatus) {
         let contextBox = SendableContext(context)
@@ -1136,14 +1980,15 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     private func writeCodable<T: Encodable>(_ context: ChannelHandlerContext,
                                             status: HTTPResponseStatus,
-                                            _ value: T) {
+                                            _ value: T,
+                                            extraHeaders: [(String, String)] = []) {
         guard let data = try? JSONEncoder().encode(value) else {
             // S5: encoding failure must not silently drop the response; send a
             // minimal error envelope instead.
             writeData(context, status: .internalServerError, data: Self.minimalErrorData)
             return
         }
-        writeData(context, status: status, data: data)
+        writeData(context, status: status, data: data, extraHeaders: extraHeaders)
     }
 
     private func writeError(_ context: ChannelHandlerContext,
@@ -1164,13 +2009,17 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 
     private func writeData(_ context: ChannelHandlerContext,
                            status: HTTPResponseStatus,
-                           data: Data) {
+                           data: Data,
+                           extraHeaders: [(String, String)] = []) {
         let contextBox = SendableContext(context)
         context.eventLoop.execute {
             var headers = HTTPHeaders()
             headers.add(name: "content-type", value: "application/json")
             headers.add(name: "content-length", value: "\(data.count)")
             headers.add(name: Self.openAIVersionHeader.0, value: Self.openAIVersionHeader.1)
+            for (name, value) in extraHeaders {
+                headers.add(name: name, value: value)
+            }
             contextBox.value.write(self.wrapOutboundOut(.head(
                 HTTPResponseHead(version: .http1_1, status: status, headers: headers))),
                 promise: nil)

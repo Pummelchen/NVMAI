@@ -2,6 +2,9 @@ import Foundation
 
 public enum StructuredAssistantEvent: Equatable, Sendable {
     case content(String)
+    /// Text the model wrote inside `<think>`…`</think>`: its reasoning, which
+    /// a client shows apart from the answer, or not at all.
+    case reasoning(String)
     case toolCall(ParsedToolCall)
 }
 
@@ -17,20 +20,85 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     private let tokenizer: GFTokenizer
     private let allowedTools: Set<String>
+    private let parsesToolCalls: Bool
     private let idGenerator: @Sendable () -> String
-    private var channel: Channel = .visible
+    private var channel: Channel
+    /// Set when a thought closes, until the answer's first character. The
+    /// templates strip the newlines between `</think>` and the answer when
+    /// they render the turn back (`content.split('</think>')[-1].lstrip('\n')`),
+    /// so the answer reported here starts where the template's would.
+    private var trimsLeadingNewlines = false
     private var toolTokens: [Int32]?
     private var emittedCalls = 0
     private var failed = false
 
+    /// `startsInThought` is true when the rendered prompt already opened a
+    /// `<think>` block: the model's first token is then reasoning, and it
+    /// never writes the opening marker itself. `parsesToolCalls` is false for
+    /// a prompt rendered without the tool template, where there is no tool to
+    /// call; a `<tool_call>` the model writes anyway streams as text, exactly
+    /// as it does when no decoder runs at all.
     public init(tokenizer: GFTokenizer,
                 allowedTools: Set<String>,
+                startsInThought: Bool = false,
+                parsesToolCalls: Bool = true,
                 idGenerator: @escaping @Sendable () -> String = {
                     "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
                 }) {
         self.tokenizer = tokenizer
         self.allowedTools = allowedTools
+        self.parsesToolCalls = parsesToolCalls
         self.idGenerator = idGenerator
+        self.channel = startsInThought ? .thought : .visible
+    }
+
+    /// The decoder a generation's output runs through, or nil when the output
+    /// streams verbatim. Both engines ask this one question, so the thought
+    /// split is the same rule wherever a model runs.
+    ///
+    /// A tool-templated prompt always gets a decoder, as it always has: its
+    /// calls are parsed here. Otherwise one is built only when there can be a
+    /// thought to split -- thinking is on, or the prompt left a `<think>`
+    /// open. With thinking off neither holds, and the output keeps the
+    /// verbatim path it has always had. `allowedTools` is nil when the prompt
+    /// was rendered without the tool template.
+    public static func forGeneration(tokenizer: GFTokenizer,
+                                     promptIDs: [Int32],
+                                     allowedTools: Set<String>?) -> StructuredAssistantDecoder? {
+        let opensThought = promptLeavesThoughtOpen(promptIDs, tokenizer: tokenizer)
+        if let allowedTools {
+            return StructuredAssistantDecoder(tokenizer: tokenizer,
+                                              allowedTools: allowedTools,
+                                              startsInThought: opensThought)
+        }
+        guard tokenizer.thinkingMode.isEnabled || opensThought else { return nil }
+        return StructuredAssistantDecoder(tokenizer: tokenizer,
+                                          allowedTools: [],
+                                          startsInThought: opensThought,
+                                          parsesToolCalls: false)
+    }
+
+    /// Whether generation begins inside a thought.
+    ///
+    /// Every supported template's thinking-on generation prompt ends in
+    /// `<think>\n`, so the model starts mid-thought and its first `<think>`
+    /// is never generated; with thinking off the prompt closes the block
+    /// (`<think>\n\n</think>\n\n`). Only the tokens after the last
+    /// `<|im_end|>` are read. That is the generation prompt, and an earlier
+    /// turn's markers -- a replayed thought, a user quoting the tag -- say
+    /// nothing about where this generation starts.
+    public static func promptLeavesThoughtOpen(_ promptIDs: [Int32],
+                                               tokenizer: GFTokenizer) -> Bool {
+        guard let start = tokenizer.thinkStartID, let end = tokenizer.thinkEndID else {
+            return false
+        }
+        let generationPrompt = promptIDs.lastIndex(of: tokenizer.endOfTurnID)
+            .map { promptIDs[($0 + 1)...] } ?? promptIDs[...]
+        var open = false
+        for id in generationPrompt {
+            if id == start { open = true } else if id == end { open = false }
+        }
+        return open
     }
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
@@ -38,17 +106,40 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         return try consumeChatML(tokenID: tokenID, delta: delta)
     }
 
-    /// ChatML transitions: `<think>`…`</think>` suppress thought text, and
-    /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser. Everything
-    /// else streams as visible content.
+    /// ChatML transitions: `<think>`…`</think>` carry reasoning, and
+    /// `<tool_call>`…`</tool_call>` buffer tokens for the Qwen parser.
+    /// Everything else streams in whichever channel is open.
     private func consumeChatML(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        if parsesToolCalls, let events = try consumeToolToken(tokenID: tokenID, delta: delta) {
+            return events
+        }
+        if tokenID == tokenizer.thinkStartID {
+            let prefix = try boundaryPrefix(delta, marker: "<think>")
+            let events = channelEvents(prefix)
+            channel = .thought
+            trimsLeadingNewlines = false
+            return events
+        }
+        if tokenID == tokenizer.thinkEndID {
+            let prefix = try boundaryPrefix(delta, marker: "</think>")
+            let events = channelEvents(prefix)
+            trimsLeadingNewlines = channel == .thought
+            channel = .visible
+            return events
+        }
+        return channelEvents(delta)
+    }
+
+    /// A tool marker, or a token inside an open call; nil for anything else.
+    private func consumeToolToken(tokenID: Int32,
+                                  delta: String) throws -> [StructuredAssistantEvent]? {
         if tokenID == tokenizer.toolCallStartID {
             guard toolTokens == nil else {
                 failed = true
                 throw ToolCallParserError.malformed
             }
             let prefix = try boundaryPrefix(delta, marker: "<tool_call>")
-            let events = visibleEvents(prefix)
+            let events = channelEvents(prefix)
             toolTokens = []
             return events
         }
@@ -70,36 +161,23 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 throw error
             }
         }
-        if var tokens = toolTokens {
-            tokens.append(tokenID)
-            guard tokens.count * MemoryLayout<Int32>.size <= QwenToolCallParser.maximumBytes else {
-                failed = true
-                throw ToolCallParserError.oversized
-            }
-            toolTokens = tokens
-            return []
+        guard var tokens = toolTokens else { return nil }
+        tokens.append(tokenID)
+        guard tokens.count * MemoryLayout<Int32>.size <= QwenToolCallParser.maximumBytes else {
+            failed = true
+            throw ToolCallParserError.oversized
         }
-        if tokenID == tokenizer.thinkStartID {
-            let prefix = try boundaryPrefix(delta, marker: "<think>")
-            let events = visibleEvents(prefix)
-            channel = .thought
-            return events
-        }
-        if tokenID == tokenizer.thinkEndID {
-            _ = try boundaryPrefix(delta, marker: "</think>")
-            channel = .visible
-            return []
-        }
-        guard channel != .thought else { return [] }
-        return delta.isEmpty ? [] : [.content(delta)]
+        toolTokens = tokens
+        return []
     }
 
     /// Routes the detokenizer's final buffered bytes through the current
-    /// channel instead of allowing thought/tool tails to become visible.
+    /// channel: a thought's tail is reasoning, and an unfinished tool call's
+    /// tail never becomes visible.
     public func consumeTail(_ text: String) throws -> [StructuredAssistantEvent] {
         guard !failed else { throw ToolCallParserError.malformed }
-        guard toolTokens == nil, channel != .thought else { return [] }
-        return visibleEvents(text)
+        guard toolTokens == nil else { return [] }
+        return channelEvents(text)
     }
 
     private func boundaryPrefix(_ delta: String, marker: String) throws -> String {
@@ -110,9 +188,19 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         return String(delta.dropLast(marker.count))
     }
 
-    private func visibleEvents(_ text: String) -> [StructuredAssistantEvent] {
-        guard channel != .thought, !text.isEmpty else { return [] }
-        return [.content(text)]
+    private func channelEvents(_ text: String) -> [StructuredAssistantEvent] {
+        switch channel {
+        case .thought:
+            return text.isEmpty ? [] : [.reasoning(text)]
+        case .visible:
+            var visible = Substring(text)
+            if trimsLeadingNewlines {
+                visible = visible.drop { $0 == "\n" }
+                guard !visible.isEmpty else { return [] }
+                trimsLeadingNewlines = false
+            }
+            return visible.isEmpty ? [] : [.content(String(visible))]
+        }
     }
 
     public func finish() throws {

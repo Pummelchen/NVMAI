@@ -45,6 +45,22 @@ public struct ServerArguments: Equatable, Sendable {
     public let lazyLoad: Bool
     /// Release the weights after this many idle seconds; 0 disables unloading.
     public let idleUnloadSeconds: Int
+    /// Serve every model under this directory, one resident at a time, with
+    /// `model` naming the one loaded first. Nil keeps the single-model server
+    /// exactly as it was, which the benchmark harness depends on.
+    public let modelsDirectory: String?
+    /// Print the catalog of `modelsDirectory` as JSON and exit.
+    public let catalogOnly: Bool
+    /// The explicit `--reasoning` level; nil when the older flags were used.
+    public let reasoningLevel: ReasoningLevel?
+
+    /// The server-wide level, however it was spelled: `--reasoning` wins,
+    /// otherwise `--thinking` and `--reasoning-effort` say the same thing.
+    public var requestedReasoningLevel: ReasoningLevel {
+        if let reasoningLevel { return reasoningLevel }
+        guard thinkingMode.isEnabled else { return .off }
+        return reasoningEffort.flatMap { ReasoningLevel(rawValue: $0.rawValue) } ?? .on
+    }
 
     /// Unloading implies deferring the first load — loading at boot only to
     /// drop it moments later is incoherent. Derived rather than folded into
@@ -62,8 +78,26 @@ public struct ServerArguments: Equatable, Sendable {
 
     public static let usage = """
     usage: NVMAIServer --model <completed .gturbo directory> [options]
+           NVMAIServer --models-dir <dir> --model <id or dir> [options]
+           NVMAIServer --catalog --models-dir <dir>
 
-      --model <dir>          Required model directory.
+      --model <dir>          Required model directory. With --models-dir, the
+                             model loaded first: a catalog id or a directory.
+      --models-dir <dir>     Serve every model under dir -- GPU installs and
+                             CPU snapshots alike -- keeping one resident. A
+                             request naming another catalog model waits for
+                             in-flight generations, unloads the resident model
+                             and loads the named one. /v1/models lists them.
+      --catalog              With --models-dir: print the catalog as JSON and
+                             exit without loading anything.
+      --reasoning <level>    Server-wide reasoning level: off, on, minimal, low,
+                             medium, high, xhigh or max, applied to whichever
+                             model is loaded. A model without that level gets
+                             the closest it has: an effort on an on/off model
+                             is on, on for an effort model is its template's
+                             default effort (extra high for Qwen3.8), off is
+                             always off. Replaces --thinking and
+                             --reasoning-effort, which keep working.
       --mtp-model <dir>      Optional native Qwen/Ornith MTP sidecar directory.
       --mtp-memory-mib <MiB> Strict incremental MTP budget, 256...512
                              (default 384).
@@ -162,10 +196,22 @@ public struct ServerArguments: Equatable, Sendable {
         var expertCacheBudgetBytes: Int?
         var lazyLoad = false
         var idleUnloadSeconds = 0
+        var modelsDirectory: String?
+        var catalogOnly = false
+        var reasoningLevel: ReasoningLevel?
+        // Tracked apart from the values, which the environment can also set:
+        // only flags typed next to --reasoning conflict with it.
+        var thinkingWasSet = false
+        var effortWasSet = false
         var index = 0
         while index < input.count {
             let flag = input[index]
             if flag == "--help" || flag == "-h" { throw ServerArgumentError.help }
+            if flag == "--catalog" {
+                catalogOnly = true
+                index += 1
+                continue
+            }
             // Valueless flags are consumed before the "requires a value" guard
             // below; otherwise `--lazy-load --port 9999` would swallow --port
             // as this flag's value and then reject it as unknown.
@@ -278,12 +324,26 @@ public struct ServerArguments: Equatable, Sendable {
                     throw ServerArgumentError.invalid("--thinking must be off or on")
                 }
                 thinkingMode = parsed
+                thinkingWasSet = true
             case "--reasoning-effort":
                 guard let parsed = ModelReasoningEffort(rawValue: value) else {
                     throw ServerArgumentError.invalid(
                         "--reasoning-effort must be low, medium, or xhigh")
                 }
                 reasoningEffort = parsed
+                effortWasSet = true
+            case "--reasoning":
+                guard let parsed = ReasoningLevel(rawValue: value) else {
+                    throw ServerArgumentError.invalid(
+                        "--reasoning must be one of "
+                        + ReasoningLevel.allCases.map(\.rawValue).joined(separator: ", "))
+                }
+                reasoningLevel = parsed
+            case "--models-dir":
+                guard !value.isEmpty else {
+                    throw ServerArgumentError.invalid("--models-dir must not be empty")
+                }
+                modelsDirectory = value
             case "--expert-cache-slots":
                 guard let parsed = Int(value),
                       RuntimeConfiguration.allowedExpertCacheSlots.contains(parsed) else {
@@ -307,7 +367,32 @@ public struct ServerArguments: Equatable, Sendable {
                 throw ServerArgumentError.invalid("unknown flag: \(flag)")
             }
         }
-        guard let model else { throw ServerArgumentError.invalid("--model is required") }
+        if catalogOnly, modelsDirectory == nil {
+            throw ServerArgumentError.invalid("--catalog requires --models-dir")
+        }
+        // Listing the catalog loads nothing, so it needs no initial model.
+        guard let model = model ?? (catalogOnly ? "" : nil) else {
+            throw ServerArgumentError.invalid("--model is required")
+        }
+        if reasoningLevel != nil, thinkingWasSet || effortWasSet {
+            throw ServerArgumentError.invalid(
+                "--reasoning replaces --thinking and --reasoning-effort; pass one or the other")
+        }
+        if modelsDirectory != nil, !catalogOnly {
+            // Each of these configures one model; with a catalog there is no
+            // single model for it to mean.
+            let conflicts: [(present: Bool, why: String)] = [
+                (modelIDOverride != nil, "--model-id: every catalog model keeps its own id"),
+                (mtpModel != nil, "--mtp-model: a draft head belongs to one model"),
+                (cpu, "--cpu: the catalog knows which engine each model uses"),
+                (idleUnloadSeconds > 0,
+                 "--idle-unload-seconds: POST /v1/models/unload releases the resident model"),
+            ]
+            if let conflict = conflicts.first(where: \.present) {
+                throw ServerArgumentError.invalid(
+                    "--models-dir cannot be combined with \(conflict.why)")
+            }
+        }
         if ropeScalingMode == .yarn {
             if !maxContextWasSet {
                 maxContext = RuntimeConfiguration.defaultYaRNContextTokens
@@ -352,7 +437,10 @@ public struct ServerArguments: Equatable, Sendable {
                 expertCacheSlots: expertCacheSlots,
                                expertCacheBudgetBytes: expertCacheBudgetBytes,
                                lazyLoad: lazyLoad,
-                               idleUnloadSeconds: idleUnloadSeconds)
+                               idleUnloadSeconds: idleUnloadSeconds,
+                               modelsDirectory: modelsDirectory,
+                               catalogOnly: catalogOnly,
+                               reasoningLevel: reasoningLevel)
     }
 }
 

@@ -49,11 +49,15 @@ public actor CPUModelBackend: ServerInferenceBackend {
     /// a promise that is quietly broken.
     public static let contextCeiling = 32_768
 
+    /// `thinkingMode` is baked into the tokenizer's generation prompt, as it
+    /// is on the GPU path: the template renders the thinking switch, so it is
+    /// a load-time setting, not a per-request one.
     public init(snapshotDirectory: URL,
                 maximumContext: Int = CPUModelBackend.contextCeiling,
-                resident: Bool = true) async throws {
+                resident: Bool = true,
+                thinkingMode: ModelThinkingMode = .off) async throws {
         let snapshot = try AffineSnapshot(directory: snapshotDirectory)
-        guard snapshot.family != nil else {
+        guard let family = snapshot.family else {
             throw CPUBackendError.unsupported(
                 CPUModelFamily.refusal(modelType: snapshot.modelType))
         }
@@ -61,13 +65,13 @@ public actor CPUModelBackend: ServerInferenceBackend {
         let engine = try CPUQwen35(snapshot: snapshot)
         threads = engine.threads
         model = engine
-        tokenizer = try await GFTokenizer.load(from: snapshotDirectory)
+        tokenizer = try await GFTokenizer.load(from: snapshotDirectory,
+                                               thinkingMode: thinkingMode)
         context = min(maximumContext, snapshot.configuration.maxPositions,
                       Self.contextCeiling)
-        // The house settings: this family ships no card of its own, and a
-        // client that sends nothing should get what the server would give
-        // any other model.
-        defaults = GenerationDefaults.house
+        // The family's own, which is what the catalog advertises for it, so
+        // a launcher showing the defaults shows what a request will get.
+        defaults = family.samplingDefaults
     }
 
     public enum CPUBackendError: Error, CustomStringConvertible {
@@ -95,7 +99,8 @@ public actor CPUModelBackend: ServerInferenceBackend {
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         let rendered = try tokenizer.applyChatTemplate(request.messages)
-        let prompt = tokenizer.encode(rendered, addBOS: false).map(Int.init)
+        let promptIDs = tokenizer.encode(rendered, addBOS: false)
+        let prompt = promptIDs.map(Int.init)
         guard prompt.count < context else {
             throw CPUBackendError.promptTooLong(prompt.count, context)
         }
@@ -116,38 +121,71 @@ public actor CPUModelBackend: ServerInferenceBackend {
             logits = try model.step(token: token, needsLogits: index == prompt.count - 1)
         }
 
-        var stopMatcher = StreamingStopMatcher(stops: configuration.stopStrings)
-        var content = ""
+        // The same decoder the GPU path runs, so a thought is split the same
+        // way on either engine. This path renders no tool template, so the
+        // decoder only ever splits thoughts.
+        let decoder = StructuredAssistantDecoder.forGeneration(
+            tokenizer: tokenizer, promptIDs: promptIDs, allowedTools: nil)
+        var detokenizer = GFDetokenizer(tokenizer: tokenizer)
+        var output = AssistantOutput(stops: configuration.stopStrings, onEvent: onEvent)
         var produced = 0
         var reason = "length"
         while produced < budget {
             let next = sampler.pick(logits, using: generator)
             if next == Int(tokenizer.eosID) { reason = "stop"; break }
             produced += 1
-            let piece = tokenizer.decode([Int32(next)], skipSpecialTokens: true)
-            if !piece.isEmpty {
-                let visible = stopMatcher.push(piece)
-                if !visible.isEmpty {
-                    content += visible
-                    onEvent(.content(visible))
-                }
-                if stopMatcher.isStopped { reason = "stop"; break }
-            }
+            output.publish(try events(for: Int32(next), decoder: decoder,
+                                      detokenizer: &detokenizer))
+            if output.isStopped { reason = "stop"; break }
             if produced >= budget { break }
             logits = try model.step(token: next)
         }
-        let tail = stopMatcher.finish()
-        if !tail.isEmpty {
-            content += tail
-            onEvent(.content(tail))
+        if let decoder {
+            output.publish(try decoder.consumeTail(detokenizer.flush()))
+            try decoder.finish()
         }
+        output.finish()
         return ServerCompletion(
-            content: content,
+            content: output.content,
             toolCalls: [],
             finishReason: reason,
             usage: OpenAIUsage(promptTokens: prompt.count,
                                completionTokens: produced,
                                totalTokens: prompt.count + produced,
-                               cachedTokens: 0))
+                               cachedTokens: 0),
+            reasoning: output.reasoning)
+    }
+
+    /// One sampled token as decoder events.
+    ///
+    /// With no decoder -- thinking off -- this is the per-token decode the
+    /// CPU path has always done, so that output does not move by a byte. A
+    /// thinking model needs the streaming detokenizer instead: the decoder
+    /// knows `<think>` and `</think>` by their literal text on the delta, and
+    /// a per-token decode that skips special tokens drops exactly those.
+    private func events(for token: Int32,
+                        decoder: StructuredAssistantDecoder?,
+                        detokenizer: inout GFDetokenizer) throws -> [StructuredAssistantEvent] {
+        guard let decoder else {
+            let piece = tokenizer.decode([token], skipSpecialTokens: true)
+            return piece.isEmpty ? [] : [.content(piece)]
+        }
+        return try decoder.consume(tokenID: token, delta: detokenizer.push(token))
+    }
+}
+
+/// The Messages API's count_tokens, from the same rendering `generate` uses,
+/// so a client sizing its context against a CPU model gets the real number.
+extension CPUModelBackend: PromptTokenCounting {
+    public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        try Self.promptTokenCount(request, tokenizer: tokenizer)
+    }
+
+    /// The count from a tokenizer alone, which is how the router answers for
+    /// a CPU model that is not the one loaded.
+    static func promptTokenCount(_ request: ValidatedChatRequest,
+                                 tokenizer: GFTokenizer) throws -> Int {
+        let rendered = try tokenizer.applyChatTemplate(request.messages)
+        return tokenizer.encode(rendered, addBOS: false).count
     }
 }

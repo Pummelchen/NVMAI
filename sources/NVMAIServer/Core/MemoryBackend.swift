@@ -15,7 +15,7 @@ import NVMAIMemory
 /// server's own tools are the client's, and no client knows about NVMAI
 /// memory. A memory tool the client would have to run is a memory tool
 /// nothing runs.
-public actor MemoryBackend: ServerInferenceBackend {
+public actor MemoryBackend: ServerInferenceBackend, PromptTokenCounting, ResidencyManaging {
     private let inner: any ServerInferenceBackend
     private let service: MemoryService
     private let configuration: MemoryConfiguration
@@ -79,6 +79,26 @@ public actor MemoryBackend: ServerInferenceBackend {
     public nonisolated var maximumContext: Int { inner.maximumContext }
     public nonisolated var samplingDefaults: GenerationDefaults.Sampling { inner.samplingDefaults }
 
+    /// Counts the request as the client sent it. The memory fragment and
+    /// bootstrap are not included: they are added per session at generation
+    /// time, and a count endpoint that guessed at them would be wrong more
+    /// often than it was useful.
+    public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
+        guard let counting = inner as? any PromptTokenCounting else {
+            throw ServerRequestError.unsupportedOperation("count_tokens")
+        }
+        return try await counting.countPromptTokens(request)
+    }
+
+    /// Forwards to the model underneath. The unload endpoint asks the
+    /// outermost backend whether it manages residency, and with memory on
+    /// that is this decorator: before it forwarded the question the endpoint
+    /// answered false and the model stayed in memory.
+    public func unload() async -> Bool {
+        guard let managing = inner as? any ResidencyManaging else { return false }
+        return await managing.unload()
+    }
+
     public func generate(
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
@@ -111,31 +131,25 @@ public actor MemoryBackend: ServerInferenceBackend {
             onEvent(event)
         }
 
+        // Only the visible transcript feeds memory -- the journal, the
+        // replayed assistant turn, the consolidation that reads them. The
+        // thoughts reach the client and nothing else.
         var transcript = ""
+        var thoughts = ""
         var rounds = 0
         while true {
             let completion = try await gated(current, onEvent: filteredEvents)
             let memoryCalls = completion.toolCalls.filter { MemoryTools.isMemoryTool($0.name) }
             let otherCalls = completion.toolCalls.filter { !MemoryTools.isMemoryTool($0.name) }
             transcript += completion.content
+            thoughts += completion.reasoning
 
             // Stop when the model is done with memory. A turn that also calls
             // a client tool ends here as well: the client has to run that one,
             // and continuing would strand its result.
             guard !memoryCalls.isEmpty, otherCalls.isEmpty else {
-                let finished = ServerCompletion(content: transcript,
-                                                toolCalls: otherCalls,
-                                                finishReason: completion.finishReason,
-                                                usage: completion.usage,
-                                                // Rebuilding the completion
-                                                // must not drop what the
-                                                // watchdogs saw: this path
-                                                // runs for every
-                                                // memory-enabled request, so
-                                                // forgetting it here silenced
-                                                // the whole feature whenever
-                                                // memory was on.
-                                                watchdogTrips: completion.watchdogTrips)
+                let finished = Self.settled(completion, content: transcript,
+                                            reasoning: thoughts, toolCalls: otherCalls)
                 await journal(request: request, completion: finished, context: context,
                               conversation: conversation, startedAt: startedAt)
                 return finished
@@ -167,12 +181,11 @@ public actor MemoryBackend: ServerInferenceBackend {
                 current = current.replacingMessages(messages, tools: current.tools)
                 let last = try await gated(current, onEvent: filteredEvents)
                 transcript += last.content
-                let finished = ServerCompletion(
-                    content: transcript,
+                thoughts += last.reasoning
+                let finished = Self.settled(
+                    last, content: transcript, reasoning: thoughts,
                     toolCalls: last.toolCalls.filter { !MemoryTools.isMemoryTool($0.name) },
-                    finishReason: transcript.isEmpty ? "length" : last.finishReason,
-                    usage: last.usage,
-                    watchdogTrips: last.watchdogTrips)
+                    finishReason: transcript.isEmpty ? "length" : last.finishReason)
                 ServerLog.memory("tool rounds exhausted; answered without tools "
                                  + "session=\(context.session.id)")
                 await journal(request: request, completion: finished, context: context,
@@ -196,6 +209,25 @@ public actor MemoryBackend: ServerInferenceBackend {
             }
             current = current.replacingMessages(messages, tools: current.tools)
         }
+    }
+
+    /// The completion a memory turn returns: the whole turn's visible text
+    /// and thoughts in place of the last round's, with that round's usage.
+    ///
+    /// Rebuilding the completion must not drop what the watchdogs saw: this
+    /// path runs for every memory-enabled request, so forgetting it here
+    /// once silenced the whole feature whenever memory was on.
+    private static func settled(_ completion: ServerCompletion,
+                                content: String,
+                                reasoning: String,
+                                toolCalls: [ParsedToolCall],
+                                finishReason: String? = nil) -> ServerCompletion {
+        ServerCompletion(content: content,
+                         toolCalls: toolCalls,
+                         finishReason: finishReason ?? completion.finishReason,
+                         usage: completion.usage,
+                         watchdogTrips: completion.watchdogTrips,
+                         reasoning: reasoning)
     }
 
     /// Writes the turn to the journal after the completion is settled.

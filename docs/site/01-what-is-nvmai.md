@@ -51,7 +51,7 @@ cd NVMAI
 tools/start-ornith-8bit.sh   # or any other start-<model>-<bits>.sh
 ```
 
-Point Codex, Qwen Code, OpenCode — or any OpenAI-compatible client — at `http://127.0.0.1:<port>` and ask it something. Then read the [Getting Started guide] and come back here with your first question.
+Point Codex, Qwen Code, OpenCode — or any OpenAI-compatible client — at `http://127.0.0.1:8080/v1` and ask it something. Then read the [Getting Started guide] and come back here with your first question.
 
 This forum will grow one article at a time, each explaining one main feature: SSD expert streaming, the RAM budget, installs and verified receipts, the OpenAI-compatible server, runtime controls, ANE prefill, long context and KV compression, agent memory, and benchmarking. The plan for the series is in the [wiki → forum migration topic].
 
