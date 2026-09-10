@@ -111,6 +111,16 @@ A model without the requested level gets the closest one it has:
 
 `GET /v1/models` and `--catalog` list each model's levels.
 
+With thinking on, the model's reasoning comes back apart from its answer, where each API's clients look for it:
+
+| API | Where the reasoning is |
+| --- | --- |
+| Chat Completions | `reasoning_content`, on the message and in each streamed `delta` |
+| Messages | a `thinking` block before the text block (its `signature` is empty: there is nothing to verify) |
+| Responses | a `reasoning` output item before the message, its text in `summary` |
+
+Reasoning a client sends back in later turns is accepted and ignored; it is never rendered into the prompt. Stop strings apply to the answer only. The loop watchdog watches reasoning in a window of its own, so a model thinking in circles is caught, while an answer that restates its conclusion is not mistaken for a loop.
+
 ## CPU models
 
 Qwen 3.5 2B and 4B, each at 4-bit and 8-bit, run on the CPU with their weights held in RAM: `qwen3.5-2b_4-Bit`, `qwen3.5-2b_8-Bit`, `qwen3.5-4b_4-Bit`, `qwen3.5-4b_8-Bit`. They are listed and switched to like every other model. Differences from the GPU models:
