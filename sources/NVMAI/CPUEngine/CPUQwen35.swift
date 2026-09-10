@@ -1,6 +1,12 @@
 import Foundation
 
-/// Qwen3.5-2B on the CPU, one token at a time.
+/// Qwen3.5's dense models (2B and 4B) on the CPU, one token at a time.
+///
+/// Every dimension comes from the snapshot's config. The two sizes differ in
+/// more than width: the 2B has as many delta-rule value heads as key heads,
+/// the 4B has twice as many; attention is 8 query heads over 2 KV heads in
+/// the 2B and 16 over 4 in the 4B. Both ratios are read, never assumed, and
+/// the head-sharing tests pin the mapping for each.
 ///
 /// The side-engine's model: small enough to stay resident beside a 35B, and
 /// run on cores the main engine leaves idle. It is a decode-only engine —
@@ -61,9 +67,9 @@ public final class CPUQwen35 {
     private var queryNorm: [Int: [Float]] = [:]
     private var keyNorm: [Int: [Float]] = [:]
     /// The delta rule's two scalar-per-head projections, which the converter
-    /// deliberately leaves at BF16: sixteen rows each, so quantizing them
-    /// would save nothing and they feed an exponential, where a rounding
-    /// error does not stay small.
+    /// deliberately leaves at BF16: one row per value head (16 in the 2B, 32
+    /// in the 4B), so quantizing them would save nothing and they feed an
+    /// exponential, where a rounding error does not stay small.
     private var deltaA: [Int: [Float]] = [:]
     private var deltaB: [Int: [Float]] = [:]
 
@@ -78,6 +84,17 @@ public final class CPUQwen35 {
     public init(snapshot: AffineSnapshot, threads: Int? = nil) throws {
         self.snapshot = snapshot
         configuration = snapshot.configuration
+        // Both head maps below divide one count by the other. A ratio that is
+        // not whole would floor into a mapping that runs and is wrong, and a
+        // zero would trap mid-token; either is a config this engine does not
+        // implement, so it is refused here, by name.
+        for (wide, narrow, what) in [
+            (configuration.heads, configuration.keyValueHeads, "attention heads over KV heads"),
+            (configuration.linearValueHeads, configuration.linearKeyHeads,
+             "delta-rule value heads over key heads"),
+        ] where narrow <= 0 || wide < narrow || wide % narrow != 0 {
+            throw SafeTensorsFile.Failure.malformed("\(what) is \(wide)/\(narrow), not whole")
+        }
         self.threads = threads ?? Int8AffineGEMV.preferredThreads
         idleThreads = threads ?? Int8AffineGEMV.preferredThreads
         for layer in 0..<configuration.layers {
@@ -122,10 +139,11 @@ public final class CPUQwen35 {
 
     /// One token, optionally without the output head.
     ///
-    /// The head is the tied embedding: 248,320 rows over 2048 columns, half
-    /// a gigabyte of the model's 1.9, read in full for every token. A prompt
-    /// token's logits are thrown away — only the last one's are used — so
-    /// computing them costs about a third of each prompt token for nothing.
+    /// The head is the tied embedding: 248,320 rows over the hidden width,
+    /// half a gigabyte of the 2B's 1.9 at 8 bits, read in full for every
+    /// token. A prompt token's logits are thrown away — only the last one's
+    /// are used — so computing them costs about a third of each prompt token
+    /// for nothing.
     @discardableResult
     public func step(token: Int, needsLogits: Bool) throws -> [Float] {
         applyWidthPolicy()
@@ -251,6 +269,9 @@ public final class CPUQwen35 {
         cachedValues.append(contentsOf: value)
         let cached = cachedKeys.count / (kvHeads * dim)
 
+        // Consecutive query heads share a KV head (transformers' `repeat_kv`
+        // expands each KV head in place), so it is `head / group`, not
+        // `head % kvHeads`. The 2B shares 2 KV heads among 8, the 4B 4 among 16.
         let group = heads / kvHeads
         let scale = 1 / Float(dim).squareRoot()
         var out = [Float](repeating: 0, count: heads * dim)
@@ -332,6 +353,11 @@ public final class CPUQwen35 {
 
         var state = recurrent[layer] ?? [Float](repeating: 0, count: hv * dv * dk)
         var readout = [Float](repeating: 0, count: hv * dv)
+        // Query and key are Hk heads wide, value and the state Hv. Where Hv
+        // is a multiple -- the 4B's 32 over 16 -- each key head serves that
+        // many *consecutive* value heads: transformers `repeat_interleave`s,
+        // the oracle `np.repeat`s, gdn.metal divides. `head % hk` would pair
+        // value head 1 with key head 1 and is the plausible wrong answer.
         let repeats = hv / hk
         for head in 0..<hv {
             let keyHead = head / repeats
