@@ -99,7 +99,8 @@ public actor CPUModelBackend: ServerInferenceBackend {
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         let rendered = try tokenizer.applyChatTemplate(request.messages)
-        let prompt = tokenizer.encode(rendered, addBOS: false).map(Int.init)
+        let promptIDs = tokenizer.encode(rendered, addBOS: false)
+        let prompt = promptIDs.map(Int.init)
         guard prompt.count < context else {
             throw CPUBackendError.promptTooLong(prompt.count, context)
         }
@@ -120,39 +121,56 @@ public actor CPUModelBackend: ServerInferenceBackend {
             logits = try model.step(token: token, needsLogits: index == prompt.count - 1)
         }
 
-        var stopMatcher = StreamingStopMatcher(stops: configuration.stopStrings)
-        var content = ""
+        // The same decoder the GPU path runs, so a thought is split the same
+        // way on either engine. This path renders no tool template, so the
+        // decoder only ever splits thoughts.
+        let decoder = StructuredAssistantDecoder.forGeneration(
+            tokenizer: tokenizer, promptIDs: promptIDs, allowedTools: nil)
+        var detokenizer = GFDetokenizer(tokenizer: tokenizer)
+        var output = AssistantOutput(stops: configuration.stopStrings, onEvent: onEvent)
         var produced = 0
         var reason = "length"
         while produced < budget {
             let next = sampler.pick(logits, using: generator)
             if next == Int(tokenizer.eosID) { reason = "stop"; break }
             produced += 1
-            let piece = tokenizer.decode([Int32(next)], skipSpecialTokens: true)
-            if !piece.isEmpty {
-                let visible = stopMatcher.push(piece)
-                if !visible.isEmpty {
-                    content += visible
-                    onEvent(.content(visible))
-                }
-                if stopMatcher.isStopped { reason = "stop"; break }
-            }
+            output.publish(try events(for: Int32(next), decoder: decoder,
+                                      detokenizer: &detokenizer))
+            if output.isStopped { reason = "stop"; break }
             if produced >= budget { break }
             logits = try model.step(token: next)
         }
-        let tail = stopMatcher.finish()
-        if !tail.isEmpty {
-            content += tail
-            onEvent(.content(tail))
+        if let decoder {
+            output.publish(try decoder.consumeTail(detokenizer.flush()))
+            try decoder.finish()
         }
+        output.finish()
         return ServerCompletion(
-            content: content,
+            content: output.content,
             toolCalls: [],
             finishReason: reason,
             usage: OpenAIUsage(promptTokens: prompt.count,
                                completionTokens: produced,
                                totalTokens: prompt.count + produced,
-                               cachedTokens: 0))
+                               cachedTokens: 0),
+            reasoning: output.reasoning)
+    }
+
+    /// One sampled token as decoder events.
+    ///
+    /// With no decoder -- thinking off -- this is the per-token decode the
+    /// CPU path has always done, so that output does not move by a byte. A
+    /// thinking model needs the streaming detokenizer instead: the decoder
+    /// knows `<think>` and `</think>` by their literal text on the delta, and
+    /// a per-token decode that skips special tokens drops exactly those.
+    private func events(for token: Int32,
+                        decoder: StructuredAssistantDecoder?,
+                        detokenizer: inout GFDetokenizer) throws -> [StructuredAssistantEvent] {
+        guard let decoder else {
+            let piece = tokenizer.decode([token], skipSpecialTokens: true)
+            return piece.isEmpty ? [] : [.content(piece)]
+        }
+        return try decoder.consume(tokenID: token, delta: detokenizer.push(token))
     }
 }
 

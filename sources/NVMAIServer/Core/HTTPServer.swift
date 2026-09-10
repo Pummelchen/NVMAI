@@ -639,23 +639,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         ServerLog.generating(id: responseID)
                         return try await self.backend.generate(request) { event in
                             guard request.stream, let outbox else { return }
-                            switch event {
-                            case .content(let text):
-                                self.enqueueStreamChunk(
-                                    self.chunk(id: responseID, created: created,
-                                               delta: ["content": text],
-                                               finishReason: nil),
-                                    outbox: outbox,
-                                    context: contextBox.value)
-                            case .toolCall(let call):
-                                self.enqueueToolCallChunks(
-                                    id: responseID,
-                                    created: created,
-                                    toolIndex: streamState.nextToolIndex(),
-                                    call: call,
-                                    outbox: outbox,
-                                    context: contextBox.value)
-                            }
+                            self.enqueueChatEvent(event, id: responseID, created: created,
+                                                  streamState: streamState,
+                                                  outbox: outbox, context: contextBox.value)
                         }
                     }
                     ServerLog.completed(id: responseID,
@@ -740,6 +726,38 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 nextOutput += 1
                 _callIndices.append(index)
                 return (index, _callIndices.count - 1)
+            }
+        }
+
+        /// Every reasoning item so far, by output index, with its whole text:
+        /// the done events and the final object both need the full thought.
+        private var _reasoning: [(index: Int, text: String)] = []
+        private var openReasoning: Int?
+
+        var reasoningItems: [(index: Int, text: String)] { lock.withLock { _reasoning } }
+
+        /// Appends to the open reasoning item, opening one when none is.
+        /// The ordinal numbers the item among reasoning items, for its id.
+        func appendReasoning(_ text: String) -> (index: Int, ordinal: Int, first: Bool) {
+            lock.withLock {
+                if let ordinal = openReasoning {
+                    _reasoning[ordinal].text += text
+                    return (_reasoning[ordinal].index, ordinal, false)
+                }
+                let index = nextOutput
+                nextOutput += 1
+                _reasoning.append((index, text))
+                openReasoning = _reasoning.count - 1
+                return (index, _reasoning.count - 1, true)
+            }
+        }
+
+        /// Close the open reasoning item, returning it if there was one.
+        func closeReasoning() -> (index: Int, ordinal: Int, text: String)? {
+            lock.withLock {
+                guard let ordinal = openReasoning else { return nil }
+                openReasoning = nil
+                return (_reasoning[ordinal].index, ordinal, _reasoning[ordinal].text)
             }
         }
     }
@@ -884,17 +902,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                         ServerLog.generating(id: responseID)
                         return try await self.backend.generate(request) { event in
                             guard request.stream, let outbox else { return }
-                            switch event {
-                            case .content(let text):
-                                self.enqueueResponsesContentDelta(
-                                    id: responseID, text: text, itemState: itemState,
-                                    outbox: outbox, context: contextBox.value)
-                            case .toolCall(let call):
-                                self.enqueueResponsesToolCall(
-                                    id: responseID, call: call, itemState: itemState,
-                                    namespace: echo.namespaces[call.name],
-                                    outbox: outbox, context: contextBox.value)
-                            }
+                            self.enqueueResponsesEvent(event, id: responseID, echo: echo,
+                                                       itemState: itemState,
+                                                       outbox: outbox, context: contextBox.value)
                         }
                     }
                     ServerLog.completed(id: responseID,
@@ -952,6 +962,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         var output: [[String: Any]]
         if let itemState {
             var slots: [Int: [String: Any]] = [:]
+            for (ordinal, item) in itemState.reasoningItems.enumerated() {
+                slots[item.index] = ResponsesAPIBuilder.reasoningItem(
+                    id: ResponsesAPIBuilder.reasoningItemID(responseID: id, index: ordinal),
+                    text: item.text)
+            }
             if let index = itemState.messageIndex {
                 slots[index] = ResponsesAPIBuilder.messageItem(
                     id: ids.message, role: "assistant", text: completion.content, status: "completed")
@@ -1033,11 +1048,79 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
+    private func enqueueResponsesEvent(_ event: ServerInferenceEvent,
+                                       id: String,
+                                       echo: ResponsesAPIEcho,
+                                       itemState: ResponsesStreamState,
+                                       outbox: SSEOutbox,
+                                       context: ChannelHandlerContext) {
+        switch event {
+        case .content(let text):
+            enqueueResponsesContentDelta(id: id, text: text, itemState: itemState,
+                                         outbox: outbox, context: context)
+        case .reasoning(let text):
+            enqueueResponsesReasoningDelta(id: id, text: text, itemState: itemState,
+                                           outbox: outbox, context: context)
+        case .toolCall(let call):
+            enqueueResponsesToolCall(id: id, call: call, itemState: itemState,
+                                     namespace: echo.namespaces[call.name],
+                                     outbox: outbox, context: context)
+        }
+    }
+
+    /// Thoughts stream as a reasoning item's summary text, ahead of the
+    /// message, the way the API's own reasoning models order them.
+    private func enqueueResponsesReasoningDelta(id: String,
+                                                text: String,
+                                                itemState: ResponsesStreamState,
+                                                outbox: SSEOutbox,
+                                                context: ChannelHandlerContext) {
+        let (index, ordinal, first) = itemState.appendReasoning(text)
+        let itemID = ResponsesAPIBuilder.reasoningItemID(responseID: id, index: ordinal)
+        if first {
+            responsesEvent("response.output_item.added",
+                           ["output_index": index,
+                            "item": ["id": itemID, "type": "reasoning", "summary": []]],
+                           itemState: itemState, outbox: outbox, context: context)
+            responsesEvent("response.reasoning_summary_part.added",
+                           ["item_id": itemID, "output_index": index, "summary_index": 0,
+                            "part": ResponsesAPIBuilder.summaryTextPart("")],
+                           itemState: itemState, outbox: outbox, context: context)
+        }
+        responsesEvent("response.reasoning_summary_text.delta",
+                       ["item_id": itemID, "output_index": index, "summary_index": 0,
+                        "delta": text],
+                       itemState: itemState, outbox: outbox, context: context)
+    }
+
+    /// Finish the open reasoning item, if any: the model has moved on to its
+    /// answer or a call, and a client renders the thought as complete.
+    private func closeResponsesReasoning(id: String,
+                                         itemState: ResponsesStreamState,
+                                         outbox: SSEOutbox,
+                                         context: ChannelHandlerContext) {
+        guard let (index, ordinal, text) = itemState.closeReasoning() else { return }
+        let itemID = ResponsesAPIBuilder.reasoningItemID(responseID: id, index: ordinal)
+        responsesEvent("response.reasoning_summary_text.done",
+                       ["item_id": itemID, "output_index": index, "summary_index": 0,
+                        "text": text],
+                       itemState: itemState, outbox: outbox, context: context)
+        responsesEvent("response.reasoning_summary_part.done",
+                       ["item_id": itemID, "output_index": index, "summary_index": 0,
+                        "part": ResponsesAPIBuilder.summaryTextPart(text)],
+                       itemState: itemState, outbox: outbox, context: context)
+        responsesEvent("response.output_item.done",
+                       ["output_index": index,
+                        "item": ResponsesAPIBuilder.reasoningItem(id: itemID, text: text)],
+                       itemState: itemState, outbox: outbox, context: context)
+    }
+
     private func enqueueResponsesContentDelta(id: String,
                                               text: String,
                                               itemState: ResponsesStreamState,
                                               outbox: SSEOutbox,
                                               context: ChannelHandlerContext) {
+        closeResponsesReasoning(id: id, itemState: itemState, outbox: outbox, context: context)
         let itemID = ResponsesAPIBuilder.messageItemID(responseID: id)
         let (index, first) = itemState.announceMessage()
         if first {
@@ -1065,6 +1148,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                           namespace: String?,
                                           outbox: SSEOutbox,
                                           context: ChannelHandlerContext) {
+        closeResponsesReasoning(id: id, itemState: itemState, outbox: outbox, context: context)
         let (index, ordinal) = itemState.allocateCall()
         let itemID = ResponsesAPIBuilder.functionCallItemID(responseID: id, index: ordinal)
         responsesEvent("response.output_item.added",
@@ -1101,6 +1185,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                        itemState: ResponsesStreamState,
                                        outbox: SSEOutbox) -> [String: Any] {
         let itemID = ResponsesAPIBuilder.messageItemID(responseID: id)
+        // A turn cut off mid-thought still finishes its reasoning item.
+        closeResponsesReasoning(id: id, itemState: itemState, outbox: outbox, context: context)
         // A turn with no text and no calls still has one (empty) message
         // item, as the API's own output does.
         if itemState.messageIndex == nil, completion.toolCalls.isEmpty {
@@ -1140,30 +1226,48 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     /// unchecked-invariant: guarded by `lock`, for the same reason as the
     /// Responses state above.
     private final class AnthropicStreamState: @unchecked Sendable {
+        /// The two kinds of block that stream as deltas. A tool_use block
+        /// arrives whole and is never left open.
+        enum Kind {
+            case text
+            case thinking
+        }
+
+        struct Block {
+            let index: Int
+            let kind: Kind
+        }
+
         private let lock = NSLock()
         private var nextIndex = 0
-        private var openText: Int?
+        private var open: Block?
         private var _announced = false
 
+        /// True once a text or tool_use block has been opened. Thinking does
+        /// not count: a message whose only block is a thought still gets its
+        /// (empty) text block, as the non-streamed content does.
         var announced: Bool { lock.withLock { _announced } }
 
-        /// The open text block's index, opening one when none is.
-        func text() -> (index: Int, first: Bool) {
+        /// The open block of `kind`, opening one when none is. Returns the
+        /// block of the other kind it had to close first, for the caller to
+        /// stop, since a thought and the answer never share a block.
+        func block(_ kind: Kind) -> (index: Int, first: Bool, closed: Block?) {
             lock.withLock {
-                _announced = true
-                if let index = openText { return (index, false) }
+                if kind == .text { _announced = true }
+                if let block = open, block.kind == kind { return (block.index, false, nil) }
+                let closed = open
                 let index = nextIndex
                 nextIndex += 1
-                openText = index
-                return (index, true)
+                open = Block(index: index, kind: kind)
+                return (index, true, closed)
             }
         }
 
-        /// Close the open text block, returning its index if there was one.
-        func closeText() -> Int? {
+        /// Close the open block, returning it if there was one.
+        func close() -> Block? {
             lock.withLock {
-                defer { openText = nil }
-                return openText
+                defer { open = nil }
+                return open
             }
         }
 
@@ -1241,8 +1345,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                             guard request.stream, let outbox else { return }
                             switch event {
                             case .content(let text):
-                                self.enqueueAnthropicText(
-                                    text, blockState: blockState,
+                                self.enqueueAnthropicDelta(
+                                    .text, text, blockState: blockState,
+                                    outbox: outbox, context: contextBox.value)
+                            case .reasoning(let text):
+                                self.enqueueAnthropicDelta(
+                                    .thinking, text, blockState: blockState,
                                     outbox: outbox, context: contextBox.value)
                             case .toolCall(let call):
                                 self.enqueueAnthropicToolUse(
@@ -1366,18 +1474,48 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
-    private func enqueueAnthropicText(_ text: String,
-                                      blockState: AnthropicStreamState,
-                                      outbox: SSEOutbox,
-                                      context: ChannelHandlerContext) {
-        let (index, first) = blockState.text()
+    /// Text or thinking, into the open block of that kind. A thought streams
+    /// as its own `thinking` block ahead of the text, with `thinking_delta`s,
+    /// as the Messages API streams extended thinking.
+    private func enqueueAnthropicDelta(_ kind: AnthropicStreamState.Kind,
+                                       _ text: String,
+                                       blockState: AnthropicStreamState,
+                                       outbox: SSEOutbox,
+                                       context: ChannelHandlerContext) {
+        let (index, first, closed) = blockState.block(kind)
+        if let closed {
+            stopAnthropicBlock(closed, outbox: outbox, context: context)
+        }
         if first {
+            let start: [String: Any] = kind == .text
+                ? ["type": "text", "text": ""]
+                : ["type": "thinking", "thinking": "",
+                   "signature": AnthropicBuilder.thinkingSignature]
             anthropicEvent(["type": "content_block_start", "index": index,
-                            "content_block": ["type": "text", "text": ""]],
+                            "content_block": start],
                            outbox: outbox, context: context)
         }
-        anthropicEvent(["type": "content_block_delta", "index": index,
-                        "delta": ["type": "text_delta", "text": text]],
+        let delta: [String: Any] = kind == .text
+            ? ["type": "text_delta", "text": text]
+            : ["type": "thinking_delta", "thinking": text]
+        anthropicEvent(["type": "content_block_delta", "index": index, "delta": delta],
+                       outbox: outbox, context: context)
+    }
+
+    /// End a streamed block. A thinking block is signed first, as the API
+    /// always does just before its stop, so a client that assembles the
+    /// block from its deltas ends up with the same object as the
+    /// non-streamed content (see `AnthropicBuilder.thinkingSignature`).
+    private func stopAnthropicBlock(_ block: AnthropicStreamState.Block,
+                                    outbox: SSEOutbox,
+                                    context: ChannelHandlerContext) {
+        if block.kind == .thinking {
+            anthropicEvent(["type": "content_block_delta", "index": block.index,
+                            "delta": ["type": "signature_delta",
+                                      "signature": AnthropicBuilder.thinkingSignature]],
+                           outbox: outbox, context: context)
+        }
+        anthropicEvent(["type": "content_block_stop", "index": block.index],
                        outbox: outbox, context: context)
     }
 
@@ -1385,9 +1523,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                          blockState: AnthropicStreamState,
                                          outbox: SSEOutbox,
                                          context: ChannelHandlerContext) {
-        if let open = blockState.closeText() {
-            anthropicEvent(["type": "content_block_stop", "index": open],
-                           outbox: outbox, context: context)
+        if let open = blockState.close() {
+            stopAnthropicBlock(open, outbox: outbox, context: context)
         }
         let index = blockState.allocate()
         anthropicEvent(["type": "content_block_start", "index": index,
@@ -1407,13 +1544,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                        completion: ServerCompletion,
                                        blockState: AnthropicStreamState,
                                        outbox: SSEOutbox) {
-        // A message always carries at least one content block.
+        // A message always carries at least one text or tool_use block.
         if !blockState.announced {
-            enqueueAnthropicText("", blockState: blockState, outbox: outbox, context: context)
+            enqueueAnthropicDelta(.text, "", blockState: blockState, outbox: outbox,
+                                  context: context)
         }
-        if let open = blockState.closeText() {
-            anthropicEvent(["type": "content_block_stop", "index": open],
-                           outbox: outbox, context: context)
+        if let open = blockState.close() {
+            stopAnthropicBlock(open, outbox: outbox, context: context)
         }
         let stop = AnthropicBuilder.stopReason(for: completion)
         anthropicEvent(["type": "message_delta",
@@ -1552,6 +1689,33 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         }
     }
 
+    /// One streamed chat event as its chunk. Reasoning rides in
+    /// `delta.reasoning_content`, the vLLM and DeepSeek convention that
+    /// Qwen Code, OpenCode and their kind read; a client that knows no
+    /// such field ignores it and sees the answer alone.
+    private func enqueueChatEvent(_ event: ServerInferenceEvent,
+                                  id: String,
+                                  created: Int,
+                                  streamState: StreamState,
+                                  outbox: SSEOutbox,
+                                  context: ChannelHandlerContext) {
+        switch event {
+        case .content(let text):
+            enqueueStreamChunk(
+                chunk(id: id, created: created, delta: ["content": text], finishReason: nil),
+                outbox: outbox, context: context)
+        case .reasoning(let text):
+            enqueueStreamChunk(
+                chunk(id: id, created: created, delta: ["reasoning_content": text],
+                      finishReason: nil),
+                outbox: outbox, context: context)
+        case .toolCall(let call):
+            enqueueToolCallChunks(id: id, created: created,
+                                  toolIndex: streamState.nextToolIndex(), call: call,
+                                  outbox: outbox, context: context)
+        }
+    }
+
     private func writeCompletion(_ context: ChannelHandlerContext,
                                  id: String,
                                  created: Int,
@@ -1564,6 +1728,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             "role": "assistant",
             "content": encodedContent,
         ]
+        // Absent rather than empty with thinking off, so that response is
+        // byte for byte what it was.
+        if !completion.reasoning.isEmpty {
+            message["reasoning_content"] = completion.reasoning
+        }
         if !completion.toolCalls.isEmpty {
             message["tool_calls"] = completion.toolCalls.map(toolCallObject)
         }

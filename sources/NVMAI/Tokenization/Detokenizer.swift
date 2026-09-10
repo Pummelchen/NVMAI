@@ -18,6 +18,7 @@ enum GFDetokenizerError: Error, Equatable, CustomStringConvertible {
 /// The small portion of `tokenizer.json` needed by the streaming decoder.
 /// Model vocabulary entries are deliberately not decoded here: there are
 /// 248K of them, while only the added-token barriers and decoder kind matter.
+@usableFromInline
 struct GFByteLevelDecoderConfiguration: Sendable {
     struct AddedToken: Sendable {
         let content: String
@@ -116,18 +117,22 @@ struct GFByteLevelDecoderConfiguration: Sendable {
 /// Work and retained state are bounded by the newly pushed token rather than
 /// the complete generated history. Batch decoding remains on swift-transformers
 /// so tests can compare the two independent implementations.
-struct GFDetokenizer {
+///
+/// Public for the CPU engine, whose loop lives outside this module but needs
+/// the same per-token deltas: the structured decoder recognises `<think>` and
+/// `<tool_call>` by their literal text on the delta.
+public struct GFDetokenizer {
     @usableFromInline let tokenizer: any Tokenizer
     @usableFromInline let configuration: GFByteLevelDecoderConfiguration
     @usableFromInline var pendingBytes: [UInt8] = []
 
-    init(tokenizer: GFTokenizer) {
+    public init(tokenizer: GFTokenizer) {
         self.tokenizer = tokenizer.tokenizer
         self.configuration = tokenizer.byteLevelDecoderConfiguration
         pendingBytes.reserveCapacity(8)
     }
 
-    mutating func push(_ id: Int32) throws -> String {
+    public mutating func push(_ id: Int32) throws -> String {
         guard id >= 0, let token = tokenizer.convertIdToToken(Int(id)) else {
             throw GFDetokenizerError.invalidTokenID(id)
         }
@@ -150,7 +155,7 @@ struct GFDetokenizer {
         return drain(final: false)
     }
 
-    mutating func flush() -> String {
+    public mutating func flush() -> String {
         drain(final: true)
     }
 

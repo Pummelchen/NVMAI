@@ -390,9 +390,10 @@ public enum AnthropicMapper {
             throw unsupported("MCP servers are not supported", "mcp_servers")
         }
         // context_management asks the API to clear old thinking or tool
-        // results from the context. This server returns no thinking and
-        // keeps every turn the client sends, so the edits have nothing to
-        // do; accepting them keeps Claude Code, which sends them always.
+        // results from the context. This server never renders earlier
+        // thinking into a prompt and keeps every turn the client sends, so
+        // the edits have nothing to do; accepting them keeps Claude Code,
+        // which sends them always.
         try validateThinking(request.thinking, maxTokens: maxTokens, profile: profile)
         guard !request.messages.isEmpty else {
             throw invalid("at least one message is required", "messages")
@@ -507,11 +508,30 @@ public enum AnthropicBuilder {
          "input": call.arguments.foundationObject()]
     }
 
-    /// Content blocks of a completion: the text (when there is any) and one
-    /// tool_use block per call. An empty completion is one empty text block,
-    /// never an empty content array.
+    /// The signature on every thinking block this server returns: empty.
+    ///
+    /// Anthropic's signature is an opaque token its API uses to verify a
+    /// thought it is handed back. Here there is nothing to verify -- replayed
+    /// thinking is dropped on the way in (see `chatMessages`) -- so nothing
+    /// is signed. The field is still sent, because the SDKs type it as a
+    /// required string, accumulate `signature_delta` into it, and replay the
+    /// block verbatim; an empty string satisfies all three, where a made-up
+    /// token would only pretend to be verifiable.
+    public static let thinkingSignature = ""
+
+    public static func thinkingBlock(_ thinking: String) -> [String: Any] {
+        ["type": "thinking", "thinking": thinking, "signature": thinkingSignature]
+    }
+
+    /// Content blocks of a completion: the thinking (when there is any),
+    /// then the text (when there is any) and one tool_use block per call. An
+    /// empty completion is one empty text block, never an empty content
+    /// array, and a turn that only thought still carries that text block.
     public static func contentBlocks(_ completion: ServerCompletion) -> [[String: Any]] {
         var blocks: [[String: Any]] = []
+        if !completion.reasoning.isEmpty {
+            blocks.append(thinkingBlock(completion.reasoning))
+        }
         if !completion.content.isEmpty || completion.toolCalls.isEmpty {
             blocks.append(textBlock(completion.content))
         }
