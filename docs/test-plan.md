@@ -233,6 +233,37 @@ The rule that replaces the budget: **overhead is judged against what it
 buys, per scenario, and consolidation stays off the critical path.** No run
 here put consolidation anywhere but the idle gap.
 
+## Repeats of the book pair (in progress)
+
+The single-run book numbers carried more weight than one run can, and they
+were confounded: the unguarded 94% was measured *before* the memory-fragment
+fix and the guarded 97% after it. So all three arms were rerun on current
+code, interleaved — control, unguarded, guarded, then again — so the order
+cannot masquerade as an effect.
+
+| arm | runs | each run (of 126) | pooled |
+| --- | --- | --- | --- |
+| control (memory off) | 3 | 118, 111, 126 | 93.9% |
+| memory, unguarded | 2 | 122, 114 | 93.7% |
+| memory, guarded | 2 | 124, 122 | **97.6%** |
+
+Two readings, one firm and one not yet.
+
+**The control's own spread is 111 to 126** — 88% to 100% on identical
+configuration — which is exactly the noise the single runs were exposed to,
+and why one run each could never settle a three-point question.
+
+**The guard looks real but is two runs short.** Both guarded runs are at or
+above every unguarded run, and its pooled figure is four points clear of
+both other arms. That is suggestive, not settled, at two runs.
+
+The third unguarded and guarded runs did not happen, and the reason is
+mine: a source file was edited while the sequence was running, and the
+harness refused a release binary older than the source — which is the check
+working exactly as designed. They are to be rerun with the machine
+otherwise idle; at the time of writing a 125B server was holding 15.7 GB of
+this 26 GB machine, and a 35B beside it would have measured the swapping.
+
 ## How a failure is handled
 
 Fix the cause, re-run the test, and record what changed. A threshold is

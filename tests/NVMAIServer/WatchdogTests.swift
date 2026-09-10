@@ -169,9 +169,17 @@ import Testing
                 + Double(elapsed.components.attoseconds) / 1e18
             return seconds * 1e9 / Double(bytes)
         }
+        // The best of several, not one reading. A single timing on a busy
+        // machine measures the scheduler: this failed once with a 125B server
+        // generating beside the suite, load average 4.9, because the long run
+        // happened to be preempted and the short one did not. Contention only
+        // ever adds time, so the minimum is the reading closest to the code.
+        func bestOf(_ bytes: Int) -> Double {
+            (0..<5).map { _ in nanosPerByte(bytes) }.min() ?? .infinity
+        }
         _ = nanosPerByte(1 << 12)                    // warm the allocator
-        let small = nanosPerByte(1 << 13)
-        let large = nanosPerByte(1 << 17)            // sixteen times as long
+        let small = bestOf(1 << 13)
+        let large = bestOf(1 << 17)                  // sixteen times as long
         #expect(large < small * 4,
                 Comment(rawValue: "per-byte cost grew from \(small) to \(large) ns"))
     }
