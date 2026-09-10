@@ -41,11 +41,19 @@ func defaultPrefillChunkTokens(family: ModelFamily, fallback: Int) -> Int {
 
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
+    /// Thought text from inside the model's `<think>` block. Kept apart from
+    /// `content` so each surface can put it where its clients look for
+    /// reasoning, and so nothing that judges the answer ever reads it.
+    case reasoning(String)
     case toolCall(ParsedToolCall)
 }
 
 public struct ServerCompletion: Equatable, Sendable {
     public let content: String
+    /// Everything the model thought, in order; empty with thinking off.
+    /// `usage.completionTokens` already counts these tokens, as it always
+    /// has -- only where the text goes has changed.
+    public let reasoning: String
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
@@ -63,8 +71,10 @@ public struct ServerCompletion: Equatable, Sendable {
                 finishReason: String,
                 usage: OpenAIUsage,
                 watchdogTrips: [WatchdogSet.Trip] = [],
-                stopSequence: String? = nil) {
+                stopSequence: String? = nil,
+                reasoning: String = "") {
         self.content = content
+        self.reasoning = reasoning
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
@@ -1095,14 +1105,19 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
             maxContext - effectivePromptIDs.count)
         config.stopStrings = []
 
-        let decoder = needsToolTemplate
-            ? StructuredAssistantDecoder(
-                tokenizer: tokenizer,
-                allowedTools: Set(request.tools.map(\.name)))
-            : nil
-        var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
-        var content = ""
-        var calls: [ParsedToolCall] = []
+        // The full render, not the cache-trimmed suffix, decides whether the
+        // generation prompt left a thought open; both end in the same
+        // generation prompt, but only the render is always whole.
+        let decoder = StructuredAssistantDecoder.forGeneration(
+            tokenizer: tokenizer,
+            promptIDs: promptIDs,
+            allowedTools: needsToolTemplate ? Set(request.tools.map(\.name)) : nil)
+        // The stall clock starts at the first visible token, so a long
+        // thought before the answer cannot trip it; the watchdogs only ever
+        // see the answer.
+        var output = AssistantOutput(stops: request.generationConfig.stopStrings,
+                                     onEvent: onEvent,
+                                     observeVisible: { watchdogs.observe($0) })
         var decodingError: Error?
         var shouldStop = false
 
@@ -1119,21 +1134,8 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         let activePromptIDs = activeProducer is StreamingMTPDecoder
             ? promptIDs : effectivePromptIDs
         func publish(_ events: [StructuredAssistantEvent]) {
-            for event in events {
-                switch event {
-                case .content(let text):
-                    let visible = stopMatcher.push(text)
-                    if !visible.isEmpty {
-                        content += visible
-                        onEvent(.content(visible))
-                        watchdogs.observe(visible)
-                    }
-                    if stopMatcher.isStopped { shouldStop = true }
-                case .toolCall(let call):
-                    calls.append(call)
-                    onEvent(.toolCall(call))
-                }
-            }
+            output.publish(events)
+            if output.isStopped { shouldStop = true }
         }
         let result = try await runRawCompletion(
             producer: activeProducer,
@@ -1187,9 +1189,9 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
                     effectivePromptIDs: effectivePromptIDs,
                     result: result,
                     maxCompletionTokens: config.maxNewTokens,
-                    decodedCalls: calls.count,
-                    visibleBytes: content.utf8.count,
-                    stopStringMatched: stopMatcher.isStopped,
+                    decodedCalls: output.calls.count,
+                    visibleBytes: output.content.utf8.count,
+                    stopStringMatched: output.isStopped,
                     toolStartID: tokenizer.toolCallStartID,
                     toolEndID: tokenizer.toolCallEndID,
                     toolResponseID: tokenizer.toolResponseID,
@@ -1207,14 +1209,12 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
                 kind: .decoderFinish,
                 cause: .classify(error))
         }
-        if needsToolTemplate, result.reason == .toolCalls, calls.isEmpty {
+        if needsToolTemplate, result.reason == .toolCalls, output.calls.isEmpty {
             throw structuredFailure(kind: .orphanToolResponse, cause: .none)
         }
-        let tail = stopMatcher.finish()
-        if !tail.isEmpty {
-            content += tail
-            onEvent(.content(tail))
-        }
+        output.finish()
+        var content = output.content
+        let calls = output.calls
         var reason: String
         if !calls.isEmpty {
             reason = "tool_calls"
@@ -1249,7 +1249,7 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
             content: generated,
             calls: calls,
             result: result,
-            stopStringFiltered: stopMatcher.isStopped)
+            stopStringFiltered: output.isStopped)
         completed = true
         return ServerCompletion(
             content: content,
@@ -1264,7 +1264,8 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
                                totalTokens: result.prefillTokens + result.newTokens,
                                cachedTokens: result.cachedPromptTokens),
             watchdogTrips: watchdogs.trips,
-            stopSequence: stopMatcher.matchedStop)
+            stopSequence: output.matchedStop,
+            reasoning: output.reasoning)
     }
 
     /// Publish this turn's KV range to the prompt cache, and persist a snapshot

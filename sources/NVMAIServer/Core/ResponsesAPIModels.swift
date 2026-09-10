@@ -411,7 +411,9 @@ public enum ResponsesAPIMapper {
     }
 
     /// A finished response's output, in the shape a later request carries it
-    /// back as input. This is what `previous_response_id` chains on.
+    /// back as input. This is what `previous_response_id` chains on. The
+    /// reasoning item is left out: a replayed one is skipped on the way back
+    /// in, because thoughts are never part of a prompt.
     public static func outputAsInput(completion: ServerCompletion,
                                      responseID: String,
                                      namespaces: [String: String] = [:]) -> [ResponsesAPIRequest.Item] {
@@ -581,6 +583,12 @@ public enum ResponsesAPIBuilder {
         "fc_" + String(responseID.dropFirst("resp_".count)) + String(index)
     }
 
+    /// Numbered like function calls: a model that thinks again after it has
+    /// started answering produces a second reasoning item in the stream.
+    public static func reasoningItemID(responseID: String, index: Int) -> String {
+        "rs_" + String(responseID.dropFirst("resp_".count)) + String(index)
+    }
+
     /// One streaming event. `sequence_number` is the client's ordering key;
     /// the handler owns the counter.
     public static func event(_ type: String, sequence: Int,
@@ -689,12 +697,29 @@ public enum ResponsesAPIBuilder {
         return item
     }
 
-    /// Output items for a completed generation, message first, then calls.
+    public static func summaryTextPart(_ text: String) -> [String: Any] {
+        ["type": "summary_text", "text": text]
+    }
+
+    /// The model's thoughts as a reasoning item. They are the whole thought,
+    /// not a summary of it, but `summary` is the part of a reasoning item
+    /// that Responses clients read and show; the item's other fields carry
+    /// hosted-model state (encrypted content) this server has none of.
+    public static func reasoningItem(id: String, text: String) -> [String: Any] {
+        ["id": id, "type": "reasoning", "summary": [summaryTextPart(text)]]
+    }
+
+    /// Output items for a completed generation: the reasoning when there is
+    /// any, then the message, then calls.
     public static func outputItems(completion: ServerCompletion,
                                    responseID: String,
                                    namespaces: [String: String] = [:]) -> [[String: Any]] {
         let ids = itemIDs(responseID: responseID, completion: completion)
         var output: [[String: Any]] = []
+        if !completion.reasoning.isEmpty {
+            output.append(reasoningItem(id: reasoningItemID(responseID: responseID, index: 0),
+                                        text: completion.reasoning))
+        }
         if !completion.content.isEmpty || completion.toolCalls.isEmpty {
             output.append(messageItem(id: ids.message, role: "assistant",
                                       text: completion.content, status: "completed"))

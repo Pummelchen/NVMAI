@@ -1,8 +1,10 @@
 import Foundation
 import Testing
+@testable import NVMAI
 @testable import NVMAIServerCore
 
-/// The CPU serving path's ceilings, which it enforces rather than promises.
+/// The CPU serving path's ceilings, which it enforces rather than promises,
+/// and its handling of a thinking model's output.
 @Suite struct CPUModelBackendTests {
 
     /// Qwen3.5 claims 262,144 positions and the GPU engine honours it. On
@@ -16,5 +18,160 @@ import Testing
         #expect(CPUModelBackend.contextCeiling < 262_144)
         #expect(CPUModelBackend.contextCeiling >= 8_192,
                 "and still enough for the work this engine is for")
+    }
+
+    // MARK: - a model that says what it is told
+
+    /// The real engine on a snapshot small enough to write in a test: no
+    /// layers, so each next token depends on the current one alone, and a
+    /// tied embedding built so that greedy decoding walks `chain`.
+    ///
+    /// Row `chain[k]` is `3^k * (e_k + e_(k+1))`. Its own logit is then
+    /// `2 * 9^k` against `3 * 9^k` for `chain[k + 1]`, and every row outside
+    /// the chain is zero -- so the successor wins at every step, with a
+    /// margin that BF16 scales cannot close.
+    private func writeScriptedModel(chain: [Int32], tokenizer: URL) throws -> URL {
+        let hidden = 64
+        let rows = 248_320
+        precondition(chain.count < hidden)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("scripted-model-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        // Eight-bit lanes pack low-first into little-endian words, so the
+        // byte stream is simply each row's levels in column order.
+        var levels = [UInt8](repeating: 0, count: rows * hidden)
+        var scales = [Float](repeating: 0, count: rows)
+        for (step, token) in chain.enumerated() {
+            let row = Int(token)
+            levels[row * hidden + step] = 255
+            levels[row * hidden + step + 1] = 255
+            scales[row] = Float(pow(3.0, Double(step))) / 255
+        }
+        let stem = "language_model.model.embed_tokens."
+        let shard = try Self.safetensors([
+            (stem + "weight", "U32", [rows, hidden / 4], levels),
+            (stem + "scales", "BF16", [rows, 1], Self.bf16(scales)),
+            (stem + "biases", "BF16", [rows, 1], Self.bf16([Float](repeating: 0, count: rows))),
+            ("language_model.model.norm.weight", "BF16", [hidden],
+             Self.bf16([Float](repeating: 1, count: hidden))),
+        ])
+        try shard.write(to: directory.appendingPathComponent("model.safetensors"))
+        let config: [String: Any] = [
+            "model_type": "qwen3_5",
+            "hidden_size": hidden, "num_hidden_layers": 0, "num_attention_heads": 1,
+            "num_key_value_heads": 1, "head_dim": hidden, "full_attention_interval": 4,
+            "linear_num_key_heads": 1, "linear_num_value_heads": 1,
+            "linear_key_head_dim": hidden, "linear_value_head_dim": hidden,
+            "linear_conv_kernel_dim": 4, "intermediate_size": hidden,
+            "vocab_size": rows, "rms_norm_eps": 1e-6,
+            "quantization": ["bits": 8, "group_size": 64, "mode": "affine"],
+        ]
+        try JSONSerialization.data(withJSONObject: config)
+            .write(to: directory.appendingPathComponent("config.json"))
+        let names = [stem + "weight", stem + "scales", stem + "biases",
+                     "language_model.model.norm.weight"]
+        try JSONSerialization.data(withJSONObject: [
+            "weight_map": Dictionary(uniqueKeysWithValues: names.map { ($0, "model.safetensors") })])
+            .write(to: directory.appendingPathComponent("model.safetensors.index.json"))
+        for file in ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja"] {
+            try FileManager.default.copyItem(at: tokenizer.appendingPathComponent(file),
+                                             to: directory.appendingPathComponent(file))
+        }
+        return directory
+    }
+
+    private static func safetensors(_ tensors: [(name: String, dtype: String,
+                                                 shape: [Int], bytes: [UInt8])]) throws -> Data {
+        var header: [String: Any] = [:]
+        var payload: [UInt8] = []
+        for tensor in tensors {
+            header[tensor.name] = ["dtype": tensor.dtype, "shape": tensor.shape,
+                                   "data_offsets": [payload.count, payload.count + tensor.bytes.count]]
+            payload.append(contentsOf: tensor.bytes)
+        }
+        var json = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+        while json.count % 8 != 0 { json.append(0x20) }
+        var out = Data()
+        withUnsafeBytes(of: UInt64(json.count).littleEndian) { out.append(contentsOf: $0) }
+        out.append(json)
+        out.append(contentsOf: payload)
+        return out
+    }
+
+    private static func bf16(_ values: [Float]) -> [UInt8] {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(values.count * 2)
+        for value in values {
+            let bits = UInt16(truncatingIfNeeded: value.bitPattern >> 16)
+            withUnsafeBytes(of: bits.littleEndian) { bytes.append(contentsOf: $0) }
+        }
+        return bytes
+    }
+
+    /// unchecked-invariant: every access is under `lock`.
+    private final class Sink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [ServerInferenceEvent] = []
+        func append(_ event: ServerInferenceEvent) { lock.withLock { events.append(event) } }
+        var all: [ServerInferenceEvent] { lock.withLock { events } }
+    }
+
+    private func request() -> ValidatedChatRequest {
+        ValidatedChatRequest(messages: [GFTokenizer.Message(role: .user, content: "hi")],
+                             tools: [], stream: true, includeUsage: false,
+                             generationConfig: GenerationConfig(maxNewTokens: 32, temperature: 0),
+                             maximumCompletionTokens: 32)
+    }
+
+    /// Runs the scripted model through the backend: after the prompt it
+    /// says "hm", closes its thought, says "ok", and ends the turn.
+    private func generate(thinking: ModelThinkingMode) async throws
+        -> (completion: ServerCompletion, events: [ServerInferenceEvent], tokens: [Int32]) {
+        let fixture = try TokenizerFixture.folder()
+        let tok = try await GFTokenizer.load(from: fixture, thinkingMode: thinking)
+        let prompt = tok.encode(try tok.applyChatTemplate(request().messages), addBOS: false)
+        func single(_ text: String) throws -> Int32 {
+            let ids = tok.encode(text, addBOS: false)
+            try #require(ids.count == 1)
+            return ids[0]
+        }
+        let spoken = [try single("h"), try single("m"), try #require(tok.thinkEndID),
+                      try single("o"), try single("k")]
+        let chain = [try #require(prompt.last)] + spoken + [tok.eosID]
+        try #require(Set(chain).count == chain.count, "the walk needs distinct tokens")
+
+        let directory = try writeScriptedModel(chain: chain, tokenizer: fixture)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backend = try await CPUModelBackend(snapshotDirectory: directory, resident: false,
+                                                thinkingMode: thinking)
+        let sink = Sink()
+        let completion = try await backend.generate(request()) { sink.append($0) }
+        return (completion, sink.all, spoken)
+    }
+
+    /// Thinking on, the rendered prompt ends inside `<think>`: the model's
+    /// first token is already a thought and `<think>` is never generated.
+    /// The CPU path splits that through the same decoder the GPU path runs.
+    @Test func aThinkingModelsThoughtIsReasoningNotTheAnswer() async throws {
+        let run = try await generate(thinking: .on)
+        #expect(run.events == [.reasoning("h"), .reasoning("m"), .content("o"), .content("k")])
+        #expect(run.completion.reasoning == "hm")
+        #expect(run.completion.content == "ok")
+        #expect(run.completion.finishReason == "stop")
+        #expect(run.completion.usage.completionTokens == 5,
+                "thought tokens are generated tokens, and were always counted")
+    }
+
+    /// Thinking off takes the per-token decode the CPU path always had: no
+    /// decoder, no reasoning, the same bytes as before. Even a model that
+    /// writes `</think>` anyway gets the old treatment.
+    @Test func thinkingOffKeepsThePathItAlwaysHad() async throws {
+        let run = try await generate(thinking: .off)
+        let tok = try await GFTokenizer.load(from: try TokenizerFixture.folder())
+        let before = run.tokens.map { tok.decode([$0], skipSpecialTokens: true) }.joined()
+        #expect(run.completion.content == before)
+        #expect(run.completion.reasoning.isEmpty)
+        #expect(!run.events.contains { if case .reasoning = $0 { true } else { false } })
     }
 }
