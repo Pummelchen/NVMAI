@@ -44,24 +44,22 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
   [docs/site](docs/site/) for the plain-language article series, or
   `tools/install_nvmai.sh --help` for its flags.
 - **OpenAI-compatible server:** A loopback Chat Completions and Responses API
-  includes launch scripts for starting NVMAI and connecting supported coding
-  clients.
-- **One server, one port:** `tools/server_launcher.sh` asks which API your
-  client uses (OpenAI or Anthropic — the server speaks both), which model to
-  load first from one list of every installed model and quantization, GPU and
-  CPU, and the thinking level that model supports, then serves on
-  `127.0.0.1:8080` (`NVMAI_PORT` overrides it). Every other installed model
-  stays available by name through the API; the server switches on demand,
-  keeping one model resident at a time.
-- **One start script per model and quantization:** `tools/start-<model>-<bits>.sh`
-  does the same with no questions asked, with the model's own tuning applied,
-  and `tools/cli_launcher.sh` also wires up a coding CLI.
+  for starting NVMAI and connecting supported coding clients.
+- **One server, one port, one launcher:** `tools/server_launcher.sh` starts the
+  API on its own, or starts it and opens one of the supported clients — Codex,
+  Claude Code, Qwen Code, OpenCode or the Zed editor — wiring that client's
+  provider config to the model the server advertises. It asks what to launch
+  from one list of every installed model and quantization (GPU and CPU), the
+  thinking level that model supports, and an optional RAM limit for the expert
+  cache (1/2/4/8/16/32 GB; the default is the install's own measured profile).
+  It serves on `127.0.0.1:8080` (`NVMAI_PORT` overrides it), and every other
+  installed model stays available by name through the API; the server switches
+  on demand, keeping one model resident at a time.
 
 ```bash
-tools/start-ornith-4bit.sh        tools/start-ornith-8bit.sh
-tools/start-qwen3.6-4bit.sh       tools/start-qwen3.6-8bit.sh
-tools/start-agentworld-4bit.sh    tools/start-agentworld-8bit.sh
-tools/start-qwen3.8-4bit.sh       tools/start-qwen3.8-8bit.sh
+tools/server_launcher.sh                                    # interactive
+tools/server_launcher.sh --client codex --model ornith 4     # server + Codex
+tools/server_launcher.sh --client zed --model qwen38 4 --ram 16
 ```
 
 - **Persistent agent memory (optional):** With `NVMAI_MEMORY=1` the model gets

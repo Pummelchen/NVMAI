@@ -23,12 +23,13 @@ PORT="${NVMAI_PORT:-8096}"
 MODEL="${NVMAI_MEMVAL_MODEL:-qwen36}"
 QUANT="${NVMAI_MEMVAL_QUANT:-4}"
 case "$MODEL" in
-  ornith)     START="$ROOT/tools/start-ornith-${QUANT}bit.sh" ;;
-  qwen36)     START="$ROOT/tools/start-qwen3.6-${QUANT}bit.sh" ;;
-  agentworld) START="$ROOT/tools/start-agentworld-${QUANT}bit.sh" ;;
+  ornith|qwen36|agentworld) : ;;
   *) echo "NVMAI_MEMVAL_MODEL must be ornith, qwen36 or agentworld" >&2; exit 2 ;;
 esac
-[[ -x "$START" ]] || { echo "no start script $START" >&2; exit 2; }
+# One launcher for every model and client now; `codex` keeps the agent loop,
+# which is what these benchmarks drove before.
+LAUNCH=("$ROOT/tools/server_launcher.sh" codex full "$MODEL" "$QUANT" default off)
+[[ -x "${LAUNCH[0]}" ]] || { echo "no launcher at ${LAUNCH[0]}" >&2; exit 2; }
 LABEL="${NVMAI_MEMVAL_LABEL:-$MODEL-${QUANT}bit}"
 SCRATCH="${NVMAI_MEMVAL_SCRATCH:-$ROOT/.build/benchmark-logs/memval-scratch-$LABEL}"
 # One results directory per benchmark and install. `pong` and `book` keep the
@@ -169,7 +170,7 @@ for ARM in "${ARMS[@]}"; do
     NVMAI_MEMORY_DIR="$MEMDIR" NVMAI_MEMORY_JOURNAL=1 \
     NVMAI_MEMORY_GUARD="${NVMAI_MEMORY_GUARD:-1}" \
     NVMAI_MEMORY_CONSOLIDATION=1 NVMAI_MEMORY_CONSOLIDATION_IDLE_SECONDS="$IDLE" \
-      exec "$START" codex full default off
+      exec "${LAUNCH[@]}"
   ) >"$SERVER_LOG" 2>&1 &
   LAUNCHER_PID=$!
   wait_ready

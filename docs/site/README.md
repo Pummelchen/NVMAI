@@ -103,6 +103,16 @@ the way it is, and what it will not do.
 4. Post in reading order and replace the relative `NN-*.md` links with topic URLs as each one goes up.
 5. Update the status column below after each post, and commit.
 
+## Keeping the articles true to the launcher
+
+Articles 02, 03, 05 and 06 describe what a person actually types. Those
+commands come from one place now: `tools/server_launcher.sh`, which starts the
+server alone or with Codex, Claude Code, Qwen Code, OpenCode or Zed, and asks
+about the model, the thinking level and the RAM limit. When that script's
+questions or flags change, these four articles need the same edit — a
+screenshot-fresh command in a forum post is the fastest way to lose a new
+user.
+
 | Article | Posted | Topic URL |
 | --- | --- | --- |
 | Welcome | ⬜ | |

@@ -52,22 +52,28 @@ class BenchmarkProfileTests(unittest.TestCase):
         self.assertIn(
             f"--prompt-cache-memory-mib {DEFAULT_PROMPT_CACHE_MEMORY_MIB}", launcher
         )
-        # The expert-cache budget is per-family now (decodeTuning), so neither
-        # the launcher nor the benchmark protocol pins one size: both measure
-        # and ship whatever the runtime picks for the model being loaded.
-        if DEFAULT_EXPERT_CACHE_BUDGET is None:
-            self.assertNotIn("--ram-budget", launcher)
-        else:
-            self.assertIn(f"--ram-budget {DEFAULT_EXPERT_CACHE_BUDGET}", launcher)
+        # The expert-cache budget is per-family (decodeTuning), so neither the
+        # benchmark protocol nor a plain launcher run pins one size: the
+        # runtime picks the model's own measured row. The launcher offers an
+        # explicit `--ram` override (1/2/4/8/16/32 GB), which must stay opt-in
+        # so the default path keeps the measured optimum.
+        self.assertIn('gpu_runtime+=(--ram-budget "${ram_gb}G")', launcher)
+        self.assertIn('if [[ -n "$ram_gb" && "$MODEL_BACKEND" != "cpu" ]]', launcher)
         self.assertIn('${NVMAI_THINKING_MODE:-off}', launcher)
-        self.assertIn('--thinking "$thinking_mode"', launcher)
+        # The dynamic path takes the reasoning level the catalog says the
+        # model supports (`--reasoning`); the single-model fallback for a
+        # binary-thinking build keeps the old `--thinking` flag.
+        self.assertIn('--reasoning "$thinking_level"', launcher)
+        self.assertIn('--thinking "$( [[ "$thinking_level" == off ]] && echo off || echo on )"', launcher)
         # Model and quantization are one list now, and the server starts
         # in dynamic mode over the whole models directory; the first
-        # question is the client's API rather than a coding CLI. Pin both
-        # so a revert to the old flow shows here.
+        # question is what to launch -- the server alone, or the server plus
+        # one coding client -- rather than a coding CLI. Pin both so a revert
+        # to the old flow shows here.
         self.assertIn('--models-dir "$MODELS_DIR"', launcher)
-        self.assertIn('Which API will your client use?', launcher)
-        self.assertIn('case "${mode_choice:-1}"', launcher)
+        self.assertIn('What do you want to launch?', launcher)
+        self.assertIn('Which answer style?', launcher)
+        self.assertIn('case "${answers_choice:-1}"', launcher)
 
     def test_environment_and_model_select_standard_base_alias(self) -> None:
         environment = server_environment({"PATH": os.environ.get("PATH", "")})

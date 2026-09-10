@@ -86,8 +86,13 @@ exactly this reason.
 
 ## Client setups
 
-The launcher prints the settings for you; the client-specific files below are
-what `tools/cli_launcher.sh` writes when you let it open a coding CLI.
+There are two ways to get a client connected:
+
+- **Let the launcher do it.** Run `tools/server_launcher.sh` (no arguments)
+  and pick the client when it asks what to launch. It writes that client's
+  configuration for you and then opens it.
+- **Do it yourself**, using the shapes below. This is also what to do for a
+  client the launcher does not know about.
 
 **OpenAI-compatible clients** need only the base URL, any API key, and the
 model ID. That is the whole story for most tools.
@@ -120,15 +125,41 @@ Those last two exist because Claude Code names a model for its own background
 tasks. Without them it asks for a `claude-*` model this server does not have
 and gets a 404 — a confusing failure that is entirely fixable.
 
-**Codex, Qwen Code and OpenCode** are supported too. For Codex and Qwen Code
-the project writes their configuration into dedicated directories
-(`~/.codex-nvmai`, `~/.qwen-nvmai`) so your real configuration is left
-untouched, and it disables Qwen Code's stream timeouts, which would otherwise
-cut off a long local generation mid-answer. OpenCode instead reads its own
-global configuration, and the helper simply warns you if that file does not
-point at NVMAI. This setup lives in `tools/cli_launcher.sh`, which starts the
-server *and* opens the client in one step — use that rather than the plain
-server launcher if you want the client wired up for you.
+**Zed** is an editor rather than a terminal client, and it takes an
+OpenAI-compatible provider in its settings file
+(`~/.config/zed/settings.json`). The shape, if you would rather add it
+yourself:
+
+```json
+{
+  "language_models": {
+    "openai_compatible": {
+      "nvmai": {
+        "api_url": "http://127.0.0.1:8080/v1",
+        "available_models": [
+          { "name": "ornith-1.5-35b-a3b_8-Bit",
+            "display_name": "NVMAI — Ornith 1.5 8-bit",
+            "max_tokens": 262144 }
+        ]
+      }
+    }
+  }
+}
+```
+
+Then choose that model in Zed's agent panel. Set `max_tokens` to the context
+window you actually run — 262144 for the native setting, or 524288 / 1048576
+with YaRN — because Zed uses it to decide how much context it has left.
+
+**Codex, Claude Code, Qwen Code, OpenCode and Zed** are all supported directly.
+For Codex and Qwen Code the launcher writes their configuration into dedicated
+directories (`~/.codex-nvmai`, `~/.qwen-nvmai`) so your real configuration is
+left untouched, and it disables Qwen Code's stream timeouts, which would
+otherwise cut off a long local generation mid-answer. Claude Code is set up
+through environment variables. OpenCode and Zed read their own settings files,
+so the launcher merges an `nvmai` provider into them — leaving the rest of
+your configuration, and your original file as a `.nvmai-backup` — and then
+opens the editor for you.
 
 ## A two-minute smoke test
 

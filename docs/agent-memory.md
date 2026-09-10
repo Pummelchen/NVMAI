@@ -277,17 +277,17 @@ There is none. Memory is off until you ask for it, and turning it on needs no
 service:
 
 ```bash
-NVMAI_MEMORY=1 tools/start-qwen3.6-8bit.sh
+NVMAI_MEMORY=1 tools/server_launcher.sh --client server --model qwen36 8
 ```
 
-The start scripts export the memory environment themselves: the workspace is
+The launcher exports the memory environment itself: the workspace is
 the directory you launched from, so two checkouts never share memory, and the
 ceiling follows the table above. To place the store elsewhere or name the
 workspace explicitly:
 
 ```bash
 NVMAI_MEMORY=1 NVMAI_MEMORY_DIR=/var/lib/nvmai \
-  NVMAI_MEMORY_WORKSPACE=my-project tools/start-ornith-8bit.sh
+  NVMAI_MEMORY_WORKSPACE=my-project tools/server_launcher.sh --client server --model ornith 8
 ```
 
 State lives in one file per project,

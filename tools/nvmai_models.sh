@@ -57,8 +57,8 @@ nvmai_resolve_quant() {
   esac
 }
 
-# nvmai_model_port -> the one port. Kept under this name because
-# tools/cli_launcher.sh still asks for it.
+# nvmai_model_port -> the one port every model is served on. Kept as a
+# function because callers and notes still ask for it by name.
 nvmai_model_port() {
   echo "$NVMAI_DEFAULT_PORT"
 }

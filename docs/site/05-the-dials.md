@@ -99,21 +99,37 @@ These are the dials specific to what makes NVMAI unusual.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| **RAM budget** (`--ram-budget`) | 10–12 GiB, per model and width | The ceiling for the expert cache — the slice of the model kept in memory. |
+| **RAM limit** (`--ram` / `--ram-budget`) | 10–12 GiB, per model and width | The ceiling for the expert cache — the slice of the model kept in memory. |
 | **Expert cache slots** (`--expert-cache-slots`) | derived from the budget | Same idea expressed as a count. Overrides the budget. |
 | **Prefill chunk** (`--prefill-chunk`) | 4096 for the supported text models | How much of your prompt is processed per step. Larger uses more temporary memory but can reduce repeated disk reads. |
 
-A larger expert cache means fewer trips to the SSD, so it is faster. It also
-means less memory for everything else. The shipped budget is set per model and
-weight width from measurement, and clamped to half your Mac's physical memory,
-so a smaller Mac is never handed a budget tuned on a bigger one. The 8 GiB you
-may see quoted is only the fallback used when the install cannot be
-identified; real installs run at 10–12 GiB.
+### The RAM limit, which the launcher asks you about
 
-**Practical advice.** Leave these alone unless you are deliberately
-experimenting or your Mac is struggling. If your Mac is struggling, lower the
-RAM budget and accept slower answers — that is the correct trade, and it keeps
-your machine usable.
+This is the one dial the launcher offers directly, because it is the one that
+decides whether your Mac stays comfortable. It asks for a limit in
+**1, 2, 4, 8, 16 or 32 GB**, and you can also pass it:
+
+```bash
+tools/server_launcher.sh --client server --model ornith 4 --ram 8
+```
+
+The default — the seventh choice, "model default" — is the install's own
+measured profile: 10–12 GiB, tuned per model and weight width and clamped to
+half your Mac's physical memory. That is the fastest setting, and the one most
+people should keep.
+
+Pick a tier deliberately when:
+
+- **Your Mac feels sluggish while it generates.** Go down a tier or two. Fewer
+  experts held in memory means more SSD reads and slower answers, and a machine
+  that still responds to you — usually the right trade.
+- **You have RAM to spare and want the fastest answers.** Go up a tier.
+
+A CPU model has no expert cache at all, so the limit does not apply to it; the
+launcher says so rather than pretending the choice did something.
+
+**Practical advice.** Leave it on the model default. Change it only if you are
+short on memory, and change one tier at a time.
 
 ## The performance features that are already on
 

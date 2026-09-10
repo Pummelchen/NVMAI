@@ -54,6 +54,12 @@ returns early once every layer is wired instead of walking all of them.
 
 ### A start script per model and quantization
 
+> **Superseded.** The eight per-model scripts and `tools/cli_launcher.sh` have
+> since been retired in favour of one `tools/server_launcher.sh`, which asks
+> what to launch — the server alone, or the server plus Codex, Claude Code,
+> Qwen Code, OpenCode or Zed — and serves every installed model on one port.
+> The commands below are kept as the record of what 5.1 shipped.
+
 Eight scripts that start the server for one install with no questions and
 each on its own port, so two configurations can run at once:
 
@@ -68,7 +74,8 @@ Ornith keeps ports 8081 and 8083. The model list, install paths and ports
 live in one catalogue that both the start scripts and the two interactive
 launchers read, so they cannot disagree about where a model is or which
 port it serves. `tools/server_launcher.sh` still asks, and
-`tools/cli_launcher.sh` also wires up Codex, Qwen Code or OpenCode.
+`tools/cli_launcher.sh` also wires up Codex, Qwen Code or OpenCode. (Both are
+now one launcher; see the note above.)
 
 ### The Mac app recognizes the models you have installed
 
