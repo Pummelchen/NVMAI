@@ -233,36 +233,43 @@ The rule that replaces the budget: **overhead is judged against what it
 buys, per scenario, and consolidation stays off the critical path.** No run
 here put consolidation anywhere but the idle gap.
 
-## Repeats of the book pair (in progress)
+## Repeats of the book pair
 
 The single-run book numbers carried more weight than one run can, and they
 were confounded: the unguarded 94% was measured *before* the memory-fragment
 fix and the guarded 97% after it. So all three arms were rerun on current
 code, interleaved — control, unguarded, guarded, then again — so the order
-cannot masquerade as an effect.
+cannot masquerade as an effect. Ornith 1.5 4-bit, three runs each.
 
-| arm | runs | each run (of 126) | pooled |
+| arm | each run (of 126) | pooled | mean time per run |
 | --- | --- | --- | --- |
-| control (memory off) | 3 | 118, 111, 126 | 93.9% |
-| memory, unguarded | 2 | 122, 114 | 93.7% |
-| memory, guarded | 2 | 124, 122 | **97.6%** |
+| control (memory off) | 118, 111, 126 | 93.9% | — |
+| memory, unguarded | 122, 114, 120 | 94.2% | 1424 s |
+| memory, guarded | 124, 122, 120 | **96.8%** | 1232 s |
 
-Two readings, one firm and one not yet.
+Three readings.
 
 **The control's own spread is 111 to 126** — 88% to 100% on identical
 configuration — which is exactly the noise the single runs were exposed to,
 and why one run each could never settle a three-point question.
 
-**The guard looks real but is two runs short.** Both guarded runs are at or
-above every unguarded run, and its pooled figure is four points clear of
-both other arms. That is suggestive, not settled, at two runs.
+**Unguarded memory is not a loss on this model.** The earlier single run
+put it seven points below the control; at three runs it sits level with it.
+The drift that run showed is real — the inn rebuilt, the eye colours
+shuffled — but it did not recur often enough to move a three-run mean.
 
-The third unguarded and guarded runs did not happen, and the reason is
-mine: a source file was edited while the sequence was running, and the
-harness refused a release binary older than the source — which is the check
-working exactly as designed. They are to be rerun with the machine
-otherwise idle; at the time of writing a 125B server was holding 15.7 GB of
-this 26 GB machine, and a 35B beside it would have measured the swapping.
+**The guard leans ahead but has not proved it.** It is 2.6 points above the
+unguarded arm and 2.9 above the control, and it was the cheapest arm to run.
+But the runs overlap — the third guarded run (120) sits below the first
+unguarded one (122) — and three runs against a control that spans fifteen
+points cannot separate three. Enough to keep the guard on by default, since
+it costs nothing measured; not enough to claim it improves the book.
+
+The third unguarded and guarded runs were late, and the reason is mine: a
+source file was edited while the first sequence was running, and the
+harness refused a release binary older than the source — the check working
+exactly as designed. All development has since moved to git worktrees, so
+the checkout the harness builds from is never touched while it runs.
 
 ## How a failure is handled
 
