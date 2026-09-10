@@ -173,19 +173,31 @@ fi
 PORT="${NVMAI_PORT:-$(nvmai_model_port)}"
 BASE_URL="http://127.0.0.1:${PORT}/v1"
 
-# --- clean slate: stop any running NVMAIServer, then start fresh ---
-if pgrep -x NVMAIServer >/dev/null 2>&1; then
-  echo "Stopping existing NVMAIServer instance(s)..."
-  pkill -x NVMAIServer
+# --- clean slate: stop the NVMAIServer on OUR port, then start fresh ---
+# Only the one on this port. This used to `pkill -x NVMAIServer`, which stops
+# every NVMAI server on the machine -- a benchmark harness on its own port,
+# or a server someone started by hand -- to make room for one of them.
+nvmai_port_pids() { lsof -ti :"$PORT" -sTCP:LISTEN 2>/dev/null || true; }
+nvmai_stop_port() {
+  local pid
+  for pid in $(nvmai_port_pids); do
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q NVMAIServer; then
+      echo "Stopping the NVMAIServer on port $PORT (pid $pid)..."
+      kill -TERM "$pid" 2>/dev/null || true
+    else
+      echo "ERROR: port $PORT is held by something that is not NVMAIServer" >&2
+      echo "       ($(ps -p "$pid" -o command= 2>/dev/null)); not touching it." >&2
+      return 1
+    fi
+  done
   for _ in $(seq 1 50); do
-    pgrep -x NVMAIServer >/dev/null 2>&1 || break
+    [[ -z "$(nvmai_port_pids)" ]] && return 0
     sleep 0.2
   done
-  if pgrep -x NVMAIServer >/dev/null 2>&1; then
-    echo "ERROR: NVMAIServer did not stop" >&2
-    exit 1
-  fi
-fi
+  echo "ERROR: the NVMAIServer on port $PORT did not stop" >&2
+  return 1
+}
+nvmai_stop_port || exit 1
 echo "Starting NVMAIServer ($ai_model $quant, $mode_word, $think_word)..."
 LAUNCH_LOG_DIR="$BASE_DIR/.build/launcher-logs"
 mkdir -p "$LAUNCH_LOG_DIR"
@@ -204,9 +216,23 @@ curl -s --max-time 2 "$BASE_URL/models" >/dev/null 2>&1 || {
 # in the routed-expert width, e.g. ornith-1.5-35b-a3b_8-Bit; the bare name
 # is not accepted). The "<id>-fast" alias serves the same weights with the
 # CLI-strip heuristic (chat-only speed) instead of the agentic tool loop.
-MODEL="$(curl -s --max-time 5 "$BASE_URL/models" \
-  | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' \
-  | grep -v -- '-fast$' | head -1)"
+# One server now lists every installed model, so "the first id it lists"
+# is no longer the model chosen above. The catalog maps the install
+# directory -- fixed by the installer -- to the id the server serves it
+# under. A server too old to report a catalog serves one model, so its
+# first id is still the right one.
+MODEL=""
+SERVER_BINARY="$BASE_DIR/.build/arm64-apple-macosx/release/NVMAIServer"
+nvmai_resolve_model "$ai_model"; nvmai_resolve_quant "$quant"
+if nvmai_load_catalog "$SERVER_BINARY" "$BASE_DIR/models" \
+   && index="$(nvmai_catalog_find_dir "${NVMAI_MODEL_STEM}_${NVMAI_QUANT_DIR}")"; then
+  MODEL="${NVMAI_CAT_ID[$index]}"
+fi
+if [[ -z "$MODEL" || "$MODEL" == "-" ]]; then
+  MODEL="$(curl -s --max-time 5 "$BASE_URL/models" \
+    | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"([^"]+)"$/\1/' \
+    | grep -v -- '-fast$' | head -1)"
+fi
 if [[ -z "$MODEL" ]]; then
   echo "ERROR: could not read the model id from $BASE_URL/models" >&2
   exit 1
