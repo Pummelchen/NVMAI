@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import NVMAI
 
@@ -63,5 +64,96 @@ struct ReasoningControlTests {
             environment: ["NVMAI_REASONING_EFFORT": "XHigh"]) == .xhigh)
         #expect(ModelReasoningEffort.resolved(
             environment: ["NVMAI_REASONING_EFFORT": "high"]) == nil)
+    }
+
+    // MARK: Thinking levels
+
+    @Test("Each family offers exactly the levels its template renders")
+    func supportedLevels() {
+        #expect(ModelFamily.qwen36.supportedReasoningLevels == [.off, .on])
+        #expect(ModelFamily.qwen36MTP.supportedReasoningLevels == [.off, .on])
+        #expect(ModelFamily.qwen38flash.supportedReasoningLevels
+            == [.off, .low, .medium, .xhigh])
+        #expect(ModelFamily.qwen38flashMTP.supportedReasoningLevels
+            == [.off, .low, .medium, .xhigh])
+        #expect(CPUModelFamily.qwen35Dense.supportedReasoningLevels == [.off, .on])
+    }
+
+    @Test("Levels map to the thinking switch and effort")
+    func runtimeMapping() throws {
+        for family in [ModelFamily.qwen36, .qwen36MTP] {
+            let off = try family.runtimeReasoning(for: .off)
+            #expect(off.thinking == .off && off.effort == nil)
+            let on = try family.runtimeReasoning(for: .on)
+            #expect(on.thinking == .on && on.effort == nil)
+        }
+        let off38 = try ModelFamily.qwen38flash.runtimeReasoning(for: .off)
+        #expect(off38.thinking == .off && off38.effort == nil)
+        let expected: [(ReasoningLevel, ModelReasoningEffort)] =
+            [(.low, .low), (.medium, .medium), (.xhigh, .xhigh)]
+        for (level, effort) in expected {
+            let settings = try ModelFamily.qwen38flash.runtimeReasoning(for: level)
+            #expect(settings.thinking == .on && settings.effort == effort)
+        }
+        let cpuOff = try CPUModelFamily.qwen35Dense.runtimeReasoning(for: .off)
+        #expect(cpuOff.thinking == .off && cpuOff.effort == nil)
+        let cpuOn = try CPUModelFamily.qwen35Dense.runtimeReasoning(for: .on)
+        #expect(cpuOn.thinking == .on && cpuOn.effort == nil)
+    }
+
+    @Test("Every supported level yields settings the family validates")
+    func mappedSettingsValidate() throws {
+        for family in [ModelFamily.qwen36, .qwen36MTP, .qwen38flash, .qwen38flashMTP] {
+            for level in family.supportedReasoningLevels {
+                let settings = try family.runtimeReasoning(for: level)
+                try family.validateReasoning(thinkingMode: settings.thinking,
+                                             effort: settings.effort)
+            }
+        }
+    }
+
+    @Test("A level the template does not render throws")
+    func unsupportedLevelsThrow() {
+        let binary: [ReasoningLevel] = [.off, .on]
+        for level in ReasoningLevel.allCases where !binary.contains(level) {
+            #expect(throws: ReasoningLevelError.unsupported(
+                family: "qwen36", level: level, supported: binary)) {
+                try ModelFamily.qwen36.runtimeReasoning(for: level)
+            }
+            #expect(throws: ReasoningLevelError.unsupported(
+                family: "qwen3_5_dense", level: level, supported: binary)) {
+                try CPUModelFamily.qwen35Dense.runtimeReasoning(for: level)
+            }
+        }
+        let effort: [ReasoningLevel] = [.off, .low, .medium, .xhigh]
+        for level in [ReasoningLevel.on, .minimal, .high, .max] {
+            #expect(throws: ReasoningLevelError.unsupported(
+                family: "qwen38flash", level: level, supported: effort)) {
+                try ModelFamily.qwen38flash.runtimeReasoning(for: level)
+            }
+        }
+    }
+
+    @Test("Display names and wire form")
+    func displayNames() throws {
+        #expect(ReasoningLevel.allCases
+            == [.off, .on, .minimal, .low, .medium, .high, .xhigh, .max])
+        #expect(ReasoningLevel.xhigh.displayName == "extra high")
+        for level in ReasoningLevel.allCases where level != .xhigh {
+            #expect(level.displayName == level.rawValue)
+        }
+        let data = try JSONEncoder().encode([ReasoningLevel.xhigh])
+        #expect(String(decoding: data, as: UTF8.self) == "[\"xhigh\"]")
+        let error = ReasoningLevelError.unsupported(
+            family: "qwen38flash", level: .high, supported: [.off, .xhigh])
+        #expect(error.description.contains("off, extra high"))
+    }
+
+    @Test("CPU family sampling defaults")
+    func cpuSamplingDefaults() {
+        let sampling = CPUModelFamily.qwen35Dense.samplingDefaults
+        #expect(sampling.temperature == 0.6)
+        #expect(sampling.topP == 0.95)
+        #expect(sampling.topK == GenerationDefaults.topK)
     }
 }
