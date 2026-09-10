@@ -61,7 +61,12 @@ class BenchmarkProfileTests(unittest.TestCase):
             self.assertIn(f"--ram-budget {DEFAULT_EXPERT_CACHE_BUDGET}", launcher)
         self.assertIn('${NVMAI_THINKING_MODE:-off}', launcher)
         self.assertIn('--thinking "$thinking_mode"', launcher)
-        self.assertIn('1) quant=8bit', launcher)
+        # Model and quantization are one list now, and the server starts
+        # in dynamic mode over the whole models directory; the first
+        # question is the client's API rather than a coding CLI. Pin both
+        # so a revert to the old flow shows here.
+        self.assertIn('--models-dir "$MODELS_DIR"', launcher)
+        self.assertIn('Which API will your client use?', launcher)
         self.assertIn('case "${mode_choice:-1}"', launcher)
 
     def test_environment_and_model_select_standard_base_alias(self) -> None:
