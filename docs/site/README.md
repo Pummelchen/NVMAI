@@ -1,77 +1,127 @@
-> Working plan for moving the NVMAI wiki to the Discourse forum at nvmai.discourse.group.
-> Status: draft — decide the forum structure and login flow, then publish article by article.
+> Working plan for the NVMAI community forum at https://nvmai.discourse.group/
+> Source of truth for the articles in this folder. The wiki stays the
+> professional reference; these articles are the friendly front door.
+> Status: drafted, ready to publish article by article.
 
-## Forum state (checked 2026-09-10)
+# NVMAI forum — the article series
 
-- Live, stock Discourse, title "NVMAI". Owner account: `Pummelchen`.
-- Categories: `General` (blue book), `Site Feedback`, `Uncategorized`.
-- Topics: only the two auto-generated ones (`Welcome to NVMAI!`, `About the General category`).
-- Public JSON API works unauthenticated (`/site.json`, `/latest.json`, topic JSON).
-- Posting requires admin credentials: an API Key (Admin panel → Users → Pummelchen → Credentials), used with `Authorization: ApiKey <key>`.
-- Login is Google sign-in (site config, already set up by the owner).
+This folder holds the ten articles that introduce NVMAI on the community
+forum, plus the welcome text below. Each file becomes one forum topic.
 
-## Structure proposal
+## Why this series exists
 
-Create these categories (order in the sidebar):
+The [GitHub wiki](https://github.com/Pummelchen/NVMAI/wiki) is the precise,
+engineering-facing documentation: exact flags, measured numbers, and the
+limits behind them. It is the right place to look something up.
 
-| Category | Icon | Contents |
-| --- | --- | --- |
-| **Guides** | 📗 | The feature articles of this series |
-| **Reference** | 📕 | System design, API reference, release notes |
-| **General** | 📘 | Keep for discussion |
-| **Show & Tell** | 🖼️ | User benchmarks, setups, results |
-| **Site Feedback** | 💬 | Already exists |
+It is not the right place to *land*. So the forum gets a series written for
+someone who has never opened a terminal, never heard of quantization, and
+just wants a large AI model running on the Mac they already own. The wiki is
+the reference; these articles are the explanation. Every article links back
+into the wiki for the precise version of whatever it simplified.
 
-Each wiki page becomes one **topic** in Guides or Reference, with a pinned "Series" topic at the top of Guides that links everything, in reading order.
+## Two things to keep in mind about the audience
 
-## Article series (wiki source → forum article)
+Roughly half of NVMAI's users are not programmers. They should be able to
+read the whole series without compiling anything, and the one unavoidable
+setup step is stated plainly rather than hidden (article 02). Once NVMAI is
+running, the Mac app needs no code at all.
 
-Status: ⬜ not started · ✍️ drafted · ✅ published
+The other half *are* programmers, and they will notice if a number or a
+limit is glossed over. "Not a coder" is not "not paying attention" — the
+articles keep the real numbers, and every limit gets the same space as the
+feature it belongs to. A limit that surprises someone later is a support
+ticket, and worse, it is a broken promise.
 
-| # | Title | Category | Wiki source | Status |
+## The articles
+
+Part 1 and part 2 are the how-to: getting started and the choices you make
+while using it. Part 3 is about NVMAI itself — what it is, why it is built
+the way it is, and what it will not do.
+
+| # | File | Title | Part | Wiki reference |
 | --- | --- | --- | --- | --- |
-| 01 | What NVMAI is, and what it is made for | Guides | Home + Features | ✍️ drafted (`01-what-is-nvmai.md`) |
-| 02 | Getting Started: install and first run | Guides | Getting-Started | ✍️ drafted (`02-getting-started.md`) |
-| 03 | SSD expert streaming: how it works | Guides | System-Design (streaming) + v4.1/v4.2 | ✍️ drafted (`03-ssd-expert-streaming.md`) |
-| 04 | The RAM budget and bounded expert cache | Guides | Runtime-Controls + System-Design | ✍️ drafted (`04-ram-budget.md`) |
-| 05 | Installs and verified receipts | Guides | System-Design (format) + Getting-Started + FAQ | ✍️ drafted (`05-installs-and-receipts.md`) |
-| 06 | The OpenAI-compatible server | Guides | OpenAI-Compatible-Server | ✍️ drafted (`06-openai-server.md`) |
-| 07 | Runtime controls | Guides | Runtime-Controls | ✍️ drafted (`07-runtime-controls.md`) |
-| 08 | Long context: RoPE/YaRN and KV cache | Guides | Runtime-Controls (context) + System-Design | ✍️ drafted (`08-long-context-kv.md`) |
-| 09 | ANE prefill and the Metal engine | Guides | v4.5-ane-prefill + Features | ✍️ drafted (`09-ane-prefill.md`) |
-| 10 | Agent memory | Guides | agent-memory.md + plan-memory-guard | ✍️ drafted (`10-agent-memory.md`) |
-| 11 | Benchmarking: how to measure | Reference | Benchmarking-Guide + Benchmarks | ✍️ drafted (`11-benchmarking.md`) |
-| 12 | System design (overview) | Reference | System-Design + v4-core-design | ⬜ (overlaps 03/04/09; may fold into a single Reference post) |
-| 13 | FAQ | General | FAQ | ⬜ (candidate: a sticky Q&A topic rather than a page) |
-| 14 | Release notes / changelog | Reference | Changelog + release-notes-v5.x | ⬜ |
+| — | (welcome, below) | Welcome to the NVMAI forum | Start here | [Home](https://github.com/Pummelchen/NVMAI/wiki) |
+| 01 | `01-what-is-nvmai.md` | What NVMAI is (in plain words) | About | [Home](https://github.com/Pummelchen/NVMAI/wiki/Home) · [Features](https://github.com/Pummelchen/NVMAI/wiki/Features) |
+| 02 | `02-getting-nvmai-running.md` | Getting NVMAI running on your Mac | Getting started | [Getting Started](https://github.com/Pummelchen/NVMAI/wiki/Getting-Started) |
+| 03 | `03-your-first-conversation.md` | Your first conversation | Getting started | [Getting Started](https://github.com/Pummelchen/NVMAI/wiki/Getting-Started) |
+| 04 | `04-choosing-a-model.md` | Choosing a model: the one real decision | Features | [Features](https://github.com/Pummelchen/NVMAI/wiki/Features) |
+| 05 | `05-the-dials.md` | The dials: what each setting actually does | Features | [Runtime Controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls) |
+| 06 | `06-connecting-your-apps.md` | Connecting your apps (the local server) | Features | [Local Server](https://github.com/Pummelchen/NVMAI/wiki/OpenAI-Compatible-Server) |
+| 07 | `07-long-context.md` | Long context and the KV cache | Features | [Runtime Controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls) |
+| 08 | `08-memory-that-remembers.md` | Memory that remembers, and the guard | Features | [Runtime Controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls) · `docs/agent-memory.md` |
+| 09 | `09-why-nvmai-runs-big-models.md` | Why NVMAI can run models that "don't fit" | About | [System Design](https://github.com/Pummelchen/NVMAI/wiki/System-Design) |
+| 10 | `10-what-nvmai-will-not-do.md` | What NVMAI will not do (and how to get help) | About | [FAQ](https://github.com/Pummelchen/NVMAI/wiki/FAQ) |
 
-> **Cross-links.** Drafts use placeholder anchors like `(#03)` in the "Where to go next" sections. At publish time these become real topic URLs (we know each topic's slug/ID once it's posted). The plan's publish step replaces the anchors with URLs, one pass per article.
+## The welcome text (for the pinned "Welcome" topic)
+
+> **Welcome to the NVMAI forum 👋**
 >
-> **Publish order.** Post in reading order (01 → 11) so each article's "where to go next" points at an already-existing topic. 01 is the front door and should be pinned to Guides once the series is live.
+> NVMAI runs large Qwen AI models locally on an Apple Silicon Mac — a 125B
+> model on a 24 GB laptop, by streaming what it needs from your SSD instead
+> of holding it all in memory. No cloud, no account, no data leaving your
+> machine.
+>
+> This forum is the friendly place to start. **You do not need to be a
+> programmer.** The [ten-part series](01-what-is-nvmai.md) walks from "what
+> is this" to "it is answering me", in plain words, and explains every
+> choice along the way. Getting started is one command:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/Pummelchen/NVMAI/main/tools/install_nvmai.sh | bash
+> ```
+>
+> The installer checks your Mac, builds NVMAI, optionally downloads a model,
+> and puts a proper double-clickable **NVMAI app** in your Applications
+> folder. [Article 02](02-getting-nvmai-running.md) shows the same steps by
+> hand if you would rather see what is happening.
+>
+> If you want the precise version — exact settings, measured numbers, and
+> the honest limits — the [wiki](https://github.com/Pummelchen/NVMAI/wiki)
+> is the professional reference.
+>
+> **Where to go**
+>
+> - 📗 **New here?** Start with [What NVMAI is](01-what-is-nvmai.md), then
+>   [Getting NVMAI running](02-getting-nvmai-running.md).
+> - 🖥️ **Already running?** [Choosing a model](04-choosing-a-model.md) and
+>   [The dials](05-the-dials.md) explain the choices in the app and the
+>   launcher.
+> - 🔌 **Connecting an app?** [Connecting your apps](06-connecting-your-apps.md).
+> - 🧠 **The interesting part?** [Memory that remembers](08-memory-that-remembers.md).
+> - 🐞 **Something broke?** [What NVMAI will not do](10-what-nvmai-will-not-do.md).
+>
+> Ask anything. "This may be a silly question" is the most useful kind of
+> post here — if it was unclear to you, it is unclear to someone else, and
+> we would rather fix the article than have you stay stuck.
 
-## Workflow
+## Publishing workflow
 
-1. Author each article as `docs/site/NN-slug.md` in the repo (canonical, reviewable, diffs against the wiki).
-2. Review the draft here; fix inaccuracies against the repo before posting.
-3. Publish to the forum via the Discourse API with the owner's API key:
-   `POST /topics.json` with `title`, `category_id`, `raw` (or a script that reads the markdown file).
-   Discourse converts markdown natively; code blocks and tables carry over.
-4. Mark the row in this table ✅ with the topic URL.
-5. Commit `docs/site/` + this plan to git after each published article.
+1. One article is one forum topic — paste the file body, keep the `#` title as the topic title.
+2. Create the categories first: **Guides** 📗 (articles 02–08), **About NVMAI** 📘 (01, 09, 10), **Show & Tell** 🖼️, **Site Feedback** 💬.
+3. Pin the welcome text as the first topic in **About NVMAI**.
+4. Post in reading order and replace the relative `NN-*.md` links with topic URLs as each one goes up.
+5. Update the status column below after each post, and commit.
 
-## Style rules for the articles
+| Article | Posted | Topic URL |
+| --- | --- | --- |
+| Welcome | ⬜ | |
+| 01 What NVMAI is | ⬜ | |
+| 02 Getting NVMAI running | ⬜ | |
+| 03 Your first conversation | ⬜ | |
+| 04 Choosing a model | ⬜ | |
+| 05 The dials | ⬜ | |
+| 06 Connecting your apps | ⬜ | |
+| 07 Long context | ⬜ | |
+| 08 Memory that remembers | ⬜ | |
+| 09 Why NVMAI runs big models | ⬜ | |
+| 10 What NVMAI will not do | ⬜ | |
 
-- Short paragraphs, plain words. A forum reader is skimming, not studying.
-- Every number gets its source: the benchmark script, the release note, or the machine it ran on.
-- One article = one feature. Cross-link instead of duplicating.
-- Limits get the same space as features. A limit that surprises later is a support ticket.
-- No copy/paste from the wiki: the wiki is the spec, the article is the explanation.
-- End every article with a "where to go next" link into the series.
+## Style rules
 
-## Open questions for the owner
-
-1. Categories: keep the proposal, or start simpler (Guides + Reference only)?
-2. Should the wiki be marked "moved to the forum" with a banner, or kept in sync?
-3. Google login: is the site already using the Google OAuth plugin, or does the owner need to install/configure it in the admin panel?
-4. API key: generate one and hand it over (it can be revoked in the admin panel at any time).
-5. Pinned series topic: title it "NVMAI documentation" and pin it to the Guides category?
+- Warm and plain. Short paragraphs. A forum reader is skimming, not studying.
+- No unexplained jargon. When a term is needed, define it where it first appears.
+- Every number carries its source: the benchmark, the release note, or the machine it ran on.
+- Limits get the same space as features. Never oversell.
+- One article, one subject. Cross-link instead of repeating.
+- End every article with a "where to go next" that continues the series.

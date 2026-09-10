@@ -1,58 +1,121 @@
-> **Category:** General (or a future "Guides" category)
-> **Status:** draft v1 — to be reviewed before posting
+# What NVMAI is (in plain words)
 
-# What NVMAI is, and what it is made for
+Welcome to the forum. Let's start with the short version, no jargon.
 
-NVMAI is a native Swift 6 + Metal inference runtime for Qwen-based MoE text models on Apple Silicon, from M1 to M6. It exists to break one specific wall: **the RAM wall.**
+**NVMAI runs large AI models on your own Mac.** Not a cut-down model, not a
+cloud service — the real thing, on the laptop or desktop you already own,
+with nothing sent anywhere.
 
-A 35B mixture-of-experts model is 15–40 GB of weights. A Mac is 16–64 GB of RAM. That arithmetic usually means "downsize the model." NVMAI instead keeps the routed experts on the NVMe drive and streams them into a small, bounded slice of memory as the model generates. The model size is then bounded by your **disk**, not your memory. A 125B model runs on a 24 GB Mac — and even on 8 GB — because only the experts the next token needs are ever resident at once.
+That is a harder trick than it sounds, and how NVMAI pulls it off is the
+whole idea.
 
-You set the RAM budget, and NVMAI holds the line. Give it 4 GB or 8 GB for the expert cache and it stays inside it, so your Mac stays responsive while the model runs.
+## The wall that usually stops you
 
-## What it is good at
+AI models are big files. A capable one is tens of gigabytes. Your Mac has a
+fixed amount of memory (RAM) — maybe 16, maybe 24, maybe 64 GB — and macOS
+itself, your browser, and your photos all want a share of it.
 
-- **Huge models on small Macs.** Qwen3.8-Flash-Next 125B-A6B in 4-bit streams at 5.46 tok/s on an 8-core M3. The 35B-A3B models run at about **21.7 tok/s** (4-bit) — close to what people expect from models a third their size.
-- **A real API, not a toy.** The loopback server speaks OpenAI Chat Completions and the Responses API, with streaming and client-side tool calls. Launch scripts wire up Codex, Qwen Code, and OpenCode directly.
-- **One command per model.** `tools/start-<model>-<bits>.sh` installs nothing to configure: pinned model, tuned settings, own port, done. Installs are verified end to end with a path-bound receipt, so a model that loads is the model that was promised.
-- **It uses the Mac at the physical limit.** Own Metal kernels, own model format (no MLX, no GGUF), and a converter that builds the format straight from the original weights. The Apple Neural Engine runs long-prompt prefill about 2.3× faster than the GPU; tiled GPU Top-K sampling cut per-token sampling cost from 15.5 ms to 1.4 ms.
-- **Long context.** Native RoPE to 262K tokens; optional YaRN to 512K or 1M. The KV cache can be stored in 16-, 8-, or 4-bit, independent of the model's own quantization (8-bit is the default).
-- **It is a measurement project, not a marketing project.** Every performance claim in this forum comes from a script in `benchmark/` with a fixed model, seed, and hardware, and the numbers change only when a release notes them — v5.1, for example, reports 10–13% faster 8-bit decode on the 35B family and byte-identical output on all eight golden runs.
+So the usual advice is: get a smaller model, or rent a bigger machine.
 
-## What it is not, and what it cannot do
+NVMAI takes a third path. It keeps the model on your **SSD** (your internal
+drive) and streams the parts it needs into memory while it is answering. The
+model's size is then limited by your *free disk space*, not your memory.
 
-Limits are part of the design, so here they are without fine print:
+The practical result: a 125-billion-parameter model runs on a 24 GB Mac. On
+this project's own reference machine — a base 8-core M3 MacBook Pro with
+24 GB — the 35B models answer at around **21.7 tokens per second** in 4-bit
+and **about 12** in 8-bit, and the 125B model at **5.46**. (A token is roughly
+a word-piece; 21 tokens a second is comfortably faster than you read.)
 
-- **Text only.** No vision, no audio. (Ornith's vision and audio are not included.)
-- **One model at a time.** One loaded model, one generated choice, per server. One model process per machine is the operating rule, not a bug.
-- **Disk is the new budget.** 19.5 GB for a 35B in 4-bit, roughly 37 GB in 8-bit, and about 161 GB for the 125B in 4-bit — its hashed n-gram table alone is 95 GB.
-- **The server is local by design.** It binds to `127.0.0.1`, has no authentication and no TLS, and must never be proxied, tunneled, or exposed. That is a feature (nothing can reach your model) and a limit (no remote access).
-- **Tool calls go back to the client.** NVMAI proposes tool calls; it never executes or authorizes them. Your client's permission policy is still the one that decides.
-- **Thinking is binary.** Ornith and Qwen expose reasoning as an on/off chat-template switch. NVMAI does not dress prompt tricks up as Low/Medium/High effort levels.
-- **Speculative decoding (MTP) is off by default.** It is experimental, requires greedy decoding and native RoPE, and measured Ornith runs showed no speed benefit — so it stays off until it does.
+That is the headline. It is genuinely unusual, and it is why NVMAI exists.
 
-## What it runs today
+## Where your memory goes instead
 
-| Model | Quantizations | Notes |
-| --- | --- | --- |
-| Qwen-AgentWorld 35B-A3B | 4-bit, 8-bit | fastest 4-bit decode of the 35B family (21.74 tok/s, M3) |
-| Qwen 3.6 35B-A3B | 4-bit, 8-bit | |
-| Ornith 1.5 35B-A3B | 4-bit, 8-bit | 8-bit is the historical default; 4-bit is the baseline |
-| Qwen3.8-Flash-Next 125B-A6B | 4-bit, 8-bit | the "125B on a laptop" model |
+Streaming does not mean ignoring your RAM — it means *sizing* it.
 
-Hardware: Apple M1–M6, macOS 26 or later, Swift 6.3 or later, and SSD space as above. Six-bit support was withdrawn; it will not load.
+You give NVMAI a budget for the part of the model it keeps in memory at any
+moment, and it stays inside that budget. Give it 4 GB or 8 GB and it holds
+the line, so your Mac stays responsive while the model works. This is
+covered properly in [Why NVMAI can run models that "don't fit"](09-why-nvmai-runs-big-models.md).
 
-## How to get the first feel for it
+## What it feels like to use
 
-Clone the repo and run one start script:
+Three ways in, depending on who you are:
 
-```bash
-git clone https://github.com/Pummelchen/NVMAI
-cd NVMAI
-tools/start-ornith-8bit.sh   # or any other start-<model>-<bits>.sh
-```
+- **A Mac app** with a normal window — type, read, adjust a few settings with
+  actual controls. Nothing to code. This is the right door for most people.
+- **A chat in the Terminal** for a quick single question, if you like that
+  sort of thing.
+- **A local server** that your existing apps can talk to. This is the one
+  programmers get excited about: point a coding assistant at your Mac and it
+  uses *your* model, locally. See
+  [Connecting your apps](06-connecting-your-apps.md).
 
-Point Codex, Qwen Code, OpenCode — or any OpenAI-compatible client — at `http://127.0.0.1:8080/v1` and ask it something. Then read the [Getting Started guide] and come back here with your first question.
+All three use the same engine and the same installed model.
 
-This forum will grow one article at a time, each explaining one main feature: SSD expert streaming, the RAM budget, installs and verified receipts, the OpenAI-compatible server, runtime controls, ANE prefill, long context and KV compression, agent memory, and benchmarking. The plan for the series is in the [wiki → forum migration topic].
+## What makes it different
 
-*Version at time of writing: NVMAI 5.1.*
+Most projects that run models on a Mac use an existing engine (MLX or
+GGUF/llama.cpp). NVMAI built its own:
+
+- **Its own streaming runtime.** The part that reads experts off the SSD and
+  keeps memory bounded is the core of the project, not a wrapper around
+  someone else's work.
+- **Its own Metal kernels.** Metal is Apple's graphics layer; NVMAI uses the
+  GPU's full width rather than going through a translation layer.
+- **Its own model format.** A converter builds it straight from the original
+  published weights, and `.gturbo` installs are verified end to end with a
+  receipt — so a model that loads is the model that was promised, byte for
+  byte.
+- **The Apple Neural Engine for prompt processing.** When an exported support
+  file is present, long-document prefill runs on the Neural Engine instead of
+  the GPU cores — measured around **2.3× faster** on a 6,000-token prompt. No
+  shipped install carries that file yet, so today this is a capability you
+  would enable yourself; without it, NVMAI quietly uses the GPU and nothing
+  breaks.
+
+There is one more thing, and it might be the most interesting feature here:
+NVMAI can give the model **memory that survives the conversation** — so it
+remembers your project from one session to the next, with a safeguard so it
+cannot quietly overwrite something *you* told it. It is off by default; you
+turn it on with one setting. That is
+[Memory that remembers](08-memory-that-remembers.md).
+
+## What it is not
+
+Worth saying on the first page, not the tenth:
+
+- **It is text in, text out.** No image or audio understanding.
+- **It runs one model at a time.** One model process per Mac is the rule.
+- **Your disk is the new budget.** The 4-bit 35B models need about 20 GB
+  installed; 8-bit about 37 GB; the 125B model needs roughly 174 GB.
+- **The server is local by design.** It only accepts connections from your
+  own machine, and it must not be exposed to a network. That is a safety
+  feature, not an oversight.
+- **The models are ones this project supports**, not anything on the
+  internet. See [Choosing a model](04-choosing-a-model.md).
+
+The full list of limits, with no small print, is
+[What NVMAI will not do](10-what-nvmai-will-not-do.md). Please read it before
+you plan around NVMAI — it will save us both some time.
+
+## Is my Mac good enough?
+
+You need Apple Silicon (M1 or newer), macOS 26 or later, and free SSD
+space. That is the honest list; [Getting NVMAI running](02-getting-nvmai-running.md)
+walks through it.
+
+Most of the published measurements come from one base M3 with 24 GB, so
+that is the configuration this project knows best. Other chips are expected
+to work well but have not been measured here to the same depth — the project
+says so plainly rather than guessing.
+
+## Where to go next
+
+Ready to try it? → **[Getting NVMAI running on your Mac](02-getting-nvmai-running.md)**
+
+Want the precise engineering version first? → the
+[wiki](https://github.com/Pummelchen/NVMAI/wiki) is the professional
+reference. This series is the friendly one; the wiki is the exact one.
+
+*NVMAI 5.1 at the time of writing.*

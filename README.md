@@ -34,6 +34,15 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 
 ### Usage
 
+- **Easiest install:** one command checks the Mac, builds NVMAI, optionally
+  downloads a model, and installs a double-clickable Mac app in
+  `~/Applications`. Safe to re-run; it updates instead of cloning twice.
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/Pummelchen/NVMAI/main/tools/install_nvmai.sh | bash
+  ```
+  From a clone, `tools/install_nvmai.sh` does the same. See
+  [docs/site](docs/site/) for the plain-language article series, or
+  `tools/install_nvmai.sh --help` for its flags.
 - **OpenAI-compatible server:** A loopback Chat Completions and Responses API
   includes launch scripts for starting NVMAI and connecting supported coding
   clients.
