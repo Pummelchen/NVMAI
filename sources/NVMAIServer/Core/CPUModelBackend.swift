@@ -22,6 +22,14 @@ public actor CPUModelBackend: ServerInferenceBackend {
 
     private let model: CPUQwen35
     private let tokenizer: GFTokenizer
+    /// Where the tokenizer came from, and the reasoning it was rendered at.
+    ///
+    /// A request that names a different thinking mode or effort -- a
+    /// mid-session switch, including turning thinking off -- resolves a
+    /// tokenizer for that configuration through the shared
+    /// `(folder, thinking, effort)` cache rather than reusing this one.
+    private let snapshotDirectory: URL
+    private let loadedReasoning: RequestReasoning
     private let context: Int
     private let defaults: GenerationDefaults.Sampling
 
@@ -67,6 +75,9 @@ public actor CPUModelBackend: ServerInferenceBackend {
         model = engine
         tokenizer = try await GFTokenizer.load(from: snapshotDirectory,
                                                thinkingMode: thinkingMode)
+        self.snapshotDirectory = snapshotDirectory
+        self.loadedReasoning = RequestReasoning(thinkingMode: thinkingMode,
+                                                effort: nil)
         context = min(maximumContext, snapshot.configuration.maxPositions,
                       Self.contextCeiling)
         // The family's own, which is what the catalog advertises for it, so
@@ -98,8 +109,13 @@ public actor CPUModelBackend: ServerInferenceBackend {
         _ request: ValidatedChatRequest,
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
-        let rendered = try tokenizer.applyChatTemplate(request.messages)
-        let promptIDs = tokenizer.encode(rendered, addBOS: false)
+        // A mid-session switch resolves a tokenizer for the requested
+        // thinking mode; nil (the common case) reuses the loaded one. The
+        // tokenizer carries the think-block and stop token IDs for its own
+        // mode, so decode follows the switch as well as the render.
+        let renderTokenizer = try await resolvedTokenizer(for: request.reasoning)
+        let rendered = try renderTokenizer.applyChatTemplate(request.messages)
+        let promptIDs = renderTokenizer.encode(rendered, addBOS: false)
         let prompt = promptIDs.map(Int.init)
         guard prompt.count < context else {
             throw CPUBackendError.promptTooLong(prompt.count, context)
@@ -125,8 +141,8 @@ public actor CPUModelBackend: ServerInferenceBackend {
         // way on either engine. This path renders no tool template, so the
         // decoder only ever splits thoughts.
         let decoder = StructuredAssistantDecoder.forGeneration(
-            tokenizer: tokenizer, promptIDs: promptIDs, allowedTools: nil)
-        var detokenizer = GFDetokenizer(tokenizer: tokenizer)
+            tokenizer: renderTokenizer, promptIDs: promptIDs, allowedTools: nil)
+        var detokenizer = GFDetokenizer(tokenizer: renderTokenizer)
         var output = AssistantOutput(stops: configuration.stopStrings, onEvent: onEvent)
         var produced = 0
         var reason = "length"
@@ -181,7 +197,24 @@ public actor CPUModelBackend: ServerInferenceBackend {
 /// so a client sizing its context against a CPU model gets the real number.
 extension CPUModelBackend: PromptTokenCounting {
     public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
-        try Self.promptTokenCount(request, tokenizer: tokenizer)
+        // Count through the same tokenizer `generate` would use, so a client
+        // sizing the context for a mid-session switch gets the real number
+        // rather than the loaded mode's.
+        try Self.promptTokenCount(
+            request, tokenizer: try await resolvedTokenizer(for: request.reasoning))
+    }
+
+    /// The tokenizer this request should be rendered with; the loaded one
+    /// unless the request named a different thinking mode or effort.
+    private func resolvedTokenizer(
+        for reasoning: RequestReasoning?
+    ) async throws -> GFTokenizer {
+        guard let reasoning, !reasoning.matches(loadedReasoning) else {
+            return tokenizer
+        }
+        return try await GFTokenizer.load(from: snapshotDirectory,
+                                          thinkingMode: reasoning.thinkingMode,
+                                          reasoningEffort: reasoning.effort)
     }
 
     /// The count from a tokenizer alone, which is how the router answers for

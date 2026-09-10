@@ -340,6 +340,18 @@ public struct ValidatedChatRequest: Sendable {
     /// applied in its log. Additive and defaulted so every existing caller is
     /// unchanged.
     public let reasoningNotes: [String]
+    /// The thinking mode and effort this request should actually render at.
+    ///
+    /// `nil` means "whatever the model was loaded with", which is the common
+    /// path and keeps the session's own tokenizer. A value that differs from
+    /// the loaded one is a mid-session switch: the session resolves a
+    /// tokenizer for it instead of reusing its own, so a coding agent can
+    /// turn thinking off (or change effort) inside a live session.
+    ///
+    /// Carried on the request rather than passed alongside it because the
+    /// prompt cache keys on this value: two levels render different prompts,
+    /// and a cached KV range from one must never be spliced onto the other.
+    public let reasoning: RequestReasoning?
 
     public init(messages: [GFTokenizer.Message],
                 tools: [GFTokenizer.FunctionDefinition],
@@ -351,7 +363,8 @@ public struct ValidatedChatRequest: Sendable {
                 workspace: String? = nil,
                 isEngineInternal: Bool = false,
                 model: String? = nil,
-                reasoningNotes: [String] = []) {
+                reasoningNotes: [String] = [],
+                reasoning: RequestReasoning? = nil) {
         self.messages = messages
         self.tools = tools
         self.stream = stream
@@ -363,6 +376,7 @@ public struct ValidatedChatRequest: Sendable {
         self.isEngineInternal = isEngineInternal
         self.model = model
         self.reasoningNotes = reasoningNotes
+        self.reasoning = reasoning
     }
 
     /// The post-strip view of this request: the same request carrying the
@@ -388,7 +402,8 @@ public struct ValidatedChatRequest: Sendable {
             workspace: workspace,
             isEngineInternal: isEngineInternal,
             model: model,
-            reasoningNotes: reasoningNotes)
+            reasoningNotes: reasoningNotes,
+            reasoning: reasoning)
     }
 
     /// The memory workspace this request names, from the X-NVMAI-Workspace
@@ -406,7 +421,8 @@ public struct ValidatedChatRequest: Sendable {
             workspace: workspace,
             isEngineInternal: isEngineInternal,
             model: model,
-            reasoningNotes: reasoningNotes)
+            reasoningNotes: reasoningNotes,
+            reasoning: reasoning)
     }
 
     /// The same request, bound to the catalog model it was validated for.
@@ -422,7 +438,8 @@ public struct ValidatedChatRequest: Sendable {
             workspace: workspace,
             isEngineInternal: isEngineInternal,
             model: model,
-            reasoningNotes: reasoningNotes)
+            reasoningNotes: reasoningNotes,
+            reasoning: reasoning)
     }
 }
 
@@ -468,6 +485,9 @@ public enum OpenAIRequestValidator {
         // and the difference is recorded below rather than turned into an
         // error.
         var reasoningNotes: [String] = []
+        var reasoning = RequestReasoning(
+            thinkingMode: reasoningProfile.thinkingMode,
+            effort: reasoningProfile.effectiveEffort)
         if let effortRaw = request.reasoningEffort {
             let control = reasoningProfile.family.reasoningControl
             let supported = control.supportedLevels
@@ -479,23 +499,23 @@ public enum OpenAIRequestValidator {
                 let applied = ReasoningFallback.effectiveLevel(
                     requested, supported: supported,
                     whenOn: efforts.last)
-                // Thinking is a load-time switch, so an effort on a server
-                // loaded with thinking off cannot be honoured by mapping it
-                // to `on` — the prompt is already rendered without the think
-                // block. Say what will actually happen instead of claiming a
-                // level that is not in force.
-                if applied != .off, !reasoningProfile.thinkingMode.isEnabled {
-                    reasoningNotes.append(
-                        "reasoning level '\(effortRaw)' needs thinking on, which this "
-                        + "server did not load; the answer is produced without a "
-                        + "thinking block (restart with --reasoning on to enable it)")
-                } else if applied != requested {
+                // This is what makes a mid-session switch real: the level is
+                // carried into generation, which resolves a tokenizer for it
+                // rather than re-rendering with the loaded one.
+                reasoning = RequestReasoning(
+                    thinkingMode: applied == .off ? .off : .on,
+                    effort: applied == .off
+                        ? nil
+                        : ModelReasoningEffort(rawValue: applied.rawValue))
+                if applied != requested {
                     reasoningNotes.append(
                         "reasoning level '\(effortRaw)' is not supported by this model; "
                         + "applied \(applied.displayName) instead (supports: "
                         + supported.map(\.displayName).joined(separator: ", ") + ")")
                 }
             } else {
+                // Unintelligible, not impossible: keep what the model was
+                // loaded with rather than guessing at a level.
                 reasoningNotes.append(
                     "reasoning level '\(effortRaw)' was not recognised; "
                     + "the model's own default applies (supports: "
@@ -615,7 +635,8 @@ public enum OpenAIRequestValidator {
                                     generationConfig: config,
                                     maximumCompletionTokens: maximum,
                                     stripCLIPrompt: stripCLIPrompt,
-                                    reasoningNotes: reasoningNotes)
+                                    reasoningNotes: reasoningNotes,
+                                    reasoning: reasoning)
     }
 
     private static func validateTool(_ tool: OpenAITool) throws -> GFTokenizer.FunctionDefinition {

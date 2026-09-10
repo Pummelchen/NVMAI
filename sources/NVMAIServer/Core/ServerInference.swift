@@ -539,6 +539,14 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
     private let context: MetalContext
     private let model: Model
     private let tokenizer: GFTokenizer
+    /// Where the tokenizer came from and the reasoning it was rendered at.
+    ///
+    /// Kept so a request that asks for a different thinking mode or effort can
+    /// resolve its own tokenizer through the shared
+    /// `(folder, thinking, effort)` cache, instead of being pinned to whatever
+    /// the model was loaded with. `nil` reasoning means the session's own.
+    private let tokenizerFolder: URL
+    private nonisolated let loadedReasoning: RequestReasoning
     private let runner: RealForwardRunner
     private let mtpDecoder: StreamingMTPDecoder?
     private let scratch: RawCompletionScratch
@@ -779,6 +787,10 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         return ServerModelSession(context: context,
                                   model: model,
                                   tokenizer: tokenizer,
+                                  tokenizerFolder: tokenizerFolder,
+                                  loadedReasoning: RequestReasoning(
+                                      thinkingMode: thinkingMode,
+                                      effort: reasoningEffort),
                                   runner: runner,
                                   mtpDecoder: mtpDecoder,
                                   scratch: scratch,
@@ -796,6 +808,8 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
     private init(context: MetalContext,
                  model: Model,
                  tokenizer: GFTokenizer,
+                 tokenizerFolder: URL,
+                 loadedReasoning: RequestReasoning,
                  runner: RealForwardRunner,
                  mtpDecoder: StreamingMTPDecoder?,
                  scratch: RawCompletionScratch,
@@ -810,6 +824,8 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         self.context = context
         self.model = model
         self.tokenizer = tokenizer
+        self.tokenizerFolder = tokenizerFolder
+        self.loadedReasoning = loadedReasoning
         self.modelFamily = model.config.family
         self.profileSampling = ModelProfile.resolve(
             modelID: model.modelID, family: model.config.family,
@@ -857,8 +873,13 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
     /// publishing against the raw request would splice an unstripped tail onto
     /// a stripped prefix, silently losing the "-fast" alias's strip on every
     /// cached continuation turn.
+    ///
+    /// `renderTokenizer` is the one this request's reasoning resolves to, so a
+    /// mid-session switch renders through the right template instead of the
+    /// one the model happened to load with.
     private func preparePrompt(
-        _ request: ValidatedChatRequest
+        _ request: ValidatedChatRequest,
+        renderTokenizer: GFTokenizer
     ) throws -> (promptIDs: [Int32],
                  cacheRequest: ValidatedChatRequest,
                  needsToolTemplate: Bool) {
@@ -886,6 +907,7 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
             ConcisePrompt.appendingSystemPrompt($0, to: filteredMessages)
         } ?? filteredMessages
         let promptIDs = try encodePrompt(
+            with: renderTokenizer,
             messages: effectiveMessages,
             tools: filteredTools,
             usesToolTemplate: needsToolTemplate)
@@ -1088,7 +1110,12 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         // which fails the request outright. `WatchdogKind.canAct` carries the
         // reasoning; ping-pong observes, and the client, which owns the loop,
         // decides.
-        let prepared = try preparePrompt(request)
+        // A request that names a different thinking mode or effort than the
+        // session loaded at is a mid-session switch: resolve the tokenizer for
+        // it here, so the render, the special tokens and the decoder all
+        // follow the switch. `nil` (the common case) reuses the session's.
+        let renderTokenizer = try await resolvedTokenizer(for: request.reasoning)
+        let prepared = try preparePrompt(request, renderTokenizer: renderTokenizer)
         let promptIDs = prepared.promptIDs
         let cacheRequest = prepared.cacheRequest
         let needsToolTemplate = prepared.needsToolTemplate
@@ -1109,7 +1136,7 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         // generation prompt left a thought open; both end in the same
         // generation prompt, but only the render is always whole.
         let decoder = StructuredAssistantDecoder.forGeneration(
-            tokenizer: tokenizer,
+            tokenizer: renderTokenizer,
             promptIDs: promptIDs,
             allowedTools: needsToolTemplate ? Set(request.tools.map(\.name)) : nil)
         // The stall clock starts at the first visible token, so a long
@@ -1395,12 +1422,38 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
             usesToolTemplate: usesToolTemplate(messages: request.messages, tools: request.tools)).count
     }
 
+    /// The tokenizer this request should be rendered with.
+    ///
+    /// Almost every request takes the session's own, which keeps the render,
+    /// the special tokens and the prompt cache exactly as they were. A request
+    /// that named a different thinking mode or effort -- a mid-session switch,
+    /// including turning thinking off -- gets a tokenizer for that
+    /// configuration. The load coordinator caches by
+    /// `(folder, thinking, effort)`, so this is a dictionary lookup once a
+    /// level has been used, and a real load the first time.
+    ///
+    /// The returned tokenizer carries the think-block and stop token IDs for
+    /// its own mode, so decode and the assistant decoder follow the switch
+    /// rather than only the prompt text.
+    private func resolvedTokenizer(
+        for reasoning: RequestReasoning?
+    ) async throws -> GFTokenizer {
+        guard let reasoning, !reasoning.matches(loadedReasoning) else {
+            return tokenizer
+        }
+        return try await GFTokenizer.load(
+            from: tokenizerFolder,
+            thinkingMode: reasoning.thinkingMode,
+            reasoningEffort: reasoning.effort)
+    }
+
     private func encodePrompt(
+        with renderTokenizer: GFTokenizer,
         messages: [GFTokenizer.Message],
         tools: [GFTokenizer.FunctionDefinition],
         usesToolTemplate: Bool
     ) throws -> [Int32] {
-        try Self.encodePrompt(tokenizer: tokenizer, messages: messages, tools: tools,
+        try Self.encodePrompt(tokenizer: renderTokenizer, messages: messages, tools: tools,
                               usesToolTemplate: usesToolTemplate)
     }
 

@@ -490,6 +490,49 @@ struct ServerArgumentTests {
         #expect(low.reasoningNotes.isEmpty)
     }
 
+    /// The request carries the level the session must render at, which is
+    /// what makes a mid-session switch real rather than a log line.
+    @Test func reasoningEffortIsCarriedForTheSession() throws {
+        // Loaded on/off and thinking off: a request naming an effort level
+        // must come back wanting thinking on.
+        let binary = ServerReasoningProfile(family: .qwen36,
+                                            thinkingMode: .off,
+                                            reasoningEffort: nil)
+        let wantsThinking = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("xhigh"), modelID: "m",
+            reasoningProfile: binary)
+        #expect(wantsThinking.reasoning?.thinkingMode == .on)
+
+        // And naming "off" on a server loaded with thinking on must come back
+        // wanting it off -- the switch a coding agent reaches for.
+        let effortOn = ServerReasoningProfile(family: .qwen38flash,
+                                              thinkingMode: .on,
+                                              reasoningEffort: .xhigh)
+        let wantsOff = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("off"), modelID: "m",
+            reasoningProfile: effortOn)
+        #expect(wantsOff.reasoning?.thinkingMode == .off)
+        #expect(wantsOff.reasoning?.effort == nil)
+
+        // An effort the model defines is carried verbatim.
+        let wantsLow = try OpenAIRequestValidator.validate(
+            try Self.effortRequest("low"), modelID: "m",
+            reasoningProfile: effortOn)
+        #expect(wantsLow.reasoning?.thinkingMode == .on)
+        #expect(wantsLow.reasoning?.effort == .low)
+
+        // Omitting the field means "what the model was loaded with", so the
+        // session keeps its own tokenizer.
+        let omitted = try JSONDecoder().decode(
+            OpenAIChatRequest.self,
+            from: Data(#"{"model":"m","messages":[{"role":"user","content":"x"}]}"#.utf8))
+        let loaded = try OpenAIRequestValidator.validate(
+            omitted, modelID: "m", reasoningProfile: effortOn)
+        #expect(loaded.reasoning?.thinkingMode == .on)
+        #expect(loaded.reasoning?.effort == .xhigh)
+        #expect(loaded.reasoningNotes.isEmpty)
+    }
+
     /// Every spelling a coding agent might send means something on the
     /// ladder, so none of them is a failure.
     @Test func unfamiliarReasoningVocabularyIsAccepted() throws {

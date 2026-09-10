@@ -237,3 +237,28 @@ extension ModelReasoningControl {
         }
     }
 }
+
+/// The reasoning a single request asks the model to render at.
+///
+/// Distinct from the server's `ServerReasoningProfile`, which describes what
+/// the model was loaded with. When the two agree a session reuses its own
+/// tokenizer; when they differ this is a mid-session switch and the session
+/// resolves a tokenizer for it. `off` is a real request: turning thinking
+/// off inside a session is the case a coding agent reaches for when a model
+/// starts over-thinking a simple turn.
+public struct RequestReasoning: Sendable, Equatable {
+    public let thinkingMode: ModelThinkingMode
+    public let effort: ModelReasoningEffort?
+
+    public init(thinkingMode: ModelThinkingMode, effort: ModelReasoningEffort?) {
+        self.thinkingMode = thinkingMode
+        // Effort is inert while thinking is off, and every template ignores
+        // it there; dropping it here keeps "off" equal to "off" whatever
+        // effort came alongside it, so a switch to off is a cache hit.
+        self.effort = thinkingMode.isEnabled ? effort : nil
+    }
+
+    /// Whether a session loaded at `loaded` can serve this request without
+    /// resolving a different tokenizer.
+    public func matches(_ loaded: RequestReasoning) -> Bool { self == loaded }
+}

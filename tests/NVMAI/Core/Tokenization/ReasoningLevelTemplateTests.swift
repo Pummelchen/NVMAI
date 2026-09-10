@@ -165,3 +165,72 @@ struct ReasoningLevelTemplateTests {
             == Self.render(tok, Self.context(.on, "xhigh")))
     }
 }
+
+/// A mid-session switch, at the level the session actually performs it.
+///
+/// Thinking and effort are baked into a tokenizer when it loads, so the
+/// switch is "resolve a tokenizer for the requested reasoning". These tests
+/// pin the two halves the session relies on: a request that differs from the
+/// loaded reasoning resolves a *different* tokenizer whose render is the
+/// target level's, and `matches` reports a same-level request as reusable so
+/// the common path keeps the session's own tokenizer.
+@Suite("Mid-session reasoning switches")
+struct MidSessionReasoningTests {
+    private typealias Message = GFTokenizer.Message
+
+    private static func folder(_ fixture: String) throws -> URL {
+        try #require(Bundle.module.url(
+            forResource: fixture, withExtension: nil, subdirectory: "Fixtures"))
+    }
+
+    @Test("Switching thinking off and back on resolves different renders")
+    func switchChangesTheRender() async throws {
+        let folder = try Self.folder("Qwen38ChatMLTokenizer")
+        let messages = [Message(role: .user, content: "Hi")]
+
+        // Loaded at extra high, as `--reasoning xhigh` would.
+        let loaded = RequestReasoning(thinkingMode: .on, effort: .xhigh)
+        let loadedTokenizer = try await GFTokenizer.load(
+            from: folder, thinkingMode: loaded.thinkingMode,
+            reasoningEffort: loaded.effort)
+        let loadedRender = try loadedTokenizer.applyChatTemplate(messages)
+
+        // A request that turns thinking off resolves a different tokenizer,
+        // and renders what thinking-off renders.
+        let off = RequestReasoning(thinkingMode: .off, effort: nil)
+        #expect(!off.matches(loaded), "off is a switch, not a no-op")
+        let offTokenizer = try await GFTokenizer.load(
+            from: folder, thinkingMode: off.thinkingMode,
+            reasoningEffort: off.effort)
+        let offRender = try offTokenizer.applyChatTemplate(messages)
+        #expect(offRender != loadedRender, "the switch must change the prompt")
+        #expect(offTokenizer.thinkingMode == .off)
+
+        // And back on at another level is a third render.
+        let low = RequestReasoning(thinkingMode: .on, effort: .low)
+        let lowTokenizer = try await GFTokenizer.load(
+            from: folder, thinkingMode: low.thinkingMode,
+            reasoningEffort: low.effort)
+        #expect(try lowTokenizer.applyChatTemplate(messages) != loadedRender)
+        #expect(try lowTokenizer.applyChatTemplate(messages) != offRender)
+    }
+
+    /// The common path must stay free: a request that asks for what is loaded
+    /// reuses the session's tokenizer rather than loading another.
+    @Test("A same-level request is reusable")
+    func sameLevelMatches() {
+        let loaded = RequestReasoning(thinkingMode: .on, effort: .medium)
+        #expect(RequestReasoning(thinkingMode: .on, effort: .medium).matches(loaded))
+        #expect(!RequestReasoning(thinkingMode: .on, effort: .xhigh).matches(loaded))
+        #expect(!RequestReasoning(thinkingMode: .off, effort: nil).matches(loaded))
+    }
+
+    /// Effort is inert while thinking is off, so asking for off *at* an effort
+    /// is the same request as asking for off -- a switch to off is one cache
+    /// entry, not one per effort that came with it.
+    @Test("Effort is dropped when thinking is off")
+    func effortIsInertWhenOff() {
+        #expect(RequestReasoning(thinkingMode: .off, effort: .xhigh)
+            == RequestReasoning(thinkingMode: .off, effort: nil))
+    }
+}
