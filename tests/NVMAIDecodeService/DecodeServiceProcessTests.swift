@@ -49,7 +49,14 @@ import NVMAIDecodeProtocol
         #expect(FileManager.default.fileExists(atPath: socketPath),
                 "decode service did not create its socket within the deadline")
 
-        let handles = try DecodeUnixSocket.connect(path: socketPath)
+        // The socket file appears at bind(); the service accepts only after
+        // listen(). A connect() between the two is refused, and on a loaded
+        // machine that gap is wide enough to hit -- which is how this failed
+        // with a 35B benchmark running beside the suite. The file existing
+        // proves the bind, not the listen, so retry to the same deadline.
+        let handles = try Self.retrying(until: Date().addingTimeInterval(5)) {
+            try DecodeUnixSocket.connect(path: socketPath)
+        }
         defer {
             try? handles.input.close()
             try? handles.output.close()
@@ -106,6 +113,20 @@ import NVMAIDecodeProtocol
 
     /// The test step builds every executable product in debug, so the binary
     /// lives under `.build/<triple-or-flat>/debug/NVMAIDecodeService`.
+    /// Runs `attempt` until it succeeds or `deadline` passes, then rethrows
+    /// the last error, so a slow start is waited for and a dead service is
+    /// still reported.
+    static func retrying<T>(until deadline: Date, _ attempt: () throws -> T) throws -> T {
+        while true {
+            do {
+                return try attempt()
+            } catch {
+                if Date() >= deadline { throw error }
+                usleep(10_000)
+            }
+        }
+    }
+
     private static func locateServiceBinary() throws -> URL {
         var directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         for _ in 0..<6 {
