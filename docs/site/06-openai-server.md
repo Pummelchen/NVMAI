@@ -23,7 +23,7 @@ Continue only when the process check prints nothing. Then:
 swift build -c release --product NVMAIServer
 .build/release/NVMAIServer \
   --model models/ornith-1.5_35B_A3B_8Bit \
-  --port 8083
+  --port 8080
 ```
 
 Keep that terminal open; stop it with Control-C.
@@ -33,14 +33,14 @@ Keep that terminal open; stop it with Control-C.
 From another terminal:
 
 ```bash
-curl -s http://127.0.0.1:8083/health
-curl -s http://127.0.0.1:8083/v1/models
+curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:8080/v1/models
 ```
 
 Send a request:
 
 ```bash
-curl -s http://127.0.0.1:8083/v1/chat/completions \
+curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "ornith-1.5-35b-a3b_8-Bit",
@@ -54,7 +54,7 @@ The KV cache defaults to 8-bit regardless of the weights. For extended context, 
 
 ### Model IDs end in the expert width
 
-The model id **always ends in the routed-expert width** — `_4-Bit` or `_8-Bit`. The width is read from the manifest's routed-expert slot, not parsed from the name, so a 4-bit and an 8-bit install of the *same* weights are distinguishable instead of both answering to one id. This is a **breaking change**: the bare `ornith-1.5-35b-a3b` is no longer accepted. Don't guess — `curl -s http://127.0.0.1:8083/v1/models` lists exactly what it serves.
+The model id **always ends in the routed-expert width** — `_4-Bit` or `_8-Bit`. The width is read from the manifest's routed-expert slot, not parsed from the name, so a 4-bit and an 8-bit install of the *same* weights are distinguishable instead of both answering to one id. This is a **breaking change**: the bare `ornith-1.5-35b-a3b` is no longer accepted. Don't guess — `curl -s http://127.0.0.1:8080/v1/models` lists exactly what it serves.
 
 ## What the API supports
 
@@ -86,28 +86,40 @@ To make compatible prefixes **survive restarts**:
 ```bash
 .build/release/NVMAIServer \
   --model models/ornith-1.5_35B_A3B_8Bit \
-  --port 8083 \
+  --port 8080 \
   --prompt-cache-disk "$HOME/Library/Caches/NVMAI/prompt-cache" \
   --prompt-cache-disk-mib 8192
 ```
 
 > ⚠️ The disk cache can contain conversation text and source code. Keep it **private, local, and unsynchronized**. Prompt reuse improves prefill and time-to-first-token; it does **not** increase decode tokens-per-second.
 
-## Launcher scripts (the no-questions path)
+## Launcher scripts
 
 The repo ships helpers that pick the settings for you:
 
-- `tools/server_launcher.sh` — starts the server in the foreground, prints the client settings.
+- `tools/server_launcher.sh` — starts the server in the foreground on `127.0.0.1:8080`, prints the client settings.
+- `tools/start-<model>-<bits>.sh` — the same for one install, no questions asked.
 - `tools/cli_launcher.sh` — starts a fresh server **and** opens Codex, Qwen Code, or OpenCode, writing isolated configs (it does not clobber your normal config homes).
 
-Run with no arguments (Enter selects `codex / full / 8 / default / off` on Ornith 1.5) or pass all five choices:
+`tools/server_launcher.sh` asks, in order:
+
+1. **Which API will your client use?** OpenAI (default) or Anthropic. The server speaks both at once; the answer only picks which settings it prints — a base URL ending in `/v1` for OpenAI, `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` for Anthropic.
+2. **Full agent loop or fast chat?** Full (default) keeps the tool loop; fast serves the `-fast` alias.
+3. **Which model?** One numbered list of every installed model and quantization, GPU and CPU, read from `NVMAIServer --catalog`. Ornith 1.5 8-bit is the default.
+4. **Which NVMAI mode?** Standard (default) or concise.
+5. **Thinking.** Only the levels the chosen model supports, `off` first and the default: `on` for a model that only switches thinking on or off, effort levels such as low / medium / extra high for one that has them.
+
+Every model and quantization shares port 8080 (`NVMAI_PORT` overrides it). The model chosen is only the one loaded first: every installed model is available by name through the API, and the server switches on demand, keeping one model resident at a time. The same answers work as arguments, and a dry run prints the server command without starting or stopping anything:
 
 ```bash
-tools/cli_launcher.sh codex full 4 default on
-tools/server_launcher.sh opencode full 8 default on
+tools/server_launcher.sh openai full ornith 8 default off
+tools/server_launcher.sh anthropic full qwen38 4 default medium
+NVMAI_LAUNCHER_DRY_RUN=1 tools/server_launcher.sh
 ```
 
-> ⚠️ The server helper **replaces** an NVMAI server already on its selected port; the CLI helper **stops existing `NVMAIServer` processes** before starting. If another session must stay up, start the server manually.
+If the server binary cannot report its catalog, the launcher says so, offers the built-in list of GPU installs, and starts that one model only.
+
+> ⚠️ The server helper **replaces** an NVMAI server already on port 8080 (or `NVMAI_PORT`); the CLI helper **stops existing `NVMAIServer` processes** before starting. If another session must stay up, start the server manually on another port.
 
 ## Model residency (for a shared Mac)
 

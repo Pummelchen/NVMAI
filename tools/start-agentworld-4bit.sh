@@ -5,10 +5,13 @@
 # count, prefetch depth, prefill chunk, sampling defaults) comes from its
 # ModelProfile row and is deliberately not set here.
 #
-#   tools/start-agentworld-4bit.sh [codex|qwen|opencode] [full|fast] [default|concise] [off|on]
+#   tools/start-agentworld-4bit.sh [openai|anthropic] [full|fast] [default|concise] [<thinking>]
 #
-# Defaults: codex, full, standard, thinking off. Override the port with
-# NVMAI_PORT; the interactive chooser is tools/server_launcher.sh.
+# Defaults: openai, full, standard, thinking off. <thinking> is off, on or
+# any level the model lists; codex|qwen|opencode still work and mean
+# openai. Serves on 127.0.0.1:8080 (NVMAI_PORT overrides it), and the same
+# server switches to any other installed model a client names; the
+# interactive chooser is tools/server_launcher.sh.
 set -euo pipefail
 exec "$(cd "$(dirname "$0")" && pwd)/server_launcher.sh" \
-  "${1:-codex}" "${2:-full}" agentworld 4 "${3:-default}" "${4:-${NVMAI_THINKING_MODE:-off}}"
+  "${1:-openai}" "${2:-full}" agentworld 4 "${3:-default}" "${4:-${NVMAI_THINKING_MODE:-off}}"
