@@ -77,7 +77,15 @@ the difference matters:
 
   **Run `tools/golden-baseline.sh --check ornith-4` and `--check qwen38-4` before
   trusting C8, C16 or C22**, and re-capture only if the diff is a deliberate
-  numerics change. C8 should be numerically inert (it removes an out-of-bounds
+  numerics change.
+
+  **The equivalence gate's snapshot side is now 2B-only.** The 4B and 9B
+  conversion snapshots (both widths, 21.8 GB) were deleted on 2026-09-11 to
+  reclaim disk, so `NVMAI_DENSE_EQUIV_PAIRS` can still be pointed at
+  `.build/qwen35-2b-affine-4bit` and `.build/qwen35-2b-affine-8bit` but not at
+  4B/9B until `tools/prepare_qwen35.py` is re-run for them. The 2B pair was kept
+  precisely because it is also the default input of `tools/qwen35_reference.py`,
+  `tools/compare_qwen35_precision.py` and `tools/precision_plan_qwen35.py`. C8 should be numerically inert (it removes an out-of-bounds
   access without changing which values are written or read); C16 only refuses a
   path that previously produced wrong output; C22 is gated on `dtype == 1` and
   cannot be reached by the 4-bit build.
