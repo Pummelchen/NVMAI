@@ -56,11 +56,23 @@ produced them is `benchmark/capital_of_paris_smartness.py`.
   rate. The outlier is the first fault-in of a 9.5 GB CPU snapshot while the
   machine was under memory pressure from the preceding loads, not the steady
   state. The rest of the row (69 tokens, `stop`) reproduced.
-- **Qwen AgentWorld 8-bit did not answer within the cap.** It hit
-  `finish_reason: length` at 128 tokens with a `<think>` scaffold in `content`
-  even though the server ran `--reasoning off`; its 4-bit sibling answered in
-  8 tokens. Whatever renders that install's thinking switch, it is not the
-  binary `enable_thinking` field the other Qwen 3.6-family installs use.
+- **Qwen AgentWorld 8-bit reproduces, and it is the weights, not the switch.**
+  It hit `finish_reason: length` at 128 tokens with a `<think>` scaffold in
+  `content` while the server ran `--reasoning off`. The re-run was identical
+  (128 tokens, `length`, 9.02 tok/s). The template is not the difference: both
+  AgentWorld installs carry a byte-identical `chat_template.jinja`, which with
+  `enable_thinking: false` renders a *closed* `<think>\n\n</think>` block, and
+  the 4-bit install under the same server and request answered in 8 tokens
+  (`stop`). The 8-bit model reopens a think block of its own; given room it
+  finishes and answers -- at a 512-token cap it stopped by itself at 482 tokens
+  (9.66 tok/s) with
+
+  > Paris is itself a capital city—it is the capital of France.
+
+  after the closing `</think>`, all of it in `content` rather than
+  `reasoning_content`. A small `max_tokens` on this install does not truncate
+  its answer, it removes it -- and `/v1/models` advertises `off` for it as for
+  every other Qwen 3.6-family install.
 - **Qwen 3.5 2B 4-bit on the GPU degenerated** -- "the capital of the French
   Republic and the capital of the French Republic" -- where the same model on
   the CPU and the same model at 8-bit were clean. It is a generation artifact
