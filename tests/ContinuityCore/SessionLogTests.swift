@@ -131,6 +131,40 @@ import Testing
         #expect(limited[0].prompt == "chapter two")
     }
 
+    /// A reply in one session must not consume an unanswered prompt from
+    /// another.
+    ///
+    /// `events(taskID:)` groups per session while the turn fold used a single
+    /// pending prompt for the whole task, so session A's unanswered prompt was
+    /// paired with session B's prompt-less reply and filed under *B's* session
+    /// carrying A's text. That mis-attributed pair then fed context assembly and
+    /// consolidation.
+    @Test func anUnansweredPromptIsNotStolenByAnotherSessionsReply() async throws {
+        let log = SessionLog()
+        let task = await log.createTask(title: "Novel")
+
+        let first = try await log.beginSession(taskID: task.id)
+        _ = try await log.recordUserPrompt(sessionID: first.id, text: "chapter one")
+        _ = try await log.endSession(first.id)
+
+        let second = try await log.beginSession(taskID: task.id)
+        _ = try await log.recordAssistantResponse(sessionID: second.id,
+                                                  ResponseRecord(text: "unsolicited"))
+        _ = try await log.endSession(second.id)
+
+        let turns = await log.turns(taskID: task.id)
+        #expect(turns.count == 2)
+        // The unanswered prompt stays its own turn, under its own session, and
+        // stays first because it happened first.
+        #expect(turns[0].sessionID == first.id)
+        #expect(turns[0].prompt == "chapter one")
+        #expect(turns[0].response == nil)
+        // The reply that had no prompt of its own does not borrow one.
+        #expect(turns[1].sessionID == second.id)
+        #expect(turns[1].prompt != "chapter one")
+        #expect(turns[1].response == "unsolicited")
+    }
+
     @Test func forgettingATaskRemovesItsSessionsAndEvents() async throws {
         let log = SessionLog()
         let kept = await log.createTask(title: "Keep")

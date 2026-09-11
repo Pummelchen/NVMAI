@@ -267,40 +267,55 @@ public actor SessionLog {
     /// recently" rather than "what is true".
     public func turns(taskID: UUID, limit: Int? = nil) -> [SessionTurn] {
         var turns: [SessionTurn] = []
-        var pendingPrompt: SessionEvent?
+        // Keyed by session, not one variable for the whole task.
+        //
+        // A single `pendingPrompt` let an unanswered prompt in one session be
+        // consumed by a later reply in *another* session, producing a turn filed
+        // under the reply's session but carrying the other session's prompt text.
+        // `events(taskID:)` groups per session while this fold did not, so the
+        // two disagreed and the mis-attributed pair then fed context assembly
+        // and consolidation.
+        var pendingPrompts: [UUID: SessionEvent] = [:]
         for event in Self.fold(events(taskID: taskID)) {
             switch event.kind {
             case .userPrompt:
-                if let prompt = pendingPrompt {
+                if let prompt = pendingPrompts.removeValue(forKey: event.sessionID) {
                     turns.append(SessionTurn(sessionID: prompt.sessionID,
                                              promptEventID: prompt.id,
                                              prompt: prompt.payload.text ?? "",
                                              response: nil,
                                              timestamp: prompt.timestamp))
                 }
-                pendingPrompt = event
+                pendingPrompts[event.sessionID] = event
             case .assistantResponse, .assistantResponseCompleted:
+                let prompt = pendingPrompts.removeValue(forKey: event.sessionID)
                 var record: ResponseRecord?
                 if case .response(let value) = event.payload { record = value }
                 turns.append(SessionTurn(sessionID: event.sessionID,
-                                         promptEventID: pendingPrompt?.id,
-                                         prompt: pendingPrompt?.payload.text ?? "",
+                                         promptEventID: prompt?.id,
+                                         prompt: prompt?.payload.text ?? "",
                                          response: event.payload.text,
                                          responseRecord: record,
                                          completedAt: event.timestamp,
-                                         timestamp: pendingPrompt?.timestamp ?? event.timestamp))
-                pendingPrompt = nil
+                                         timestamp: prompt?.timestamp ?? event.timestamp))
             default:
                 continue
             }
         }
-        if let prompt = pendingPrompt {
+        // Anything still unanswered, oldest first, so the list stays ordered by
+        // time and the "newest last" contract below keeps its meaning.
+        for prompt in pendingPrompts.values.sorted(by: { $0.timestamp < $1.timestamp }) {
             turns.append(SessionTurn(sessionID: prompt.sessionID,
                                      promptEventID: prompt.id,
                                      prompt: prompt.payload.text ?? "",
                                      response: nil,
                                      timestamp: prompt.timestamp))
         }
+        // Sort rather than trusting the fold's output order. An unanswered
+        // prompt is only known to be unanswered once the fold ends, so it is
+        // appended after turns that were recorded later than it; "newest last"
+        // is a property of the timestamps, not of the order the two loops ran.
+        turns.sort { $0.timestamp < $1.timestamp }
         if let limit, turns.count > limit {
             turns = Array(turns.suffix(limit))
         }
