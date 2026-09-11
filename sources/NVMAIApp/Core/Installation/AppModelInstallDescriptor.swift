@@ -195,6 +195,9 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         // beside a target that is already there.
         case .qwen38flash: return .qwen38
         case .qwen38flashMTP: return nil
+        // The dense Qwen 3.5 models are installed by tools/install_models.sh,
+        // not by the app's downloader, which carries no dense schema.
+        case .qwen35Dense: return nil
         }
     }
 

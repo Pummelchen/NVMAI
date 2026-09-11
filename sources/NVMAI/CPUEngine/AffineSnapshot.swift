@@ -66,16 +66,63 @@ public struct AffineSnapshot: Sendable {
         }
     }
 
+    /// Where the tensors actually live.
+    ///
+    /// Two shapes carry the same architecture: a plain affine safetensors
+    /// snapshot, which the converter writes and the CPU engine has always
+    /// read, and a `.gturbo` install, which is what every other model here
+    /// is. A `.gturbo` is a byte copy of the same quantized tensors (both
+    /// quantizers are group-64 affine), so this is a storage difference and
+    /// not a semantic one -- which `tools/gturbo_diff_snapshot.py` checks
+    /// rather than assumes.
+    private enum Storage {
+        case safetensors(shards: [String: SafeTensorsFile],
+                         placement: [String: String])
+        case gturbo(index: ResidentIndex, weights: ResidentWeights)
+    }
+
+    /// One read-only mapping of a `.gturbo`'s resident payload, held for the
+    /// life of the snapshot.
+    ///
+    /// Mapping once matters: `matrix(_:)` is called per tensor (several
+    /// hundred times a token), and mapping the 1.3 GB file on each call paged
+    /// the whole payload in repeatedly -- generation went from seconds to
+    /// never finishing.
+    ///
+    /// unchecked-invariant: the file is opened read-only and mapped with
+    /// `.alwaysMapped`, no operation in this project writes it, and the
+    /// mapping outlives every pointer vended from it because the `Data` is
+    /// held for the snapshot's lifetime. Readers therefore only ever read
+    /// immutable pages, so handing the same base address to the CPU engine's
+    /// row-range reads from several threads cannot race. The same reasoning
+    /// the safetensors case documents for its shard mappings.
+    struct ResidentWeights: @unchecked Sendable {
+        let data: Data
+        var base: UnsafeRawPointer? {
+            data.withUnsafeBytes { $0.baseAddress }
+        }
+    }
+
     public let directory: URL
     public let configuration: Configuration
-    private let shards: [String: SafeTensorsFile]
-    private let placement: [String: String]
+    private let storage: Storage
     private let baseBits: Int
     private let groupSize: Int
     /// Per-tensor width overrides, keyed by stem. The 4-bit build keeps the
     /// tied embedding and the attention K/V at 8 bits, because measuring
     /// said that is where the error actually is.
     private let widths: [String: Int]
+
+    /// The safetensors shards, for the paths that are only reachable from the
+    /// snapshot initializer. Nil for a `.gturbo` install.
+    private var shards: [String: SafeTensorsFile] {
+        if case .safetensors(let shards, _) = storage { return shards }
+        return [:]
+    }
+    private var placement: [String: String] {
+        if case .safetensors(_, let placement) = storage { return placement }
+        return [:]
+    }
 
     public init(directory: URL) throws {
         self.directory = directory
@@ -135,21 +182,213 @@ public struct AffineSnapshot: Sendable {
               let map = index["weight_map"] as? [String: String] else {
             throw SafeTensorsFile.Failure.malformed("index has no weight_map")
         }
-        placement = map
         var opened: [String: SafeTensorsFile] = [:]
         for file in Set(map.values) {
             opened[file] = try SafeTensorsFile(url: directory.appendingPathComponent(file))
         }
-        shards = opened
+        storage = .safetensors(shards: opened, placement: map)
+    }
+
+    /// Load a `.gturbo` install as CPU weights.
+    ///
+    /// The install's `manifest.json` carries the same architecture facts the
+    /// converter used to write `config.json`, and its resident index carries
+    /// the tensor offsets, so this needs no second architecture description --
+    /// it is the snapshot's reader pointed at a different file layout.
+    ///
+    /// Two facts live only in the snapshot config and are re-derived here:
+    /// `full_attention_interval`, from the spacing of the manifest's
+    /// full-attention mask, and the norm epsilon, which the manifest does not
+    /// record and which is 1e-6 for every Qwen 3.5-family model. The first is
+    /// checked for regularity rather than assumed, because a wrong interval
+    /// silently changes which layers use DeltaNet and which use attention.
+    public init(gturbo directory: URL) throws {
+        self.directory = directory
+        let manifest = try ManifestReader.read(directoryURL: directory)
+        let arch = manifest.arch
+        // The family is an identity fact, not an arch field; reading it keeps a
+        // GPU install from being offered to the CPU engine by mistake.
+        let identity = try ManifestReader.peekIdentity(directoryURL: directory)
+        guard identity.family == .qwen35Dense else {
+            throw SafeTensorsFile.Failure.malformed(
+                "not a dense install: manifest declares \(identity.family.rawValue)")
+        }
+        modelType = CPUModelFamily.qwen35Dense.rawValue
+
+        // The DeltaNet geometry is optional in the manifest because older
+        // installs predate it. A dense install must carry it -- these values
+        // decide the linear-attention arithmetic -- so a missing one is a
+        // refusal, not a default.
+        func required(_ value: Int?, _ field: String) throws -> Int {
+            guard let value else {
+                throw SafeTensorsFile.Failure.malformed(
+                    "manifest.arch lacks \(field), which the CPU engine needs")
+            }
+            return value
+        }
+        configuration = Configuration(
+            hiddenSize: arch.hiddenSize,
+            layers: arch.numLayers,
+            heads: arch.numHeads,
+            keyValueHeads: arch.numKVHeads,
+            headDim: arch.headDim,
+            fullAttentionInterval: try Self.fullAttentionInterval(of: arch),
+            linearKeyHeads: try required(arch.linearNumKHeads, "linearNumKHeads"),
+            linearValueHeads: try required(arch.linearNumVHeads, "linearNumVHeads"),
+            linearKeyHeadDim: try required(arch.linearKeyHeadDim, "linearKeyHeadDim"),
+            linearValueHeadDim: try required(arch.linearValueHeadDim, "linearValueHeadDim"),
+            convKernel: try required(arch.linearConvKernelSize, "linearConvKernelSize"),
+            intermediateSize: arch.ffnIntermediate,
+            vocabulary: arch.vocabSize,
+            normEpsilon: 1e-6,
+            ropeTheta: Float(arch.ropeTheta),
+            partialRotaryFactor: arch.partialRotaryFactor,
+            tiedEmbedding: arch.tieWordEmbeddings,
+            maxPositions: 262_144)
+
+        guard let quant = manifest.quant else {
+            throw SafeTensorsFile.Failure.malformed("manifest.quant is missing")
+        }
+        baseBits = quant.attention.weightBits
+        groupSize = quant.attention.groupSize
+        // The manifest names slots, not tensors. Every dense tensor is an
+        // attention-slot tensor except the embedding and the head, and the
+        // engine asks by name, so those two carry the override.
+        let embeddingBits = quant.embedding.weightBits
+        var widths: [String: Int] = [:]
+        let weightsURL = directory.appendingPathComponent("model_weights.bin")
+        let index = try ResidentIndexReader.load(fileURL: weightsURL)
+        // Mapped once, held for the snapshot's life; see `ResidentWeights`.
+        let weights = ResidentWeights(
+            data: try Data(contentsOf: weightsURL, options: .alwaysMapped))
+        for name in index.entries.keys {
+            let stem = name.hasSuffix(".weight")
+                ? String(name.dropLast(".weight".count)) : name
+            if stem.hasSuffix("embed_tokens") || stem.hasSuffix("lm_head")
+                || stem == "language_model.lm_head" {
+                widths[stem] = embeddingBits
+            }
+        }
+        if embeddingBits != baseBits {
+            // `matrix(_:)` keys widths by stem, and the head is read by name.
+            widths["language_model.model.embed_tokens"] = embeddingBits
+            widths["language_model.lm_head"] = embeddingBits
+        }
+        self.widths = widths
+        storage = .gturbo(index: index, weights: weights)
+    }
+
+    /// The `full_attention_interval` the manifest's mask encodes.
+    ///
+    /// `1` marks full attention and `2` gated DeltaNet, and every Qwen 3.5
+    /// dense model puts full attention on the last layer of each group of
+    /// `interval`. Deriving it is exact for a regular mask and refuses an
+    /// irregular one rather than guessing, because the interval decides which
+    /// layers take the arithmetic path.
+    private static func fullAttentionInterval(
+        of arch: ManifestArch
+    ) throws -> Int {
+        let mask = arch.fullAttentionLayerMask
+        let full = mask.enumerated().filter { $0.element == 1 }.map(\.offset)
+        guard full.count >= 2 else {
+            throw SafeTensorsFile.Failure.malformed(
+                "manifest's attention mask has fewer than two full-attention "
+                + "layers, so no interval can be derived: full at \(full)")
+        }
+        // The gap between *consecutive* full-attention layers. Every Qwen 3.5
+        // model puts full attention on the last layer of each group, so a
+        // regular mask has one gap throughout.
+        let gaps = Set(zip(full, full.dropFirst()).map { $1 - $0 })
+        guard gaps.count == 1, let interval = gaps.first, interval > 1 else {
+            throw SafeTensorsFile.Failure.malformed(
+                "manifest's attention mask is not a regular interval: full at \(full)")
+        }
+        return interval
     }
 
     public func bits(forStem stem: String) -> Int { widths[stem] ?? baseBits }
+
+    /// The stem of a `.weight` name, which is how widths and the index are
+    /// keyed.
+    private func stem(of name: String) -> String {
+        name.hasSuffix(".weight") ? String(name.dropLast(".weight".count)) : name
+    }
+
+    /// One affine matrix out of a `.gturbo` resident payload.
+    ///
+    /// The index already carries the packed shape, the weight extent and the
+    /// scale/bias extents, so this is a mapping rather than a parse. The
+    /// resident file is opened read-only and never written, so the pointers
+    /// handed out live as long as the mapping and concurrent row-range reads
+    /// cannot race -- the same invariant the snapshot case documents.
+    private static func matrix(_ name: String,
+                               index: ResidentIndex,
+                               weights: ResidentWeights,
+                               groupSize: Int,
+                               bits: Int) throws -> Matrix {
+        let stem = name.hasSuffix(".weight")
+            ? String(name.dropLast(".weight".count)) : name
+        guard let entry = index.entries[name] else {
+            throw SafeTensorsFile.Failure.missing(name)
+        }
+        let rows = Int(entry.shape.0)
+        // The resident index stores the *logical* (unpacked) width -- the
+        // repacker derives it from the scales, `lastScale * groupSize` -- where
+        // a safetensors snapshot stores the packed word count and needs
+        // `* lanes`. Reading it the snapshot's way made every matrix 2-4x too
+        // wide, which showed up as a generation that never finished rather
+        // than as an error.
+        let columns = Int(entry.shape.1)
+        // The companions are offsets on the weight's own entry, not entries of
+        // their own: a repacked `.gturbo` carries one record per tensor and
+        // points at its scale and bias spans. (A safetensors snapshot names
+        // them as separate tensors, which is why the two readers differ here.)
+        guard entry.sizeBytes > 0, entry.scaleSize > 0, entry.biasSize > 0 else {
+            throw SafeTensorsFile.Failure.malformed(
+                "\(stem): empty weight, scales or biases in the resident index")
+        }
+        guard let base = weights.base else {
+            throw SafeTensorsFile.Failure.malformed("model_weights.bin could not be mapped")
+        }
+        return Matrix(
+            weights: UnsafeRawBufferPointer(start: base.advanced(by: Int(entry.fileOffset)),
+                                            count: Int(entry.sizeBytes)),
+            scales: base.advanced(by: Int(entry.scaleOffset))
+                .assumingMemoryBound(to: UInt16.self),
+            biases: base.advanced(by: Int(entry.biasOffset))
+                .assumingMemoryBound(to: UInt16.self),
+            rows: rows, columns: columns, bits: bits, groupSize: groupSize)
+    }
 
     /// Fault every shard in, so the model is in memory rather than in the
     /// page cache's good graces. Returns the bytes made resident.
     @discardableResult
     public func makeResident() -> Int {
-        shards.values.reduce(0) { $0 + $1.makeResident() }
+        switch storage {
+        case .safetensors:
+            return shards.values.reduce(0) { $0 + $1.makeResident() }
+        case .gturbo(_, let weights):
+            // A `.gturbo`'s resident payload is one file, mapped once at load.
+            // Faulting it in is the same intent as faulting every snapshot
+            // shard in: touch a byte per page so the pages are resident rather
+            // than at the page cache's mercy.
+            return Self.faultIn(weights)
+        }
+    }
+
+    /// Touch a byte per page so the mapping is resident. Returns the bytes.
+    private static func faultIn(_ weights: ResidentWeights) -> Int {
+        var touched = 0
+        weights.data.withUnsafeBytes { raw in
+            // `madvise(WILLNEED)` is not exposed here and this is a load-time
+            // cost paid once.
+            var offset = 0
+            while offset < raw.count {
+                touched &+= Int(raw[offset])
+                offset += 4096
+            }
+        }
+        return weights.data.count
     }
 
     /// The family this snapshot's layer shape belongs to, or nil when the
@@ -168,13 +407,50 @@ public struct AffineSnapshot: Sendable {
     }
 
     public func floats(_ name: String) throws -> [Float] {
-        try shard(name).floats(name)
+        if case .gturbo(let index, let weights) = storage {
+            guard let entry = index.entries[name] else {
+                throw SafeTensorsFile.Failure.missing(name)
+            }
+            guard let base = weights.base else {
+                throw SafeTensorsFile.Failure.malformed("model_weights.bin could not be mapped")
+            }
+            let raw = UnsafeRawBufferPointer(
+                start: base.advanced(by: Int(entry.fileOffset)),
+                count: Int(entry.sizeBytes))
+            // Dtype codes are the repacker's (`ietnyDtype`): 0 u32, 1 bf16,
+            // 2 fp16, 3 fp32. The bf16 widening is the same bit trick the
+            // safetensors reader uses -- the top sixteen bits of a float32 are
+            // exactly a bfloat16.
+            switch entry.dtype {
+            case 3:
+                return Array(raw.bindMemory(to: Float.self))
+            case 1:
+                return raw.bindMemory(to: UInt16.self).map {
+                    Float(bitPattern: UInt32($0) << 16)
+                }
+            case 2:
+                return raw.bindMemory(to: Float16.self).map(Float.init)
+            default:
+                throw SafeTensorsFile.Failure.unsupported(
+                    dtype: "resident dtype \(entry.dtype)", name: name)
+            }
+        }
+        return try shard(name).floats(name)
     }
 
-    public func has(_ name: String) -> Bool { placement[name] != nil }
+    public func has(_ name: String) -> Bool {
+        switch storage {
+        case .safetensors: return placement[name] != nil
+        case .gturbo(let index, _): return index.entries[name] != nil
+        }
+    }
 
     /// A quantized matrix by its `.weight` name.
     public func matrix(_ name: String) throws -> Matrix {
+        if case .gturbo(let index, let weights) = storage {
+            return try Self.matrix(name, index: index, weights: weights,
+                                   groupSize: groupSize, bits: bits(forStem: stem(of: name)))
+        }
         let stem = name.hasSuffix(".weight")
             ? String(name.dropLast(".weight".count)) : name
         let shard = try shard(name)

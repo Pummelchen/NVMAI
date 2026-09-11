@@ -7,6 +7,9 @@ enum RepackModelFamily: String, Sendable, Equatable {
     case qwen36MTP = "qwen36_mtp"
     case qwen38flash = "qwen38flash"
     case qwen38flashMTP = "qwen38flash_mtp"
+    /// Qwen 3.5's dense text models (2B, 4B, 9B). A whole model, not a draft
+    /// head, and the only family here whose weights carry no routed experts.
+    case qwen35Dense = "qwen3_5_dense"
     /// A draft sidecar is loaded beside a target and prompted through the
     /// target's tokenizer, so a local import of one carries no tokenizer of
     /// its own.
@@ -164,14 +167,21 @@ struct ArchInfo: Sendable, Equatable {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw RepackError.configJsonInvalid(path: configPath, detail: "not a JSON object")
         }
-        guard let tc = root["text_config"] as? [String: Any] else {
-            throw RepackError.configJsonInvalid(path: configPath, detail: "no text_config")
-        }
+        // A vision-language or MoE checkpoint nests the text model under
+        // `text_config`. A dense Qwen 3.5 snapshot is already flat -- the
+        // converter writes the text config at the root, because that is the
+        // shape the CPU engine reads -- so the root *is* the text config
+        // there. Accepting both keeps one reader for one architecture instead
+        // of a second config shape nobody else can parse.
+        let tc = (root["text_config"] as? [String: Any]) ?? root
         if (root["model_type"] as? String) == "qwen3_5_mtp" {
             return try loadQwen36MTP(configPath: configPath, tc: tc)
         }
         if (root["model_type"] as? String) == "qwen3_5_moe" {
             return try loadQwen35MoE(configPath: configPath, tc: tc)
+        }
+        if (root["model_type"] as? String) == "qwen3_5_dense" {
+            return try loadQwen35Dense(configPath: configPath, tc: tc)
         }
         if (root["model_type"] as? String) == "qwen4_exp" {
             return try loadQwen4Exp(configPath: configPath, tc: tc, root: root)
@@ -179,7 +189,7 @@ struct ArchInfo: Sendable, Equatable {
         throw RepackError.configJsonInvalid(
             path: configPath,
             detail: "unsupported model_type (expected qwen3_5_moe, "
-                + "qwen3_5_mtp or qwen4_exp)")
+                + "qwen3_5_mtp, qwen3_5_dense or qwen4_exp)")
     }
 
     // MARK: - Qwen3.5-MoE text (`model_type == "qwen3_5_moe"`)
@@ -259,6 +269,87 @@ struct ArchInfo: Sendable, Equatable {
             linearConvKernelSize: try i("linear_conv_kernel_dim"))
         try crossCheckProductionQwen35MoE(arch, configPath: configPath)
         return arch
+    }
+
+    /// Qwen 3.5 dense (`model_type == "qwen3_5_dense"`): the 2B, 4B and 9B the
+    /// CPU engine serves.
+    ///
+    /// Dense is the MoE text architecture minus the experts, so the shared
+    /// fields are read by the MoE loader and only the six that differ are
+    /// overridden. Writing a second sixty-field initializer would mean two
+    /// places to keep the DeltaNet and attention contract correct, and the
+    /// first time they drifted the GPU models would be the ones that broke.
+    ///
+    /// What differs:
+    ///   - `mlp.{gate,up,down}_proj` in every layer, so the FFN width is
+    ///     `intermediate_size` and there is no per-expert or shared width
+    ///   - no router and no routed experts at all, so `numExperts` and
+    ///     `topKExperts` are 0 and the planner writes no `packed_experts`
+    ///   - its own family value, so a dense payload can never be handed to the
+    ///     GPU loader
+    private static func loadQwen35Dense(configPath: String,
+                                        tc: [String: Any]) throws -> ArchInfo {
+        // The MoE loader is a reader for the shared DeltaNet/attention
+        // contract, and it demands three keys a dense config does not carry.
+        // Supplying them here rather than branching inside it keeps that
+        // function's production cross-check exact for the models it is really
+        // about; the values are overwritten below and never leave this call.
+        var shared = tc
+        for key in ["shared_expert_intermediate_size", "moe_intermediate_size",
+                    "num_experts", "num_experts_per_tok"] where shared[key] == nil {
+            shared[key] = 0
+        }
+        let base = try loadQwen35MoE(configPath: configPath, tc: shared)
+        func i(_ k: String) throws -> Int {
+            guard let n = (tc[k] as? Int) ?? (tc[k] as? NSNumber)?.intValue else {
+                throw RepackError.configJsonInvalid(path: configPath, detail: "missing \(k)")
+            }
+            return n
+        }
+        // The MoE loader reads `shared_expert_intermediate_size`, which a dense
+        // config does not have. Its `intermediate_size` is the whole FFN.
+        let intermediate = try i("intermediate_size")
+        // Every layer is dense: there is no sliding-window variant in this
+        // family, so the mask the MoE loader derived from `layer_types` (2 for
+        // DeltaNet, 1 for full attention) is already exactly right.
+        return ArchInfo(
+            hiddenSize: base.hiddenSize,
+            intermediateSize: intermediate,
+            moeIntermediateSize: 0,
+            numHeads: base.numHeads,
+            numKVHeads: base.numKVHeads,
+            numFullKVHeads: base.numFullKVHeads,
+            headDim: base.headDim,
+            fullHeadDim: base.fullHeadDim,
+            vocabSize: base.vocabSize,
+            slidingWindow: base.slidingWindow,
+            finalLogitSoftcap: base.finalLogitSoftcap,
+            ropeTheta: base.ropeTheta,
+            fullRopeTheta: base.fullRopeTheta,
+            partialRotaryFactor: base.partialRotaryFactor,
+            numLayers: base.numLayers,
+            numExperts: 0,
+            topKExperts: 0,
+            tieWordEmbeddings: base.tieWordEmbeddings,
+            attentionKEqV: base.attentionKEqV,
+            fullAttentionLayerMask: base.fullAttentionLayerMask,
+            hiddenActivation: base.hiddenActivation,
+            family: .qwen35Dense,
+            attnOutputGate: base.attnOutputGate,
+            attentionScale: base.attentionScale,
+            embeddingScaledBySqrtHidden: base.embeddingScaledBySqrtHidden,
+            routerScaled: base.routerScaled,
+            ffnSandwichNorms: base.ffnSandwichNorms,
+            // There is no shared expert to gate.
+            sharedExpertGated: false,
+            ropeNeoxSubdim: base.ropeNeoxSubdim,
+            linearNumKHeads: base.linearNumKHeads,
+            linearNumVHeads: base.linearNumVHeads,
+            linearKeyHeadDim: base.linearKeyHeadDim,
+            linearValueHeadDim: base.linearValueHeadDim,
+            linearConvKernelSize: base.linearConvKernelSize,
+            routerNormTopK: base.routerNormTopK,
+            quantGroupSize: base.quantGroupSize)
     }
 
     /// Qwen3.6 MTP is a single full-attention decoder layer. It intentionally

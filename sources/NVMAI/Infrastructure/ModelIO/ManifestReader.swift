@@ -50,6 +50,15 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let pleVocabDivisor: Int?
     public let routerNormTopK: Bool?
     public let quantGroupSize: Int?
+    /// Gated-DeltaNet geometry. Optional for the same reason as the block
+    /// above: manifests written before a reader needed them do not carry
+    /// them, and decoding an absent key as nil is what keeps those installs
+    /// loadable. The dense CPU engine is the reader that needs them.
+    public let linearNumKHeads: Int?
+    public let linearNumVHeads: Int?
+    public let linearKeyHeadDim: Int?
+    public let linearValueHeadDim: Int?
+    public let linearConvKernelSize: Int?
 }
 
 public struct ManifestQuantSlot: Decodable, Equatable, Sendable {
@@ -155,6 +164,52 @@ public enum ManifestReader {
         return manifest
     }
 
+    /// Read a manifest without validating it against a GPU `ArchConfig`.
+    ///
+    /// `load` cross-checks the manifest's architecture against the config the
+    /// runtime is about to build, which is right for a GPU install and wrong
+    /// for a dense one: there is no GPU config for that family, and the CPU
+    /// engine's reader takes the manifest's own facts instead. Everything the
+    /// format itself guarantees -- magic, version, known flags, page-aligned
+    /// expert stride, the wire-level codec rules -- is still checked here.
+    public static func read(directoryURL: URL,
+                            maxBytes: UInt64 = defaultMaxBytes) throws -> Manifest {
+        let directory = try GTurboModelDirectory(rootURL: directoryURL)
+        let data: Data
+        do {
+            data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
+        } catch ModelError.missingFile {
+            throw ModelError.partialInstall(path: directoryURL.path)
+        }
+        let manifest: Manifest
+        do {
+            let wire = try GTurboManifestCodec.decodeUnchecked(data)
+            guard wire.magic == GTurboFormatV1.magic else {
+                throw ModelError.notAGTurboDirectory
+            }
+            guard wire.versionMajor == GTurboFormatV1.versionMajor,
+                  wire.versionMinor >= 0 else {
+                throw ModelError.unsupportedVersion(major: wire.versionMajor,
+                                                    minor: wire.versionMinor)
+            }
+            for key in wire.flags.keys where !GTurboFormatV1.knownFlags.contains(key) {
+                throw ModelError.unknownFlag(name: key)
+            }
+            if wire.expertStride % GTurboFormatV1.alignmentBytes != 0 {
+                throw ModelError.expertStrideNotPageAligned(
+                    stride: wire.expertStride,
+                    pageSize: Int(GTurboFormatV1.alignmentBytes))
+            }
+            try GTurboManifestCodec.validate(wire)
+            manifest = Manifest(wire: wire)
+        } catch let error as ModelError {
+            throw error
+        } catch {
+            throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
+        }
+        return manifest
+    }
+
     /// Extract the architecture dimensions from the manifest without full
     /// cross-validation so it can be used to auto-select the expected
     /// configuration (e.g. by the installation probe).
@@ -240,6 +295,11 @@ public enum ManifestReader {
             // The community MLX checkpoints quantize the router at the model's
             // uniform width (4 or 8 bits, group 32). The draft head is
             // quantized with the target, so it inherits the same rule.
+            allowedRouterBits = [4, 8]
+        case .qwen35Dense:
+            // A dense model has no router tensor at all, so there is no width
+            // to constrain. The slot still has to satisfy `validateQuant`'s
+            // table, so allow both rather than inventing a rule.
             allowedRouterBits = [4, 8]
         }
         let slots: [(String, ManifestQuantSlot, Set<Int>)] = [
@@ -390,7 +450,12 @@ private extension ManifestArch {
                   pleHeadsPerNgram: wire.pleHeadsPerNgram,
                   pleVocabDivisor: wire.pleVocabDivisor,
                   routerNormTopK: wire.routerNormTopK,
-                  quantGroupSize: wire.quantGroupSize)
+                  quantGroupSize: wire.quantGroupSize,
+                  linearNumKHeads: wire.linearNumKHeads,
+                  linearNumVHeads: wire.linearNumVHeads,
+                  linearKeyHeadDim: wire.linearKeyHeadDim,
+                  linearValueHeadDim: wire.linearValueHeadDim,
+                  linearConvKernelSize: wire.linearConvKernelSize)
     }
 }
 

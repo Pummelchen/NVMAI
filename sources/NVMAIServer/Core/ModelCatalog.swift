@@ -188,7 +188,7 @@ public struct ModelCatalog: Sendable {
             // listing it would offer a model that fails on first use.
             return .failure(ProbeFailure(
                 reason: "an MTP draft head (\(identity.family.rawValue)), served only beside its target"))
-        case .qwen36, .qwen38flash:
+        case .qwen36, .qwen38flash, .qwen35Dense:
             break
         }
         guard GFTokenizer.tokenizerFolder(forModelDirectory: directory) != nil else {
@@ -202,7 +202,13 @@ public struct ModelCatalog: Sendable {
         return .success(Entry(
             id: id,
             name: displayNames[base] ?? base,
-            kind: .gpu(identity.family),
+            // The one line that routes a .gturbo dense install to the CPU
+            // engine. Everything else about the install -- manifest, receipt,
+            // verify-install -- is the shared GPU path, which is the point of
+            // repacking these at all.
+            kind: identity.family == .qwen35Dense
+                ? .cpu(.qwen35Dense)
+                : .gpu(identity.family),
             quant: identity.weightBits,
             path: directory,
             sampling: ModelProfile.resolve(identity: identity).sampling,

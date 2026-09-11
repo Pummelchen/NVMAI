@@ -33,6 +33,9 @@ public enum GenerationDefaults {
         case .qwen38flash, .qwen38flashMTP:
             // Qwen3.8-Flash-Next is specified at temperature 1.0 / top-p 0.95.
             return Sampling(temperature: 1.0, topK: topK, topP: 0.95)
+        case .qwen35Dense:
+            // Qwen 3.5 is a Qwen 3.6-lineage card: 0.6 / top-p 0.95.
+            return Sampling(temperature: 0.6, topK: topK, topP: 0.95)
         default:
             return house
         }

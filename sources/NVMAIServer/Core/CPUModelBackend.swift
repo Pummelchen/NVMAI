@@ -57,23 +57,53 @@ public actor CPUModelBackend: ServerInferenceBackend {
     /// a promise that is quietly broken.
     public static let contextCeiling = 32_768
 
+    /// Accepts either shape the CPU engine can serve: an affine safetensors
+    /// snapshot, which the dense converter writes, or a `.gturbo` install,
+    /// which is what every other model in this project is. The two carry the
+    /// same quantized tensors -- `tools/gturbo_diff_snapshot.py` checks that
+    /// rather than assuming it -- so this is a storage difference, not a
+    /// semantic one.
+    ///
     /// `thinkingMode` is baked into the tokenizer's generation prompt, as it
     /// is on the GPU path: the template renders the thinking switch, so it is
-    /// a load-time setting, not a per-request one.
+    /// a load-time setting, not a per-request one. A request can still switch
+    /// it; that is `resolvedTokenizer(for:)`.
     public init(snapshotDirectory: URL,
                 maximumContext: Int = CPUModelBackend.contextCeiling,
                 resident: Bool = true,
                 thinkingMode: ModelThinkingMode = .off) async throws {
-        let snapshot = try AffineSnapshot(directory: snapshotDirectory)
+        // A `.gturbo` declares itself with a manifest; a snapshot does not.
+        // `manifest.json` is also what the catalog keys on, so the two agree
+        // about which shape a directory is.
+        let isGTurbo = FileManager.default.fileExists(
+            atPath: snapshotDirectory.appendingPathComponent("manifest.json").path)
+        let snapshot = isGTurbo
+            ? try AffineSnapshot(gturbo: snapshotDirectory)
+            : try AffineSnapshot(directory: snapshotDirectory)
         guard let family = snapshot.family else {
             throw CPUBackendError.unsupported(
                 CPUModelFamily.refusal(modelType: snapshot.modelType))
         }
+        _ = family
         residentBytes = resident ? snapshot.makeResident() : 0
         let engine = try CPUQwen35(snapshot: snapshot)
         threads = engine.threads
         model = engine
-        tokenizer = try await GFTokenizer.load(from: snapshotDirectory,
+        // A snapshot keeps its tokenizer at the directory root; a `.gturbo`
+        // keeps it under `tokenizer/`. Try the root first, which is what the
+        // snapshot path has always done -- including the synthetic snapshots
+        // the tests build -- then fall back to the shared lookup.
+        let rootTokenizer = snapshotDirectory.appendingPathComponent("tokenizer.json")
+        let folder: URL
+        if FileManager.default.fileExists(atPath: rootTokenizer.path) {
+            folder = snapshotDirectory
+        } else if let found = GFTokenizer.tokenizerFolder(forModelDirectory: snapshotDirectory) {
+            folder = found
+        } else {
+            throw CPUBackendError.unsupported(
+                "no tokenizer in \(snapshotDirectory.lastPathComponent)")
+        }
+        tokenizer = try await GFTokenizer.load(from: folder,
                                                thinkingMode: thinkingMode)
         self.snapshotDirectory = snapshotDirectory
         self.loadedReasoning = RequestReasoning(thinkingMode: thinkingMode,

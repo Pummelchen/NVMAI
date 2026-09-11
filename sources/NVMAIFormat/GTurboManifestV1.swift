@@ -57,6 +57,16 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let routerNormTopK: Bool?
     package let quantGroupSize: Int?
 
+    /// Gated-DeltaNet geometry. Optional for the same reason as the block
+    /// above: manifests written before a reader needed them do not carry them.
+    /// The writer has always emitted these keys, so they were present on disk
+    /// and simply not decoded.
+    package let linearNumKHeads: Int?
+    package let linearNumVHeads: Int?
+    package let linearKeyHeadDim: Int?
+    package let linearValueHeadDim: Int?
+    package let linearConvKernelSize: Int?
+
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
                  headDim: Int, fullHeadDim: Int, vocabSize: Int,
@@ -81,7 +91,12 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  pleHeadsPerNgram: Int? = nil,
                  pleVocabDivisor: Int? = nil,
                  routerNormTopK: Bool? = nil,
-                 quantGroupSize: Int? = nil) {
+                 quantGroupSize: Int? = nil,
+                 linearNumKHeads: Int? = nil,
+                 linearNumVHeads: Int? = nil,
+                 linearKeyHeadDim: Int? = nil,
+                 linearValueHeadDim: Int? = nil,
+                 linearConvKernelSize: Int? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -120,6 +135,11 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.pleVocabDivisor = pleVocabDivisor
         self.routerNormTopK = routerNormTopK
         self.quantGroupSize = quantGroupSize
+        self.linearNumKHeads = linearNumKHeads
+        self.linearNumVHeads = linearNumVHeads
+        self.linearKeyHeadDim = linearKeyHeadDim
+        self.linearValueHeadDim = linearValueHeadDim
+        self.linearConvKernelSize = linearConvKernelSize
     }
 }
 
@@ -225,9 +245,15 @@ package enum GTurboManifestCodec {
         for flag in manifest.flags.keys where !GTurboFormatV1.knownFlags.contains(flag) {
             throw NVMAIFormatError.invalid(field: "manifest.flags.\(flag)", reason: "unknown v1 flag")
         }
+        // A dense payload has no routed experts at all -- the planner writes
+        // expertsPerLayer 0 and expertStride 0 for one -- so "greater than
+        // zero" is the wrong test for it. Every other family still needs both.
+        let isDense = manifest.arch.family == "qwen3_5_dense"
         guard !manifest.modelID.isEmpty,
-              manifest.numLayers > 0, manifest.expertsPerLayer > 0,
-              manifest.expertStride > 0,
+              manifest.numLayers > 0,
+              isDense
+                ? (manifest.expertsPerLayer == 0 && manifest.expertStride == 0)
+                : (manifest.expertsPerLayer > 0 && manifest.expertStride > 0),
               manifest.expertStride % GTurboFormatV1.alignmentBytes == 0 else {
             throw NVMAIFormatError.invalid(field: "manifest", reason: "invalid dimensions or stride")
         }
@@ -237,12 +263,14 @@ package enum GTurboManifestCodec {
                 field: "manifest.arch", reason: "dimensions disagree with streaming metadata")
         }
         let arch = manifest.arch
+        // `moeIntermediateSize` is 0 for a dense model, which has no
+        // per-expert FFN; its FFN width is `ffnIntermediate`.
         guard arch.hiddenSize > 0, arch.ffnIntermediate > 0,
-              arch.moeIntermediateSize > 0, arch.numHeads > 0,
+              isDense || arch.moeIntermediateSize > 0, arch.numHeads > 0,
               arch.numKVHeads > 0, arch.numFullKVHeads > 0,
               arch.headDim > 0, arch.fullHeadDim > 0,
               arch.vocabSize > 0, arch.slidingWindow >= 0,
-              arch.topKExperts > 0, arch.topKExperts <= arch.numExperts,
+              isDense || (arch.topKExperts > 0 && arch.topKExperts <= arch.numExperts),
               arch.finalLogitSoftcap.isFinite,
               arch.ropeTheta.isFinite, arch.ropeTheta > 0,
               arch.fullRopeTheta.isFinite, arch.fullRopeTheta > 0,

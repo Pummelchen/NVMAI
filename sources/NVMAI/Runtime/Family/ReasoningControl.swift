@@ -34,7 +34,7 @@ public enum ModelReasoningControlError: Error, Equatable, CustomStringConvertibl
 extension ModelFamily {
     public var reasoningControl: ModelReasoningControl {
         switch self {
-        case .qwen36, .qwen36MTP:
+        case .qwen36, .qwen36MTP, .qwen35Dense:
             return .binaryThinking
         case .qwen38flash, .qwen38flashMTP:
             return .thinkingWithEffortLevels(defaultEffort: .xhigh)

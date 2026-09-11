@@ -993,6 +993,15 @@ extension Model {
         let checks = RuntimeSchemaChecks(residentIndex: residentIndex, quant: quant)
 
         switch config.family {
+        case .qwen35Dense:
+            // Unreachable by construction: a dense family is served by the CPU
+            // engine, which validates its own snapshot schema and never goes
+            // through `Model.load`. Throwing is the honest outcome if that
+            // routing is ever broken -- the alternative is validating a dense
+            // payload against the MoE checks, which would fail confusingly on
+            // a missing routed-expert tensor.
+            throw ModelError.unsupportedArchitecture(
+                detail: "qwen35Dense is served by the CPU engine, not Model.load")
         case .qwen38flash:
             // Embedding and head are 8-bit in this checkpoint while the body
             // is 4-bit, so both are validated against the embedding slot the
