@@ -805,15 +805,99 @@ struct NVMAIBench {
     }
 
 
+/// What the CPU commands could not load, and why both shapes were refused.
+enum DenseModelError: Error, CustomStringConvertible {
+    case notAModel(String)
+    case unreadableVocabulary(String)
+
+    var description: String {
+        switch self {
+        case .notAModel(let path):
+            return "\(path) is neither a .gturbo install (no manifest.json) nor a "
+                + "safetensors snapshot (no config.json)"
+        case .unreadableVocabulary(let path):
+            return "\(path) carries neither a vocab.json mapping nor a tokenizer, "
+                + "so its continuations cannot be checked"
+        }
+    }
+}
+
+    /// Loads a dense CPU model in either shape it ships in.
+    ///
+    /// These commands took an affine safetensors snapshot only. That stopped
+    /// reaching a shipped model once the dense Qwen 3.5 family became `.gturbo`
+    /// installs: all six carry a `manifest.json` and no `config.json`, so the
+    /// whole-model check could only run against a conversion intermediate -- and
+    /// the 4B/9B intermediates were deleted to reclaim disk, leaving the 2B
+    /// pair. Choosing by what is on disk makes the check usable on the models a
+    /// user actually has, which is what `tools/verify_cpu_models.sh` drives.
+    static func loadDenseSnapshot(_ path: String) throws -> AffineSnapshot {
+        let directory = URL(fileURLWithPath: path)
+        if FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("manifest.json").path) {
+            return try AffineSnapshot(gturbo: directory)
+        }
+        guard FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("config.json").path) else {
+            throw DenseModelError.notAModel(path)
+        }
+        return try AffineSnapshot(directory: directory)
+    }
+
+    /// The string-to-id and id-to-string mapping the `cpu35` checks read.
+    ///
+    /// A safetensors snapshot ships `vocab.json`, the same table the numpy
+    /// reference reads. A shipped `.gturbo` install ships a tokenizer
+    /// directory instead and no `vocab.json`, so the engine's own tokenizer
+    /// supplies the mapping there. Either way the ids are the model's own
+    /// rather than a bench-local table that could drift from the reference.
+    ///
+    /// `labelFor` spells a check's expected word the way `textFor` spells a
+    /// decoded id, so the two columns of the report read alike.
+    static func denseVocabulary(
+        _ path: String, directory: URL
+    ) throws -> (idFor: (String) -> Int?,
+                 textFor: (Int) -> String,
+                 labelFor: (String) -> String) {
+        let vocabularyURL = directory.appendingPathComponent("vocab.json")
+        if FileManager.default.fileExists(atPath: vocabularyURL.path) {
+            let object = try JSONSerialization.jsonObject(with: Data(contentsOf: vocabularyURL))
+            guard let mapping = object as? [String: Int] else {
+                throw DenseModelError.unreadableVocabulary(vocabularyURL.path)
+            }
+            var inverse: [Int: String] = [:]
+            inverse.reserveCapacity(mapping.count)
+            for (text, id) in mapping { inverse[id] = text }
+            return ({ (word: String) -> Int? in mapping[word] },
+                    { (id: Int) -> String in inverse[id] ?? "?" },
+                    { (word: String) -> String in word })
+        }
+        guard let tokenizer = try loadTokenizer(directory) else {
+            throw DenseModelError.unreadableVocabulary(path)
+        }
+        return ({ (word: String) -> Int? in
+            // The checks spell a leading space as U+0120, the byte-level
+            // encoding of a space. A word has to be exactly one token to be
+            // comparable with the reference's expectation.
+            let text = word.replacingOccurrences(of: "\u{120}", with: " ")
+            let ids = tokenizer.encode(text, addBOS: false)
+            return ids.count == 1 ? Int(ids[0]) : nil
+        }, { (id: Int) -> String in tokenizer.decode([Int32(id)]) },
+           { (word: String) -> String in
+               word.replacingOccurrences(of: "\u{120}", with: " ")
+           })
+    }
+
     /// Qwen3.5-2B on the CPU, checked against the continuations that define
     /// correctness for the numpy reference.
     ///
-    /// The token ids come out of the snapshot's own `vocab.json`, so this
-    /// needs no tokenizer and cannot drift from what the reference does.
+    /// The token ids come out of the model itself -- its `vocab.json` in a
+    /// snapshot, its tokenizer in a `.gturbo` install -- so this cannot drift
+    /// from what the reference does.
     static func runCPUQwen35(snapshot path: String, dump: URL? = nil) throws {
         let directory = URL(fileURLWithPath: path)
         let started = ContinuousClock.now
-        let snapshot = try AffineSnapshot(directory: directory)
+        let snapshot = try Self.loadDenseSnapshot(path)
         // Width is the side-engine's scheduling knob, so it is settable
         // here: the measurement that produced the policy is a sweep of it.
         let requested = ProcessInfo.processInfo.environment["NVMAI_CPU35_THREADS"]
@@ -831,14 +915,7 @@ struct NVMAIBench {
               + "loaded in \(String(format: "%.2fs", seconds(started)))")
         print("threads: \(model.threads)")
 
-        let vocabulary = try JSONSerialization.jsonObject(
-            with: Data(contentsOf: directory.appendingPathComponent("vocab.json")))
-        guard let vocabulary = vocabulary as? [String: Int] else {
-            print("vocab.json is not a mapping"); return
-        }
-        var inverse: [Int: String] = [:]
-        inverse.reserveCapacity(vocabulary.count)
-        for (text, id) in vocabulary { inverse[id] = text }
+        let vocabulary = try Self.denseVocabulary(path, directory: directory)
 
         let checks: [([String], String)] = [
             (["Once", "\u{120}upon", "\u{120}a"], "\u{120}time"),
@@ -853,7 +930,7 @@ struct NVMAIBench {
             var logits: [Float] = []
             let run = ContinuousClock.now
             for word in words {
-                guard let id = vocabulary[word] else {
+                guard let id = vocabulary.idFor(word) else {
                     print("  no token for \(word)"); failures += 1; break
                 }
                 logits = try model.step(token: id)
@@ -861,7 +938,7 @@ struct NVMAIBench {
             guard !logits.isEmpty else { continue }
             var best = 0
             for index in logits.indices where logits[index] > logits[best] { best = index }
-            let want = vocabulary[expected] ?? -1
+            let want = vocabulary.idFor(expected) ?? -1
             let ok = best == want
             failures += ok ? 0 : 1
             let prompt = words.map { $0.replacingOccurrences(of: "\u{120}", with: " ") }
@@ -869,7 +946,8 @@ struct NVMAIBench {
             let rate = Double(words.count) / seconds(run)
             print(String(format: "  %@ %-46@ -> %@ (%.2f), wanted %@  [%.1f tok/s]",
                          ok ? "ok " : "FAIL", prompt as NSString,
-                         inverse[best] ?? "?", logits[best], expected, rate))
+                         vocabulary.textFor(best), logits[best],
+                         vocabulary.labelFor(expected), rate))
             if let dump {
                 try? FileManager.default.createDirectory(
                     at: dump, withIntermediateDirectories: true)
@@ -950,7 +1028,7 @@ struct NVMAIBench {
                                        prompt: String,
                                        limit: Int) throws {
         let directory = URL(fileURLWithPath: path)
-        let snapshot = try AffineSnapshot(directory: directory)
+        let snapshot = try Self.loadDenseSnapshot(path)
         let requested = ProcessInfo.processInfo.environment["NVMAI_CPU35_THREADS"]
             .flatMap(Int.init)
         let model = try CPUQwen35(snapshot: snapshot, threads: requested)
@@ -984,7 +1062,7 @@ struct NVMAIBench {
                                   input: URL,
                                   output: URL) throws {
         let directory = URL(fileURLWithPath: path)
-        let snapshot = try AffineSnapshot(directory: directory)
+        let snapshot = try Self.loadDenseSnapshot(path)
         let requested = ProcessInfo.processInfo.environment["NVMAI_CPU35_THREADS"]
             .flatMap(Int.init)
         let model = try CPUQwen35(snapshot: snapshot, threads: requested)
@@ -1047,15 +1125,25 @@ struct NVMAIBench {
 
     /// GFTokenizer loads asynchronously and these commands are one-shot
     /// tools, so they wait rather than restructuring `main` around it.
+    ///
+    /// A shipped `.gturbo` install keeps its tokenizer in a `tokenizer/`
+    /// sidecar; a flat HF snapshot keeps `tokenizer.json` at the top level.
+    /// Both are accepted, sidecar first, so these commands reach the models
+    /// that are actually installed.
     static func loadTokenizer(_ directory: URL) throws -> GFTokenizer? {
-        // unchecked-invariant: written exactly once inside the Task below and
-        // read only after `semaphore.wait()` returns, which the signal orders
-        // after that write. There is no concurrent access.
+        // unchecked-invariant: written only inside the Task below and read
+        // only after `semaphore.wait()` returns, which the signal orders after
+        // the last write. There is no concurrent access.
         final class Box: @unchecked Sendable { var value: GFTokenizer? }
         let box = Box()
         let semaphore = DispatchSemaphore(value: 0)
         Task {
-            box.value = try? await GFTokenizer.load(from: directory)
+            box.value = try? await GFTokenizer.load(forModelDirectory: directory)
+            if box.value == nil,
+               FileManager.default.fileExists(
+                   atPath: directory.appendingPathComponent("tokenizer.json").path) {
+                box.value = try? await GFTokenizer.load(from: directory)
+            }
             semaphore.signal()
         }
         semaphore.wait()
