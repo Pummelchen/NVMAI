@@ -476,7 +476,13 @@ public final class ResponseStore: @unchecked Sendable {
 
     public func put(id: String, entry: Entry) {
         lock.withLock {
-            if entries[id] == nil { order.append(id) }
+            // A re-put replaces the entry *and* refreshes its place in the
+            // eviction order. Leaving a replaced response at its first insertion
+            // point evicts the response the caller just wrote -- the newest thing
+            // in the store -- while keeping whatever it replaced, which is the
+            // opposite of "the oldest entry goes".
+            if let existing = order.firstIndex(of: id) { order.remove(at: existing) }
+            order.append(id)
             entries[id] = entry
             while order.count > capacity, let oldest = order.first {
                 order.removeFirst()
