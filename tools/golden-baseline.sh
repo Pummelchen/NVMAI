@@ -9,7 +9,9 @@
 #   tools/golden-baseline.sh --server [...]   # CLI and server must agree
 #
 # Targets: ornith-4, ornith-8, qwen36-4, qwen36-8, qwen38-4, qwen38-8,
-# agentworld-4, agentworld-8.
+# agentworld-4, agentworld-8, katcoder-4, katcoder-8 (the last two are declared
+# before their install exists: the target is inert until the directory is there,
+# and release.sh demands the baseline as soon as it is).
 # Bare 4 and 8 still mean
 # Ornith, because the stored baselines are named for it.
 #
@@ -236,7 +238,9 @@ for t in "${targets[@]}"; do
     qwen36-8) dir="qwen3.6_35B_A3B_8Bit"; file="qwen3.6-35b-a3b-8bit.txt"; q=8 ;;
     agentworld-4) dir="qwen-agentworld_35B_A3B_4Bit"; file="qwen-agentworld-35b-a3b-4bit.txt"; q=4 ;;
     agentworld-8) dir="qwen-agentworld_35B_A3B_8Bit"; file="qwen-agentworld-35b-a3b-8bit.txt"; q=8 ;;
-    *) echo "unknown target: $t (ornith-4, ornith-8, qwen36-4, qwen36-8, qwen38-4, qwen38-8, agentworld-4, agentworld-8)" >&2
+    katcoder-4) dir="kat-coder-v2.5_35B_A3B_4Bit"; file="kat-coder-v2.5-35b-a3b-4bit.txt"; q=4 ;;
+    katcoder-8) dir="kat-coder-v2.5_35B_A3B_8Bit"; file="kat-coder-v2.5-35b-a3b-8bit.txt"; q=8 ;;
+    *) echo "unknown target: $t (ornith-4, ornith-8, qwen36-4, qwen36-8, qwen38-4, qwen38-8, agentworld-4, agentworld-8, katcoder-4, katcoder-8)" >&2
        status=1; continue ;;
   esac
   model="$ROOT/models/$dir"
