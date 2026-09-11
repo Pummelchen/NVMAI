@@ -204,6 +204,19 @@ public struct AffineSnapshot: Sendable {
     /// silently changes which layers use DeltaNet and which use attention.
     public init(gturbo directory: URL) throws {
         self.directory = directory
+        // Refused deliberately, and loudly, until the reader is corrected.
+        //
+        // The repacker produces a byte-identical dense `.gturbo`
+        // (`tools/gturbo_diff_snapshot.py` checks that), but this reader does
+        // not yet interpret the resident index correctly: it loads, it is
+        // fast, and it produces fluent nonsense. A silently wrong answer is
+        // the one failure this project refuses, so the install is rejected
+        // with the reason rather than served. Flip this once the equivalence
+        // check passes -- same model, both paths, token-for-token.
+        throw SafeTensorsFile.Failure.malformed(
+            "dense .gturbo reading is not implemented yet: use the affine "
+            + "snapshot install for this model (tools/install_models.sh "
+            + "qwen35-2b|qwen35-4b|qwen35-9b writes one)")
         let manifest = try ManifestReader.read(directoryURL: directory)
         let arch = manifest.arch
         // The family is an identity fact, not an arch field; reading it keeps a
