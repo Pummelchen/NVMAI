@@ -967,23 +967,38 @@ extension RealForwardRunner {
             let qNorm = try model.qNorm(layer: L)
             let kNorm = try model.kNorm(layer: L)
 
-            try fusedQKVGEMV.encode(commandBuffer: attnCB,
-                                qWeights: q.buffer, qWeightsOffset: Int(q.offset),
-                                qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
-                                qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
-                                kWeights: k.buffer, kWeightsOffset: Int(k.offset),
-                                kScales: k.buffer, kScalesOffset: Int(k.scaleOffset),
-                                kBiases: k.buffer, kBiasesOffset: Int(k.biasOffset),
-                                vWeights: vProj.buffer, vWeightsOffset: Int(vProj.offset),
-                                vScales: vProj.buffer, vScalesOffset: Int(vProj.scaleOffset),
-                                vBiases: vProj.buffer, vBiasesOffset: Int(vProj.biasOffset),
-                                x: normed,
-                                qOut: qScratch,
-                                kOut: kWrite.buffer, kOutOffset: kWrite.offset,
-                                vOut: vWrite.buffer, vOutOffset: vWrite.offset,
-                                qRows: qDim,
-                                kvRows: kvDim,
-                                n: D)
+            // Width-aware, like the gated branch above: the fused kernel is
+            // int4-only, so an 8-bit attention install would have had its q/k/v
+            // read as packed nibbles. `encodePrimaryGEMV` takes the tensor and
+            // routes 4-bit, 8-bit and a promoted bf16 projection correctly.
+            if model.attentionWeightBits == 4 {
+                try fusedQKVGEMV.encode(commandBuffer: attnCB,
+                                    qWeights: q.buffer, qWeightsOffset: Int(q.offset),
+                                    qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
+                                    qBiases: q.buffer, qBiasesOffset: Int(q.biasOffset),
+                                    kWeights: k.buffer, kWeightsOffset: Int(k.offset),
+                                    kScales: k.buffer, kScalesOffset: Int(k.scaleOffset),
+                                    kBiases: k.buffer, kBiasesOffset: Int(k.biasOffset),
+                                    vWeights: vProj.buffer, vWeightsOffset: Int(vProj.offset),
+                                    vScales: vProj.buffer, vScalesOffset: Int(vProj.scaleOffset),
+                                    vBiases: vProj.buffer, vBiasesOffset: Int(vProj.biasOffset),
+                                    x: normed,
+                                    qOut: qScratch,
+                                    kOut: kWrite.buffer, kOutOffset: kWrite.offset,
+                                    vOut: vWrite.buffer, vOutOffset: vWrite.offset,
+                                    qRows: qDim,
+                                    kvRows: kvDim,
+                                    n: D)
+            } else {
+                try encodePrimaryGEMV(commandBuffer: attnCB, projection: q,
+                                      x: normed, y: qScratch, m: qDim, n: D)
+                try encodePrimaryGEMV(commandBuffer: attnCB, projection: k,
+                                      x: normed, y: kWrite.buffer,
+                                      yOffset: kWrite.offset, m: kvDim, n: D)
+                try encodePrimaryGEMV(commandBuffer: attnCB, projection: vProj,
+                                      x: normed, y: vWrite.buffer,
+                                      yOffset: vWrite.offset, m: kvDim, n: D)
+            }
 
             let rotated = isFull
                 ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2.0)
@@ -1052,11 +1067,18 @@ extension RealForwardRunner {
                                     ringCapacity: activeRingCapacity,
                                     kvFormat: keyView)
             }
-            try int4.encode(commandBuffer: tailCB,
-                        weights: o.buffer, weightsOffset: Int(o.offset),
-                        scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
-                        biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
-                        x: attnOut, y: oOut, m: D, n: qDim)
+            // Same width-awareness as the projections above; `int4` here was the
+            // last int4-only call on this branch.
+            if model.attentionWeightBits == 4 {
+                try int4.encode(commandBuffer: tailCB,
+                            weights: o.buffer, weightsOffset: Int(o.offset),
+                            scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
+                            biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
+                            x: attnOut, y: oOut, m: D, n: qDim)
+            } else {
+                try encodePrimaryGEMV(commandBuffer: tailCB, projection: o,
+                                      x: attnOut, y: oOut, m: D, n: qDim)
+            }
         }
 
         // Plain pre-norm residual block: hidden += attention branch,
