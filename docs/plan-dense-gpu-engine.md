@@ -129,6 +129,46 @@ oracle.
 Each step passes the full gates before the next: warning-free build,
 `tools/lint.sh`, the serial suite, and a golden baseline.
 
+### What the code requires, read before writing S1
+
+Four details decide whether S1/S2 are correct, and each was checked against the
+install and the loader:
+
+1. **The FFN is per-tensor quantized, not slot quantized.** The dense install's
+   global slots are `attention` 4-bit, `embedding` 8-bit, `sharedExpert` 8-bit,
+   `router` 8-bit -- but the tensors that matter carry **per-tensor** entries:
+   `layers.N.mlp.{gate,up,down}_proj` are 4-bit, and `self_attn.k_proj` /
+   `v_proj` are 8-bit on full-attention layers while `q_proj`/`o_proj` are
+   4-bit. So the dense schema must resolve each tensor's width from its own
+   manifest entry, not from `quant.sharedExpert` (8-bit) or `quant.attention`
+   (4-bit). The `qwen38flash` branch already does this for its embedding and
+   head ("validated against the embedding slot the manifest declares rather
+   than an assumed width"), so the mechanism exists; the dense branch has to
+   use it for every MLP and attention tensor.
+2. **`TensorSchema.qwen35Dense` should map the shared-expert roles onto the
+   dense MLP**: `sharedExpertGate` -> `layers.N.mlp.gate_proj.weight`,
+   `sharedExpertUp` -> `…up_proj.weight`, `sharedExpertDown` ->
+   `…down_proj.weight`. That is what makes S2 small: the existing shared-expert
+   stage *is* a dense SwiGLU FFN (`silu(gate(x)) * up(x)` through `down`), the
+   dense family has `sharedExpertGated: false` so the scalar-gate branch is
+   already inert, and no new kernel is needed. `router` and
+   `sharedExpertScalarGate` must be names that cannot exist (the family has
+   neither) so that any accidental read fails at the lookup instead of reading
+   the FFN gate as router logits.
+3. **The FFN width is `ffnIntermediate` (6144 for the 2B, 12288 for the 9B),
+   not `moeIntermediateSize`** -- which is 0 for this family. The runner sizes
+   the shared-expert stage from `cfg.moeIntermediateSize` today
+   (`RealForwardRunner.swift:531`), so S2 has to select `ffnIntermediate` when
+   `numExperts == 0`; otherwise the stage is allocated at width 0.
+4. **The head differs by model within the family**: the 2B and 4B tie the
+   embedding (`tieWordEmbeddings: true`, no head tensor) and are served by
+   `Model.head()`'s tied path, while the 9B is untied and its tensor is named
+   `language_model.lm_head` -- *without* the `.weight` suffix qwen36 uses. One
+   dense schema cannot spell both, so either the schema's `lmHead` follows the
+   tie flag or the dense branch validates the head conditionally. The 9B's
+   tensor name is the reason this is recorded here rather than discovered in
+   S2.
+
 - [ ] **S1 — load.** Dense validation branch + profile; `Model.load` opens a
       dense install. Execution still refuses, so nothing can produce wrong
       output.
