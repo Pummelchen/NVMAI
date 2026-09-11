@@ -153,6 +153,38 @@ itself the result worth recording:
   argmax compares with `>` (NaN-safe, and a NaN row degrades to a *rejected*
   prediction because acceptance is decided by the target's own greedy token).
 
+**Invariant (a), executed: no file-derived value reaches arithmetic
+unvalidated.** The chains that carry values out of a file were walked end to end,
+and each is bounded before use:
+
+- **Resident index** (`model_weights.bin`): every entry's `fileOffset`/`sizeBytes`/
+  `scaleOffset`/`biasOffset` is validated against `indexSize + residentSize`, and
+  that region against the real file size, at load (C13) -- the guard that stops a
+  right-length file declaring a huge payload and pointing an entry past the
+  mapping.
+- **Packed-expert layout** (`layout.json`): the structural validator pins
+  `expert.offset == physicalRank * expertStride` (checked multiply), `size ==
+  expertStride`, every tensor range inside its expert blob (checked add) and
+  non-overlapping, then the manifest cross-check pins each layer file's size to
+  `expertsPerLayer * expertStride` (checked multiply). Verified by reading both
+  validators this round; a crafted layout is a thrown `indexCorrupt`/
+  `configurationInvalid`, not a read.
+- **Runtime use of those values**: the stream-size product is checked (C69) and
+  the four offset sums in the streamer are checked (C68); `expertOffset` is the
+  one deliberately unchecked hot-path multiply, and it is checked at construction
+  instead -- both state why in place.
+- **Quantization widths**: per-tensor overrides decode with `try` and a width
+  outside {4, 8} is refused with the key named (C28), so the group count every
+  dequantize derives from that width cannot come from a bad number (C24/C34).
+- **safetensors**: the shape product is checked and the declared byte range has
+  to agree with the element width (C66). The *shape-versus-size* half of that item
+  remains open and narrowed in `Unconfirmed` -- it is the silent one, because
+  quantized dequantization derives its group count from the shape.
+- **Ancillary files**: `ple_constants.json` is validated before `PLEHash`'s own
+  preconditions can trap on it (C30); the n-gram table's geometry is checked with
+  checked arithmetic (C29); the install receipt is path-bound and structurally
+  validated (D3).
+
 **Invariant (b), executed: no trap reachable from input.** All 283 `precondition`/
 `preconditionFailure`/`fatalError` sites in `sources/` were classified by the
 layer the value comes from rather than one at a time:
