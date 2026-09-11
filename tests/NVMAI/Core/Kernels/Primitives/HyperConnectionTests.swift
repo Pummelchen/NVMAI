@@ -20,6 +20,19 @@ struct HyperConnectionTests {
     private static let dim = 2560
     private static let streams = 4
 
+    /// O5: `hc_read_phase1_int4` used to declare two live threadgroup arrays --
+    /// `nrm` and `xs`, 2 x 10,240 halves = 40,992 bytes against Apple's
+    /// 32,768-byte limit -- so `makeComputePipelineState` threw, `psoReadPhase1`
+    /// stayed nil, `canFuseRead` was permanently false and the fused read path
+    /// was dead code: any measurement of it measured the unfused path. The
+    /// staging copy is gone (every thread reads only the elements it wrote, so
+    /// `streams` is read from device memory instead) and the pipeline builds.
+    @Test("The fused read kernel builds, which it could not with two staging arrays")
+    func fusedReadKernelBuilds() throws {
+        let context = try MetalContext()
+        _ = try context.pipeline("hc_read_phase1_int4")
+    }
+
     @Test("Gated read averages mix-weighted streams")
     func mixReduceMatchesReference() throws {
         var rng = SeedTree(0x11C0).key("hc-mix-reduce")

@@ -181,7 +181,7 @@ constant constexpr uint kHCThreads  = 256u;
 constant constexpr uint kHCGroup    = 64u;      // affine group size
 constant constexpr uint kHCMaxWide  = 10240u;   // streams * dim upper bound
 
-static inline float hc_rms_inv(threadgroup const half* x, uint D, float eps,
+static inline float hc_rms_inv(device const half* x, uint D, float eps,
                                uint lid, uint lsize, uint lane, uint sg, uint sgs,
                                threadgroup float* partial) {
     float acc = 0.0f;
@@ -326,17 +326,24 @@ void hc_read_phase1_int4(
     uint sg   [[simdgroup_index_in_threadgroup]],
     uint sgs  [[simdgroups_per_threadgroup]]
 ) {
+    // One staging array, not two: `xs` used to hold a threadgroup copy of
+    // `streams`, which put `nrm` + `xs` (2 x 10,240 halves = 40,992 bytes) over
+    // Apple's 32,768-byte threadgroup limit, so this kernel could not build at
+    // all and the fused read path was dead code. The copy bought nothing: every
+    // thread reads only the elements it wrote (same stride in the staging loop
+    // and in the reduction), so `streams` is read from device memory instead.
+    // The values are identical, so the arithmetic and its rounding are
+    // unchanged; what the fused path loses is one device->threadgroup staging
+    // pass, which is why it stays opt-in (`NVMAI_HC_FUSED`) until it is measured
+    // against the unfused path on the family that uses it.
     threadgroup half  nrm[kHCMaxWide];
-    threadgroup half  xs[kHCMaxWide];
     threadgroup float partial[kHCThreads / 32u];
     const uint wide = S * D;
-    for (uint i = lid; i < wide; i += kHCThreads) xs[i] = streams[i];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
     // Per-stream inverse RMS, identical reduction to rmsnorm_bf16w_grouped.
     for (uint s = 0; s < S; ++s) {
-        const float inv = hc_rms_inv(xs + s * D, D, eps, lid, kHCThreads, lane, sg, sgs, partial);
+        const float inv = hc_rms_inv(streams + s * D, D, eps, lid, kHCThreads, lane, sg, sgs, partial);
         for (uint i = lid; i < D; i += kHCThreads) {
-            const float xv = float(xs[s * D + i]);
+            const float xv = float(streams[s * D + i]);
             const float wv = float(hcNorm[s * D + i]);
             nrm[s * D + i] = half(xv * inv * wv);
         }

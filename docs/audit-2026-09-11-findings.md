@@ -99,6 +99,7 @@ got wrong, and says how.
 | C75 | low-medium | `NVMAI/Infrastructure/Streaming/PreadExpertStreamer.swift:434` | **A stride from a layout file reached a trapping narrowing.** The slot allocation began `Int(layout.expertStride)`, which **traps** for any value above `Int.max`, and the rounding sum after it would trap again near it -- on a value that arrives in the `.gturbo` layout, not from the build. Everything upstream bounds the *product* `expertsPerLayer * expertStride` (C69) and pins each expert's range inside a file whose size is verified, so no producer emits such a stride; but the stride alone is what bounds this allocation, and the conversion is the last unchecked step in that chain. It converts exactly now (`Int(exactly:)`) and throws `offsetOutOfRange` with the stride in the message. **Teeth:** a test opens a streamer whose layout declares `expertStride: UInt64.max` with a stream range that fits the synthetic file, so the open-time size check passes; with the conversion restored the test process dies with **signal 5** and "Fatal error: Not enough bits to represent the passed value". Found by auditing *derivations* rather than files -- the same shape as C74, one conversion further along. |
 | C76 | medium | `NVMAI/Runtime/Inference/Model.swift:1026` (found by auditing split geometry) | **The attention scratch's two ceilings were never checked against the config.** The kernels size their scratch from `Attention.maxQHeads` (the host split-KV reduction buffer, 32) and `kAttnMaxHeadDim` in `attention.metal` (512, which declares `q_smem` and the per-thread row). Nothing bounded a model against either: a manifest with more query heads reaches `Attention.encode`'s own `precondition` and **aborts the process** -- the same class C31 refused for the MoE/GDN threadgroup tiles -- and a head dimension above the kernel's constant overruns threadgroup memory, silently. Both are refused at load in `validateExecutableGeometry` now, next to the hidden-size bound and for the same reason. Read-verified: the guard is two comparisons in the function C31/C43 already validate, and a test would need the 28-field memberwise `ArchConfig` rebuild the existing fixtures do, which is more scaffolding than the guard -- recorded here rather than implied. |
 | C77 | low-medium | `NVMAI/Runtime/Generation/RawCompletion.swift:445` (token-id derivation) | **The consumer trusted a sampled id to be in range.** The sampler's kernels clamp their sentinel to token 0 and the tests pin "whatever the logits, the sampler returns an index inside the vocabulary" -- but the register has carried an *unidentified* intermittent out-of-range id, seen under full-suite GPU load, since the sampler tests were written. A token id indexes the embedding table and extends the KV history, so using one is silent corruption of the same kind the empty-row guard (C47) was added for. `sampleOnce` now passes the id through `validatedToken`, which throws `GeneratorError.samplerReturnedOutOfRangeToken(id:vocab:)` naming both numbers. That does not identify the intermittent producer -- the guard is the consumer's side -- but it makes the next occurrence a named error instead of a corrupted generation, which is the outcome that was missing. Tested directly on the guard (in range passes, `vocab` itself and the UINT_MAX sentinel both throw); the end-to-end teeth cannot be written until the producer is identified, and the register says that rather than implying otherwise. |
+| C78 | medium | `NVMAI/Metal/Fusions/fused.metal:329`, `:184` (was O5, the last open finding) | **The fused hyper-connection read kernel could not be built, so the path was dead code.** `hc_read_phase1_int4` staged *two* `kHCMaxWide` (10,240-half) threadgroup arrays -- `nrm` and `xs`, 40,992 bytes with the reduction partials against Apple's 32,768-byte limit -- so `makeComputePipelineState` threw, `psoReadPhase1` stayed nil, `canFuseRead` was permanently false, and **any measurement of the fused read path measured the unfused one**. The staging copy bought nothing: every thread reads only the elements it wrote (same stride in the staging loop and in the reduction), so `hc_rms_inv` takes a `device` pointer and `streams` is read from device memory, leaving one array (20,512 bytes). The values are identical, so the arithmetic and its rounding are unchanged. **Teeth:** a test creates the pipeline, and with the old kernel it fails with the driver's own words -- `Threadgroup memory size (40992) exceeds the maximum threadgroup memory allowed (32768)`. **What this does not do is turn the fused path on**: no `ModelProfile` row sets `hcFused`, so it stays opt-in via `NVMAI_HC_FUSED=1` and the composed path (three dispatches, its scratch and lifetimes) still wants a Qwen3.8-Flash-Next measurement before anyone relies on it -- which the register records rather than implying the fix validated integration. The convert is a resourcing question, not a capability one: the raw tensors come from Hugging Face through the established path (`tools/prepare_qwen38.py` -> `NVMAIRepack`), and this volume has 56 GB free of 926. |
 
 ## Coverage — what has been read, and how deeply
 
@@ -110,7 +111,7 @@ and this register rather than asserted:
 | Modules read | 15 of 15 | The seven read-only passes covered every module once |
 | Source files / lines | 293 files, 76 753 lines (Swift, Metal, C, headers) | The whole tree |
 | Files carrying at least one recorded finding | 59 (20%), 32 639 lines (43%) | The evidence trail, not the reading: most files read produced nothing to record, and one row can cite a 1 700-line file for one function |
-| Findings resolved | 76 code + 8 documentation = 84 of 87 (96%) | 1 open (O5), 3 disproved, 0 unconfirmed |
+| Findings resolved | 77 code + 8 documentation = 85 of 88 (96%) | 0 open, 3 disproved, 0 unconfirmed |
 | Explicitly read-verified (no executable check possible) | 6 of 71 | Each says so in its row: C53's wiring, C61 (a mid-stream fault on one of two pipelined responses), C63 (a signal inside one `pread`), C64 (a KV view no code path builds), C67 (a flag no caller sets), C69 and C71 (crafted-install and socket-timing paths) |
 
 **A second pass over the largest never-cited files** was made after the finding
@@ -301,7 +302,7 @@ cannot. Saying "audited" without that sentence would overstate what happened.
 
 ## Verification status of the fixes
 
-Unit tests and lint gate every batch (1447 tests in 223 suites, `tools/lint.sh`
+Unit tests and lint gate every batch (1448 tests in 223 suites, `tools/lint.sh`
 clean). Three fixes are verified *against real inference* and three are not, and
 the difference matters:
 
@@ -352,9 +353,8 @@ the difference matters:
 
 ## Open — verified, not yet fixed
 
-| # | Sev | Where | What is wrong |
-| --- | --- | --- | --- |
-| O5 | medium | `NVMAI/Metal/Fusions/fused.metal:329-331` | **The kernel fix is the work.** `hc_read_phase1_int4` declares two live 10,240-half threadgroup arrays (40,992 B against Apple's 32,768 B limit), so it cannot build and `canFuseRead` is permanently false — the fused read path is dead code today and any measurement of it measured nothing. The gate and `try?` are now documented as such rather than implying availability; the fix is to stage one array and read the second vector from device memory. Unverifiable here without a Qwen3.8 run. |
+None. O5, the last one, became C78. Every finding the seven read-only passes
+reported is now fixed, disproved, or recorded as deliberate.
 
 ## Rejected — the premise did not survive reading the code
 
