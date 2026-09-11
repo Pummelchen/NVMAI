@@ -95,6 +95,7 @@ got wrong, and says how.
 | C71 | low-medium | `NVMAIApp/Core/Inference/DecodeServiceInferenceClient.swift:36`, `:139`, `:198`, `:394` (was O31's last item) | **A Stop pressed inside the generation-start window was dropped.** `cancel()` targets the active generation on purpose, so a late cancel cannot hit a later one (D7) -- and the service's untargeted `cancel(nil)` only cancels a generation it *already* has active. A Stop landing after the app asked for a generation but before `runGenerationSession` published its id therefore sent `cancel(nil)` while the service had nothing running, and the `generate` frame that followed ran the whole generation: the button did nothing and the GPU stayed busy for the full answer. The request is latched now and re-sent as a *targeted* cancel immediately after the generate frame (the service has the generation by then), and the latch is cleared when a new generation is requested, so a press while idle cannot cancel the next one. Read-verified: driving this needs a live decode-service socket and a Stop inside a window that is microseconds wide; the register says so rather than implying a test exists. |
 | C72 | low | `NVMAIServer/Core/ServerInference.swift:1198` (was O30) | **The generation loop detokenized and stop-checked with a different tokenizer than the one that rendered the prompt.** `renderTokenizer` is resolved per request from the reasoning level (`resolvedTokenizer(for:)`), and it is what renders the prompt, what `count_tokens` counts with (C37) and what the `StructuredAssistantDecoder` is built with -- but `runRawCompletion` was handed the *session's* tokenizer, i.e. the level the model was loaded at. So a mid-session reasoning switch ran the decoder on one tokenizer and the detokenizer plus the stop-id check (`stopTokenIDs`, `endOfTurnID`, `toolResponseID`, the tool-call markers) on another. They coincide across a loaded folder today, which is exactly why the register called it harmless, but nothing guarantees it and the generation loop is the wrong place to depend on it. Read-verified: nothing observable changes while the two agree, and a test would need a fixture pair whose stop ids or special tokens differ -- the bundled fixtures are one folder per mode with the same control tokens. |
 | C73 | low | `NVMAIServer/Core/ServerTerminationSignals.swift:34` | **`wait()` trapped when the stream was cancelled before a signal arrived.** It ended with `preconditionFailure("termination signal stream ended without a signal")`, and `wait()`/`cancel()` are both public -- nothing stops a caller from cancelling first, and the audit's own signal tests do exactly that afterwards. Production is ordered correctly (`main` waits, then cancels on the way out), so the trap was unreachable rather than wrong; but a trap a caller can reach by call ordering is a landmine, not an invariant. `wait()` returns `Int32?` now, nil meaning "cancelled without a signal", and a test covers cancel-then-wait: with the trap restored the test process dies with **signal 5 (SIGTRAP)**, which is the teeth check. Found by working invariant (b) -- *no trap reachable from input or call ordering* -- across the layers rather than by reading another file. |
+| C74 | low-medium | `NVMAI/CPUEngine/AffineSnapshot.swift:361`, `:486` (was the last Unconfirmed claim) | **A quantized width that is not a whole number of groups truncated the group count and was then accepted.** Both branches of the CPU snapshot loader compute `columns / groupSize` with integer division and then check the scale/bias byte count against that quotient. A width outside whole groups makes the quotient one group short, and scales sized for that short count satisfy the check -- so the dequantize reads fewer groups per row than the packed weights hold and returns plausible nonsense, which is the failure the register described as *the silent one*. Both sites now refuse a width that is not a multiple of `groupSize` before the quotient is used. Producers derive the width from the scale count, so this is defence in depth, the same class C34 guarded in the CPU GEMVs. **Teeth:** the safetensors branch is covered by a test that loads a real snapshot whose logical width is 32 at 4 bits, and with the guard removed `matrix(_:)` returns without throwing ("an error was expected but none was thrown"). The resident-index branch makes the identical division with the identical consequence and is read-verified only -- reaching it needs a `.gturbo` install whose index declares such a width, which no producer emits. |
 
 ## Coverage — what has been read, and how deeply
 
@@ -242,7 +243,7 @@ cannot. Saying "audited" without that sentence would overstate what happened.
 
 ## Verification status of the fixes
 
-Unit tests and lint gate every batch (1444 tests in 223 suites, `tools/lint.sh`
+Unit tests and lint gate every batch (1445 tests in 223 suites, `tools/lint.sh`
 clean). Three fixes are verified *against real inference* and three are not, and
 the difference matters:
 
@@ -356,13 +357,6 @@ someone an investigation.
 
 ## Unconfirmed — need their mechanism read before they are trusted
 
-- `NgramTableReader`/`ResidentIndex` accept `shape` values unrelated to `sizeBytes`/`dtype`, so a hand-edited index or sidecar can describe a tensor whose logical width disagrees with the packed bytes. No consumer reduces `shape` with trapping arithmetic any more (that half became C66); what is left is the silent one -- quantized dequantization derives its group count from that width.
-- One claim is still open and is the *silent* kind: `NgramTableReader`/
-  `ResidentIndex` accept `shape` values unrelated to `sizeBytes`/`dtype`, and
-  quantized dequantization derives its group count from that shape. Its
-  trapping half became C66; this half needs a validation that says what the
-  shape must agree with, which is a change to a load path that no fixture
-  currently exercises.
-- Everything else reported by the seven passes is fixed, disproved, or
-  recorded as deliberate. New claims go here until their mechanism is read.
-  pass reports go here until their mechanism is read.
+None. Every claim reported by the seven read-only passes has been fixed, disproved,
+or recorded as deliberate: the last one became C74. New claims go here until their
+mechanism is read.

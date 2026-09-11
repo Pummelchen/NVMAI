@@ -175,6 +175,23 @@ import Testing
         return directory
     }
 
+    /// A width that is not a whole number of 64-element groups used to reach
+    /// `columns / groupSize` and truncate: the guard that compares the scale
+    /// count then agreed with scales sized for the truncated count, so the
+    /// dequantize read fewer groups per row than the weights hold and returned
+    /// plausible nonsense. It is refused now, before the division's result is
+    /// trusted.
+    @Test func aWidthOutsideWholeGroupsIsRefused() throws {
+        let directory = try writeSnapshot(rows: 8, columns: 32, bits: 4,
+                                          level: { _, _ in 1 }, scale: 1, bias: 0)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let snapshot = try AffineSnapshot(directory: directory)
+
+        #expect(throws: SafeTensorsFile.Failure.self) {
+            _ = try snapshot.matrix("w.weight")
+        }
+    }
+
     @Test func readsAQuantizedMatrixAtBothWidths() throws {
         for bits in [4, 8] {
             let directory = try writeSnapshot(rows: 128, columns: 64, bits: bits,

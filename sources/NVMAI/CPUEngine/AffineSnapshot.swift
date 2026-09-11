@@ -358,6 +358,18 @@ public struct AffineSnapshot: Sendable {
         // resident file is one mapping, so a wrong span does not fault -- it
         // silently dequantizes whatever is next to it. BF16 companions are two
         // bytes per group per row, and the scales and biases must match.
+        // `columns / groupSize` is integer division, so a width that is not a
+        // whole number of groups truncates the group count and the guard below
+        // then accepts scales sized for the wrong number of groups: the
+        // dequantize reads fewer groups per row than the weights hold and returns
+        // plausible nonsense. Producers derive the width from the scale count, so
+        // this is defence in depth -- the class C34 guarded in the GEMVs -- and it
+        // is checked here because this is where the division is.
+        guard columns % groupSize == 0 else {
+            throw SafeTensorsFile.Failure.malformed(
+                "\(stem): width \(columns) is not a whole number of "
+                    + "\(groupSize)-element groups")
+        }
         let perRow = columns / groupSize
         guard entry.scaleSize == UInt64(rows * perRow * 2),
               entry.biasSize == entry.scaleSize else {
@@ -481,6 +493,12 @@ public struct AffineSnapshot: Sendable {
         let lanes = 32 / width
         let rows = entry.shape[0]
         let columns = entry.shape[1] * lanes
+        // Same division, same reason as the resident-index branch above.
+        guard columns % groupSize == 0 else {
+            throw SafeTensorsFile.Failure.malformed(
+                "\(stem): width \(columns) at \(width) bits is not a whole number "
+                    + "of \(groupSize)-element groups")
+        }
         let scales = try shard.bytes(stem + ".scales")
         let biases = try shard.bytes(stem + ".biases")
         guard scales.count == rows * (columns / groupSize) * 2,
