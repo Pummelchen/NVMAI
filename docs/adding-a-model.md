@@ -72,6 +72,41 @@ PY
 A `vision_config` in `config.json` does **not** mean the checkpoint carries a
 vision tower: KAT declares one and ships language weights only. Check the index.
 
+### The checks that cost nothing and catch the expensive mistakes
+
+All four run before a byte of weights is fetched. They exist because a
+conversion is 69 GB of download and an hour of quantization, and each of these
+has a failure mode that would otherwise appear at the end of it.
+
+**1. Diff the chat template against a sibling the runtime already serves.** The
+renderer uses the model's own `chat_template.jinja` (its absence is a hard
+error), so the template *is* the prompt, the tool-call dialect and the
+reasoning markers. KAT's differs from AgentWorld's in two places — AgentWorld
+has an extra `audio` content branch, and a mid-conversation system message
+raises on AgentWorld where KAT renders it inline — and nowhere else: the ChatML
+markers, the `<tool_call>` block, the thinking block and the generation prompt
+are byte-identical. That answers "will the parser accept its tool calls?" by
+construction rather than by hoping.
+
+**2. Resolve every key the repacker's arch reader requires.** Read the
+`loadQwen35MoE` branch of `sources/NVMAIRepack/Core/Format/ArchInfo.swift`,
+extract its `try i("…")` keys, and check each against the checkpoint's
+`text_config`. A missing one is a `configJsonInvalid` at the end of the
+conversion; KAT has all seventeen, plus `layer_types` and both rope keys.
+
+**3. Check the production cross-check.** The same file carries
+`crossCheckProductionQwen35MoE`, which refuses a 2048/40 model whose geometry
+differs in any field from the shipped one. If the checkpoint matches it
+exactly, the repacker will treat it as *the* production geometry; if it does
+not, that is a runtime question to answer before converting, not after.
+
+**4. Confirm the tokenizer sidecar.** The converter's `TOKENIZER_FILES` marks
+`tokenizer.json` and `tokenizer_config.json` required and the rest optional, and
+skips a missing optional file rather than failing. But the *runtime* needs
+`chat_template.jinja` — it errors with "installed tokenizer is missing
+chat_template.jinja" — so a checkpoint that omits it needs a template supplied
+even though the converter would not complain.
+
 ## 2. The eight wiring points
 
 | # | Where | What |
