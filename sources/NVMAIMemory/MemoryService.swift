@@ -255,6 +255,10 @@ public actor MemoryService {
         if !doomed.isEmpty {
             var removed: [String] = []
             for url in doomed {
+                // Never remove a workspace another process is inside. The cap is
+                // the one rule here that deletes facts, and `open` only knows
+                // *this* process's workspaces.
+                guard !Self.isLockHeld(at: url) else { continue }
                 try? manager.removeItem(at: url)
                 try? manager.removeItem(at: url.appendingPathExtension("lock"))
                 try? manager.removeItem(at: url.appendingPathExtension("compacting"))
@@ -273,6 +277,36 @@ public actor MemoryService {
             }
         }
         if !expired.isEmpty { log(.expired(files: expired)) }
+    }
+
+    /// Whether another process holds this project's workspace lock.
+    ///
+    /// `FileJournal` takes `flock(LOCK_EX | LOCK_NB)` on `<journal>.lock`, so the
+    /// probe is the same call: it succeeds only when nobody holds the workspace.
+    /// Deleting a file another process is appending to takes its `.lock` with it
+    /// -- the file that process's `flock` is attached to -- and leaves it
+    /// writing to a deleted inode, which its next compaction then rewrites into
+    /// nothing. The retention pass already behaves this way by opening the file
+    /// through the ordinary engine; this is the same rule for the cap.
+    ///
+    /// Everything unreadable, and every unexpected `flock` failure, counts as
+    /// held: skipping a deletable file costs disk, deleting a live one costs
+    /// data.
+    static func isLockHeld(at journalURL: URL) -> Bool {
+        let descriptor = open(journalURL.appendingPathExtension("lock").path,
+                              O_RDWR | O_CLOEXEC)
+        if descriptor < 0 {
+            // No lock file at all means no journal has opened this workspace, so
+            // there is nothing that could be holding it. Any other errno is not
+            // ours to read in favour of deleting.
+            return errno != ENOENT
+        }
+        defer { close(descriptor) }
+        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(descriptor, LOCK_UN)
+            return false
+        }
+        return true
     }
 
     /// Every project file under the directory with its last-write time.
