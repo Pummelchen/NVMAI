@@ -54,6 +54,13 @@ public enum JournalError: Error, CustomStringConvertible {
     /// Another process already has this journal open for writing.
     case locked(URL)
     case writeFailed(URL, errno: Int32)
+    /// The journal exists but could not be read.
+    ///
+    /// Deliberately not the same as an empty journal, and not `cannotOpen`
+    /// either: this is the case that has to stop a compaction. The engine
+    /// replays before it rewrites, so a read that reported "no records" for a
+    /// file it merely failed to read would checkpoint over the only copy.
+    case readFailed(URL, errno: Int32)
 
     public var description: String {
         switch self {
@@ -65,6 +72,8 @@ public enum JournalError: Error, CustomStringConvertible {
             return "another process is already writing the journal at \(url.path)"
         case .writeFailed(let url, let code):
             return "writing \(url.path) failed: \(String(cString: strerror(code)))"
+        case .readFailed(let url, let code):
+            return "reading \(url.path) failed: \(String(cString: strerror(code)))"
         }
     }
 }
@@ -316,13 +325,14 @@ public actor FileJournal: ContinuityJournal {
         // queue: a large file on a slow disk must not pin a pool thread.
         let path = url.path
         let decoder = self.decoder
-        return await withCheckedContinuation { continuation in
+        return try await withCheckedThrowingContinuation { continuation in
             Self.blockingQueue.async {
-                guard let contents = FileManager.default.contents(atPath: path) else {
-                    continuation.resume(returning: [])
-                    return
+                do {
+                    let contents = try Self.readContents(atPath: path) ?? Data()
+                    continuation.resume(returning: Self.decodeRecords(contents, decoder: decoder))
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-                continuation.resume(returning: Self.decodeRecords(contents, decoder: decoder))
             }
         }
     }
@@ -332,10 +342,42 @@ public actor FileJournal: ContinuityJournal {
     /// Takes no lock, so it is safe to point at the file of a running server.
     /// A store only its own process can look at is a store nobody can debug.
     public static func read(contentsOf url: URL) throws -> [JournalRecord] {
-        guard let contents = FileManager.default.contents(atPath: url.path) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        // `nil` means the file is not there; anything else that goes wrong is
+        // reported, so a caller listing workspaces does not show a file it could
+        // not read as an empty one.
+        guard let contents = try readContents(atPath: url.path) else { return [] }
         return decodeRecords(contents, decoder: decoder)
+    }
+
+    /// The journal's bytes, or `nil` when there is no file at that path.
+    ///
+    /// The two cases have to be distinguishable: this is what the engine replays
+    /// before it compacts, so reading a file that exists but cannot be read as
+    /// "no records" writes a checkpoint over the only copy of those records.
+    /// `FileManager.contents` answers `nil` for both and drops the errno with
+    /// it.
+    private static func readContents(atPath path: String) throws -> Data? {
+        let descriptor = open(path, O_RDONLY | O_CLOEXEC)
+        if descriptor < 0 {
+            if errno == ENOENT { return nil }
+            throw JournalError.readFailed(URL(fileURLWithPath: path), errno: errno)
+        }
+        defer { close(descriptor) }
+        var contents = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            // `Darwin.read`, not a member: this type has a `read` of its own
+            // and the unqualified name resolves to it.
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw JournalError.readFailed(URL(fileURLWithPath: path), errno: errno)
+            }
+            if count == 0 { return contents }
+            contents.append(contentsOf: buffer[0..<count])
+        }
     }
 
     /// Splits a journal into records, dropping anything that will not decode.

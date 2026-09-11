@@ -9,6 +9,39 @@ import Testing
             .appendingPathComponent("journal.ndjson")
     }
 
+    /// `start()` is the replay. If an unreadable journal replayed as empty, the
+    /// engine would come up believing the workspace was new and its next
+    /// compaction would write that belief over the records it could not read.
+    /// The file must be untouched, not merely unread.
+    @Test func startRefusesAnUnreadableJournalAndLeavesItAlone() async throws {
+        let url = temporaryURL()
+        let engine = ContinuityEngine(journal: try FileJournal(url: url))
+        try await engine.start()
+        _ = try await engine.createTask(title: "kept", objective: "survive a bad read")
+        await engine.shutDown()
+
+        // Opened before the permissions change: the failure under test is the
+        // replay, not the open.
+        let reopened = ContinuityEngine(journal: try FileJournal(url: url))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000],
+                                              ofItemAtPath: url.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                   ofItemAtPath: url.path)
+        }
+        await #expect(throws: JournalError.self) { try await reopened.start() }
+        await reopened.shutDown()
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                              ofItemAtPath: url.path)
+        let records = try FileJournal.read(contentsOf: url)
+        let titles = records.compactMap { record -> String? in
+            guard case .task(let task) = record else { return nil }
+            return task.title
+        }
+        #expect(titles == ["kept"], "the task was lost to a failed replay")
+    }
+
     @Test func aSessionCanBeRecordedEndToEnd() async throws {
         let engine = ContinuityEngine()
         try await engine.start()

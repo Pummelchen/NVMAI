@@ -10,6 +10,55 @@ import Testing
             .appendingPathComponent("journal-\(UUID().uuidString)")
     }
 
+    // MARK: - Absent versus unreadable
+
+    /// A workspace that has never been written replays as empty. This is the
+    /// case the unreadable check must not break.
+    @Test func aMissingJournalReadsAsEmpty() throws {
+        let url = temporaryDirectory().appendingPathComponent("never-written.ndjson")
+        #expect(try FileJournal.read(contentsOf: url).isEmpty)
+    }
+
+    /// The failure this prevents: the engine replays before it compacts, so a
+    /// journal that exists but cannot be read must not look like an empty one.
+    /// The compaction that follows a "successful" empty replay writes a
+    /// checkpoint over the only copy of records nobody managed to read.
+    @Test func anUnreadableJournalIsAnErrorNotAnEmptyOne() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("journal.ndjson")
+        let writer = try FileJournal(url: url)
+        try await writer.append(.task(ContinuityTask(title: "kept")))
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                   ofItemAtPath: url.path)
+        }
+
+        // The journal is already open; `replay` reads through its own
+        // descriptor, and that is what fails with the file unreadable.
+        try FileManager.default.setAttributes([.posixPermissions: 0o000],
+                                              ofItemAtPath: url.path)
+        do {
+            _ = try await writer.replay()
+            Issue.record("an unreadable journal replayed as if it were readable")
+        } catch let error as JournalError {
+            guard case .readFailed = error else {
+                Issue.record("expected readFailed, got \(error)")
+                return
+            }
+        }
+        #expect(throws: JournalError.self) {
+            _ = try FileJournal.read(contentsOf: url)
+        }
+
+        // With the permissions back the record is still there: nothing rewrote
+        // or truncated the file on the way through.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                              ofItemAtPath: url.path)
+        #expect(try FileJournal.read(contentsOf: url).count == 1)
+        try await writer.shutDown()
+    }
+
     // MARK: - The workspace lock
 
     /// The failure this prevents: two servers launched from the same
