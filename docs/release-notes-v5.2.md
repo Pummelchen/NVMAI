@@ -199,6 +199,15 @@ measured at 5.1 and has **not** been re-run for 5.2; the ranges above are
 short-generation measurements on a different protocol and are not comparable
 with that table row for row.
 
+### Verification
+
+The release gates ran on the tagged commit and all passed: `tools/lint.sh`
+clean; `swift test --no-parallel` **1462 tests in 227 suites passed**; all
+**eight installed golden baselines identical** (Ornith 1.5 and Qwen-AgentWorld
+35B-A3B at 4 and 8 bits, Qwen 3.6 35B-A3B at 4 and 8, Qwen3.8-Flash-Next
+125B-A6B at 4 and 8); and a clean scratch release build with no compiler
+warnings. The archive is 25,308,191 bytes.
+
 ### Checksum
 
 `nvmai-5.2-macos-arm64.tar.gz` sha256: `SHA256_PENDING`
