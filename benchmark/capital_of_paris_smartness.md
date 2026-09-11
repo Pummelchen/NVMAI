@@ -4,11 +4,14 @@ A fixed, deliberately ambiguous prompt -- *"Capital of Paris"* -- sent to
 every model the local server serves, on every engine it serves it on, plus a
 plain control question, with **thinking off**. The tables are generated from
 the raw rows by `benchmark/capital_of_paris_report.py`; the harness that
-produced them is `benchmark/capital_of_paris_smartness.py`.
+produced them is `benchmark/capital_of_paris_smartness.py`, and the rows
+themselves are in the gitignored
+`benchmark/benchmark-results/capital-of-paris-20260911T1935/` (`results-v2-3x2.jsonl`
+for this report, `results.jsonl` for the single-pass first one).
 
 ## Protocol
 
-- Commit `c7fca53`; `macOS 26.6.2, Swift 6.3.3, Apple M3 24 GB`.
+- Commit `45b3224`; `macOS 26.6.2, Swift 6.3.3, Apple M3 24 GB`.
 - Server: `.build/release/NVMAIServer --models-dir models --model qwen3.5-2b_4-Bit --port 8091 --reasoning off`
 - Request: `POST /v1/chat/completions`, `temperature: 0`, `max_tokens: 128`, `stream: true` with usage, `thinking off`.
 - 20 model/engine combinations x 2 prompts x 3 repeats = **120 measured runs**, 120 of them ok.

@@ -149,7 +149,11 @@ def main():
     print(f"every model the local server serves, on every engine it serves it on, plus a")
     print("plain control question, with **thinking off**. The tables are generated from")
     print("the raw rows by `benchmark/capital_of_paris_report.py`; the harness that")
-    print("produced them is `benchmark/capital_of_paris_smartness.py`.\n")
+    print("produced them is `benchmark/capital_of_paris_smartness.py`, and the rows")
+    print("themselves are in the gitignored")
+    print("`benchmark/benchmark-results/capital-of-paris-20260911T1935/` "
+          "(`results-v2-3x2.jsonl`")
+    print("for this report, `results.jsonl` for the single-pass first one).\n")
 
     print("## Protocol\n")
     print(f"- Commit `{COMMIT}`; `{DEVICE}`.")
