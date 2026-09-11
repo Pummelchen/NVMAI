@@ -1195,9 +1195,17 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
             output.publish(events)
             if output.isStopped { shouldStop = true }
         }
+        // `renderTokenizer` is the one this request's reasoning resolves to, and
+        // it is already what rendered the prompt and what the assistant decoder
+        // was built with. `tokenizer` is the session's -- the level the model was
+        // *loaded* at -- so a mid-session reasoning switch had the decoder on one
+        // tokenizer and the detokenizer plus the stop-id check on another. Their
+        // stop ids and special tokens coincide across a loaded folder today,
+        // which is why this looked harmless; it is not guaranteed, and the
+        // generation loop is the wrong place to rely on it.
         let result = try await runRawCompletion(
             producer: activeProducer,
-            tokenizer: tokenizer,
+            tokenizer: renderTokenizer,
             promptIds: activePromptIDs,
             config: config,
             context: context,
