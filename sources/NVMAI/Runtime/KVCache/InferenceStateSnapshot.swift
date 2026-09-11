@@ -43,6 +43,9 @@ public enum InferenceStateSnapshotError: Error, Equatable, CustomStringConvertib
     case invalidPayloadSize(expected: Int, actual: Int)
     case exceedsLimit(bytes: Int, limit: Int)
     case integerOverflow
+    /// A live subsystem's state is not carried by the snapshot, so a restore
+    /// would leave the previous conversation's buffers mixed into this prefix.
+    case stateNotInSnapshot(String)
 
     public var description: String {
         switch self {
@@ -58,6 +61,9 @@ public enum InferenceStateSnapshotError: Error, Equatable, CustomStringConvertib
             "inference-state snapshot requires \(bytes) bytes; cache limit is \(limit)"
         case .integerOverflow:
             "inference-state snapshot size overflow"
+        case .stateNotInSnapshot(let feature):
+            "inference-state snapshot does not carry \(feature) state, and restoring "
+                + "would leave the previous conversation's buffers in place"
         }
     }
 }

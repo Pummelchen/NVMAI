@@ -4,105 +4,112 @@ A full read-only audit of the tree by seven independent passes (kernels/quant,
 format+ModelIO+streaming, HTTP server, forward runner+KV cache, tokenizer+
 sampling, repacker+memory+continuity, app+CLI+decode service), followed by
 verification and fixes. This file is the register: every finding, where it is,
-and what happened to it. It exists so nothing found is lost and so a reader can
-tell a fixed bug from a known one.
+and what happened to it, so nothing found is lost and a reader can tell a fixed
+bug from a known one.
 
-**Status vocabulary.** `fixed` — changed in this audit, with the commit.
-`verified` — I reproduced the mechanism in the code and it is real, not yet
-changed. `documented` — real but accepted deliberately; the reason is written
-down. `refuted` — the claim did not hold up when I read it. `open` — real,
-cause understood, fix not written yet.
-
-Findings a subagent reported and I did not personally confirm are marked
-`unverified`. Nothing here is asserted on a subagent's word alone.
+**Status vocabulary.** `fixed` — changed in this audit. `open` — real, verified
+by me against the code, not yet changed. `deliberate` — real but accepted; the
+reason is written down. `unconfirmed` — reported by a pass, mechanism not yet
+read by me. Nothing here is asserted on a subagent's word alone; every `fixed`
+and `open` row is something I traced in the source myself.
 
 ---
 
-## Fixed in this audit
+## Fixed
 
-| # | Sev | Area | What was wrong | Status |
-| --- | --- | --- | --- | --- |
-| C1 | high | `NVMAIMemory/MemoryTools.swift` | `Int(Double)` traps on NaN/±inf/out-of-`Int`-range, and the value comes from a model-authored tool argument (`limit=1e999`). Clamps to `nil`/bounds instead of aborting the process holding the model. | **fixed** |
-| C2 | high | `ContinuityCore/Session/SessionLog.swift` | `pruneTurns(keeping: 0)` computed `turnStarts[count - 0]` — one past the end, a trap. `keeping: 0` is now a cut past the end, which is what "drop every turn" means; boundary events survive per the doc. | **fixed** |
-| C3 | high | `NVMAI/Infrastructure/Streaming/PreadExpertStreamer.swift` | `precondition(experts.count <= slotCount)` trapped, while the comment two lines above promised a throw and both callers already handle `nil`. Reachable from `--expert-cache-slots 8` against Qwen3.8-Flash-Next (top-10 routing; prefill tiles up to 16). Now `guard … else { return nil }`. | **fixed** |
-| C4 | medium | `docs/v4.5-ane-prefill.md` | Said ANE prefill is "off by default"; `RuntimePrefillANE.environmentValue` returns `.on` when unset. Marked historical and corrected. | **fixed** |
-| C5 | medium | `NVMAI/Runtime/Prefill/ANEPrefillAttention.swift` | Same false claim in the enum's doc comment ("off by default … never silently selected"). | **fixed** |
-| C6 | medium | `NVMAICLI/Args.swift`, `NVMAIServer/Core/ServerArguments.swift` | `--expert-cache-slots` help hardcoded "8, 16, 24, 32, 64, 96, or 128" while the validator accepts 40/48/112/160/192/256. Now spelled from `RuntimeConfiguration.allowedExpertCacheSlots`. | **fixed** |
-| C7 | medium-high | `tools/golden-baseline.sh` | Did not pin `NVMAI_PREFILL_ANE`, which defaults to `on`, and the ANE path is deliberately not byte-identical to the GPU path. The gate's meaning depended on prompt length and on whether a sidecar happened to be installed. Now exports `NVMAI_PREFILL_ANE=off`. | **fixed** |
-
-## Verified, not yet fixed
-
-| # | Sev | Location | What is wrong |
+| # | Sev | Where | What was wrong |
 | --- | --- | --- | --- |
-| V1 | critical | `NVMAI/Infrastructure/ModelIO/ResidentIndex.swift:96-99`, `NVMAIFormat/GTurboResidentIndexV1.swift:183-191` | Only `indexSize <= st_size` is checked. `residentSize` comes from the header and is used as the bound for every entry offset (`residentEnd = indexSize + residentSize`), so a same-size edit of `model_weights.bin` makes the reader hand out pointers past the mapping (SIGBUS / garbage). The receipt does not re-hash this file at load. |
-| V2 | high | `NVMAIServer/Core/ResponsesAPIModels.swift:386-408`, `AnthropicModels.swift:446-459` | `/v1/responses` and `/v1/messages` fill omitted sampling with the generic `GenerationDefaults` **before** validation, so the served model's own defaults (`ServedModel.sampling`) are unreachable. Qwen3.8-Flash-Next samples at 0.6 instead of its card's 1.0 on two of three surfaces. |
-| V3 | high | `NVMAIServer/Core/HTTPServer.swift:1667`, `:1909` | A streaming request rejected before `startStream` (queue full, shutting down) has no HTTP head, but `handleAsyncFailure` still writes SSE frames as a body: the client gets `data:` bytes with no status line. The intended 429 is undeliverable on every streaming surface. |
-| V4 | high | `NVMAIBench/main.swift:850-882`, `:951-953`, `:984` | `cpu35` counts oracle failures, prints "N of 3 wrong", and exits 0. The check that is supposed to say the Swift forward pass matches the oracle reports success on failure. |
-| V5 | high | `NVMAIRepack/Core/Remote/RemoteStreamingRepacker.swift:313-329` | The disk reservation covers `model_weights.bin` + `packed_experts/**` only. `plan.passthroughFiles` (Qwen3.8's ~95 GiB n-gram table, cap 256 GiB) is excluded but is preallocated and written, so a 168 GiB install passes a 66 GiB check and dies with ENOSPC mid-download. |
-| V6 | high | `NVMAIMemory/ContinuityStore.swift:137-139` | The computed `bounded.limit` is passed to `MemoryRanking.rank`, which never reads it; the durable backend returns every match (up to a 2000-candidate scan) while the in-memory backend slices. Two backends answer the same query differently and one can push ~2000 records into the model's context. `maximumIndexScan` is dead. |
-| V7 | medium-high | `NVMAICLI/Args.swift:135-136`, `:187` | `--rdadvise` is documented "default off" but the CLI defaults to `default` and `rdadviseEnabled = policy != .off`, so read-ahead advice is ON by default. Scripted verification records runs as RDADVISE off while measuring it on. |
-| V8 | medium | `NVMAIMemory/SessionJournal.swift:127-133` | The truncation guard is in UTF-8 bytes but the cut is in Characters, so multibyte text over 4096 bytes with under ~2730 characters is "summarised" as the whole text plus a duplicated tail, with a **negative** omitted count (2000 CJK chars → `-3072 bytes omitted`). |
-| V9 | medium | `NVMAICLI/Args.swift:264-269` | `--repetition-penalty` accepts `> 0` while the app's validator requires `>= 1`; `GenerationConfig.validate()` does not check it, so `0.5` runs and rewards repetition. |
-| V10 | medium | `ContinuityCore/Persistence/Journal.swift:382-383` | `compact` closes the descriptor then `descriptor = try openForAppend(url)`; if the reopen throws, the field keeps the closed fd number, so `descriptor >= 0` passes and later writes target a reassigned fd. |
-| V11 | medium | `NVMAIRepack/Core/Remote/SourceByteProvider.swift:80-95` | On reopen failure the dictionary still maps the path to the already-closed fd, and the exit `defer` closes it a second time — possibly an unrelated live descriptor. `LocalSourceByteProvider` does `removeValue` first; this one does not. |
-| V12 | medium | `NVMAIFormat/GTurboManifestV1.swift:196-205`, `ModelIO/ManifestReader.swift:494` | Per-tensor quant overrides decode with `try?`, so a malformed slot is silently dropped, and surviving `weightBits` values are never range-checked — the exact silent 4/8-bit misread the type's own comment warns about. |
-| V13 | medium | `NVMAI/Infrastructure/Streaming/NgramTableReader.swift:63`, `:75-76` | Preconditions trap on geometry from an unhashed `ple_constants.json`, and `rowCount &* UInt64(bytes)` wraps, collapsing `expected` so a mismatched table passes the guard. |
-| V14 | medium | `NVMAIRepack/Core/Planning/RepackPlanner.swift:561` | Logical shape is derived as `scalesShape.last * 64`, a literal, while `plan.baseGroupSize` records the source's group size and is never required to be 64. A non-64 source writes an install whose index and manifest disagree. |
-| V15 | medium | `ContinuityCore/Session/SessionLog.swift:268-308` | `turns(taskID:)` folds all of a task with a single `pendingPrompt` while `events` groups per session, so an unanswered prompt from session A can be paired with session B's reply and rendered as B's turn. |
-| V16 | medium | `NVMAIApp/Core/Configuration/AppRuntimeOptions.swift:173-199` | `AppLoadedRuntimeKey` omits `prefillEnabled`, `prefillChunkTokens` and `conciseMode`, which do reach the helper and which it compares exactly. Changing Prefill or Prefill-chunk leaves staleness false, so no Reload affordance appears and the generation fails with "runtime options do not match the loaded session". |
-| V17 | medium | `NVMAIServer/Core/ServerPromptCache.swift:25-34`, `:121-150` | The cache does not key on the request's reasoning level, though `ValidatedChatRequest.reasoning`'s doc says it does and that a cached range "must never be spliced onto" another level's. A mid-session switch can reuse a prefix and re-render the tail at the loaded level. |
-| V18 | low-medium | `NVMAIServer/Core/ManagedModelBackend.swift:108-131` | `unload()` returns false while a load is in flight (`session` is nil), and the load then completes and stays resident. |
-| V19 | low-medium | `NVMAIApp/Core/Inference/DecodeServiceInferenceClient.swift:227-298` | The helper's launchd label embeds pid+token and nothing scans for an existing job, so a force-quit leaves an orphan holding ~20 GB and the relaunch starts a **second** model process. |
+| C1 | high | `NVMAIMemory/MemoryTools.swift` | `Int(Double)` traps on NaN, ±infinity and anything outside `Int`'s range, and the value comes straight from a model-authored tool argument (`limit=1e999` parses as +infinity). It aborted the process holding the loaded model. Clamps now. |
+| C2 | high | `ContinuityCore/Session/SessionLog.swift` | `pruneTurns(keeping: 0)` computed `turnStarts[count - 0]` — one past the end, a trap. `keeping: 0` is now a cut past the end, which is what "drop every turn" means; session-boundary events survive per the doc comment. |
+| C3 | high | `NVMAI/Infrastructure/Streaming/PreadExpertStreamer.swift` | `precondition(experts.count <= slotCount)` trapped while the comment two lines above promised a throw and both callers already handle `nil`. Reachable from `--expert-cache-slots 8` against Qwen3.8-Flash-Next (top-10 routing, prefill tiles up to 16). |
+| C4 | medium | `docs/v4.5-ane-prefill.md` | Claimed ANE prefill is "off by default"; `environmentValue` returns `.on` when the variable is unset, and has since v4.6. Marked historical and corrected. |
+| C5 | medium | `NVMAI/Runtime/Prefill/ANEPrefillAttention.swift` | The same false claim in the enum's own doc comment ("off by default … never silently selected"). |
+| C6 | medium | `NVMAICLI/Args.swift`, `NVMAIServer/Core/ServerArguments.swift` | `--expert-cache-slots` help hardcoded a list that stopped at 128 while the validator accepts 40/48/112/160/192/256. Now spelled from `RuntimeConfiguration.allowedExpertCacheSlots`, so it cannot drift again. |
+| C7 | medium-high | `tools/golden-baseline.sh` | Never pinned `NVMAI_PREFILL_ANE`, which defaults to `on`, and the ANE path is deliberately not byte-identical to the GPU path. The only real-inference regression gate followed a default that depends on prompt length and on whether a sidecar happens to be installed. Exports `NVMAI_PREFILL_ANE=off` now. |
+| C8 | high | `NVMAI/Kernels/MoE/MoE.swift` | `routerLogits` was allocated at 256 floats while `encodeRouter`'s guard had been raised to 512 "for Qwen3.8-Flash-Next", in a comment calling the old 256 "a conservative guard rather than a width limit". At 512 experts the router GEMV wrote 2048 bytes through a 1024-byte buffer, every layer, every token — non-faulting only because driver allocations are page-granular. Allocation and guard now share `MoE.maxRouterExperts`, with a length precondition. |
+| C9 | medium | `NVMAI/Metal/Sampling/logit.metal` | `sample_topk64_final` seeded `picked` from `indices[0]` with no `kept > 0` guard, so a row with no finite mass emitted the `0xFFFFFFFF` sentinel as a token id. The generic `sample` kernel guards exactly this case; the top-64 variant is the default for topK ≤ 64, which is the app's 20. |
+| C10 | medium | `NVMAI/Metal/Prefill/prefill.metal` | The prefill router skipped an expert on an exact tie with the k-th score (`s <= top_score[KK-1]`) where decode admits it and applies the lower-index tie-break (`s < …`, with a comment saying so). Identical logits could route differently in a prompt and its continuation — which the kernel's own nearby comment forbids. |
+| C11 | high | `ResponsesAPIModels.swift`, `AnthropicModels.swift` | Both mappers filled omitted sampling with the generic `GenerationDefaults` before validation, so the served model's profile was unreachable. The validator resolves `request.value ?? sampling.value`, so Qwen3.8-Flash-Next sampled at 0.6 instead of its card's 1.0 on two of three surfaces. Fields stay nil; each mapper test pins it with a non-house sampling value (the old test could not tell the paths apart, because its `sampling` was already 0.6). |
+| C12 | medium | `NVMAI/CPUEngine/AffineSnapshot.swift` | The `.gturbo` reader validated its scale/bias spans only as non-empty, while the safetensors branch beside it checks the exact extent. The resident file is a single mapping, so a wrong span dequantized neighbouring bytes instead of failing. Same check now; the equivalence gate confirms real installs pass. |
+| C13 | critical | `NVMAI/Infrastructure/ModelIO/ResidentIndex.swift` | Only `indexSize <= st_size` was checked, and every entry bound the decoder enforces comes from `indexSize + residentSize` in that same header. A same-length edit could declare a huge payload region and point an entry past the mapping — SIGBUS or silent garbage, since the CPU loader hands out pointers with no further check. The region is bounded against the real file now; the test fails with the guard removed, which is how the vulnerability was confirmed. |
+| C14 | high | `NVMAIRepack/Core/Remote/RemoteStreamingRepacker.swift` | The disk reservation counted `model_weights.bin` + `packed_experts/**` only, while every passthrough file is ftruncated and written in full. Qwen3.8's ~95 GiB n-gram table (cap 256 GiB) meant a ~168 GiB install passed a ~66 GiB check and died with ENOSPC after tens of GiB. Both sites count them; `--share-ngram-table`'s hardlink case is excluded for free, because that file never enters `plan.passthroughFiles`. |
+| C15 | high | `NVMAIMemory/InMemoryStore.swift` | `MemoryRanking.rank` never read `query.limit`. `ContinuityStore` computed `bounded.limit` and passed it in — where it was ignored — so the durable backend returned every match up to its 2000-candidate scan for a query asking for ten, while the in-memory backend honoured the bound. Thousands of up-to-64-KiB records into the model's context, and two backends disagreeing about the same query. |
+| C16 | critical | `NVMAI/Runtime/Inference/RealForwardRunner.swift` | `restoreInferenceState` restored KV+GDN and called only `resetTransientState()`, which does not clear the sparse indexer's pooled keys or the PLE convolution window — `reset()` does. A restored prefix then ranked blocks from keys never rebuilt for it, and hashed n-grams from the previous conversation's predecessors: silent wrong output. Now refused with `stateNotInSnapshot`, scoped to the families that enable those subsystems, so the MoE families keep restoring and Qwen3.8 re-prefills. |
+| C17 | medium | `NVMAICLI/Args.swift` | `--rdadvise` documented "default off" while the default leaves advice on; `--expert-cache-slots` documented a fixed default of 64 that is really derived from the model profile; `--repetition-penalty` accepted values below 1 that every other front end rejects — and below 1 the kernel *multiplies* the repeated logit, rewarding repetition. |
+| C18 | low | `NVMAIApp/Mac/Generation/PromptComposerView.swift` | The prompt tip stated "The default temperature is 0.60" unconditionally; the app follows the model profile, which is 1.0 for Qwen3.8-Flash-Next. |
+| C19 | high | `NVMAIBench/main.swift` | `cpu35` accumulated oracle failures, printed "N of 3 wrong", and exited 0 — and this is the command that exists to be scripted as the check that the Swift forward pass matches the oracle. Both missing-tokenizer paths also exited 0. Non-zero now. |
+| C20 | high | `NVMAIServer/Core/ServerPromptCache.swift`, `ServerInference.swift` | A mid-session reasoning switch was silently reverted on a *text-continuation* cache hit: `matchTextContinuation` re-renders the tail, and it was handed the session's tokenizer, so the model saw a generation prompt built for the loaded level while the decoder was built for the requested one — chain-of-thought into `content`, or the whole answer reported as reasoning with `content` empty. Comparing rendered token IDs (which the surrounding claim relied on) only covers the direct-prefix path. A level change now invalidates the cache and re-prefills, which is what "a switch is a miss" always meant. |
 
-## False documentation, no behavioural impact
+## Open — verified, not yet fixed
 
-| # | Location | What is false |
+| # | Sev | Where | What is wrong |
+| --- | --- | --- | --- |
+| O1 | high | `NVMAIServer/Core/HTTPServer.swift:1667`, `:1909` | A streaming request rejected before `startStream` (queue full, shutting down) has no HTTP head, but `handleAsyncFailure` still writes SSE frames as a body, so the client gets `data:` bytes with no status line. The intended 429 is undeliverable on every streaming surface. |
+| O2 | high | `NVMAI/Runtime/Inference/RealForwardRunner+Residual.swift:438-476` | The prefill QSA indexer projections call `prefillQMM.encode` unconditionally, while decode branches on `dtype == 1` to a bf16 path. `prepare_qwen38.py` promotes `indexer.index_q_proj`/`index_k_proj` to bf16 at 8 bits, so an 8-bit Qwen3.8 install reads the first K bytes of each 2K-byte bf16 row as 8-bit codes with scales from offset 0 — and `validateRuntimeSchema` has no indexer check, so it loads clean. Past the dense-exact window (~2048 keys) prefill ranks garbage and decode reuses the poisoned cache. |
+| O3 | medium | `NVMAI/Runtime/Inference/RealForwardRunner+Decode.swift:970`, `:1055` | The non-gated full-attention branch selects INT4 fused QKV and INT4 `o_proj` with no `attentionWeightBits` test, while every sibling dispatch site and the prefill path are width-aware. Reachable for a manifest with `attnOutputGate == false` (the repacker's default) plus an 8-bit attention slot. Latent: all four in-tree profiles set `attnOutputGate: true`. |
+| O4 | medium | `NVMAI/Metal/MoE/moe.metal:16`, `NVMAI/Metal/GDN/gdn.metal:848` | Fixed 2816-element threadgroup tiles staged from `cfg.hiddenSize` with no bound anywhere; a hidden size above 2816 overruns threadgroup memory. Latent (shipped sizes are 2048/2560/2816). |
+| O5 | medium | `NVMAI/Kernels/Primitives/HyperConnection.swift:70-72` | `try? context.pipeline(...)` for `hc_read_phase1_int4`, which needs 40,992 B of threadgroup memory against Apple's 32,768 limit, so the pipeline always fails to build and `canFuseRead` is permanently false. A whole fused path is silently dead and any claim that it ran is vacuous. |
+| O6 | medium | `NVMAI/Metal/Attention/attention.metal:307` | `attention_decode_gqa_swa_partial` returns without writing its partials when `q_per_kv > kAttnMaxQPerKV`, leaving the shared split-KV scratch from the previous layer for the combine pass. Host-guarded today (`Attention.swift:188`). |
+| O7 | medium | `NVMAIMemory/SessionJournal.swift:127-133` | The truncation guard is in UTF-8 bytes but the cut is in Characters, so multibyte text over 4096 bytes with under ~2730 characters is "summarised" as the whole text plus a duplicated tail, with a **negative** omitted count (2000 CJK characters → `-3072 bytes omitted`). |
+| O8 | medium | `ContinuityCore/Persistence/Journal.swift:382-383` | `compact` closes the descriptor then `descriptor = try openForAppend(url)`; if the reopen throws, the field keeps the closed fd number, so `descriptor >= 0` passes and later writes target a reassigned fd. |
+| O9 | medium | `NVMAIRepack/Core/Remote/SourceByteProvider.swift:80-95` | On reopen failure the dictionary still maps the path to the already-closed fd, and the exit `defer` closes it a second time — possibly an unrelated live descriptor. `LocalSourceByteProvider` does `removeValue` first; this one does not. |
+| O10 | medium | `NVMAIFormat/GTurboManifestV1.swift:196-205`, `ModelIO/ManifestReader.swift:494` | Per-tensor quant overrides decode with `try?`, so a malformed slot is silently dropped, and surviving `weightBits` values are never range-checked — the exact silent 4/8-bit misread the type's own comment warns about. |
+| O11 | medium | `NVMAI/Infrastructure/Streaming/NgramTableReader.swift:63`, `:75-76` | Preconditions trap on geometry from an unhashed `ple_constants.json`, and `rowCount &* UInt64(bytes)` wraps, collapsing `expected` so a mismatched table passes the guard. |
+| O12 | medium | `NVMAIRepack/Core/Planning/RepackPlanner.swift:561` | Logical shape is derived as `scalesShape.last * 64`, a literal, while `plan.baseGroupSize` records the source's group size and is never required to be 64. A non-64 source writes an install whose index and manifest disagree; the runtime rejects it at load, after a 20–236 GB write. |
+| O13 | medium | `ContinuityCore/Session/SessionLog.swift:268-308` | `turns(taskID:)` folds a whole task with a single `pendingPrompt` while `events` groups per session, so an unanswered prompt from session A can be paired with session B's reply and rendered as B's turn. |
+| O14 | medium | `NVMAIApp/Core/Configuration/AppRuntimeOptions.swift:173-199` | `AppLoadedRuntimeKey` omits `prefillEnabled`, `prefillChunkTokens` and `conciseMode`, which do reach the helper and which it compares exactly. Changing Prefill or Prefill-chunk leaves staleness false, so no Reload affordance appears and the generation fails with "runtime options do not match the loaded session". |
+| O15 | medium | `NVMAIServer/Core/ServerInference.swift:1410-1422` | `count_tokens` encodes the un-stripped prompt while generation applies the CLI-strip and the concise-mode system prompt, so `input_tokens` is inflated for the `<model>-fast` alias and under-reported in concise mode, contradicting its own doc. |
+| O16 | medium | `NVMAI/Runtime/KVCache/KVCacheManager.swift:345-388` | The disk-tier restore recomputes expected segment lengths against the *receiving* runner's current capacity, so any snapshot past the initial 8192-token capacity fails to restore. The feature silently never works for long conversations; fails closed. |
+| O17 | medium | `NVMAI/Runtime/Family/PLEConstants.swift:30-52`, `NgramTableReader.swift:101-125` | The per-token gather width comes from `ple_constants.json` while the destination buffer is sized from `cfg.ple.embedDim`, and `gather` has no capacity argument. A mismatched sidecar writes past `ple.embedding` or feeds wrong-width rows silently. |
+| O18 | low-medium | `NVMAIServer/Core/ManagedModelBackend.swift:108-131` | `unload()` returns false while a load is in flight (`session` is nil), and the load then completes and stays resident — so the request that motivated the endpoint does not free memory. |
+| O19 | low-medium | `NVMAIApp/Core/Inference/DecodeServiceInferenceClient.swift:227-298` | The helper's launchd label embeds pid+token and nothing scans for an existing job, so a force-quit leaves an orphan holding ~20 GB and the relaunch starts a **second** model process. |
+| O20 | low-medium | `NVMAIServer/Core/HTTPServer.swift:63-79`, `:276-292` | No aggregate cap on request headers or pipelined requests (NIO caps only each field at 80 KiB), and the 413 is written at `.end`, after the whole oversized body has been read and discarded. |
+| O21 | low | `NVMAI/Runtime/Inference/RealForwardRunner+Decode.swift:938-954`, `+Prefill.swift:944` | A mask-0 (sliding-window) layer is executed as full attention with `fullHeadDim`/`numFullKVHeads`/`fullRopeTheta` whenever `attnOutputGate` is set, and is never validated. Latent: no shipped preset declares mask 0. |
+| O22 | low | `NVMAI/Metal/Quant/kv_cache_quantize.metal:42-68` | Codes are derived from the exact group scale/bias and the stored values are rounded to fp16 afterwards, opposite to the repo's own convention (`Quantization.swift:77-90`), so every reconstructed value carries a rounding error that could have been folded into the code. |
+| O23 | low | `NVMAI/Metal/TensorCore/tensorops.metal:58-104`, `MPPPrefillInt4QMM.swift:73-81` | The A tile is never clamped to `M` (the host guards `k % 64`, not `m % 64`), so a chunk length that is not a multiple of 64 reads up to 63 rows past the written activations. Contained by the 128-row scratch today. |
+| O24 | low | `NVMAIKernelsC/int4_affine_gemv.c:35`, `int8_affine_gemv.c:43`, `:61` | The CPU affine GEMV entry points never validate the documented `n % 64`, and a bad `n` mis-strides every row after the first (`row_bytes = n/2`) — silently wrong output, not a dropped tail. Every Metal wrapper does check. |
+| O25 | low | `NVMAI/Metal/Sampling/logit.metal:77-84`, `:340-350` | `softcap_value` propagates NaN, so a NaN logits row yields no finite mass and the sampler falls back to token 0 with no diagnostic. The test comment claiming NaN rows are clamped is false. |
+| O26 | low | `NVMAI/Runtime/Generation/Sampler.swift:89-108` | `GenerationConfig.validate()` checks temperature, topK, topP and presencePenalty but not `repetitionPenalty`, the one float the sampler divides by. Every production entry point checks it separately, so it is a library-API gap. |
+| O27 | low | `NVMAI/Runtime/Generation/Sampler.swift:290-300` | The incremental penalty history assumes exactly one appended token per call and never forgets: a reused sampler, or multi-token appends, silently penalize stale ids. |
+| O28 | low | `NVMAI/Tokenization/Tokenizer.swift:542-558` | The manual ChatML renderer emits historical assistant content raw, while every bundled template strips reasoning from history and wraps a trailing assistant turn — and the doc claims byte-for-byte parity. Multi-turn chats are prompted off-distribution versus the model's own template. |
+| O29 | low | `NVMAI/Runtime/Generation/RawCompletion.swift:246-253` | `StopReason.toolCalls` is unreachable: `tokenID == tokenizer.toolResponseID` sits inside a branch guarded by `stopTokenIDs.contains(tokenID)`, and `toolResponseID` is never in that set, so a tool turn reports `.endOfTurn` and the `orphanToolResponse` diagnostic is dead. |
+| O30 | low | `NVMAIServer/Core/ServerInference.swift:1170`, `ModelRouter.swift:439-442` | The reasoning switch reaches the render and the assistant decoder but not `runRawCompletion` or the token-counting path, which still use the session tokenizer — so the doc's claim that "decode … follow[s] the switch" is only half true. |
+| O31 | low | `NVMAIApp/Mac/Generation/...`, `NVMAIMemory/...` | Reported tail, mechanism read but impact bounded: a Stop pressed inside the generation-start window can be dropped (`cancel()` writes `cancel(nil)` before `activeGenerationID` is set); one 60 s inter-event timeout covers prefill as well as decode, so a slow prefill chunk gets a healthy helper killed and reloaded; `MemoryService.sweepStaleWorkspaces` deletes another process's journal and `.lock` by path without checking `flock`; a journal read error is indistinguishable from an empty journal and the next compaction destroys the old records; `ContextAssembler.memoryItemIDs` is ranking order while its comment says render order. |
+
+## False documentation, no behavioural impact yet
+
+| # | Where | What is false |
 | --- | --- | --- |
-| D1 | `NVMAIApp/Mac/Generation/PromptComposerView.swift:119` | "The default temperature is 0.60." The app follows the model profile, which is 1.0 for Qwen3.8-Flash-Next. |
-| D2 | `NVMAICLI/Args.swift:146-148`, `Run.swift:70-78` | `--concise` is called "per-quantization" and the code claims the manifest bit width selects the variant; `ConcisePrompt.prompt(forRoutedExpertBits:)` returns `standard` for every width and the manifest read is pinned to `qwen36_35B_A3B`, so `bits` silently falls back to 4 for every other family. |
-| D3 | `NVMAIServer/Core/VerifiedInstallReceipt.swift:7-11` | Claims loads verify the receipt binding "and file sizes"; the receipt↔manifest comparison never touches the filesystem, and only `model_weights.bin`, `layout.json` and `packed_experts/*.bin` are ever size-checked. Tokenizer and sidecar files are not. |
+| D1 | `NVMAICLI/Args.swift:146-148`, `Run.swift:70-78` | `--concise` is called "per-quantization" and the code claims the manifest bit width selects the variant; `ConcisePrompt.prompt(forRoutedExpertBits:)` returns `standard` for every width and the manifest read is pinned to `qwen36_35B_A3B`, so `bits` silently falls back to 4 for every other family. |
+| D2 | `NVMAI/Infrastructure/ModelIO/VerifiedInstallReceipt.swift:7-11` | Claims loads verify the receipt binding "and file sizes"; the receipt↔manifest comparison never touches the filesystem, and only `model_weights.bin`, `layout.json` and `packed_experts/*.bin` are ever size-checked. Tokenizer and sidecar files are not. |
+| D3 | `NVMAIRepack/Core/Verification/VerifiedInstallTool.swift:50-51` | The comment says duplicate filesystem keys are rejected; that decode does not run `GTurboManifestV1`'s structural checks (duplicate, reserved-name and prefix-collision paths), so `--verify-install` can certify a directory the runtime refuses. |
 | D4 | `NVMAIValidation/.../Moe.swift:54` | References an `applyStreamed` sibling that no longer exists. |
-| D5 | `NVMAIRepack/Core/Verification/VerifiedInstallTool.swift:50-51` | The comment says duplicate filesystem keys are rejected; that decode does not run the `GTurboManifestV1` structural checks (duplicate/reserved/prefix-collision paths). |
-| D6 | `NVMAIApp/Core/Configuration/MacAppSettings.swift:11-46` | RDADVISE / prefill chunk / expert-cache policy / verification are exposed in the Inspector but not persisted, so they revert silently. |
+| D5 | `NVMAI/Runtime/KVCache/KVCacheManager.swift:25-27` | `KVView.validTokenCount` is documented as an inclusive bound, but every caller passes a count and the kernels iterate `p < seqLen`; the public `keyView(layer:)` default is one *fewer* than the count the decode path deliberately passes. |
+| D6 | `NVMAI/Metal/Sampling/logit.metal:107-113` (test comment at `SamplerTests.swift:62-67`) | The test comment claims a NaN row is tanh-clamped and therefore does not exercise `kept == 0`; it does not, and the fallback is `kept == 0`. See O25. |
 
-## Verified and deliberately not changed
+## Deliberate, verified, not changed
 
-- `RuntimePrefillANE`'s asymmetry — an explicit `on` with no sidecar throws, the default degrades quietly — is correct and documented in `wasRequestedExplicitly`. Only the doc comment was wrong (C5).
+- `RuntimePrefillANE`'s asymmetry — an explicit `on` with no sidecar throws, the default degrades quietly — is correct and explained in `wasRequestedExplicitly`. Only the doc comment was wrong (C5).
 - `executeExpertCachePlan`'s preconditions validate a plan the type itself constructs, not user input; once `makeExpertCachePlan` returns non-nil they hold by construction.
 - `MemoryBackend` excluding memory items from `count_tokens` is documented and deliberate.
+- `FusedQKVEpilogue`'s extra no-scale V-norm diverges from the prefill neox path, but it is dead code for shipped presets (`attnOutputGate == true` everywhere) and the live gated path matches both `tools/*_reference.py` and the ANE exporter.
+- `int8_affine_gemv.c`'s comment claiming its four-accumulator reduce equals the 4-bit chain cannot be true (different rounding order); doc-only, and each kernel serves its own tensors.
 
-## Reported and not yet independently confirmed
+## Unconfirmed — need their mechanism read before they are trusted
 
-Sorted by severity as reported; each needs its mechanism read before it is
-trusted. Kept here rather than dropped.
-
-- `NgramTableReader`/`ResidentIndex` assertions on `shape` unrelated to
-  `sizeBytes` (`GTurboResidentIndexV1.swift:193-208`, trap at `Model.swift:1321`).
-- `PreadExpertStreamer.readFull` does not retry `EINTR` (`:1493-1503`) where
-  every other pread loop in the module does.
-- Unchecked `UInt64` offset arithmetic (`PreadExpertStreamer.swift:417,613,634,
-  1094,1097`, `ExpertStreamer.swift:60-61`).
-- `SSEOutbox.next()` installs its continuation after the cancellation handler
-  (`HTTPServer.swift:2174-2190`): a drainer cancelled between iterations can park
-  forever. Today only a terminal frame rescues it.
-- `errorCaught`/`failStream` cancel `activeTask` unconditionally
-  (`HTTPServer.swift:314`, `:1898`), so with pipelining an I/O error belonging to
-  response N can cancel request N+1.
-- `ResponseStore.put` does not move a re-put id to the back of `order`
-  (`ResponsesAPIModels.swift:471-480`), so it can be evicted before older entries.
-- No aggregate cap on request headers or pipelined requests; the 413 is written
-  only at `.end`, after the whole oversized body has been read and discarded
-  (`HTTPServer.swift:63-79`, `:276-292`).
-- `HEAD` to any path other than `/health` and `/v1/models` returns a body
-  (`HTTPServer.swift:366-368`, `:2016-2043`).
-- App: a Stop pressed inside the generation-start window can be dropped because
-  `cancel()` writes `cancel(nil)` before `activeGenerationID` is set.
-- App: one 60 s inter-event timeout covers prefill as well as decode, so a single
-  prefill chunk slower than 60 s gets the helper declared dead, killed, reloaded
-  and retried.
-- `MemoryService.sweepStaleWorkspaces` deletes another process's journal and
-  `.lock` by path without checking `flock`.
-- A journal read error is indistinguishable from an empty journal, and the next
-  compaction then destroys the old records (`Journal.swift:320-325`).
-- `ContextAssembler.memoryItemIDs` is ranking order while its comment says render
-  order.
+- `moe.metal:1007/1016/1030` index `partial[8]`/`blob[sg_idx]` by raw simdgroup id with no `sg < 8` guard; safe only because k8 is selected exactly when `maxStreamedExperts == 8`.
+- `dequant_int4.metal:389/462/503` do 4-byte loads on 2-byte-aligned addresses, which the same file calls undefined; no Swift call site dispatches them.
+- `kv_cache_quantize.metal:29` derives its element index from `thread_position.x` while the dispatch width is a hard-coded 64.
+- `CPUExpertFFN.Offsets` hardcodes 4-bit packing with no width check; only tests call it.
+- `VerifiedInstallTool.payloadMaxBytes` (128 GiB) is below the repacker's passthrough cap for `ngram_table.bin` (256 GiB), so an install the repacker accepts can be unverifiable.
+- `RemoteStreamingRepacker.swift:298-308` wipes the partial and preallocates inside the `dryRunSpaceCheck` branch when a resume is in flight (no caller sets the flag today).
+- `encodeLayout` takes the first non-empty layer's `expertStride` as global without checking uniformity, which `GTurboV1StructuralValidator` requires.
+- Unchecked `UInt64` offset arithmetic in `PreadExpertStreamer.swift:417/613/634/1094/1097` and `ExpertStreamer.swift:60-61`; no reachable trigger found.
+- `PreadExpertStreamer.readFull` does not retry `EINTR` where every other pread loop in the module does.
+- `SSEOutbox.next()` installs its continuation after the cancellation handler, so a drainer cancelled between iterations can park forever; a terminal frame always rescues it today.
+- `errorCaught`/`failStream` cancel `activeTask` unconditionally, so with pipelining an I/O error belonging to response N can cancel request N+1.
+- `ResponseStore.put` does not move a re-put id to the back of `order`, contrary to its comment.
+- `HEAD` to any path other than `/health` and `/v1/models` returns a body.
+- `GTurboEncoders.swift:29-30` uses a `precondition` rather than a thrown error for a tensor name over 65535 bytes.
+- `NgramTableReader`/`ResidentIndex` accept `shape` values unrelated to `sizeBytes`/`dtype`; a consumer reduces them with trapping `Int` multiplication.
+- `NVMAIApp/Core/Configuration/MacAppSettings.swift:11-46` exposes RDADVISE, prefill chunk, expert-cache policy and verification in the Inspector but persists none of them, so they revert silently on a model switch or relaunch.

@@ -1005,6 +1005,29 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                     actual: snapshot.payload.count)
             }
             guard let kv else { throw InferenceStateSnapshotError.invalidLayout }
+            // Refuse when a subsystem this snapshot does not carry is live.
+            //
+            // `reset()` clears the sparse indexer and the PLE block;
+            // `restoreInferenceState` only calls `resetTransientState()`, which
+            // does not. Restoring would therefore leave the indexer ranking
+            // blocks from pooled keys that were never rebuilt for this prefix,
+            // and the n-gram hashing starting from the previous conversation's
+            // predecessors. The model attends to a wrong subset of keys and
+            // answers fluently and wrongly, with no error anywhere -- the
+            // failure this project refuses. Throwing here costs the caller a
+            // re-prefill, not a wrong answer.
+            //
+            // Both are non-nil only for a family that enables them
+            // (Qwen3.8-Flash-Next), so the MoE families keep restoring. Carrying
+            // these buffers in the snapshot, or replaying the prefix to rebuild
+            // them, is the real fix; it is recorded in
+            // docs/audit-2026-09-11-findings.md.
+            if qsaIndexer != nil {
+                throw InferenceStateSnapshotError.stateNotInSnapshot("sparse-indexer")
+            }
+            if pleBlock != nil {
+                throw InferenceStateSnapshotError.stateNotInSnapshot("PLE")
+            }
             try snapshot.payload.withUnsafeBytes { bytes in
                 var offset = 0
                 try kv.restoreSnapshot(
