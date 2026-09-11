@@ -251,19 +251,46 @@ the receipt doing its job: it is what detects a moved or swapped directory. It
 is not corruption and does not need a re-download — re-issue it in place, which
 re-hashes the payload against the manifest and rebinds it to the current path:
 
-```bash
-swift run -c release NVMAIRepack --verify-install --input-gturbo models/qwen3.5_2B_4Bit
-```
+## The manifest must describe the payload, and that is checked
 
-Never hand-edit the receipt to match a new path. The binding is the check;
-editing it forges the attestation instead of re-establishing it.
+Nothing above is a convention a reader is asked to trust. A packed u32 weight's
+byte extent determines its width exactly — a word holds `32 / bits` values, so a
+`rows x columns` logical matrix occupies `rows * columns * bits / 8` bytes and
+nothing else — which makes the payload the authority and the manifest the thing
+that gets checked.
 
-Because the receipt is path-bound, an install must be written to where it will
-live. Repacking into a temporary directory and moving it into place produces an
-install whose receipt is invalid — `tools/repack_dense.sh` repacks straight into
-`models/` for this reason.
+`NVMAIRepack --verify-install` does that, in
+`VerifiedInstallTool.validateQuantAgainstResident`. For every `dtype 0` entry it
+computes the implied width from the bytes and requires the width the reader
+would resolve to equal it. The reader's rule is reproduced deliberately, because
+that rule *is* the contract being verified:
 
-## Building one
+- an explicit per-tensor entry wins;
+- otherwise, for an install with no packed experts, `embed_tokens` and `lm_head`
+  take the embedding slot and everything else takes the attention slot, exactly
+  as `AffineSnapshot.init(gturbo:)` does;
+- a packed-expert install keeps its routed-expert widths in
+  `packed_experts/layout.json` and its resident tensors are the GPU path's
+  business, so no slot fallback is applied and only explicit entries are checked.
+
+With no routed experts the `routedExpert` slot describes no tensor at all, so it
+is not derived from anything and is checked separately: it must name a width the
+payload actually uses, preferring the dominant one. Ties are resolved as a
+*set*, not by picking a maximum, so the verdict cannot depend on dictionary
+iteration order. That slot is what `ManifestIdentity.weightBits` reads and what
+becomes the `_<bits>-Bit` suffix in `/v1/models`, so a wrong value there is not
+cosmetic — it is how an 8-bit install came to advertise itself as 4-bit and get
+skipped by the catalog as a duplicate.
+
+This runs before the receipt is written, and a receipt cannot be issued by a run
+that failed. Since the runtime validates the receipt and binds it to the
+manifest by hash, an install that serves has passed this check — which is why
+the runtime does not repeat it.
+
+Both bugs this catches were found by comparing two things that could not both be
+true (identical bytes, different logits), not by a check like this one. A
+manifest can be internally consistent and still lie about the bytes beside it,
+and only a comparison against the payload can see that.
 
 ```bash
 # From a Hugging Face source, streamed, no full local checkpoint:
@@ -288,3 +315,17 @@ The second is the one that matters. The first proves the bytes are right, which
 a wrong per-tensor width would still pass — the bytes are right, they are just
 read at the wrong width. `tools/repack_dense.sh` runs both, in that order, then
 `--verify-install`.
+
+## Building one
+
+```bash
+swift run -c release NVMAIRepack --verify-install --input-gturbo models/qwen3.5_2B_4Bit
+```
+
+Never hand-edit the receipt to match a new path. The binding is the check;
+editing it forges the attestation instead of re-establishing it.
+
+Because the receipt is path-bound, an install must be written to where it will
+live. Repacking into a temporary directory and moving it into place produces an
+install whose receipt is invalid — `tools/repack_dense.sh` repacks straight into
+`models/` for this reason.

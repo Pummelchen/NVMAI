@@ -134,10 +134,21 @@ run reports it as installed and touches nothing.
   including unloading one to load the other.
 - `README.md`, `docs/site/04-choosing-a-model.md` and the wiki drop the
   "snapshots, not `.gturbo` — no receipt" caveat. **Done.**
-- Not done, and worth knowing: the equivalence gate is not part of
-  `swift test`. It loads real models, which the unit tests deliberately never
-  do, so it is opt-in and read by a human. A regression in the resident-index
-  mapping would be caught by `tools/repack_dense.sh` and by nothing automatic.
+- The manifest/payload agreement is enforced, not hoped for. **Done, after the
+  fact.** Both bugs here were a manifest lying about the bytes beside it while
+  every existing check passed, so `--verify-install` now cross-checks every
+  packed tensor's declared width against the width its own byte extent implies.
+  The installer runs that after every repack and a receipt cannot be issued by a
+  run that failed, so an install that serves has passed it. Covered by
+  `tests/NVMAIRepack/Core/Verification/QuantManifestPayloadAgreementTests.swift`,
+  which needs no model and runs in under a second; reintroducing the writer bug
+  makes it fail.
+- Not done, and worth knowing: the **logit** equivalence gate is still not part
+  of `swift test`. It loads real models, which the unit tests deliberately never
+  do, so it is opt-in and read by a human. A regression that keeps the manifest
+  honest but changes which tensor is read — an offset, a name, a stride — would
+  pass every automatic check and be caught only by
+  `tools/repack_dense.sh`.
 
 ## Why it was not done at the time
 

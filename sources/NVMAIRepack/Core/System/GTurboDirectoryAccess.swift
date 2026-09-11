@@ -102,6 +102,33 @@ package final class GTurboDirectoryAccess {
         return data
     }
 
+    /// Read at most the first `maxBytes` of a file.
+    ///
+    /// `readMetadata` refuses any file larger than its cap, which is right for
+    /// the small JSON documents it serves and useless for the resident index:
+    /// the index is the *head* of `model_weights.bin`, and that file is 1.3 to
+    /// 200 GB. This reads the head without ever materializing the payload.
+    package func readPrefix(_ relativePath: String,
+                            maxBytes: UInt64) throws -> Data {
+        let fd = try openFile(relativePath)
+        defer { close(fd) }
+        let size = try fileSize(fileDescriptor: fd, relativePath: relativePath)
+        let wanted = min(size, maxBytes)
+        guard wanted <= UInt64(Int.max) else {
+            throw RepackError.configurationInvalid(
+                detail: "\(relativePath) prefix \(wanted) exceeds addressable size")
+        }
+        var data = Data(count: Int(wanted))
+        if !data.isEmpty {
+            try data.withUnsafeMutableBytes {
+                try Posix.preadAll(
+                    fd: fd, path: "\(rootPath)/\(relativePath)",
+                    buf: $0.baseAddress!, count: $0.count, offset: 0)
+            }
+        }
+        return data
+    }
+
     package func fileSize(_ relativePath: String) throws -> UInt64 {
         let fd = try openFile(relativePath)
         defer { close(fd) }

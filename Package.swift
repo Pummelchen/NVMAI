@@ -167,7 +167,9 @@ let package = Package(
         ),
         .testTarget(
             name: "NVMAIRepackTests",
-            dependencies: ["NVMAIRepackCore"],
+            // `NVMAIFormat` directly: the manifest and resident-index validation
+            // tests assert on those types rather than on JSON dictionaries.
+            dependencies: ["NVMAIRepackCore", "NVMAIFormat"],
             path: "tests/NVMAIRepack/Core",
             resources: [.copy("Support/qwen38_tensor_names.txt")]
         ),
