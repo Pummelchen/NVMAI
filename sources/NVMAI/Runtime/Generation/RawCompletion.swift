@@ -216,6 +216,7 @@ public func runRawCompletion(producer: any LogitProducer,
     var generated = 0
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
+    var toolCallMarkers = ToolCallMarkerCounter()
     var loopMark = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
 
     while true {
@@ -242,12 +243,17 @@ public func runRawCompletion(producer: any LogitProducer,
         fusedRunner?.totalLoopSampleNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tSample
         generated += 1
         uncommittedBoundaryTokenIDs = [tokenID]
+        toolCallMarkers.observe(tokenID,
+                                start: tokenizer.toolCallStartID,
+                                end: tokenizer.toolCallEndID)
 
         if tokenizer.stopTokenIDs.contains(tokenID) || config.extraStopTokens.contains(tokenID) {
             if tokenID == tokenizer.endOfTurnID {
-                reason = .endOfTurn
-            } else if tokenID == tokenizer.toolResponseID {
-                reason = .toolCalls
+                // The stop token says the turn ended, not why: `<|im_end|>`
+                // closes both a prose answer and a tool call. `toolCalls` is
+                // the reason the callers branch on, so it has to come from the
+                // turn's own tokens.
+                reason = toolCallMarkers.isCompleteToolTurn ? .toolCalls : .endOfTurn
             } else {
                 reason = .eos
             }
@@ -339,6 +345,7 @@ private func runStreamingMTPCompletion(
     var backedHistory = promptIds
     var uncommitted: [Int32] = []
     var pending: [(token: Int32, backed: Bool)] = [(boundary, false)]
+    var toolCallMarkers = ToolCallMarkerCounter()
 
     decodeLoop: while true {
         while !pending.isEmpty {
@@ -351,11 +358,16 @@ private func runStreamingMTPCompletion(
             // (R10). A token reported backed by the batch is already in the
             // KV, so it never sits uncommitted.
             uncommitted = item.backed ? [] : [item.token]
+            toolCallMarkers.observe(item.token,
+                                    start: tokenizer.toolCallStartID,
+                                    end: tokenizer.toolCallEndID)
 
             if tokenizer.stopTokenIDs.contains(item.token)
                 || config.extraStopTokens.contains(item.token) {
-                if item.token == tokenizer.endOfTurnID { reason = .endOfTurn }
-                else if item.token == tokenizer.toolResponseID { reason = .toolCalls }
+                // Same classification as the scalar loop above.
+                if item.token == tokenizer.endOfTurnID {
+                    reason = toolCallMarkers.isCompleteToolTurn ? .toolCalls : .endOfTurn
+                }
                 else { reason = .eos }
                 let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
                 if !tail.isEmpty { onProgress(.tail(tail)) }
