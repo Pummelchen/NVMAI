@@ -177,7 +177,20 @@ install and the loader:
       skipped when there are no experts. Build, lint and the suite are green
       (1458 tests). Execution still refuses, so nothing can produce wrong
       output.
-- [ ] **S1b — architecture resolution.** The runtime resolves a family's
+- [~] **S1b — architecture resolution.** *Partly landed.* The resolver exists
+      (`ArchConfig.resolved(forFamily:directoryURL:)` + `ArchConfig.from(manifest:family:)`)
+      and the CLI and server use it, so the family refusal is gone and the dense
+      install resolves its geometry -- and the layer conventions, which the
+      format struct now decodes instead of discarding -- from the manifest. Three
+      MoE-shaped assumptions on the way out were found by following the load path
+      and fixed: the manifest demanded `packed_experts/layer_NN.bin` for every
+      layer, the layout validator rejected a zero-expert document, and its
+      cross-check demanded a size for files that were never written. The MoE
+      path is unaffected (Ornith still loads and generates; both golden baselines
+      byte-identical). **Still open:** the trusted-install receipt wants the same
+      packed layer files, which is the next assumption in the chain; then
+      `Model.load` reaches S1a's validation and the S2 boundary. The original
+      note follows.  The runtime resolves a family's
       architecture from `ArchConfig.knownArchitectures`, which has no dense
       entry *and could not hold one*: the family is a single enum case and the
       three models have different geometry (2B/4B hidden 2048 / FFN 6144, 9B

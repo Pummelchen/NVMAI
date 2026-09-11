@@ -73,6 +73,27 @@ package enum GTurboPackedExpertsLayoutCodec {
 
 package enum GTurboV1StructuralValidator {
     package static func validate(_ layout: GTurboPackedExpertsLayoutV1) throws {
+        // A dense model packs no experts, and the repacker writes that honestly:
+        // `expertsPerLayer: 0`, `expertStride: 0`, an empty `layers` list, while
+        // `numLayers` still counts the transformer layers. Everything below is
+        // about packed payload, so the degenerate document is valid for exactly
+        // the case that has none -- and only that case: a layer tuple without
+        // experts, or experts without a stride, stays invalid.
+        if layout.expertsPerLayer == 0 {
+            // The repacker writes one entry per transformer layer anyway, each
+            // with an empty expert list. Nothing is packed, nothing is
+            // streamed, and the file names those entries carry are never read
+            // -- so the document is valid exactly while every entry declares no
+            // experts, and an entry that names one without a stride is still
+            // refused below.
+            guard layout.expertStride == 0, layout.numLayers > 0,
+                  layout.layers.allSatisfy({ $0.experts.isEmpty }),
+                  layout.layers.isEmpty || layout.layers.count == layout.numLayers else {
+                throw NVMAIFormatError.invalid(field: "layout",
+                                               reason: "invalid dimensions or stride")
+            }
+            return
+        }
         guard layout.numLayers > 0, layout.expertsPerLayer > 0,
               layout.expertStride > 0,
               layout.expertStride % GTurboFormatV1.alignmentBytes == 0,
@@ -187,6 +208,12 @@ package enum GTurboV1StructuralValidator {
         let expectedLayerSize = try gturboCheckedMultiply(UInt64(layout.expertsPerLayer),
                                                           layout.expertStride,
                                                           field: "layout.layerSize")
+        // Nothing packed means nothing to size. A dense install's layout names
+        // one file per layer with an empty expert list and the manifest lists
+        // none of them, because the repacker wrote no such files -- with zero
+        // experts there is no per-layer payload to stream. The dimension
+        // agreement above is the real check for that case.
+        guard expectedLayerSize > 0 else { return }
         for layer in layout.layers {
             let path = "packed_experts/\(layer.file)"
             guard manifestFileSizes[path] == expectedLayerSize else {

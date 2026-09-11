@@ -128,10 +128,14 @@ public func run(args: Args,
         // fails on a dimension mismatch instead of loading.
         let identity = try ManifestReader.peekIdentity(directoryURL: modelURL)
         let family = identity.family
-        guard let expectedArch = ArchConfig.knownArchitectures[family] else {
-            return errored(stderr,
-                           "model declares family \(family.rawValue), which this "
-                               + "runtime does not implement", 2)
+        let expectedArch: ArchConfig
+        do {
+            // The family's preset, or -- for a family with more than one
+            // geometry, like the dense Qwen 3.5 models -- the manifest's own
+            // declaration.
+            expectedArch = try ArchConfig.resolved(forFamily: family, directoryURL: modelURL)
+        } catch {
+            return errored(stderr, "\(error)", 2)
         }
         // Without an explicit --expert-cache-slots, take the same tuned budget
         // the server uses, so the two front ends do not disagree about what

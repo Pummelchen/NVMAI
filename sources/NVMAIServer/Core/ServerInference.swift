@@ -644,10 +644,16 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         // exactly as the CLI resolves it: a payload of any other family should
         // load, not fail on a dimension mismatch.
         let modelFamily = try ManifestReader.peekFamily(directoryURL: modelDirectory)
-        guard let expectedArch = ArchConfig.knownArchitectures[modelFamily] else {
-            throw ServerInferenceError.unsupportedModel(
-                "model declares family \(modelFamily.rawValue), which this "
-                    + "runtime does not implement")
+        let expectedArch: ArchConfig
+        do {
+            // The family's preset, or -- for a family with more than one
+            // geometry, like the dense Qwen 3.5 models -- the manifest's own
+            // declaration. `ServerInferenceError` keeps the shape callers
+            // expect; the reason travels in the message.
+            expectedArch = try ArchConfig.resolved(forFamily: modelFamily,
+                                                   directoryURL: modelDirectory)
+        } catch {
+            throw ServerInferenceError.unsupportedModel("\(error)")
         }
         let derivedSlots: Int
         // An explicit --ram-budget always wins; this only supplies the default,

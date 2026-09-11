@@ -50,6 +50,19 @@ public struct ManifestArch: Decodable, Equatable, Sendable {
     public let pleVocabDivisor: Int?
     public let routerNormTopK: Bool?
     public let quantGroupSize: Int?
+    // The layer conventions, carried by every manifest this repacker writes and
+    // optional for the same reason as the block above. The architecture presets
+    // state them per family; a family without a preset (the dense Qwen 3.5
+    // models) must read them here rather than assume them, because picking the
+    // wrong one produces confident nonsense instead of an error -- a wrong
+    // attention output gate or RoPE convention is not a shape mismatch.
+    public let attnOutputGate: Bool?
+    public let attentionScale: Double?
+    public let embeddingScaledBySqrtHidden: Bool?
+    public let routerScaled: Bool?
+    public let ffnSandwichNorms: Bool?
+    public let sharedExpertGated: Bool?
+    public let ropeNeoxSubdim: Bool?
     /// Gated-DeltaNet geometry. Optional for the same reason as the block
     /// above: manifests written before a reader needed them do not carry
     /// them, and decoding an absent key as nil is what keeps those installs
@@ -298,11 +311,19 @@ public enum ManifestReader {
         }
         // Validate that all expected layer files are listed in the manifest.
         // Accept both `layer_0.bin` and `layer_00.bin` naming conventions.
-        for L in 0..<m.numLayers {
-            let layerFileShort = String(format: "packed_experts/layer_%d.bin", L)
-            let layerFilePadded = String(format: "packed_experts/layer_%02d.bin", L)
-            if m.files[layerFileShort] == nil && m.files[layerFilePadded] == nil {
-                throw ModelError.missingFile(name: layerFileShort)
+        //
+        // Only when the install packs experts at all. A dense model has
+        // `expertsPerLayer: 0` and an empty layout -- there is nothing streamed
+        // per layer to name -- and requiring the files anyway refused every
+        // dense install with a message about a file the format never promised
+        // to write.
+        if m.expertsPerLayer > 0 {
+            for L in 0..<m.numLayers {
+                let layerFileShort = String(format: "packed_experts/layer_%d.bin", L)
+                let layerFilePadded = String(format: "packed_experts/layer_%02d.bin", L)
+                if m.files[layerFileShort] == nil && m.files[layerFilePadded] == nil {
+                    throw ModelError.missingFile(name: layerFileShort)
+                }
             }
         }
     }
@@ -475,6 +496,13 @@ private extension ManifestArch {
                   pleVocabDivisor: wire.pleVocabDivisor,
                   routerNormTopK: wire.routerNormTopK,
                   quantGroupSize: wire.quantGroupSize,
+                  attnOutputGate: wire.attnOutputGate,
+                  attentionScale: wire.attentionScale,
+                  embeddingScaledBySqrtHidden: wire.embeddingScaledBySqrtHidden,
+                  routerScaled: wire.routerScaled,
+                  ffnSandwichNorms: wire.ffnSandwichNorms,
+                  sharedExpertGated: wire.sharedExpertGated,
+                  ropeNeoxSubdim: wire.ropeNeoxSubdim,
                   linearNumKHeads: wire.linearNumKHeads,
                   linearNumVHeads: wire.linearNumVHeads,
                   linearKeyHeadDim: wire.linearKeyHeadDim,

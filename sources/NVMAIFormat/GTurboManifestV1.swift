@@ -67,6 +67,18 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
     package let linearValueHeadDim: Int?
     package let linearConvKernelSize: Int?
 
+    /// The layer conventions, which the writer has always emitted and no reader
+    /// decoded until a family without an architecture preset needed them (the
+    /// dense Qwen 3.5 models). Optional so every earlier manifest still
+    /// decodes.
+    package let attnOutputGate: Bool?
+    package let attentionScale: Double?
+    package let embeddingScaledBySqrtHidden: Bool?
+    package let routerScaled: Bool?
+    package let ffnSandwichNorms: Bool?
+    package let sharedExpertGated: Bool?
+    package let ropeNeoxSubdim: Bool?
+
     package init(hiddenSize: Int, ffnIntermediate: Int, moeIntermediateSize: Int,
                  numHeads: Int, numKVHeads: Int, numFullKVHeads: Int,
                  headDim: Int, fullHeadDim: Int, vocabSize: Int,
@@ -96,7 +108,14 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
                  linearNumVHeads: Int? = nil,
                  linearKeyHeadDim: Int? = nil,
                  linearValueHeadDim: Int? = nil,
-                 linearConvKernelSize: Int? = nil) {
+                 linearConvKernelSize: Int? = nil,
+                 attnOutputGate: Bool? = nil,
+                 attentionScale: Double? = nil,
+                 embeddingScaledBySqrtHidden: Bool? = nil,
+                 routerScaled: Bool? = nil,
+                 ffnSandwichNorms: Bool? = nil,
+                 sharedExpertGated: Bool? = nil,
+                 ropeNeoxSubdim: Bool? = nil) {
         self.hiddenSize = hiddenSize
         self.ffnIntermediate = ffnIntermediate
         self.moeIntermediateSize = moeIntermediateSize
@@ -140,6 +159,13 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
         self.linearKeyHeadDim = linearKeyHeadDim
         self.linearValueHeadDim = linearValueHeadDim
         self.linearConvKernelSize = linearConvKernelSize
+        self.attnOutputGate = attnOutputGate
+        self.attentionScale = attentionScale
+        self.embeddingScaledBySqrtHidden = embeddingScaledBySqrtHidden
+        self.routerScaled = routerScaled
+        self.ffnSandwichNorms = ffnSandwichNorms
+        self.sharedExpertGated = sharedExpertGated
+        self.ropeNeoxSubdim = ropeNeoxSubdim
     }
 }
 
