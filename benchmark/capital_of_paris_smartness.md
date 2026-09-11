@@ -50,12 +50,14 @@ produced them is `benchmark/capital_of_paris_smartness.py`.
 ## Measurement notes
 
 - **Row 12 is a cold-start outlier, and it did not reproduce.** Qwen 3.5 9B
-  8-bit on the CPU recorded a 167.4 s TTFT and a 53.8 s load in the matrix; a
-  re-run of that exact row immediately afterwards measured **load 16.2 s, TTFT
-  2.9 s, 3.14 tok/s** (`recheck.jsonl`), consistent with the 4-bit row's decode
-  rate. The outlier is the first fault-in of a 9.5 GB CPU snapshot while the
-  machine was under memory pressure from the preceding loads, not the steady
-  state. The rest of the row (69 tokens, `stop`) reproduced.
+  8-bit on the CPU recorded a 167.4 s TTFT and a 53.8 s load in the matrix.
+  Four further measurements of that row across two sessions gave TTFT
+  **2.9-4.0 s** at **3.1-4.4 tok/s** (2.875 s / 3.135 tok/s; then 3.96 s /
+  4.38 tok/s cold and 2.98 s / 4.15 tok/s with the model still resident), and
+  the GPU row reproduced at 1.48 s TTFT / 8.74 tok/s with the same 68 tokens.
+  All five runs returned the same reply, word for word. The 167 s was the first
+  fault-in of a 9.5 GB CPU snapshot under memory pressure from the preceding
+  loads, not the steady state.
 - **Qwen AgentWorld 8-bit reproduces, and it is the weights, not the switch.**
   It hit `finish_reason: length` at 128 tokens with a `<think>` scaffold in
   `content` while the server ran `--reasoning off`. The re-run was identical
