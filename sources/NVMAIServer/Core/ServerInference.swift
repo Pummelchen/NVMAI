@@ -54,6 +54,16 @@ public struct ServerCompletion: Equatable, Sendable {
     /// `usage.completionTokens` already counts these tokens, as it always
     /// has -- only where the text goes has changed.
     public let reasoning: String
+    /// Characters of `reasoning` the model wrote although this request's
+    /// render had thinking off.
+    ///
+    /// Not a fault of the runtime -- some installs think with the switch off,
+    /// measured on Qwen AgentWorld 35B-A3B 8-bit -- but not something to leave
+    /// silent either: the operator asked for no thought, paid tokens for one,
+    /// and a client that caps tokens gets an empty answer rather than a short
+    /// one. Carried as a count, like the watchdog trips, so the HTTP layer can
+    /// log it where generated text does not belong.
+    public let unrequestedReasoning: Int
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
@@ -72,9 +82,11 @@ public struct ServerCompletion: Equatable, Sendable {
                 usage: OpenAIUsage,
                 watchdogTrips: [WatchdogSet.Trip] = [],
                 stopSequence: String? = nil,
-                reasoning: String = "") {
+                reasoning: String = "",
+                unrequestedReasoning: Int = 0) {
         self.content = content
         self.reasoning = reasoning
+        self.unrequestedReasoning = unrequestedReasoning
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
@@ -1170,7 +1182,10 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
 
         // The full render, not the cache-trimmed suffix, decides whether the
         // generation prompt left a thought open; both end in the same
-        // generation prompt, but only the render is always whole.
+        // generation prompt, but only the render is always whole. The decoder
+        // runs for every generation, so a thought the *model* opens while the
+        // switch is off is still split out of the answer rather than streamed
+        // as it.
         let decoder = StructuredAssistantDecoder.forGeneration(
             tokenizer: renderTokenizer,
             promptIDs: promptIDs,
@@ -1227,19 +1242,9 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
                     case .prefill:
                         break
                     case .token(_, let tokenID, let delta):
-                        let events = if let decoder {
-                            try decoder.consume(tokenID: tokenID, delta: delta)
-                        } else {
-                            delta.isEmpty ? [] : [StructuredAssistantEvent.content(delta)]
-                        }
-                        publish(events)
+                        publish(try decoder.consume(tokenID: tokenID, delta: delta))
                     case .tail(let text):
-                        let events = if let decoder {
-                            try decoder.consumeTail(text)
-                        } else {
-                            text.isEmpty ? [] : [StructuredAssistantEvent.content(text)]
-                        }
-                        publish(events)
+                        publish(try decoder.consumeTail(text))
                     }
                 } catch {
                     decodingError = error
@@ -1275,7 +1280,7 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
                 cause: .classify(decodingError))
         }
         do {
-            try decoder?.finish()
+            try decoder.finish()
         } catch {
             throw structuredFailure(
                 kind: .decoderFinish,
@@ -1337,7 +1342,12 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
                                cachedTokens: result.cachedPromptTokens),
             watchdogTrips: watchdogs.trips,
             stopSequence: output.matchedStop,
-            reasoning: output.reasoning)
+            reasoning: output.reasoning,
+            // The render's mode, not the loaded session's: a request that
+            // switched thinking off per request is the one whose thought is
+            // unrequested.
+            unrequestedReasoning: renderTokenizer.thinkingMode.isEnabled
+                ? 0 : output.reasoning.count)
     }
 
     /// Publish this turn's KV range to the prompt cache, and persist a snapshot

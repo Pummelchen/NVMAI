@@ -230,7 +230,8 @@ public actor MemoryBackend: ServerInferenceBackend, PromptTokenCounting, Residen
                          usage: completion.usage,
                          watchdogTrips: completion.watchdogTrips,
                          stopSequence: completion.stopSequence,
-                         reasoning: reasoning)
+                         reasoning: reasoning,
+                         unrequestedReasoning: completion.unrequestedReasoning)
     }
 
     /// Writes the turn to the journal after the completion is settled.

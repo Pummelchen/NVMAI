@@ -52,26 +52,41 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         self.channel = startsInThought ? .thought : .visible
     }
 
-    /// The decoder a generation's output runs through, or nil when the output
-    /// streams verbatim. Both engines ask this one question, so the thought
-    /// split is the same rule wherever a model runs.
+    /// The decoder a generation's output runs through. Both engines ask this
+    /// one question, so the thought split is the same rule wherever a model
+    /// runs.
     ///
-    /// A tool-templated prompt always gets a decoder, as it always has: its
-    /// calls are parsed here. Otherwise one is built only when there can be a
-    /// thought to split -- thinking is on, or the prompt left a `<think>`
-    /// open. With thinking off neither holds, and the output keeps the
-    /// verbatim path it has always had. `allowedTools` is nil when the prompt
-    /// was rendered without the tool template.
+    /// A tool-templated prompt parses its calls here. Every other prompt gets a
+    /// decoder that splits thoughts alone -- `parsesToolCalls: false`, so a
+    /// `<tool_call>` a model writes without a tool template still streams as
+    /// text.
+    ///
+    /// Thinking off used to mean *no decoder*, on the reasoning that a prompt
+    /// which closes the block cannot produce a thought to split, and the
+    /// verbatim path that produced was simpler and byte-stable. Qwen
+    /// AgentWorld 35B-A3B 8-bit disproves it: with `--reasoning off` it opens a
+    /// `<think>` block of its own, spends the entire token budget inside it,
+    /// and that verbatim path streamed the scaffold as the *answer*, so a
+    /// client that capped tokens received no answer at all and
+    /// `reasoning_content` stayed empty. It is not a decoder: the channel is
+    /// decided by the prompt (`startsInThought`), so a generation that opens no
+    /// marker still emits exactly the same text, in the same channel, as the
+    /// verbatim path did.
+    ///
+    /// There is no nil case left to return. A loaded tokenizer always resolves
+    /// `<think>`/`</think>` -- `resolveChatMLTokens` throws when either is
+    /// missing -- so the old `nil` was reachable only through the thinking-off
+    /// shortcut this corrects. `allowedTools` is nil when the prompt was
+    /// rendered without the tool template.
     public static func forGeneration(tokenizer: GFTokenizer,
                                      promptIDs: [Int32],
-                                     allowedTools: Set<String>?) -> StructuredAssistantDecoder? {
+                                     allowedTools: Set<String>?) -> StructuredAssistantDecoder {
         let opensThought = promptLeavesThoughtOpen(promptIDs, tokenizer: tokenizer)
         if let allowedTools {
             return StructuredAssistantDecoder(tokenizer: tokenizer,
                                               allowedTools: allowedTools,
                                               startsInThought: opensThought)
         }
-        guard tokenizer.thinkingMode.isEnabled || opensThought else { return nil }
         return StructuredAssistantDecoder(tokenizer: tokenizer,
                                           allowedTools: [],
                                           startsInThought: opensThought,

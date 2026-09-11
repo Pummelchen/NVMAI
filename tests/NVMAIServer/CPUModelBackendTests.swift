@@ -188,16 +188,56 @@ import Testing
                 "thought tokens are generated tokens, and were always counted")
     }
 
-    /// Thinking off takes the per-token decode the CPU path always had: no
-    /// decoder, no reasoning, the same bytes as before. Even a model that
-    /// writes `</think>` anyway gets the old treatment.
-    @Test func thinkingOffKeepsThePathItAlwaysHad() async throws {
+    /// Thinking off, a model that writes a stray `</think>` but no opening: it
+    /// is not reasoning, and the answer is the text the chain spells.
+    ///
+    /// The per-token decode this used to compare against is gone -- both
+    /// engines detokenize through the streaming detokenizer now, so that the
+    /// decoder can see the markers -- and the property that mattered is the
+    /// text.
+    @Test func thinkingOffIgnoresAStrayClosingMarker() async throws {
         let run = try await generate(thinking: .off)
-        let tok = try await GFTokenizer.load(from: try TokenizerFixture.folder())
-        let before = run.tokens.map { tok.decode([$0], skipSpecialTokens: true) }.joined()
-        #expect(run.completion.content == before)
+        #expect(run.completion.content == "hmok")
         #expect(run.completion.reasoning.isEmpty)
+        #expect(run.completion.unrequestedReasoning == 0)
         #expect(!run.events.contains { if case .reasoning = $0 { true } else { false } })
+    }
+
+    /// Thinking off, a model that opens a thought of its own: the thought is
+    /// reasoning and the answer is what the client sees.
+    ///
+    /// The failure this covers is measured. Qwen AgentWorld 35B-A3B 8-bit,
+    /// asked `Capital of Paris` with the server at `--reasoning off`, opens a
+    /// `<think>` block itself and never leaves it inside the token budget; the
+    /// path that existed for thinking off streamed that scaffold as `content`
+    /// and left `reasoning_content` empty, so a client that caps tokens got no
+    /// answer at all. Qwen 3.5 9B 8-bit does the same on the CPU engine, and
+    /// the scripted chain below is its shape.
+    @Test func aThoughtTheModelStartsWithThinkingOffIsStillReasoning() async throws {
+        let fixture = try TokenizerFixture.folder()
+        let tok = try await GFTokenizer.load(from: fixture, thinkingMode: .off)
+        func single(_ text: String) throws -> Int32 {
+            let ids = tok.encode(text, addBOS: false)
+            try #require(ids.count == 1)
+            return ids[0]
+        }
+        let prompt = tok.encode(try tok.applyChatTemplate(request().messages), addBOS: false)
+        // The prompt closed the block; the model opens one anyway.
+        let spoken = [try #require(tok.thinkStartID), try single("m"), try single("h"),
+                      try #require(tok.thinkEndID), try single("o"), try single("k")]
+        let chain = [try #require(prompt.last)] + spoken + [tok.eosID]
+        try #require(Set(chain).count == chain.count, "the walk needs distinct tokens")
+
+        let directory = try writeScriptedModel(chain: chain, tokenizer: fixture)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backend = try await CPUModelBackend(snapshotDirectory: directory, resident: false,
+                                                thinkingMode: .off)
+        let completion = try await backend.generate(request(stops: [])) { _ in }
+        #expect(completion.content == "ok")
+        #expect(completion.reasoning == "mh")
+        // The fact the server logs, so the log line has teeth: this request
+        // rendered with thinking off and the model thought anyway.
+        #expect(completion.unrequestedReasoning == 2)
     }
 
     /// A request that switches thinking mode re-renders through a tokenizer

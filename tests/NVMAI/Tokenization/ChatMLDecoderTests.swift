@@ -216,25 +216,44 @@ struct ChatMLDecoderTests {
         }
     }
 
-    /// With thinking off and no tool template there is no decoder at all, so
-    /// that output keeps the verbatim path it has always had.
-    @Test("Thinking off without tools builds no decoder")
-    func thinkingOffBuildsNoDecoder() async throws {
+    /// Thinking off no longer means "no decoder": a model can open a thought of
+    /// its own, and the verbatim path sent that scaffold to the client as the
+    /// answer.
+    ///
+    /// The case is measured, not hypothetical. Qwen AgentWorld 35B-A3B 8-bit,
+    /// asked `Capital of Paris` with the server at `--reasoning off`, emits
+    /// `<think>` itself and never leaves it inside 128 tokens; the 4-bit build
+    /// of the same family answers in 8. Before this, `forGeneration` returned
+    /// nil for that request, so `content` was the scaffold and
+    /// `reasoning_content` was empty.
+    @Test("Thinking off still splits a thought the model starts itself")
+    func thinkingOffSplitsASelfStartedThought() async throws {
         let messages = [GFTokenizer.Message(role: .user, content: "Hi")]
         let offPrompt = tok.encode(try tok.applyChatTemplate(messages), addBOS: false)
-        #expect(StructuredAssistantDecoder.forGeneration(
-            tokenizer: tok, promptIDs: offPrompt, allowedTools: nil) == nil)
-        #expect(StructuredAssistantDecoder.forGeneration(
-            tokenizer: tok, promptIDs: offPrompt, allowedTools: ["get_weather"]) != nil)
+        let watcher = try #require(StructuredAssistantDecoder.forGeneration(
+            tokenizer: tok, promptIDs: offPrompt, allowedTools: nil))
 
-        let thinking = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder(),
-                                                  thinkingMode: .on)
-        let onPrompt = thinking.encode(try thinking.applyChatTemplate(messages), addBOS: false)
-        let splitter = try #require(StructuredAssistantDecoder.forGeneration(
-            tokenizer: thinking, promptIDs: onPrompt, allowedTools: nil))
-        let events = try feed("mulling\n</think>\n\nHello", into: splitter)
-        #expect(reasoningText(events) == "mulling\n")
-        #expect(visibleText(events) == "Hello")
+        // The prompt closed the block; the model opens one anyway.
+        let events = try feed("<think>\nmulling it over\n</think>\n\nParis", into: watcher)
+        #expect(reasoningText(events) == "\nmulling it over\n")
+        #expect(visibleText(events) == "Paris")
+        try watcher.finish()
+
+        // A tool template still parses calls through the same decoder.
+        let tooled = StructuredAssistantDecoder.forGeneration(
+            tokenizer: tok, promptIDs: offPrompt, allowedTools: ["get_weather"])
+        let callEvents = try feed(
+            "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>",
+            into: tooled)
+        #expect(callEvents.contains { if case .toolCall = $0 { true } else { false } })
+
+        // And a generation that opens no marker is unchanged: the same text,
+        // in the same channel, as the verbatim path produced.
+        let plain = StructuredAssistantDecoder.forGeneration(
+            tokenizer: tok, promptIDs: offPrompt, allowedTools: nil)
+        let plainEvents = try feed("Just the answer.", into: plain)
+        #expect(visibleText(plainEvents) == "Just the answer.")
+        #expect(reasoningText(plainEvents).isEmpty)
     }
 
     @Test("Detokenizer tail inside an unfinished tool call is never visible")

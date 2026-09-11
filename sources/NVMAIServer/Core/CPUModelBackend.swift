@@ -172,7 +172,8 @@ public actor CPUModelBackend: ServerInferenceBackend {
 
         // The same decoder the GPU path runs, so a thought is split the same
         // way on either engine. This path renders no tool template, so the
-        // decoder only ever splits thoughts.
+        // decoder only ever splits thoughts -- including one the model opens
+        // itself while the switch is off.
         let decoder = StructuredAssistantDecoder.forGeneration(
             tokenizer: renderTokenizer, promptIDs: promptIDs, allowedTools: nil)
         var detokenizer = GFDetokenizer(tokenizer: renderTokenizer)
@@ -189,10 +190,8 @@ public actor CPUModelBackend: ServerInferenceBackend {
             if produced >= budget { break }
             logits = try model.step(token: next)
         }
-        if let decoder {
-            output.publish(try decoder.consumeTail(detokenizer.flush()))
-            try decoder.finish()
-        }
+        output.publish(try decoder.consumeTail(detokenizer.flush()))
+        try decoder.finish()
         output.finish()
         return ServerCompletion(
             content: output.content,
@@ -205,24 +204,25 @@ public actor CPUModelBackend: ServerInferenceBackend {
             // Named, as the GPU path names it: a Messages client is told
             // which of its stop sequences ended the turn.
             stopSequence: output.matchedStop,
-            reasoning: output.reasoning)
+            reasoning: output.reasoning,
+            // Same rule as the GPU path: the render decided the switch, so a
+            // thought that arrived with thinking off is reported as one.
+            unrequestedReasoning: renderTokenizer.thinkingMode.isEnabled
+                ? 0 : output.reasoning.count)
     }
 
     /// One sampled token as decoder events.
     ///
-    /// With no decoder -- thinking off -- this is the per-token decode the
-    /// CPU path has always done, so that output does not move by a byte. A
-    /// thinking model needs the streaming detokenizer instead: the decoder
-    /// knows `<think>` and `</think>` by their literal text on the delta, and
-    /// a per-token decode that skips special tokens drops exactly those.
+    /// The streaming detokenizer, not a per-token `decode`, and for the reason
+    /// the decoder exists: it knows `<think>` and `</think>` by their literal
+    /// text on the delta, and a per-token decode that skips special tokens
+    /// drops exactly the markers a self-started thought has to be recognized
+    /// by. Both engines now detokenize the same way, which is what makes "the
+    /// same rule wherever a model runs" true rather than aspirational.
     private func events(for token: Int32,
-                        decoder: StructuredAssistantDecoder?,
+                        decoder: StructuredAssistantDecoder,
                         detokenizer: inout GFDetokenizer) throws -> [StructuredAssistantEvent] {
-        guard let decoder else {
-            let piece = tokenizer.decode([token], skipSpecialTokens: true)
-            return piece.isEmpty ? [] : [.content(piece)]
-        }
-        return try decoder.consume(tokenID: token, delta: detokenizer.push(token))
+        try decoder.consume(tokenID: token, delta: detokenizer.push(token))
     }
 }
 

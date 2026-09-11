@@ -42,6 +42,16 @@ enum ServerLog {
         for trip in completion.watchdogTrips {
             watchdog(id: id, trip: trip)
         }
+        // The model thought although the request rendered with thinking off.
+        // Worth a line because the consequence is not obvious: those tokens are
+        // billed, and a client that caps `max_tokens` sees an empty answer
+        // rather than a short one. Counted, never quoted -- generated text does
+        // not belong in a log line.
+        if completion.unrequestedReasoning > 0 {
+            write("request \(id) thinking off, but the model wrote "
+                + "\(completion.unrequestedReasoning) characters of reasoning; "
+                + "they are in reasoning_content, not content")
+        }
     }
 
     static func failed(id: String,
