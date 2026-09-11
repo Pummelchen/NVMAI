@@ -246,6 +246,15 @@ rather than changed, because making the planner's property throwing would ripple
 through the copy path for a failure the load path already refuses -- but a reader
 should know *which* layer is the one that catches it.
 
+**The repacker's per-expert sizing, checked (the producer half of C74).** Where
+the C74 guard on the runtime side is defence in depth, this is why: the planner
+derives `perExpertWeightSize`/`perExpertScaleSize`/`perExpertBiasSize` by
+*dividing the real tensor byte counts* by the expert count and then verifying the
+division is exact (`perExpert * count == sizeBytes` at `:488-490`), and those
+products cannot wrap because each is at most the byte count it came from. It never
+derives a size from a width and a group count, so a width outside whole groups
+cannot be *produced* here -- only refused, which is what the runtime guard does.
+
 **Invariant (b), executed: no trap reachable from input.** All 283 `precondition`/
 `preconditionFailure`/`fatalError` sites in `sources/` were classified by the
 layer the value comes from rather than one at a time:
@@ -290,7 +299,10 @@ the difference matters:
   reverting the fix), and C47/C48 (kernel-level teeth plus an end-to-end loop
   test; both are numerically inert for finite logits, so no healthy path
   changes).
-- **The opt-in dense equivalence gate passes on this tree.** `NVMAI_DENSE_EQUIV=1`,
+- **The opt-in dense equivalence gate passes on this tree.**
+  **Re-run after the C63-C77 batches** (fourteen rounds later, on `dcca9c0`):
+  one test, no failures, 83.4 s, `worst == 0` on both 2B widths again -- so the
+  dense reader and CPU engine are unchanged by everything that landed since. `NVMAI_DENSE_EQUIV=1`,
   `NVMAI_DENSE_EQUIV_PAIRS=.build/qwen35-2b-affine-4bit:models/qwen3.5_2B_4Bit,.build/qwen35-2b-affine-8bit:models/qwen3.5_2B_8Bit`,
   `swift test --no-parallel --filter DenseGTurboEquivalenceTests`: one test, no failures, 89.95 s,
   `worst == 0` on both widths -- the 2B installs are byte-equivalent to their snapshots'
