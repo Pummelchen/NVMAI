@@ -302,9 +302,20 @@ public final class RemoteStreamingRepacker {
                     partialDirectory: paths.partialDirectory)
             } else {
                 checkpoint.completedRanges = []
-                try FileManager.default.removeItem(atPath: paths.partialDirectory)
-                try Posix.mkdirP(paths.partialDirectory)
-                try createOutputFiles(plan: plan, paths: paths)
+                // A space check must not destroy a partial download. It issues no
+                // requests (see the early return below) and its caller may decide
+                // not to proceed, yet this branch used to remove the partial
+                // directory and preallocate every output file -- tens or hundreds
+                // of gigabytes of transferred data gone to answer "would it fit".
+                // The reservation is computed from the plan and the checkpoint,
+                // never from what is on disk, so a dry run does not need the files
+                // to exist. Every real call passes `dryRunSpaceCheck: false`, so
+                // this is the only branch that changes.
+                if !options.dryRunSpaceCheck {
+                    try FileManager.default.removeItem(atPath: paths.partialDirectory)
+                    try Posix.mkdirP(paths.partialDirectory)
+                    try createOutputFiles(plan: plan, paths: paths)
+                }
             }
             try checkpoint.write(
                 to: paths.checkpointFile,
