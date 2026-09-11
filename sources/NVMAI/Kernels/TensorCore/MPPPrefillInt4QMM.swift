@@ -70,6 +70,20 @@ final class MPPPrefillInt4QMM {
                        n: Int,
                        k: Int,
                        required: Bool = false) throws -> Path {
+        // `k` must be a whole number of K tiles. The kernel's A operand declares a
+        // *static* `tileK` extent and the MPP operation trusts the operand's
+        // extents, so a partial K tile would read past the staged weights -- the
+        // bug llama.cpp fixed in a3027337 ("the op reads those out-of-bounds
+        // elements (undefined behavior per the MSL specification, 2.22.2)").
+        //
+        // `m` deliberately has no matching guard. The A operand's M extent is the
+        // runtime row count, and `slice` only *shifts the origin*: per
+        // `MPPTensorOpsMatMul2d.h`, `A.slice(0, tgid.y*64)` "has same extents as
+        // original tensor A but origin shifted", and the documented pattern
+        // ("will do edge checking for all thread groups against extents of
+        // original tensor") is dispatched with `(M + 63)/64` -- a partial last row
+        // tile is the supported case. Requiring `m % 64 == 0` here would refuse
+        // shapes the API handles, so it stays a fallback for `k` only.
         guard m > 0,
               n > 0,
               k > 0,

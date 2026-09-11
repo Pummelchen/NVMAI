@@ -258,7 +258,11 @@ private let mppTensorOpsAvailable: Bool = {
             (name: "full-kv", n: 1024, k: 2816),
             (name: "full-o", n: 2816, k: 8192),
         ]
-        for m in [32, 128] {
+        // 100 is deliberate: two row tiles with the second one partial (36 of 64
+        // rows), which is the case that has to edge-check rather than read the
+        // whole tile. Its input and output buffers are sized for exactly `m` rows
+        // and the comparison covers the valid region only.
+        for m in [32, 100, 128] {
             for shape in shapes {
                 let path = try Self.runShape(
                     context: context, candidate: candidate, baseline: baseline,

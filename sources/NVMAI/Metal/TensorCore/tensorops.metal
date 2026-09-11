@@ -38,6 +38,12 @@ kernel void mpp_prefill_affine_threadgroup_f16(
     uint3 tgid                          [[threadgroup_position_in_grid]],
     uint3 lid3                          [[thread_position_in_threadgroup]],
     uint3 threads3                      [[threads_per_threadgroup]]) {
+    // M and N here are the local tile shape, not a claim about the operands: the
+    // operation bounds-checks every tile against the *operand* extents, so the
+    // last partial M tile reads only rows < M (`firstA` below carries the runtime
+    // M as its extent) and the store at the end masks whatever the tile computed
+    // beyond it. K is the one extent stated statically here, which is why the host
+    // refuses a K that is not a whole K tile.
     constexpr auto descriptor = matmul2d_descriptor(
         kMPPAffineTileM, kMPPAffineTileN, kMPPAffineTileK,
         false, true, false);

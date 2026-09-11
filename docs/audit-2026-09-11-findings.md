@@ -8,10 +8,13 @@ and what happened to it, so nothing found is lost and a reader can tell a fixed
 bug from a known one.
 
 **Status vocabulary.** `fixed` — changed in this audit. `open` — real, verified
-by me against the code, not yet changed. `deliberate` — real but accepted; the
-reason is written down. `unconfirmed` — reported by a pass, mechanism not yet
-read by me. Nothing here is asserted on a subagent's word alone; every `fixed`
-and `open` row is something I traced in the source myself.
+by me against the code, not yet changed. `rejected` — reported, then disproved
+by reading the mechanism. `deliberate` — real but accepted; the reason is
+written down. `unconfirmed` — reported by a pass, mechanism not yet read by me.
+Nothing here is asserted on a subagent's word alone; every `fixed` and `open`
+row is something I traced in the source myself. That is a claim about
+provenance, not infallibility: `Rejected` holds a row I had marked verified and
+got wrong, and says how.
 
 ---
 
@@ -111,10 +114,20 @@ the difference matters:
 | O5 | medium | `NVMAI/Metal/Fusions/fused.metal:329-331` | **The kernel fix is the work.** `hc_read_phase1_int4` declares two live 10,240-half threadgroup arrays (40,992 B against Apple's 32,768 B limit), so it cannot build and `canFuseRead` is permanently false — the fused read path is dead code today and any measurement of it measured nothing. The gate and `try?` are now documented as such rather than implying availability; the fix is to stage one array and read the second vector from device memory. Unverifiable here without a Qwen3.8 run. |
 | O14 | medium | `NVMAIApp/Core/Configuration/AppRuntimeOptions.swift:173`, `NVMAIDecodeService/Entry.swift:144` | **The app and the helper disagree about which options are load-time, and I did not resolve it.** `AppLoadedRuntimeKey` omits `prefillEnabled`, `prefillChunkTokens` and `conciseMode`, while `DecodeRuntimeOptions` is `Equatable` over all its fields and the helper throws "generation runtime options do not match the loaded session" on any difference. So changing Prefill or Concise leaves `hasStaleLoadedRuntime` false, no Reload affordance appears, and the generation fails with a cryptic error while the control does nothing. Adding the three fields to the key fixes that but fails two deliberate tests — `loadedRuntimeKeyTracksOnlyLoadTimeChoices` (asserts prefill enabled/chunk leave the key equal) and `requestTimePrefillChangeDoesNotMarkReadySessionStale` — so the app's intent is that prefill is request-time, and the helper is the side that is wrong. I reverted my change rather than override a design decision: resolving it needs a per-field answer, because `conciseMode` is plainly request-time (a prompt flag, no allocation effect) while `prefillChunkTokens` may size the prefill scratch at load, in which case letting a request raise it without a reload would overrun. **Decide per field**: exclude `conciseMode` from the helper's comparison; for the prefill pair, either show a Reload or confirm the scratch is sized for the maximum allowed chunk. |
 | O19 | low-medium | `NVMAIApp/Core/Inference/DecodeServiceInferenceClient.swift:227-298` | The helper's launchd label embeds pid+token and nothing scans for an existing job, so a force-quit leaves an orphan holding ~20 GB and the relaunch starts a **second** model process. |
-| O23 | low | `NVMAI/Metal/TensorCore/tensorops.metal:58-104`, `MPPPrefillInt4QMM.swift:73-81` | The A tile is never clamped to `M` (the host guards `k % 64`, not `m % 64`), so a chunk length that is not a multiple of 64 reads up to 63 rows past the written activations. Contained by the 128-row scratch today. |
 | O25 | low | `NVMAI/Metal/Sampling/logit.metal:77-84`, `:340-350` | `softcap_value` propagates NaN, so a NaN logits row yields no finite mass and the sampler falls back to token 0 with no diagnostic. The test comment claiming NaN rows are clamped is false. |
 | O30 | low | `NVMAIServer/Core/ServerInference.swift:1170`, `ModelRouter.swift:439-442` | The reasoning switch reaches the render, the assistant decoder and now `count_tokens` (C37), but not `runRawCompletion`, which still gets the session's tokenizer — so the doc's claim that "decode … follow[s] the switch" remains half true (the detokenizer and the stop-id check run at the loaded level). Currently harmless because `thinkingMode`/`stopTokenIDs` are mode-independent across a loaded folder. |
 | O31 | low | `NVMAIApp/Mac/Generation/...`, `NVMAIMemory/...` | Reported tail, mechanism read but impact bounded: a Stop pressed inside the generation-start window can be dropped (`cancel()` writes `cancel(nil)` before `activeGenerationID` is set); one 60 s inter-event timeout covers prefill as well as decode, so a slow prefill chunk gets a healthy helper killed and reloaded; `MemoryService.sweepStaleWorkspaces` deletes another process's journal and `.lock` by path without checking `flock`; a journal read error is indistinguishable from an empty journal and the next compaction destroys the old records; `ContextAssembler.memoryItemIDs` is ranking order while its comment says render order. |
+
+## Rejected — the premise did not survive reading the code
+
+Recorded rather than deleted: a finding that is wrong for an instructive reason
+is worth more than one that never existed, and this one was listed as "verified
+by me" when it was not. I read the host guard and the kernel's `slice` call and
+*assumed* what `slice` does to a tensor's extents instead of reading it.
+
+| # | Where | The claim | Why it is wrong |
+| --- | --- | --- | --- |
+| O23 | `Metal/TensorCore/tensorops.metal:41`, `Kernels/TensorCore/MPPPrefillInt4QMM.swift:73` | The A tile is never clamped to `M`: the host guards `k % 64` but not `m % 64`, so a chunk length that is not a multiple of 64 reads up to 63 rows past the written activations. | `tensor::slice` **shifts the origin and keeps the parent's extents.** `MPPTensorOpsMatMul2d.h`: `A.slice(0, tgid.y*64)` "has same extents as original tensor A but origin shifted to (0,tgid.y*64) i.e. mA[x,y] == A[x,tgid.y*64+y]". The A operand here is declared `dextents<int32_t,2>(kMPPAffineTileK, M)` — the runtime row count *is* its M extent — and the header's own pattern "will do edge checking for all thread groups against extents of original tensor" is dispatched with `MTLSizeMake((M + 63)/64, …)`, so a partial last row tile is the supported case and reads only rows below `M`. The store is masked on `globalM < M && globalN < N`. The `k % 64` guard exists for the opposite reason — K is the extent the descriptor states *statically*, and [llama.cpp a3027337](https://github.com/ggml-org/llama.cpp/commit/a30273376ef669023334fc20ad02ae4ed8196a65) is what happens when a static extent is trusted over an operand holding less valid data than it claims. There is no `m % 64` guard because M is a runtime extent the operation checks; adding one would refuse shapes the API handles and would cost the MPP path on every final chunk. The behaviour is already pinned by `m: 17` and `m: 33`, whose buffers are sized for exactly `m` rows and which compare against a CPU reference. Both sites now carry a comment stating the asymmetry, `m: 100` was added to the production-shape sweep to cover a partial *second* row tile, and MPP tests plus lint pass. |
 
 ## False documentation — found and fixed
 
