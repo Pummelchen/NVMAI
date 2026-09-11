@@ -89,6 +89,10 @@ Cutting a release is a runbook, not improvisation: `docs/release-process.md`
 holds the order (notes, README callout, version, tag, dry run, publish), the
 machine preconditions, and what `release.sh`'s failure messages actually mean —
 including a golden gate that reports a *refused* start as a "mismatch".
+Adding a model is the other runbook: `docs/adding-a-model.md` lists the eight
+places a new checkpoint has to be wired, the disk each width needs, the
+verification bar before it may be called supported, and how to re-issue install
+receipts after the checkout moves.
 
 Do not download a full checkpoint, duplicate the `.gturbo` model, create a worktree, or purge caches just to run tests.
 
