@@ -140,6 +140,18 @@ tools/install_models.sh <key>-8bit       # 8-bit
 
 The installer streams one source shard at a time (about 11 GB in flight for a
 35B-A3B) and deletes each after use; it does **not** stage the full checkpoint.
+
+**An interrupted conversion is not resumable the way it looks.** Each source
+shard is deleted once converted, and the snapshot's index and `config.json` are
+written only at the very end, so a run that dies at shard N re-downloads those N
+shards on the next attempt, and `OutputWriter` never clears its output directory
+— orphan `model-*.safetensors` from the dead run sit beside the new ones, which
+is wasted space in exactly the disk budget you were trying to fit. Before
+re-running, remove the partial output (`rm -rf .build/<key>-affine-*`), and run
+the conversion as a supervised background job with a log rather than in a
+session that might be interrupted: `SIGTERM` is handled so the in-flight `curl`
+stops, but a shard left partially written would be resumed by the next run and
+then fail to deserialize.
 Both widths come from one download when the converter is called with `--bits 4
 8`, but the **snapshot and the install exist at the same time**, so budget:
 

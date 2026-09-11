@@ -67,7 +67,11 @@ tools/install_models.sh katcoder          # ~20 GB snapshot + ~20 GB install
 ```
 
 Peak disk ~51 GB (two source shards ~11 GB, snapshot 20.0 GB, install ~20 GB).
-Then delete the snapshot (`rm -rf .build/katcoder-affine-*`) and verify:
+Run it as a supervised background job with a log, not in a foreground session:
+each source shard is deleted once converted and the snapshot is finalised only
+at the end, so an interrupted run re-downloads every shard it had consumed and
+leaves orphan output shards behind. Before re-running after a failure,
+`rm -rf .build/katcoder-affine-*`. Then delete the snapshot and verify:
 
 ```bash
 .build/release/NVMAICLI --model models/kat-coder-v2.5_35B_A3B_4Bit \
@@ -83,10 +87,20 @@ terminate a process this session did not start.
 
 ## Step 3 — the 8-bit decision
 
-Peak ~83 GB (11 + 36.9 + ~35) against **69 GB free**: short by roughly 35 GB
-after the 4-bit install. Free space (the 125B installs are 125-162 GB and
-rebuild from the installer), or stop at 4-bit and say so. Do not delete an
-existing install without asking.
+Peak ~83 GB (11 + 36.9 + ~35) against **70 GB free**: short by roughly 33 GB
+once the 4-bit install is in place. Reclaimable without deleting a model is
+about 1 GB (the staged release under `.build/releases` plus test logs); the rest
+of `.build` is build products that rebuild, and 3.2 GB of it is the dense 2B
+snapshots the CPU equivalence gate runs against. So it is a model or nothing:
+
+| Candidate | Frees | Rebuild cost |
+| --- | ---: | --- |
+| A 35B-A3B 8-bit install (only if the goal allows it) | 34 GB | ~70 GB streamed + install |
+| `qwen3.8-flash-next_125B_A6B_8Bit` | 220 GB | the 125B conversion, hours |
+
+The 125B installs are 162 GB (4-bit) and 220 GB (8-bit) on disk -- not 125 GB;
+that is the parameter count. Free space, or stop at 4-bit and say so. Do not
+delete an existing install without asking.
 
 ## Step 4 — the app descriptors
 

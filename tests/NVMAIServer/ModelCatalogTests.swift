@@ -252,4 +252,25 @@ struct ModelCatalogTests {
         #expect(snapshot.served(by: .gpu, id: "snap@gpu") == nil)
         #expect(snapshot.served(by: .cpu, id: "snap@cpu")?.kind == .cpu(.qwen35Dense))
     }
+
+    /// A manifest carries an id, not a name, so an install missing from this
+    /// table is listed as its raw id in `/v1/models`, the launcher and the app.
+    ///
+    /// The list is the shipped set, and the count is asserted so that adding a
+    /// model is a deliberate edit here rather than a silent fallback to the id.
+    /// The KAT-Coder row is what the count guards: it was added with the model,
+    /// before the model had an install.
+    @Test func everyShippedModelHasADisplayName() {
+        let shipped = ["qwen3.6-35b-a3b", "ornith-1.5-35b-a3b", "qwen-agentworld",
+                       "kat-coder-v2.5", "qwen3.8-flash-next",
+                       "qwen3.5-2b", "qwen3.5-4b", "qwen3.5-9b"]
+        for id in shipped {
+            let name = ModelCatalog.displayNames[id]
+            #expect(name?.isEmpty == false, "no display name for \(id)")
+        }
+        let names = Array(ModelCatalog.displayNames.values)
+        #expect(Set(names).count == names.count, "two models share a display name")
+        #expect(ModelCatalog.displayNames.count == shipped.count,
+                "a display name was added or removed without updating the shipped list")
+    }
 }
