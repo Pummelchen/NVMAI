@@ -318,7 +318,13 @@ other.
 
 ## Unconfirmed — need their mechanism read before they are trusted
 
-- `RemoteStreamingRepacker.swift:298-308` wipes the partial and preallocates inside the `dryRunSpaceCheck` branch when a resume is in flight (no caller sets the flag today).
 - `NgramTableReader`/`ResidentIndex` accept `shape` values unrelated to `sizeBytes`/`dtype`, so a hand-edited index or sidecar can describe a tensor whose logical width disagrees with the packed bytes. No consumer reduces `shape` with trapping arithmetic any more (that half became C66); what is left is the silent one -- quantized dequantization derives its group count from that width.
-- None outstanding as of this batch: the last one became C70. Claims a later
+- One claim is still open and is the *silent* kind: `NgramTableReader`/
+  `ResidentIndex` accept `shape` values unrelated to `sizeBytes`/`dtype`, and
+  quantized dequantization derives its group count from that shape. Its
+  trapping half became C66; this half needs a validation that says what the
+  shape must agree with, which is a change to a load path that no fixture
+  currently exercises.
+- Everything else reported by the seven passes is fixed, disproved, or
+  recorded as deliberate. New claims go here until their mechanism is read.
   pass reports go here until their mechanism is read.
