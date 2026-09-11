@@ -104,3 +104,28 @@ struct NgramTableReaderTests {
         #expect(r.gatherBytes(headCount: 16) == 16 * r.rowBytes)
     }
 }
+
+extension NgramTableReaderTests {
+    /// Geometry comes from `ple_constants.json`, a file on disk, not a fact of
+    /// the build — so an unusable one is reported, not trapped on.
+    @Test("Unusable geometry is refused, not trapped on")
+    func refusesUnusableGeometry() throws {
+        let url = try Self.makeTable()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        for (rowDim, rowCount) in [(0, UInt64(64)), (8, UInt64(0))] {
+            #expect(throws: NgramTableReader.Failure.self) {
+                _ = try NgramTableReader(path: url.path, rowDim: rowDim,
+                                         rowCount: rowCount, bypassCache: false)
+            }
+        }
+        // The multiplication that sizes the table must not wrap: with a row
+        // count near `UInt64.max` a wrapping product collapses `expected` to a
+        // small number and the size guard below would accept a table built for
+        // a different geometry.
+        #expect(throws: NgramTableReader.Failure.self) {
+            _ = try NgramTableReader(path: url.path, rowDim: Int.max,
+                                     rowCount: UInt64.max, bypassCache: false)
+        }
+    }
+}

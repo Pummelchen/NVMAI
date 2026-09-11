@@ -42,6 +42,46 @@ public struct PLEConstants: Decodable, Sendable {
         return UInt64(offset) + UInt64(vocab)
     }
 
+    /// Check the sidecar's geometry against the architecture that will use it.
+    ///
+    /// `headCount * pleHeadDim` is the number of fp16 values one token gathers
+    /// (`PLEHash.headCount` rows of the table's row width), and the PLE block's
+    /// embedding buffer is sized from `cfg.ple.embedDim`. Nothing else compares
+    /// the two: a sidecar from another model would have the gather write past
+    /// that buffer -- host heap corruption, not a GPU fault -- or feed the block
+    /// rows of the wrong width, silently. `PLEHash`'s own consistency checks are
+    /// preconditions, so this must run *before* `makeHash()` to turn a corrupt
+    /// sidecar into a report rather than a trap.
+    public func validate(embedDim: Int,
+                         ngramSize: Int,
+                         headsPerNgram: Int) throws {
+        let headCount = headsPerNgram * (self.ngramSize - 1)
+        guard self.ngramSize == ngramSize else {
+            throw ModelError.archMismatch(field: "ple.ngramSize",
+                                          expected: "\(ngramSize)",
+                                          actual: "\(self.ngramSize)")
+        }
+        guard self.headsPerNgram == headsPerNgram else {
+            throw ModelError.archMismatch(field: "ple.headsPerNgram",
+                                          expected: "\(headsPerNgram)",
+                                          actual: "\(self.headsPerNgram)")
+        }
+        guard ngramHeadsOffsets.count == headCount,
+              ngramHeadsVocabSizes.count == headCount else {
+            throw ModelError.archMismatch(
+                field: "ple_constants.json head tables",
+                expected: "\(headCount) entries each",
+                actual: "\(ngramHeadsOffsets.count) offsets, "
+                    + "\(ngramHeadsVocabSizes.count) vocab sizes")
+        }
+        guard headCount * pleHeadDim == embedDim else {
+            throw ModelError.archMismatch(
+                field: "ple geometry (headCount * pleHeadDim)",
+                expected: "\(embedDim) values per token",
+                actual: "\(headCount) * \(pleHeadDim) = \(headCount * pleHeadDim)")
+        }
+    }
+
     public func makeHash() -> PLEHash {
         PLEHash(multipliers: layerMultipliers.map { UInt64(bitPattern: $0) },
                 offsets: ngramHeadsOffsets.map { UInt64(bitPattern: $0) },

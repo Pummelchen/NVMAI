@@ -22,6 +22,7 @@ public final class NgramTableReader: @unchecked Sendable {
     public enum Failure: Error, CustomStringConvertible {
         case openFailed(path: String, errno: Int32)
         case sizeMismatch(path: String, expected: UInt64, actual: UInt64)
+        case invalidGeometry(rowDim: Int, rowCount: UInt64)
         case rowOutOfRange(row: UInt32, rowCount: UInt64)
         case readFailed(row: UInt32, errno: Int32)
         case shortRead(row: UInt32, expected: Int, got: Int)
@@ -34,6 +35,10 @@ public final class NgramTableReader: @unchecked Sendable {
                 return "n-gram table \(p) is \(actual) bytes; expected at least "
                     + "\(expected) and at most 1 MiB of alignment padding past "
                     + "it. The table does not match the manifest's geometry"
+            case .invalidGeometry(let rowDim, let count):
+                return "n-gram table geometry is not usable: rowDim \(rowDim), "
+                    + "rowCount \(count). Both come from ple_constants.json, so "
+                    + "the sidecar is corrupt or built for another model"
             case .rowOutOfRange(let row, let count):
                 return "n-gram row \(row) is outside the table's \(count) rows"
             case .readFailed(let row, let e):
@@ -60,7 +65,13 @@ public final class NgramTableReader: @unchecked Sendable {
     ///     because a bounded footprint is the point of streaming.
     public init(path: String, rowDim: Int, rowCount: UInt64,
                 bypassCache: Bool = true) throws {
-        precondition(rowDim > 0 && rowCount > 0)
+        // Thrown, not a precondition: both values come from `ple_constants.json`,
+        // which is a file on disk rather than a fact of the build. A corrupt or
+        // foreign sidecar used to abort the process here instead of reporting
+        // itself.
+        guard rowDim > 0, rowCount > 0 else {
+            throw Failure.invalidGeometry(rowDim: rowDim, rowCount: rowCount)
+        }
         let opened = open(path, O_RDONLY)
         guard opened >= 0 else {
             throw Failure.openFailed(path: path, errno: errno)
@@ -72,8 +83,20 @@ public final class NgramTableReader: @unchecked Sendable {
             close(opened)
             throw Failure.openFailed(path: path, errno: code)
         }
-        let bytes = rowDim * MemoryLayout<Float16>.stride
-        let expected = rowCount &* UInt64(bytes)
+        // Checked, not wrapping. `rowCount &* bytes` could wrap to a small
+        // number, which collapses `expected` and lets the size guard below
+        // accept a table built for a completely different geometry.
+        let (rowBytes, byteOverflow) = rowDim.multipliedReportingOverflow(
+            by: MemoryLayout<Float16>.stride)
+        guard !byteOverflow, rowBytes > 0 else {
+            throw Failure.invalidGeometry(rowDim: rowDim, rowCount: rowCount)
+        }
+        let bytes = rowBytes
+        let (expected, sizeOverflow) = rowCount.multipliedReportingOverflow(
+            by: UInt64(bytes))
+        guard !sizeOverflow else {
+            throw Failure.invalidGeometry(rowDim: rowDim, rowCount: rowCount)
+        }
         // The checkpoint pads the table past its last addressable row (the
         // shipped one rounds up to a 512-row boundary), so an exact size is
         // the wrong check. What this must still catch is a table built for a

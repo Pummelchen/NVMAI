@@ -126,3 +126,68 @@ struct PLEHashTests {
         }
     }
 }
+
+/// The n-gram sidecar is geometry, and nothing else compared it to the
+/// architecture.
+///
+/// `headCount * pleHeadDim` is the number of fp16 values one token gathers,
+/// while the PLE block's embedding buffer is sized from `cfg.ple.embedDim`.
+/// A sidecar built for another model would have the gather write past that
+/// buffer (host heap corruption) or feed the block wrong-width rows, silently.
+/// `PLEHash`'s own consistency checks are preconditions, so this validation has
+/// to run before `makeHash()` for a corrupt sidecar to be a report rather than a
+/// trap.
+@Suite("PLE sidecar geometry")
+struct PLEConstantsGeometryTests {
+    private func constants(ngramSize: Int = 3,
+                           headsPerNgram: Int = 8,
+                           pleHeadDim: Int = 160,
+                           headEntries: Int? = nil) -> PLEConstants {
+        let headCount = headEntries ?? (headsPerNgram * (ngramSize - 1))
+        return PLEConstants(
+            layerMultipliers: Array(repeating: 1, count: ngramSize),
+            ngramHeadsOffsets: Array(repeating: 0, count: headCount),
+            ngramHeadsVocabSizes: Array(repeating: 1, count: headCount),
+            eosTokenID: 0,
+            ngramSize: ngramSize,
+            headsPerNgram: headsPerNgram,
+            pleNumHeads: 16,
+            pleHeadDim: pleHeadDim)
+    }
+
+    @Test("A sidecar that agrees with the architecture validates")
+    func acceptsMatchingGeometry() throws {
+        // 8 * (3 - 1) * 160 = 2560 values per token.
+        try constants().validate(embedDim: 2560, ngramSize: 3, headsPerNgram: 8)
+    }
+
+    @Test("A per-token width that disagrees with embedDim is refused")
+    func refusesWidthMismatch() {
+        #expect(throws: ModelError.self) {
+            try constants().validate(embedDim: 2048, ngramSize: 3, headsPerNgram: 8)
+        }
+    }
+
+    @Test("A different n-gram shape is refused")
+    func refusesShapeMismatch() {
+        #expect(throws: ModelError.self) {
+            try constants(ngramSize: 4).validate(embedDim: 2560, ngramSize: 3,
+                                                 headsPerNgram: 8)
+        }
+        #expect(throws: ModelError.self) {
+            try constants(headsPerNgram: 4).validate(embedDim: 2560, ngramSize: 3,
+                                                    headsPerNgram: 8)
+        }
+    }
+
+    @Test("Head tables that do not match the shape are refused")
+    func refusesHeadTableMismatch() {
+        // Enough entries to pass PLEHash's own precondition would be a trap;
+        // too few is what a truncated sidecar looks like, and it is checked
+        // here so the failure is named rather than left to a precondition.
+        #expect(throws: ModelError.self) {
+            try constants(headEntries: 4).validate(embedDim: 2560, ngramSize: 3,
+                                                  headsPerNgram: 8)
+        }
+    }
+}

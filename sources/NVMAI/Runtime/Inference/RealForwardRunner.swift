@@ -596,6 +596,16 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         if cfg.ple.enabled {
             let constants = try PLEConstants.load(
                 directoryURL: model.directoryURL)
+            // Before anything derives buffer sizes or row addressing from the
+            // sidecar. Its values are geometry, and `PLEBlock`'s embedding
+            // buffer is sized from `cfg.ple.embedDim` while the gather width
+            // comes from this file -- a disagreement writes past that buffer
+            // (host heap, not a GPU fault) or feeds the block wrong-width rows,
+            // silently. `PLEHash`'s own checks are preconditions, so this has
+            // to run first to make a corrupt sidecar a report rather than a trap.
+            try constants.validate(embedDim: cfg.ple.embedDim,
+                                   ngramSize: cfg.ple.ngramSize,
+                                   headsPerNgram: cfg.ple.headsPerNgram)
             self.pleHash = constants.makeHash()
             self.ngramTable = try NgramTableReader(
                 path: model.directoryURL.appendingPathComponent(
