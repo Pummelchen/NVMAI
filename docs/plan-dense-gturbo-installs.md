@@ -7,9 +7,61 @@ because that is what the CPU engine reads. Every other install is a `.gturbo`
 directory with a manifest, a layout, and a path-bound `verified-install.json`
 receipt. This plan makes the dense models consistent with the rest.
 
-Status: **design settled, not implemented.** The family decision is made (a new
-dense value, below). The reconnaissance was done on 2026-09-11 against `main`;
-every claim carries the source it came from.
+Status: **stage 1 done and verified; stage 2 blocked, and the reason is
+recorded below.** The family decision is made (a new dense value, below) and
+the repacker produces a correct dense `.gturbo`. The CPU engine reading it
+does not yet, so the reader refuses rather than lies. The reconnaissance was
+done on 2026-09-11 against `main`; every claim carries the source it came from.
+
+## Where it actually got to (2026-09-11)
+
+**Stage 1 -- the repacker -- is correct and checked.** `NVMAIRepack
+--input-snapshot` accepts a dense snapshot; the 2B repacks into a `.gturbo`
+that is byte-identical to its source. `tools/gturbo_diff_snapshot.py` proves
+it rather than assuming it: it parses the resident index and the safetensors
+shards directly and compared all 320 resident tensors, weight + scales +
+biases, with zero mismatches. The two companion facts worth keeping:
+
+  - `ArchInfo` accepts the converter's *flat* config, where the root is the
+    text config. The MoE loader is reused for the shared DeltaNet and
+    attention contract with the four MoE-only keys stubbed, so there is one
+    reader for that contract rather than two that can drift.
+  - `ManifestArch` gained the five gated-DeltaNet fields as optionals, and the
+    wire codec now decodes the `linear_*` keys the writer had always emitted
+    but the reader silently dropped. Optional, so existing installs are
+    unaffected.
+
+**Stage 2 -- the CPU reader -- is not correct, and is refused.** It loads, it
+is fast, and it produces fluent nonsense. The blocker is precise:
+
+    tensor            snapshot packed  snapshot logical  scales/row  wire shape[1]
+    embed_tokens          [248320, 512]            2048         32          2048
+    gate_proj               [6144, 256]            1024         32          2048
+
+`shape[1]` is neither the packed nor the logical width, and for `gate_proj`
+the scale span implies 32 groups/row (2048 logical columns at group 64) while
+its weight bytes per row at 4 bits give 512. Those cannot both be true, so one
+of the readings is wrong. `docs/gturbo-format.md` is referenced by
+`GTurboEncoders.swift` and **does not exist**, and no dense `.gturbo` exists
+in the wild, so the field is undocumented for a CPU reader. Reading
+`ResidentBuffer`'s consumer is the fastest way to settle it.
+
+Two further findings from building the reader, both worth not rediscovering:
+
+  - The resident index stores the **logical** width in `shape[1]`, unlike a
+    safetensors snapshot which stores the packed word count. Reading it the
+    snapshot's way made every matrix 2-4x too wide, which showed up as a
+    generation that never finished rather than as an error.
+  - The scale and bias spans are **offsets on the weight's own entry**, not
+    entries of their own. A snapshot names them as separate tensors.
+  - Mapping `model_weights.bin` per tensor access pages the whole payload in
+    repeatedly; mapping once and holding it took generation from never
+    finishing to 2 seconds. `ResidentWeights` documents that invariant.
+
+`AffineSnapshot.init(gturbo:)` therefore **throws** until the reader is
+correct. The guard and the unreachable code beneath it must be removed in the
+same commit that lands the fix. Nothing has been migrated: the shipped 2B, 4B
+and 9B are still snapshots and still work.
 
 ## Why it was not done at the time
 
