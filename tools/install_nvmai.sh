@@ -293,8 +293,8 @@ LAUNCHER
   <key>CFBundleName</key><string>NVMAI</string>
   <key>CFBundleDisplayName</key><string>NVMAI</string>
   <key>CFBundleIdentifier</key><string>local.nvmai.app</string>
-  <key>CFBundleVersion</key><string>5.1</string>
-  <key>CFBundleShortVersionString</key><string>5.1</string>
+  <key>CFBundleVersion</key><string>5.2</string>
+  <key>CFBundleShortVersionString</key><string>5.2</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>NVMAI</string>
   <key>CFBundleIconFile</key><string>NVMAI</string>

@@ -7,6 +7,27 @@
 
 NVMAI is the fastest SSD streamer for AI models on Mac - M1 to M6
 
+## New in 5.2
+
+- **One server serves every installed model.** `--models-dir` puts the whole
+  catalogue on one port with one model resident at a time, and a request naming
+  another model switches to it. One launcher replaces the per-model start
+  scripts: pick the client (Codex, Claude Code, Qwen Code, OpenCode, Zed), the
+  model, the thinking level and the RAM limit.
+- **The dense Qwen 3.5 2B / 4B / 9B run on the GPU as well as the CPU**, with
+  the engine selectable per request — `<id>@cpu` or `<id>@gpu`. The GPU path was
+  accepted only after its logits matched the CPU engine's on the real install.
+- **Optional agent memory:** `NVMAI_MEMORY=1` gives a model facts that outlive a
+  conversation, scoped per repository, with nothing to install.
+- **Thinking arrives as `reasoning_content`**, apart from the answer, including
+  a thought a model opens when thinking is off — which is now split out and
+  logged instead of being streamed as the answer.
+- **A deep audit of the whole tree:** 89 code findings and 8 documentation
+  defects, 0 open (`docs/audit-2026-09-11-findings.md`).
+
+Fixed releases are tagged; the full history is in the
+[Changelog](https://github.com/Pummelchen/NVMAI/wiki/Changelog).
+
 ## Benchmarks
 
 Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
@@ -30,10 +51,11 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 - **Qwen-AgentWorld 35B-A3B**
 - **Ornith 1.5 35B-A3B**
 - **Qwen 3.6 35B-A3B**
-- **Qwen 3.5 2B / 4B / 9B** — dense models on the CPU engine, at 4-bit and
-  8-bit, converted from Qwen's own bf16 release by this project's converter
-  (`tools/install_models.sh qwen35-2b|qwen35-4b|qwen35-9b`). The 9B is the
-  vision-language build and is converted text-only, like every model here.
+- **Qwen 3.5 2B / 4B / 9B** — dense models at 4-bit and 8-bit, on either engine:
+  the GPU by default, the CPU on request (`--engine cpu`, or the `@cpu` model id
+  for one request). Converted from Qwen's own bf16 release by this project's
+  converter (`tools/install_models.sh qwen35-2b|qwen35-4b|qwen35-9b`). The 9B is
+  the vision-language build and is converted text-only, like every model here.
   These install as `.gturbo` directories with the same manifest and
   path-bound verification receipt as every other model here. They were affine
   snapshots until the repacker learned the dense shape; the two formats are
