@@ -97,7 +97,13 @@ let package = Package(
         // reach the network and cannot be reached from one.
         .target(
             name: "ContinuityCore",
-            path: "sources/ContinuityCore"
+            path: "sources/ContinuityCore",
+            // Documentation that lives next to the code it describes. SwiftPM
+            // treats any undeclared file under a target path as unhandled and
+            // warns on every clean plan; excluding it says so explicitly and
+            // leaves the file where it is. (`sources/NVMAICLICore`'s
+            // `exclude: ["Command"]` is the same mechanism.)
+            exclude: ["README.md"]
         ),
         // Worked examples and a scale check for ContinuityCore. Not part of
         // the server; it exists so the package's claims can be run.
