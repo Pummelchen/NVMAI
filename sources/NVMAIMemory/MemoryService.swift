@@ -35,6 +35,9 @@ public actor MemoryService {
     /// Set once a durable operation has failed, so the session prompt can say
     /// memory is not persisting instead of the model assuming it is.
     private var isDegraded = false
+    /// Workspaces whose journal failure has been logged, so a disk that stays
+    /// full produces one line rather than one per tool call.
+    private var reportedJournalFailures: Set<MemoryScope> = []
     private var log: @Sendable (MemoryLogEvent) -> Void
 
     /// Everything one scope needs, created on first use.
@@ -126,6 +129,9 @@ public actor MemoryService {
             await workspaces[oldest]?.engine?.shutDown()
             workspaces[oldest] = nil
             lastUsed[oldest] = nil
+            // Reopening replays the file into a fresh engine, so a failure
+            // there later is a new one and worth its own line.
+            reportedJournalFailures.remove(oldest)
             log(.degraded(operation: "residency",
                           detail: "closed workspace \(oldest.workspace) to stay inside "
                               + "\(ceiling >> 20) MiB"))
@@ -206,6 +212,9 @@ public actor MemoryService {
                                stopReason: stopReason,
                                droppedBytes: filteredPrompt.dropped + filteredReply.dropped)
         await journal.record(turn, in: session.scope)
+        // Never fails the turn: the reply has already been given. A journal
+        // that refused it stops the workspace reporting itself durable.
+        _ = await journalFailed(in: session.scope)
         log(.journaled(session: session.session.id, index: index, bytes: turn.byteCount))
         await enforceResidencyBudget(keeping: session.scope)
     }
@@ -355,6 +364,7 @@ public actor MemoryService {
         }
         workspaces.removeAll()
         lastUsed.removeAll()
+        reportedJournalFailures.removeAll()
     }
 
     /// The journal, for a caller that wants to read it back. Never used to
@@ -367,11 +377,27 @@ public actor MemoryService {
     public var isEnabled: Bool { configuration.isEnabled }
 
     /// Whether writes reach durable storage in a scope. False once a durable
-    /// operation has failed, and false when the journal could not be opened
-    /// at all.
+    /// operation has failed, false when the journal could not be opened at
+    /// all, and false once the journal has refused a write.
     public func isDurable(in scope: MemoryScope) async -> Bool {
-        guard !isDegraded else { return false }
-        return await workspace(for: scope)?.persists ?? false
+        guard !isDegraded, let workspace = await workspace(for: scope),
+              workspace.persists else { return false }
+        return !(await journalFailed(in: scope))
+    }
+
+    /// Whether a workspace's journal has refused a write, logged the first
+    /// time it is seen.
+    ///
+    /// Read from the engine rather than inferred from a tool result: a turn's
+    /// prompt and reply are journaled on a path where no caller sees the
+    /// write fail.
+    private func journalFailed(in scope: MemoryScope) async -> Bool {
+        guard let store = workspaces[scope]?.store as? ContinuityStore,
+              let failure = await store.journalFailure else { return false }
+        if reportedJournalFailures.insert(scope).inserted {
+            log(.degraded(operation: "journal", detail: failure))
+        }
+        return true
     }
 
     /// Whether the configuration's own scope is persisting.
@@ -462,11 +488,17 @@ public actor MemoryService {
                                                session: context.session,
                                                limits: configuration.limits,
                                                guarding: configuration.guardsUserFacts)
+        // Checked whatever the outcome: a call whose own write landed can
+        // still have had a session event refused.
+        let journalLost = await journalFailed(in: context.scope)
         if case .failure(let message) = result {
             log(.toolFailed(tool: name, detail: message))
             // A durable backend that failed sends later work to the local
-            // store, and marks the session as no longer persisting.
-            if !isDegraded, message.contains("unavailable")
+            // store, and marks the session as no longer persisting. A failed
+            // journal does not: the engine still holds every fact, and a
+            // local retry would answer "stored" for a write that ends with
+            // the process.
+            if !isDegraded, !journalLost, message.contains("unavailable")
                 || message.contains("timed out") {
                 isDegraded = true
                 log(.degraded(operation: name, detail: message))

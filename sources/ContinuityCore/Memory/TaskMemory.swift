@@ -20,13 +20,18 @@ public actor TaskMemory {
     private let limits: MemoryLimits
     /// Notified after every mutation so the engine can journal it without
     /// this actor knowing that persistence exists.
-    private var observer: (@Sendable (MemoryMutation) async -> Void)?
+    ///
+    /// An observer that throws fails the mutating call, after the mutation
+    /// has been applied. RAM stays the source of truth; what the caller
+    /// learns is that the change did not reach wherever the observer sends
+    /// it, which for the engine is the only copy that survives a restart.
+    private var observer: (@Sendable (MemoryMutation) async throws -> Void)?
 
     public init(limits: MemoryLimits = .default) {
         self.limits = limits
     }
 
-    public func setObserver(_ observer: (@Sendable (MemoryMutation) async -> Void)?) {
+    public func setObserver(_ observer: (@Sendable (MemoryMutation) async throws -> Void)?) {
         self.observer = observer
     }
 
@@ -136,8 +141,8 @@ public actor TaskMemory {
             - (existing?.storageBytes ?? 0)
         let result = MemoryWriteResult(item: updated,
                                        previousVersion: existing.map { $0.version })
-        if let archived { await notify(.versioned(archived)) }
-        await notify(.written(result))
+        if let archived { try await notify(.versioned(archived)) }
+        try await notify(.written(result))
         return result
     }
 
@@ -165,7 +170,7 @@ public actor TaskMemory {
         item.updatedAt = now
         if let provenance { item.provenance = provenance }
         items[taskID]?[address] = item
-        await notify(.statusChanged(item))
+        try await notify(.statusChanged(item))
         return item
     }
 
@@ -350,9 +355,9 @@ public actor TaskMemory {
         return version
     }
 
-    private func notify(_ mutation: MemoryMutation) async {
+    private func notify(_ mutation: MemoryMutation) async throws {
         guard let observer else { return }
-        await observer(mutation)
+        try await observer(mutation)
     }
 }
 

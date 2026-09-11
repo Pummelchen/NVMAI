@@ -91,6 +91,9 @@ public enum ContinuityError: Error, Equatable, CustomStringConvertible {
     case tooManyItems(count: Int, limit: Int)
     case unknownMemoryItem(namespace: String, key: String)
     case versionConflict(namespace: String, key: String, expected: Int, actual: Int)
+    /// The change is applied in RAM but the journal refused it, so it will
+    /// not survive a restart.
+    case notPersisted(String)
 
     public var description: String {
         switch self {
@@ -113,6 +116,8 @@ public enum ContinuityError: Error, Equatable, CustomStringConvertible {
             return "no memory at \(namespace).\(key)"
         case .versionConflict(let namespace, let key, let expected, let actual):
             return "\(namespace).\(key) is at version \(actual), not \(expected)"
+        case .notPersisted(let detail):
+            return "applied in memory but not written to the journal: \(detail)"
         }
     }
 }

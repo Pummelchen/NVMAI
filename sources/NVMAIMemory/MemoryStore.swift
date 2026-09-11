@@ -335,6 +335,9 @@ public enum MemoryError: Error, Equatable, CustomStringConvertible {
     case backendUnavailable(String)
     case timedOut(operation: String, milliseconds: Int)
     case disabled
+    /// The store took the change but could not make it durable: it holds for
+    /// this process and is gone after a restart.
+    case notPersisted(String)
 
     public var description: String {
         switch self {
@@ -345,16 +348,23 @@ public enum MemoryError: Error, Equatable, CustomStringConvertible {
         case .backendUnavailable(let detail): return "memory backend unavailable: \(detail)"
         case .timedOut(let operation, let ms): return "memory \(operation) timed out after \(ms) ms"
         case .disabled: return "memory is disabled"
+        case .notPersisted(let detail):
+            return "memory was not saved to disk and lasts only until the server restarts: "
+                + detail
         }
     }
 
     /// Whether the failure is the backend's rather than the caller's. These
     /// are the ones the server degrades on instead of surfacing as a tool
     /// error, because the model cannot fix them.
+    ///
+    /// `notPersisted` is the backend's, but it is not here: surfacing it is
+    /// the point, because a model that is not told keeps believing the fact
+    /// is saved.
     public var isBackendFailure: Bool {
         switch self {
         case .backendUnavailable, .timedOut, .disabled: return true
-        case .invalidKey, .invalidScope, .valueTooLarge: return false
+        case .invalidKey, .invalidScope, .valueTooLarge, .notPersisted: return false
         }
     }
 }

@@ -90,9 +90,15 @@ public actor ContinuityStore: MemoryStore {
               existing.status.isEligibleForContext else { return false }
         // Archived, not destroyed. A model that deletes a fact in one session
         // and contradicts itself in the next leaves a chain that explains it.
-        _ = try? await engine.archive(taskID: taskID,
-                                      namespace: address.namespace,
-                                      key: address.key)
+        do {
+            try await engine.archive(taskID: taskID,
+                                     namespace: address.namespace,
+                                     key: address.key)
+        } catch ContinuityError.notPersisted(let detail) {
+            // Retired in RAM only. Answering "deleted" would bring the fact
+            // back after a restart with the model believing it gone.
+            throw MemoryError.notPersisted(detail)
+        } catch {}
         return true
     }
 
@@ -359,6 +365,13 @@ public actor ContinuityStore: MemoryStore {
         try await task(for: scope)
     }
 
+    /// The first journal write the engine could not make, or nil while every
+    /// write has reached the file. Read by the service, which is what tells
+    /// the model whether its memory outlives the process.
+    public var journalFailure: String? {
+        get async { await engine.journalFailure }
+    }
+
     // MARK: - Internals
 
     private func record(from item: ContinuityCore.MemoryItem) throws -> MemoryRecord {
@@ -530,6 +543,8 @@ public actor ContinuityStore: MemoryStore {
             return .valueTooLarge(bytes: bytes, limit: limit)
         case .invalidKey(let value, let reason), .invalidNamespace(let value, let reason):
             return .invalidKey(value, reason)
+        case .notPersisted(let detail):
+            return .notPersisted(detail)
         default:
             return .backendUnavailable(String(describing: error))
         }
