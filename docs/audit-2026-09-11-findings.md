@@ -22,10 +22,10 @@ got wrong, and says how.
 
 | # | Sev | Where | What was wrong |
 | --- | --- | --- | --- |
+| — | — | — | **The C-series has no C4.** That finding was a documentation correction, not code, and is now `D8` where it belongs. The numbers are left as they are rather than closed up, so every commit message and tracker entry that cites a C-number still means the same finding. |
 | C1 | high | `NVMAIMemory/MemoryTools.swift` | `Int(Double)` traps on NaN, ±infinity and anything outside `Int`'s range, and the value comes straight from a model-authored tool argument (`limit=1e999` parses as +infinity). It aborted the process holding the loaded model. Clamps now. |
 | C2 | high | `ContinuityCore/Session/SessionLog.swift` | `pruneTurns(keeping: 0)` computed `turnStarts[count - 0]` — one past the end, a trap. `keeping: 0` is now a cut past the end, which is what "drop every turn" means; session-boundary events survive per the doc comment. |
 | C3 | high | `NVMAI/Infrastructure/Streaming/PreadExpertStreamer.swift` | `precondition(experts.count <= slotCount)` trapped while the comment two lines above promised a throw and both callers already handle `nil`. Reachable from `--expert-cache-slots 8` against Qwen3.8-Flash-Next (top-10 routing, prefill tiles up to 16). |
-| C4 | medium | `docs/v4.5-ane-prefill.md` | Claimed ANE prefill is "off by default"; `environmentValue` returns `.on` when the variable is unset, and has since v4.6. Marked historical and corrected. |
 | C5 | medium | `NVMAI/Runtime/Prefill/ANEPrefillAttention.swift` | The same false claim in the enum's own doc comment ("off by default … never silently selected"). |
 | C6 | medium | `NVMAICLI/Args.swift`, `NVMAIServer/Core/ServerArguments.swift` | `--expert-cache-slots` help hardcoded a list that stopped at 128 while the validator accepts 40/48/112/160/192/256. Now spelled from `RuntimeConfiguration.allowedExpertCacheSlots`, so it cannot drift again. |
 | C7 | medium-high | `tools/golden-baseline.sh` | Never pinned `NVMAI_PREFILL_ANE`, which defaults to `on`, and the ANE path is deliberately not byte-identical to the GPU path. The only real-inference regression gate followed a default that depends on prompt length and on whether a sidecar happens to be installed. Exports `NVMAI_PREFILL_ANE=off` now. |
@@ -138,12 +138,15 @@ by me" when it was not. I read the host guard and the kernel's `slice` call and
 
 ## False documentation — found and fixed
 
-All seven were corrected in one batch. Two turned out to be more than
+All eight were corrected in one batch. Two turned out to be more than
 documentation and were fixed as behaviour: D3's missing structural validation
 (`--verify-install` could certify a directory the runtime refuses, and would hash
 a manifest's own `verified-install.json` entry and then overwrite it) and D7's
 dead installer branch, which asserted a refusal the runtime does not implement.
 D1 removed a function that selected nothing plus the manifest reads that fed it.
+D8 arrived here late: it was found as a documentation claim and fixed as one, but
+was filed under the code series (C4) until the sections were checked against each
+other.
 
 
 | # | Where | What is false |
@@ -155,6 +158,7 @@ D1 removed a function that selected nothing plus the manifest reads that fed it.
 | D5 | `NVMAI/Runtime/KVCache/KVCacheManager.swift:25-27` | `KVView.validTokenCount` is documented as an inclusive bound, but every caller passes a count and the kernels iterate `p < seqLen`; the public `keyView(layer:)` default is one *fewer* than the count the decode path deliberately passes. |
 | D6 | `NVMAI/Metal/Sampling/logit.metal:107-113` (test comment at `SamplerTests.swift:62-67`) | The test comment claims a NaN row is tanh-clamped and therefore does not exercise `kept == 0`; it does not, and the fallback is `kept == 0`. See O25. |
 | D7 | `tools/install_models.sh:279-290` | The `unsupported` branch says 8-bit Qwen3.8-Flash-Next "cannot execute -- the runtime refuses it at load". No catalogue row uses that branch, so it is dead, and no such refusal exists: `validateFamilyQuantSupport` allows 4 *and* 8 bits, and `SlotGEMV` implements both. The message predates SlotGEMV and would mislead anyone who wired the branch up as intended. |
+| D8 | `docs/v4.5-ane-prefill.md` | Claimed ANE prefill is "off by default"; `environmentValue` returns `.on` when the variable is unset, and has since v4.6. Marked historical and corrected. (Carried the number C4 while it sat in the fixed-code table; the numbering gap above is explained there.) |
 
 ## Deliberate, verified, not changed
 
