@@ -172,6 +172,35 @@ import NVMAIValidationSupport
         #expect(Double(count5) < 0.5 * uniformExpect, "id 5 chosen \(count5) times (uniform≈\(uniformExpect))")
     }
 
+    /// Every id appended since the last sample is folded in, not only the last.
+    ///
+    /// The incremental path added `history.last` per call, which is correct for
+    /// the one production caller — it appends exactly one token between samples —
+    /// but a speculative path appending two folds one, and an id appearing only as
+    /// the *first* of the pair is then never in the penalty table. The frequency
+    /// count does not scale the penalty, so being in the table is the whole of the
+    /// effect, and the penalty edits the logits buffer in place: the table's
+    /// contents are directly observable rather than inferred from a draw.
+    @Test func repetitionPenaltyFoldsEveryAppendedId() throws {
+        let v = 64
+        let rig = try Rig(vocab: v)
+        let flat = [Float](repeating: 8.0, count: v)
+        let cfg = GenerationConfig(temperature: 1.0, repetitionPenalty: 2.0, seed: 1)
+
+        // Seed a table that does not mention 42, then append two ids at once with
+        // 42 first and 9 last.
+        _ = try rig.draw(flat, config: cfg, position: 0, history: [7, 7, 7])
+        _ = try rig.draw(flat, config: cfg, position: 1, history: [7, 7, 7, 42, 9])
+
+        let ptr = rig.logits.contents().bindMemory(to: Float16.self, capacity: v)
+        let untouched = Float(ptr[3])          // never in any history
+        #expect(Float(ptr[7]) < untouched * 0.9, "the seeded id is penalized")
+        #expect(Float(ptr[9]) < untouched * 0.9, "the last appended id is penalized")
+        #expect(Float(ptr[42]) < untouched * 0.9, Comment(rawValue:
+                "id 42 was appended before 9, so it is penalized only if every "
+                    + "appended id is folded and not just the last"))
+    }
+
     /// Saturated-logit suppression: raw logits deep in softcap-tanh
     /// saturation must still respond to the repetition penalty. The penalty
     /// acts on the post-softcap value — applied to the raw logit it moves the

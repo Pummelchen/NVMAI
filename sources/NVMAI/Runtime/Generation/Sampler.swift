@@ -187,6 +187,10 @@ final class Sampler {
     /// Whether the current generation's prompt has been folded into
     /// `penaltyFrequency` yet.
     private var penaltyHistorySeeded = false
+    /// How many ids of the caller's history have been folded into
+    /// `penaltyFrequency`. The incremental path uses it to fold exactly the ids
+    /// appended since the last call.
+    private var penaltyHistoryCount = 0
 
     /// Monotonic counter combined with the clock so two samples in the same
     /// nanosecond still draw distinct non-deterministic seeds (R34).
@@ -304,8 +308,30 @@ final class Sampler {
                 penaltyFrequency[id, default: 0] += 1
             }
             penaltyHistorySeeded = true
-        } else if let last = history.last, last >= 0, Int(last) < vocab {
-            penaltyFrequency[last, default: 0] += 1
+            penaltyHistoryCount = history.count
+        } else if history.count > penaltyHistoryCount {
+            // Every id appended since the last call, not just the final one.
+            // Folding only `history.last` was correct for the one production
+            // caller, which appends exactly one token between samples — but a
+            // speculative path that appends two would silently fold one, and the
+            // repetition penalty is what keeps a decode loop from repeating
+            // itself. For that caller this is the same single id as before.
+            for id in history[penaltyHistoryCount...]
+            where id >= 0 && Int(id) < vocab {
+                penaltyFrequency[id, default: 0] += 1
+            }
+            penaltyHistoryCount = history.count
+        } else if history.count < penaltyHistoryCount {
+            // The caller replaced the history rather than appending to it, so the
+            // frequency table describes a sequence that is no longer in the
+            // buffer. `resetPenaltyHistory` is the supported way to say this; a
+            // table that still penalizes absent ids is a quieter wrong answer than
+            // a re-seed, so re-seed.
+            penaltyFrequency.removeAll(keepingCapacity: true)
+            for id in history where id >= 0 && Int(id) < vocab {
+                penaltyFrequency[id, default: 0] += 1
+            }
+            penaltyHistoryCount = history.count
         }
 
         let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
@@ -335,6 +361,7 @@ final class Sampler {
     func resetPenaltyHistory() {
         penaltyFrequency.removeAll(keepingCapacity: true)
         penaltyHistorySeeded = false
+        penaltyHistoryCount = 0
     }
 
     // MARK: - Seed
