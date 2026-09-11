@@ -1,3 +1,4 @@
+import NVMAI
 import NVMAIAppCore
 import SwiftUI
 

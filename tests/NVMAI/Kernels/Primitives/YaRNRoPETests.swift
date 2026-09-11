@@ -1,7 +1,9 @@
-import Testing
 import Darwin
-@testable import NVMAI
+import Metal
 import NVMAIValidationSupport
+import Testing
+
+@testable import NVMAI
 
 @Suite struct YaRNRoPETests {
     @Test func referenceParametersMatchTransformersYaRN() {

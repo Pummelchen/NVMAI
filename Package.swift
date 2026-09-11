@@ -1,6 +1,20 @@
 // swift-tools-version: 6.3
 import PackageDescription
 
+/// The language standard this package is written to.
+///
+/// Swift 6 language mode is set below (`swiftLanguageModes: [.v6]`); these are
+/// the upcoming features that are not yet default in that mode and that the
+/// tree is clean under. Enforced here rather than documented, so a target
+/// added later cannot quietly opt out. The ones deliberately *not* adopted
+/// (and why, with their measured diagnostic counts) are recorded in
+/// `docs/swift-language-standard.md`.
+let nvmaiLanguageStandard: [SwiftSetting] = [
+    .enableUpcomingFeature("InferIsolatedConformances"),
+    .enableUpcomingFeature("ImmutableWeakCaptures"),
+    .enableUpcomingFeature("MemberImportVisibility"),
+]
+
 let package = Package(
     name: "NVMAI",
     platforms: [
@@ -26,7 +40,8 @@ let package = Package(
     targets: [
         .target(
             name: "NVMAIFormat",
-            path: "sources/NVMAIFormat"
+            path: "sources/NVMAIFormat",
+            swiftSettings: nvmaiLanguageStandard
         ),
         // C99 + NEON for the inner loops where Swift's vector types do not
         // lower well. Kept deliberately small: one file, one entry point,
@@ -35,7 +50,8 @@ let package = Package(
         // vs 0.680 ms), so it is not worth the unsafeFlags constraint.
         .target(
             name: "NVMAIKernelsC",
-            path: "sources/NVMAIKernelsC"
+            path: "sources/NVMAIKernelsC",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAI",
@@ -47,28 +63,33 @@ let package = Package(
             path: "sources/NVMAI",
             resources: [
                 .copy("Metal"),
-            ]
+            ],
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAIRepackCore",
             dependencies: ["NVMAIFormat"],
-            path: "sources/NVMAIRepack/Core"
+            path: "sources/NVMAIRepack/Core",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .executableTarget(
             name: "NVMAIRepack",
             dependencies: ["NVMAIRepackCore"],
-            path: "sources/NVMAIRepack/Command"
+            path: "sources/NVMAIRepack/Command",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAICLICore",
             dependencies: ["NVMAI"],
             path: "sources/NVMAICLI",
-            exclude: ["Command"]
+            exclude: ["Command"],
+            swiftSettings: nvmaiLanguageStandard
         ),
         .executableTarget(
             name: "NVMAICLI",
             dependencies: ["NVMAICLICore"],
-            path: "sources/NVMAICLI/Command"
+            path: "sources/NVMAICLI/Command",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAIAppCore",
@@ -76,21 +97,25 @@ let package = Package(
             path: "sources/NVMAIApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
-            ]
+            ],
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAIMacPresentation",
             dependencies: ["NVMAIAppCore"],
-            path: "sources/NVMAIApp/MacPresentation"
+            path: "sources/NVMAIApp/MacPresentation",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAIDecodeProtocol",
-            path: "sources/NVMAIDecodeProtocol"
+            path: "sources/NVMAIDecodeProtocol",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .executableTarget(
             name: "NVMAIDecodeService",
             dependencies: ["NVMAIAppCore", "NVMAIDecodeProtocol"],
-            path: "sources/NVMAIDecodeService"
+            path: "sources/NVMAIDecodeService",
+            swiftSettings: nvmaiLanguageStandard
         ),
         // Continuity: sessions, task memory and context assembly, in this
         // process. Depends on nothing at all, not even NIO, so it cannot
@@ -103,14 +128,16 @@ let package = Package(
             // warns on every clean plan; excluding it says so explicitly and
             // leaves the file where it is. (`sources/NVMAICLICore`'s
             // `exclude: ["Command"]` is the same mechanism.)
-            exclude: ["README.md"]
+            exclude: ["README.md"],
+            swiftSettings: nvmaiLanguageStandard
         ),
         // Worked examples and a scale check for ContinuityCore. Not part of
         // the server; it exists so the package's claims can be run.
         .executableTarget(
             name: "ContinuityDemo",
             dependencies: ["ContinuityCore"],
-            path: "sources/ContinuityDemo"
+            path: "sources/ContinuityDemo",
+            swiftSettings: nvmaiLanguageStandard
         ),
         // Agent memory: the model-facing surface (keys, tools, prompt
         // fragment, journal filter) over ContinuityCore. Depends on nothing
@@ -120,14 +147,16 @@ let package = Package(
         .target(
             name: "NVMAIMemory",
             dependencies: ["ContinuityCore"],
-            path: "sources/NVMAIMemory"
+            path: "sources/NVMAIMemory",
+            swiftSettings: nvmaiLanguageStandard
         ),
         // See and correct what the server remembers: list, show, delete.
         // Reads take no lock; writes need the workspace.
         .executableTarget(
             name: "NVMAIMemoryTool",
             dependencies: ["NVMAIMemory", "ContinuityCore"],
-            path: "sources/NVMAIMemoryTool"
+            path: "sources/NVMAIMemoryTool",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAIServerCore",
@@ -138,17 +167,20 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "sources/NVMAIServer/Core"
+            path: "sources/NVMAIServer/Core",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .executableTarget(
             name: "NVMAIServer",
             dependencies: ["NVMAIServerCore"],
-            path: "sources/NVMAIServer/Command"
+            path: "sources/NVMAIServer/Command",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .executableTarget(
             name: "NVMAIBench",
             dependencies: ["NVMAI"],
-            path: "sources/NVMAIBench"
+            path: "sources/NVMAIBench",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .executableTarget(
             name: "NVMAIMac",
@@ -156,12 +188,14 @@ let package = Package(
             path: "sources/NVMAIApp/Mac",
             resources: [
                 .copy("Resources/nvmai-app-icon.png"),
-            ]
+            ],
+            swiftSettings: nvmaiLanguageStandard
         ),
         .target(
             name: "NVMAIValidationSupport",
             dependencies: ["NVMAI"],
-            path: "sources/NVMAIValidation/Support"
+            path: "sources/NVMAIValidation/Support",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "NVMAITests",
@@ -169,7 +203,8 @@ let package = Package(
             path: "tests/NVMAI",
             resources: [.copy("Tokenization/Fixtures"),
                         .copy("Runtime/qwen38_tensor_names.txt"),
-                        .copy("Runtime/ple_golden.json")]
+                        .copy("Runtime/ple_golden.json")],
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "NVMAIRepackTests",
@@ -177,32 +212,38 @@ let package = Package(
             // tests assert on those types rather than on JSON dictionaries.
             dependencies: ["NVMAIRepackCore", "NVMAIFormat"],
             path: "tests/NVMAIRepack/Core",
-            resources: [.copy("Support/qwen38_tensor_names.txt")]
+            resources: [.copy("Support/qwen38_tensor_names.txt")],
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "NVMAIAppCoreTests",
             dependencies: ["NVMAIAppCore", "NVMAI", "NVMAIRepackCore", "NVMAIDecodeProtocol"],
-            path: "tests/NVMAIApp/Core"
+            path: "tests/NVMAIApp/Core",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "NVMAIDecodeServiceTests",
             dependencies: ["NVMAIDecodeService", "NVMAIAppCore", "NVMAIDecodeProtocol"],
-            path: "tests/NVMAIDecodeService"
+            path: "tests/NVMAIDecodeService",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "NVMAIMacPresentationTests",
             dependencies: ["NVMAIAppCore", "NVMAIMacPresentation"],
-            path: "tests/NVMAIApp/MacPresentation"
+            path: "tests/NVMAIApp/MacPresentation",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "ContinuityCoreTests",
             dependencies: ["ContinuityCore"],
-            path: "tests/ContinuityCore"
+            path: "tests/ContinuityCore",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "NVMAIMemoryTests",
             dependencies: ["NVMAIMemory", "ContinuityCore"],
-            path: "tests/NVMAIMemory"
+            path: "tests/NVMAIMemory",
+            swiftSettings: nvmaiLanguageStandard
         ),
         .testTarget(
             name: "NVMAIServerTests",
@@ -216,7 +257,8 @@ let package = Package(
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             path: "tests/NVMAIServer",
-            resources: [.copy("Fixtures")]
+            resources: [.copy("Fixtures")],
+            swiftSettings: nvmaiLanguageStandard
         ),
     ],
     swiftLanguageModes: [.v6]

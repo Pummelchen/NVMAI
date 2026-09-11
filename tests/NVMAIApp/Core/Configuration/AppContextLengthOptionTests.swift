@@ -1,4 +1,6 @@
+import NVMAI
 import Testing
+
 @testable import NVMAIAppCore
 
 @Suite struct AppContextLengthOptionTests {

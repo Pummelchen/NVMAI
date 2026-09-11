@@ -1,5 +1,7 @@
 import Foundation
 import Testing
+import Tokenizers
+
 @testable import NVMAI
 
 /// ChatML (Qwen) tokenizer coverage against the synthetic fixture: the same

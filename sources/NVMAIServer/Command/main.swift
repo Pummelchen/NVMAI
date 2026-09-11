@@ -1,5 +1,9 @@
 import Darwin
 import Foundation
+// `MemberImportVisibility`: `ServerArguments` exposes `ModelFamily` (an NVMAI
+// type) and its `rawValue`, so this file names that module directly rather than
+// relying on NVMAIServerCore re-exporting it.
+import NVMAI
 import NVMAIMemory
 import NVMAIServerCore
 
