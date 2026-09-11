@@ -7,8 +7,18 @@ public actor ServerTerminationSignals {
     private let stream: AsyncStream<Int32>
     private let continuation: AsyncStream<Int32>.Continuation
     private let sources: [any DispatchSourceSignal]
+    /// How a second signal during shutdown ends the process.
+    ///
+    /// `exit(1)` in production. It is injectable because an unconditional exit
+    /// is untestable in-process: the suite that exercises the second-signal path
+    /// killed its own test run, and because the delivery is asynchronous it did
+    /// so *after* the test returned -- aborting whichever suite ran next, with no
+    /// summary and no crash report. That is the intermittent full-suite abort
+    /// this register carried as unexplained.
+    private let forceExit: @Sendable () -> Void
 
-    public init(_ signals: [Int32] = [SIGINT, SIGTERM]) {
+    public init(_ signals: [Int32] = [SIGINT, SIGTERM],
+                forceExit: @escaping @Sendable () -> Void = { exit(1) }) {
         var capturedContinuation: AsyncStream<Int32>.Continuation?
         let stream = AsyncStream<Int32>(bufferingPolicy: .bufferingOldest(1)) {
             capturedContinuation = $0
@@ -18,9 +28,11 @@ public actor ServerTerminationSignals {
 
         self.stream = stream
         self.continuation = continuation
+        self.forceExit = forceExit
         self.sources = signals.map {
             Darwin.signal($0, SIG_IGN)
-            return Self.makeSource(signal: $0, continuation: continuation, state: shared)
+            return Self.makeSource(signal: $0, continuation: continuation, state: shared,
+                                   forceExit: forceExit)
         }
         for source in sources {
             source.resume()
@@ -44,15 +56,17 @@ public actor ServerTerminationSignals {
     private nonisolated static func makeSource(
         signal: Int32,
         continuation: AsyncStream<Int32>.Continuation,
-        state: SignalState
+        state: SignalState,
+        forceExit: @escaping @Sendable () -> Void
     ) -> any DispatchSourceSignal {
         let source = DispatchSource.makeSignalSource(signal: signal, queue: .global())
-        source.setEventHandler { @Sendable [continuation, state] in
+        source.setEventHandler { @Sendable [continuation, state, forceExit] in
             if state.record() {
                 // S33: the first signal begins a graceful shutdown; a second
                 // one during shutdown forces immediate exit instead of being
-                // silently dropped.
-                exit(1)
+                // silently dropped. Injected so the behaviour can be asserted
+                // without ending the process running the assertion.
+                forceExit()
             } else {
                 continuation.yield(signal)
             }

@@ -52,6 +52,14 @@ public struct StreamLayout: Sendable {
         self.expertOffsets = expertOffsets
     }
 
+    /// The byte offset of one expert within this layer's file.
+    ///
+    /// Unchecked on purpose, and safe only because the type's contract is
+    /// validated where the layout is built: `perLayer` must be representable
+    /// (`expertStride * expertsPerLayer`, checked in `Model` before the
+    /// `StreamLayout` is formed) and `layer`/`expert` must be within the model's
+    /// and the layout's bounds. Checking here would put a reporting multiply on
+    /// every expert read, which is the whole decode path.
     @inline(always)
     public func expertOffset(layer: Int, expert: Int) -> UInt64 {
         if layer == 0, let expertOffsets, expert >= 0, expert < expertOffsets.count {

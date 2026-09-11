@@ -620,8 +620,20 @@ public struct Model {
             }
             streamersBox.layerVerified[L] = true
         }
-        let streamSize = UInt64(packedExpertsLayout.expertsPerLayer)
-            * packedExpertsLayout.expertStride
+        // Checked at the one place this product is formed. `StreamLayout.
+        // expertOffset` multiplies `perLayer` again on every expert read
+        // (`@inline(always)`, recomputed per call, on the decode path), so the
+        // product is validated here rather than there -- a wrapped one would make
+        // `streamSize` small, pass the streamer's own file-size check, and leave
+        // every derived offset pointing outside the layer file.
+        let (streamSize, streamSizeOverflow) = UInt64(packedExpertsLayout.expertsPerLayer)
+            .multipliedReportingOverflow(by: packedExpertsLayout.expertStride)
+        guard !streamSizeOverflow else {
+            throw ModelError.internalInconsistency(
+                detail: "packed expert layer \(L) declares \(packedExpertsLayout.expertsPerLayer) "
+                    + "experts of \(packedExpertsLayout.expertStride) bytes, which overflows "
+                    + "the stream size")
+        }
         let layout = StreamLayout(
             path: url.path,
             streamOffset: 0,
