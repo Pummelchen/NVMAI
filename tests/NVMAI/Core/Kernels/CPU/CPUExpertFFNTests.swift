@@ -150,4 +150,20 @@ import NVMAIValidationSupport
             #expect(abs(once[i] - twice[i]) <= 1e-4 * max(scale, 1))
         }
     }
+
+    /// The layout's weight regions follow the declared width. Before it took one,
+    /// the divisors were a `/ 2` with a `// 4-bit` comment beside them: an 8-bit
+    /// caller would have got a block half the size it needed and offsets that
+    /// still looked plausible, which is the class of bug this file exists over.
+    @Test func theLayoutFollowsTheDeclaredWeightWidth() {
+        let four = CPUExpertFFN.Offsets(d: 2048, f: 512)
+        let eight = CPUExpertFFN.Offsets(d: 2048, f: 512, weightBits: 8)
+
+        // The packed weight regions double; the BF16 scales and biases do not.
+        #expect(eight.gateScales - eight.gate == (four.gateScales - four.gate) * 2)
+        #expect(eight.gateBiases - eight.gateScales == four.gateBiases - four.gateScales)
+        #expect(eight.strideBytes > four.strideBytes)
+        // The default is still 4-bit, so existing callers describe what they did.
+        #expect(CPUExpertFFN.Offsets(d: 64, f: 64) == CPUExpertFFN.Offsets(d: 64, f: 64, weightBits: 4))
+    }
 }

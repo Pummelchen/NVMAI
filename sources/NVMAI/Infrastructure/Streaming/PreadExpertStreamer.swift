@@ -1504,6 +1504,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 count - filled,
                 off_t(fileOffset) + off_t(filled))
             if readCount < 0 {
+                // A signal interrupted the read: nothing was transferred, and
+                // the call has to be retried. Every other read loop in this
+                // module and in the model-IO layer does that; treating it as a
+                // failure turned a delivered signal into a streamer error, and
+                // the callers cannot tell the two apart.
+                if errno == EINTR { continue }
                 throw StreamerError.preadFailed(errno: errno)
             }
             if readCount == 0 {

@@ -39,12 +39,19 @@ public enum CPUExpertFFN {
         /// - Parameters:
         ///   - d: hidden size (gate/up input, down output)
         ///   - f: MoE intermediate size (gate/up output, down input)
-        public init(d: Int, f: Int) {
+        ///   - weightBits: width the packed weights use. The divisors below are
+        ///     what encode it, so it is a parameter rather than a comment: a
+        ///     caller laying out 8-bit weights with the old `/ 2` would get a
+        ///     block half the size it needs, and every offset after the first
+        ///     wrong, with the shapes still plausible.
+        public init(d: Int, f: Int, weightBits: Int = 4) {
+            precondition([4, 8].contains(weightBits),
+                         "expert layout supports 4- and 8-bit weights, not \(weightBits)")
             precondition(d % groupSize == 0 && f % groupSize == 0,
                          "d=\(d) and f=\(f) must be multiples of \(groupSize)")
-            let gateWeights = f * d / 2          // 4-bit
+            let gateWeights = f * d * weightBits / 8
             let gateMeta = f * (d / groupSize) * 2 // BF16
-            let downWeights = d * f / 2
+            let downWeights = d * f * weightBits / 8
             let downMeta = d * (f / groupSize) * 2
             gate = 0
             gateScales = gate + gateWeights
