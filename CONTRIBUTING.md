@@ -61,7 +61,9 @@ under the repository's [Apache License 2.0](LICENSE).
 ## Releasing (maintainers)
 
 Every release is a tag *and* a published GitHub Release with prebuilt binaries.
-`tools/release.sh` does the whole sequence — 3.6 is the reference shape.
+`tools/release.sh` does the whole sequence — 3.6 is the reference shape. The full
+runbook, including the preconditions that stall it and what each failure message
+actually means, is [`docs/release-process.md`](docs/release-process.md).
 
 ```bash
 # 1. update the README callout ("New in X.Y", replacing the previous one)

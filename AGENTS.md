@@ -85,6 +85,11 @@ For performance results, build release once and follow the [community benchmark 
 
 Launch helpers live in `benchmark/`. Start the server before running any benchmark script.
 
+Cutting a release is a runbook, not improvisation: `docs/release-process.md`
+holds the order (notes, README callout, version, tag, dry run, publish), the
+machine preconditions, and what `release.sh`'s failure messages actually mean —
+including a golden gate that reports a *refused* start as a "mismatch".
+
 Do not download a full checkpoint, duplicate the `.gturbo` model, create a worktree, or purge caches just to run tests.
 
 Report the commit, hardware and RAM, macOS, Swift version, exact command, exit code, complete timing footer or error, and every protocol deviation. Treat results as measurements, not performance ceilings.
