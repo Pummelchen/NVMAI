@@ -987,22 +987,15 @@ extension Model {
     /// `validateRuntimeSchema` refuses it rather than letting the kernel do it.
     static let maximumThreadgroupTileWidth = 2816
 
-    static func validateRuntimeSchema(residentIndex: ResidentIndex,
-                                      layout: PackedExpertsLayout,
-                                      manifest: Manifest,
-                                      config: ArchConfig) throws {
-        guard let quant = manifest.quant else {
-            throw ModelError.indexCorrupt(
-                detail: "manifest.quant is required by the executable runtime schema")
-        }
-        // The MoE and GDN kernels stage activations into fixed threadgroup tiles
-        // of 2816 elements (`kMoEXMaxD` in moe.metal, `xt[2816]` in gdn.metal),
-        // and their staging loops are bounded by the configured hidden size. A
-        // model wider than that writes past the tile into whatever shares the
-        // threadgroup's memory -- undefined behaviour rather than a caught
-        // error, and reachable only by a config that has never shipped (every
-        // preset here is 2048, 2560 or 2816). This is the guard for the next
-        // family, and it is what lets the tile stay a compile-time constant.
+    /// Refuses model geometry the compiled kernels cannot serve.
+    ///
+    /// Split out of `validateRuntimeSchema` to keep it inside the project's
+    /// function-length gate. Both checks are about the *shape* of the model
+    /// rather than its tensors, and both exist because the failure they prevent
+    /// is silent: the kernels index threadgroup memory and pick attention
+    /// geometry from these values, so a shape they were not compiled for does not
+    /// fail, it produces wrong numbers.
+    static func validateExecutableGeometry(_ config: ArchConfig) throws {
         // A sliding-window layer (mask 0) is a valid `ArchConfig` value and the
         // CPU engine implements it, but the GPU path does not: the gated
         // attention branch runs every non-linear layer as *full* attention with
@@ -1024,6 +1017,26 @@ extension Model {
                     + "\(Self.maximumThreadgroupTileWidth)-element threadgroup tiles "
                     + "the MoE and GDN kernels are compiled with")
         }
+
+    }
+
+    static func validateRuntimeSchema(residentIndex: ResidentIndex,
+                                      layout: PackedExpertsLayout,
+                                      manifest: Manifest,
+                                      config: ArchConfig) throws {
+        guard let quant = manifest.quant else {
+            throw ModelError.indexCorrupt(
+                detail: "manifest.quant is required by the executable runtime schema")
+        }
+        // The MoE and GDN kernels stage activations into fixed threadgroup tiles
+        // of 2816 elements (`kMoEXMaxD` in moe.metal, `xt[2816]` in gdn.metal),
+        // and their staging loops are bounded by the configured hidden size. A
+        // model wider than that writes past the tile into whatever shares the
+        // threadgroup's memory -- undefined behaviour rather than a caught
+        // error, and reachable only by a config that has never shipped (every
+        // preset here is 2048, 2560 or 2816). This is the guard for the next
+        // family, and it is what lets the tile stay a compile-time constant.
+        try Self.validateExecutableGeometry(config)
 
         let checks = RuntimeSchemaChecks(residentIndex: residentIndex, quant: quant)
 
