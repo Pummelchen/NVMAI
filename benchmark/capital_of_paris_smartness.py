@@ -7,7 +7,7 @@ already resident is measured back to back, and the row says which it was, so a
 cold load can be told apart from the steady state. One JSON object per run is
 appended to $RESULTS as it goes, so progress is visible while it works.
 
-The run behind `capital_of_paris_smartness.md`:
+The run behind the wiki's `Capital-of-Paris-Smartness` page:
 
     .build/release/NVMAIServer --models-dir models \
         --model qwen3.5-2b_4-Bit --port 8091 --reasoning off

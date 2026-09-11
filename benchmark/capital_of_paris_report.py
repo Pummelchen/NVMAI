@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Turn the smartness matrix's raw rows into its markdown report.
+"""Turn the smartness matrix's raw rows into its wiki page.
 
     python3 benchmark/capital_of_paris_report.py results.jsonl > \
-        benchmark/capital_of_paris_smartness.md
+        .qwen/wiki/Capital-of-Paris-Smartness.md
+
+The page is wiki content, not a repository document: it is a measurement
+report, and the repository keeps the tooling that produces it (this script and
+`capital_of_paris_smartness.py`) plus the gitignored raw rows.
 
 Reads the JSONL that `capital_of_paris_smartness.py` writes: one object per
 (model, prompt, repeat). Groups by (label, quant, engine, prompt), reports the
@@ -144,16 +148,18 @@ def main():
     models = len({(r["label"], r["quant"], r["engine"]) for r in rows})
     ok = sum(1 for r in rows if r["status"] == "ok")
 
+    print('<img src="assets/wordmark.svg" alt="NVMAI" height="34">\n')
     print("# \"Capital of Paris\" on every served model and engine\n")
     print("A fixed, deliberately ambiguous prompt -- *\"Capital of Paris\"* -- sent to")
     print(f"every model the local server serves, on every engine it serves it on, plus a")
     print("plain control question, with **thinking off**. The tables are generated from")
     print("the raw rows by `benchmark/capital_of_paris_report.py`; the harness that")
-    print("produced them is `benchmark/capital_of_paris_smartness.py`, and the rows")
-    print("themselves are in the gitignored")
+    print("produced them is `benchmark/capital_of_paris_smartness.py`, both in the")
+    print("[NVMAI repository](https://github.com/Pummelchen/NVMAI). The rows")
+    print("themselves are gitignored, under")
     print("`benchmark/benchmark-results/capital-of-paris-20260911T1935/` "
           "(`results-v2-3x2.jsonl`")
-    print("for this report, `results.jsonl` for the single-pass first one).\n")
+    print("for this page, `results.jsonl` for the single-pass first run).\n")
 
     print("## Protocol\n")
     print(f"- Commit `{COMMIT}`; `{DEVICE}`.")
