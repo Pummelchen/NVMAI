@@ -12,6 +12,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var version: Int = currentVersion
     var contextTokens: Int = AppContextLengthOption.fourK.tokens
     var expertCacheSlots: Int = AppRuntimeOptions.automaticSlotCount
+    var expertCachePolicy: String = AppExpertCachePolicy.lfu.rawValue
     var samplingFollowsModel: Bool = true
     var temperature: Double = 0.6
     var topKEnabled: Bool = true
@@ -19,17 +20,21 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var topPEnabled: Bool = true
     var topP: Double = 0.95
     var prefillEnabled: Bool = true
+    var prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens
     var newlineShortcut: AppNewlineShortcut = .return
     var showPromptExamples: Bool = true
     var conciseMode: Bool = false
     var thinkingMode: String = "off"
     var kvCacheBits: Int = 8
     var ropeScalingMode: String = "none"
+    var rdadvisePolicy: String = AppRDAdvicePolicy.default.rawValue
+    var modelVerification: String = AppModelVerification.fullSha256.rawValue
 
     private enum CodingKeys: String, CodingKey {
         case version
         case contextTokens
         case expertCacheSlots
+        case expertCachePolicy
         case samplingFollowsModel
         case temperature
         case topKEnabled
@@ -37,17 +42,21 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case topPEnabled
         case topP
         case prefillEnabled
+        case prefillChunkTokens
         case newlineShortcut
         case showPromptExamples
         case conciseMode
         case thinkingMode
         case kvCacheBits
         case ropeScalingMode
+        case rdadvisePolicy
+        case modelVerification
     }
 
     init(version: Int = currentVersion,
          contextTokens: Int = AppContextLengthOption.fourK.tokens,
          expertCacheSlots: Int = AppRuntimeOptions.automaticSlotCount,
+         expertCachePolicy: String = AppExpertCachePolicy.lfu.rawValue,
          // nil: follow the model unless the sampling given here is already
          // a choice of its own (anything but the house values).
          samplingFollowsModel: Bool? = nil,
@@ -57,15 +66,19 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          topPEnabled: Bool = true,
          topP: Double = 0.95,
          prefillEnabled: Bool = true,
+         prefillChunkTokens: Int = RuntimeConfiguration.qwenLongPrefillChunkTokens,
          newlineShortcut: AppNewlineShortcut = .return,
          showPromptExamples: Bool = true,
          conciseMode: Bool = false,
          thinkingMode: String = "off",
          kvCacheBits: Int = 8,
-         ropeScalingMode: String = "none") {
+         ropeScalingMode: String = "none",
+         rdadvisePolicy: String = AppRDAdvicePolicy.default.rawValue,
+         modelVerification: String = AppModelVerification.fullSha256.rawValue) {
         self.version = version
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
+        self.expertCachePolicy = expertCachePolicy
         self.samplingFollowsModel = samplingFollowsModel
             ?? Self.isHouseSampling(temperature: temperature, topKEnabled: topKEnabled, topK: topK,
                                     topPEnabled: topPEnabled, topP: topP)
@@ -75,12 +88,15 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.topPEnabled = topPEnabled
         self.topP = topP
         self.prefillEnabled = prefillEnabled
+        self.prefillChunkTokens = prefillChunkTokens
         self.newlineShortcut = newlineShortcut
         self.showPromptExamples = showPromptExamples
         self.conciseMode = conciseMode
         self.thinkingMode = thinkingMode
         self.kvCacheBits = kvCacheBits
         self.ropeScalingMode = ropeScalingMode
+        self.rdadvisePolicy = rdadvisePolicy
+        self.modelVerification = modelVerification
     }
 
     init(from decoder: Decoder) throws {
@@ -88,6 +104,12 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         let fileVersion = try container.decode(Int.self, forKey: .version)
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
+        // Additive in version 2: a file written before these existed keeps its
+        // version and simply takes the defaults, so no migration and no version
+        // bump is needed for either direction.
+        expertCachePolicy = try container.decodeIfPresent(
+            String.self, forKey: .expertCachePolicy)
+            ?? AppExpertCachePolicy.lfu.rawValue
         temperature = try container.decode(Double.self, forKey: .temperature)
         topKEnabled = try container.decode(Bool.self, forKey: .topKEnabled)
         topK = try container.decode(Int.self, forKey: .topK)
@@ -102,6 +124,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         }
         version = fileVersion < 2 ? Self.currentVersion : fileVersion
         prefillEnabled = try container.decode(Bool.self, forKey: .prefillEnabled)
+        prefillChunkTokens = try container.decodeIfPresent(
+            Int.self, forKey: .prefillChunkTokens)
+            ?? RuntimeConfiguration.qwenLongPrefillChunkTokens
         newlineShortcut = try container.decodeIfPresent(
             AppNewlineShortcut.self,
             forKey: .newlineShortcut) ?? .return
@@ -117,6 +142,11 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         kvCacheBits = try container.decodeIfPresent(Int.self, forKey: .kvCacheBits) ?? 8
         ropeScalingMode = try container.decodeIfPresent(
             String.self, forKey: .ropeScalingMode) ?? "none"
+        rdadvisePolicy = try container.decodeIfPresent(
+            String.self, forKey: .rdadvisePolicy) ?? AppRDAdvicePolicy.default.rawValue
+        modelVerification = try container.decodeIfPresent(
+            String.self, forKey: .modelVerification)
+            ?? AppModelVerification.fullSha256.rawValue
     }
 
     /// The pre-profile defaults every settings file used to start from.
@@ -140,6 +170,10 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)
+            && AppExpertCachePolicy(rawValue: expertCachePolicy) != nil
+            && RuntimeConfiguration.allowedPrefillChunkTokens.contains(prefillChunkTokens)
+            && AppRDAdvicePolicy(rawValue: rdadvisePolicy) != nil
+            && AppModelVerification(rawValue: modelVerification) != nil
     }
 }
 

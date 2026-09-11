@@ -180,6 +180,59 @@ import Testing
         #expect(AppNewlineShortcut.return.sendMessageLabel == "Command-Return")
     }
 
+    /// The Inspector exposes these four and the settings file persisted none of
+    /// them, so a model switch or a relaunch silently reset them to defaults
+    /// while the control still showed whatever the user had just chosen.
+    @Test func theInspectorOptionsSurviveARoundTrip() throws {
+        let initial = MacAppSettings(
+            expertCachePolicy: AppExpertCachePolicy.lru.rawValue,
+            prefillChunkTokens: 64,
+            rdadvisePolicy: AppRDAdvicePolicy.bounded.rawValue,
+            modelVerification: AppModelVerification.trustedInstall.rawValue)
+        #expect(initial.isValid())
+
+        let decoded = try JSONDecoder().decode(
+            MacAppSettings.self,
+            from: JSONEncoder().encode(initial))
+
+        #expect(decoded == initial)
+        #expect(decoded.expertCachePolicy == "lru")
+        #expect(decoded.prefillChunkTokens == 64)
+        #expect(decoded.rdadvisePolicy == "bounded")
+        #expect(decoded.modelVerification == "trusted-install")
+    }
+
+    /// Adding fields must not invalidate a file written before they existed:
+    /// they decode to their defaults, the version stays what it was, and
+    /// `isValid` still accepts it. That is why this needed no version bump --
+    /// and a bump without a migration would have made every existing file
+    /// invalid and silently reset every setting.
+    @Test func aFileWithoutTheInspectorOptionsTakesTheDefaults() throws {
+        let encoded = try JSONEncoder().encode(MacAppSettings())
+        var object = try #require(
+            try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        for key in ["expertCachePolicy", "prefillChunkTokens",
+                    "rdadvisePolicy", "modelVerification"] {
+            object.removeValue(forKey: key)
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(MacAppSettings.self, from: data)
+
+        #expect(decoded == MacAppSettings())
+        #expect(decoded.isValid())
+    }
+
+    /// A hand-edited or stale file must not put an unrepresentable value into
+    /// the runtime options; the store treats an invalid file as one to keep and
+    /// not to trust.
+    @Test func invalidInspectorOptionsAreRejected() {
+        #expect(!MacAppSettings(prefillChunkTokens: 96).isValid())
+        #expect(!MacAppSettings(expertCachePolicy: "nope").isValid())
+        #expect(!MacAppSettings(rdadvisePolicy: "nope").isValid())
+        #expect(!MacAppSettings(modelVerification: "nope").isValid())
+    }
+
     @Test(arguments: [true, false])
     func showPromptExamplesRoundTrips(_ show: Bool) throws {
         let initial = MacAppSettings(showPromptExamples: show)

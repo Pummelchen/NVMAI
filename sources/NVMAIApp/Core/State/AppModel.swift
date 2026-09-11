@@ -90,7 +90,14 @@ public final class AppModel {
         self.modelPathText = directory.path
         self.runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
+            expertCachePolicy: AppExpertCachePolicy(
+                rawValue: settings.expertCachePolicy) ?? .lfu,
             prefillEnabled: settings.prefillEnabled,
+            prefillChunkTokens: settings.prefillChunkTokens,
+            rdadvisePolicy: AppRDAdvicePolicy(
+                rawValue: settings.rdadvisePolicy) ?? .default,
+            modelVerification: AppModelVerification(
+                rawValue: settings.modelVerification) ?? .fullSha256,
             conciseMode: settings.conciseMode,
             thinkingMode: ModelThinkingMode(rawValue: settings.thinkingMode) ?? .off,
             kvCachePrecision: KVCachePrecision(rawValue: settings.kvCacheBits) ?? .int8,
@@ -740,7 +747,14 @@ public final class AppModel {
             forModelDirectory: modelDirectory)
         runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
+            expertCachePolicy: AppExpertCachePolicy(
+                rawValue: settings.expertCachePolicy) ?? .lfu,
             prefillEnabled: settings.prefillEnabled,
+            prefillChunkTokens: settings.prefillChunkTokens,
+            rdadvisePolicy: AppRDAdvicePolicy(
+                rawValue: settings.rdadvisePolicy) ?? .default,
+            modelVerification: AppModelVerification(
+                rawValue: settings.modelVerification) ?? .fullSha256,
             conciseMode: settings.conciseMode,
             thinkingMode: ModelThinkingMode(rawValue: settings.thinkingMode) ?? .off,
             kvCachePrecision: KVCachePrecision(rawValue: settings.kvCacheBits) ?? .int8,
@@ -765,6 +779,7 @@ public final class AppModel {
         let settings = MacAppSettings(
             contextTokens: maxContextTokens,
             expertCacheSlots: runtimeOptions.expertCacheSlots,
+            expertCachePolicy: runtimeOptions.expertCachePolicy.rawValue,
             samplingFollowsModel: samplingFollowsModel,
             temperature: temperature,
             topKEnabled: topKEnabled,
@@ -772,12 +787,15 @@ public final class AppModel {
             topPEnabled: topPEnabled,
             topP: topP,
             prefillEnabled: runtimeOptions.prefillEnabled,
+            prefillChunkTokens: runtimeOptions.prefillChunkTokens,
             newlineShortcut: newlineShortcut,
             showPromptExamples: showPromptExamples,
             conciseMode: runtimeOptions.conciseMode,
             thinkingMode: runtimeOptions.thinkingMode.rawValue,
             kvCacheBits: runtimeOptions.kvCachePrecision.rawValue,
-            ropeScalingMode: runtimeOptions.ropeScalingMode.rawValue)
+            ropeScalingMode: runtimeOptions.ropeScalingMode.rawValue,
+            rdadvisePolicy: runtimeOptions.rdadvisePolicy.rawValue,
+            modelVerification: runtimeOptions.modelVerification.rawValue)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
         do {
             try MacAppSettingsFileStore.save(

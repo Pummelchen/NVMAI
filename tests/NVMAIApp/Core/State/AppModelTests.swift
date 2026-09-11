@@ -413,6 +413,43 @@ struct MovedModelRecoveryTests {
                 "re-attestation must be confirmed by re-probing, not assumed")
     }
 
+    /// The Inspector binds these four straight to `runtimeOptions`, and the
+    /// settings file carried none of them: persisting looked like it worked
+    /// (the file was rewritten) while the values reverted on the next launch or
+    /// model switch. This drives the whole chain -- mutate, persist through a
+    /// public trigger, reload into a fresh model -- rather than the settings
+    /// struct alone, because that is where the gap was.
+    @MainActor
+    @Test func inspectorOptionsSurviveAReload() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppModelSettings-\(UUID().uuidString)", isDirectory: true)
+        let modelDirectory = root.appendingPathComponent("model", isDirectory: true)
+        try FileManager.default.createDirectory(at: modelDirectory,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let model = AppModel(modelDirectory: modelDirectory,
+                             client: MockLifecycleInferenceClient(),
+                             settingsPersistenceEnabled: true)
+        model.runtimeOptions.expertCachePolicy = .lru
+        model.runtimeOptions.prefillChunkTokens = 64
+        model.runtimeOptions.rdadvisePolicy = .bounded
+        model.runtimeOptions.modelVerification = .trustedInstall
+        // Any public setting change writes the file; this one is unrelated to
+        // the four above on purpose.
+        model.setNewlineShortcut(.shiftReturn)
+
+        let reloaded = AppModel(modelDirectory: modelDirectory,
+                                client: MockLifecycleInferenceClient(),
+                                settingsPersistenceEnabled: true)
+        #expect(reloaded.newlineShortcut == .shiftReturn,
+                "the settings file was not written at all")
+        #expect(reloaded.runtimeOptions.expertCachePolicy == .lru)
+        #expect(reloaded.runtimeOptions.prefillChunkTokens == 64)
+        #expect(reloaded.runtimeOptions.rdadvisePolicy == .bounded)
+        #expect(reloaded.runtimeOptions.modelVerification == .trustedInstall)
+    }
+
     private func waitUntilTrue(
         _ predicate: @MainActor () -> Bool,
         timeout: Duration = .seconds(5)
