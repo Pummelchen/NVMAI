@@ -1,8 +1,15 @@
 # Plan: the dense Qwen 3.5 models on the GPU engine
 
-**Status: not implemented. The three dense models are CPU-only today, by
-refusal rather than by design.** This document is the design and the step
-plan; it is updated as steps land.
+**Status: implemented and verified. The three dense models (2B/4B/9B, 4- and
+8-bit) run on the GPU engine, and the engine is a per-launch and per-request
+choice** (`<id>@cpu` / `<id>@gpu`, alongside the bare id, which is the GPU
+default). All six installs produce the numpy reference's own three
+continuations; both golden baselines are byte-identical; and the opt-in
+equivalence test (`NVMAI_DENSE_GPU_EQUIV=1`) checks the GPU against the oracle's
+continuations with teeth -- reverting the width fix makes it emit garbage. What
+follows is the design as written before the work, kept because it is the record
+of what the port had to solve; the checklist says what landed, and the last
+section what it actually cost.
 
 Motivation: the three dense models — Qwen 3.5 **2B / 4B / 9B** at 4 and 8 bits
 — should be runnable on **either** engine, chosen per launch and per request,
@@ -177,7 +184,7 @@ install and the loader:
       skipped when there are no experts. Build, lint and the suite are green
       (1458 tests). Execution still refuses, so nothing can produce wrong
       output.
-- [~] **S1b — architecture resolution.** *Partly landed.* The resolver exists
+- [x] **S1b — architecture resolution.** The resolver exists
       (`ArchConfig.resolved(forFamily:directoryURL:)` + `ArchConfig.from(manifest:family:)`)
       and the CLI and server use it, so the family refusal is gone and the dense
       install resolves its geometry -- and the layer conventions, which the
@@ -202,18 +209,55 @@ install and the loader:
       Until this lands, `Model.load` is not reached for a dense install and the
       S1a validation is not yet exercised by a load — which is why S1a is
       committed as a checkpoint rather than as a finished step.
-- [ ] **S2 — decode FFN.** Dense stage in `+Decode` (skip the routed half when
+- [x] **S2 — decode FFN.** Dense stage in `+Decode` (skip the routed half when
       `numExperts == 0`), logits compared against the CPU engine on the real
       2B install.
-- [ ] **S3 — prefill FFN.** The same in `+Prefill`, so prompts are processed on
+- [x] **S3 — prefill FFN.** The same in `+Prefill`, so prompts are processed on
       the GPU too.
-- [ ] **S4 — enable.** Remove the refusal and the forced CPU routing; catalog
+- [x] **S4 — enable.** Remove the refusal and the forced CPU routing; catalog
       lists per engine; `ModelProfile` row; the launcher's engine question and
       `--engine`.
-- [ ] **S5 — per request.** `<id>@cpu` / `<id>@gpu` routing and per-engine
+- [x] **S5 — per request.** `<id>@cpu` / `<id>@gpu` routing and per-engine
       residency.
-- [ ] **S6 — verify and record.** Oracle continuations on the GPU, both golden
+- [x] **S6 — verify and record.** Oracle continuations on the GPU, both golden
       baselines, the register and the tracker.
 
 S1–S3 are the feature; S4–S5 are the interface the request asks for. Nothing
 user-visible changes until S4, and S4 does not happen until S2's numbers match.
+
+## What the port actually cost
+
+The design was right about the shape and wrong about the size: the feed-forward
+stage was the *small* part. What made the family run was a set of assumptions
+along the load and dispatch path that had never been exercised without a routed
+mixture, each now a finding in the register (C85-C89):
+
+- **Per-tensor widths were only half-honoured.** Validation resolved them; the
+  runner did not. `k_proj`/`v_proj` were read through the attention slot's 4-bit
+  kernel while the install stores them at 8, which is a plausible-looking wrong
+  attention output rather than an error. Fixed by resolving widths *by role*
+  (the manifest's override keys are tensor stems, and the first layer of a dense
+  model is a Gated-DeltaNet layer with no `k_proj` at all -- asking layer 0 is
+  how the lookup missed) and by building one affine dispatcher per width the
+  model's roles need.
+- **Checkpoints keep some small tensors in fp32.** `A_log` and the gated norm
+  are fp32 in these installs while `gdn.metal` reads `bfloat`, so the runtime
+  promotes them once at load -- the same rounding the MoE installs already ship.
+- **Four MoE-shaped load assumptions refused a zero-expert install**: the
+  manifest required `packed_experts/layer_NN.bin` for every layer, the layout
+  validator required `expertsPerLayer > 0`, its cross-check demanded a size for
+  files the repacker never wrote, and the trusted-install receipt wanted the
+  same files.
+- **Two config-derived traps**: `MoE`'s `(1...16)` precondition and the prefetch
+  ring's `(1...topKExperts)` guard both assumed a mixture and trapped the
+  runner's construction for a model with none.
+- **The Gated-DeltaNet staging tile** covered 2816 elements and the 9B is 4096
+  wide. The tile is named now (`kGDNActivationMaxD`) and the geometry guard is
+  family-aware: a dense model never dispatches the MoE kernels, so only the GDN
+  tile bounds it.
+- **One bug of my own, worth recording as a hazard.** The dense prefill branch
+  did not commit the command buffer carrying the layer's attention work, so that
+  work never ran: the buffers stayed zero, the stack produced a zero hidden
+  state, and the model emitted fluent nonsense. The activation-dump comparison
+  found it in one run, and it is why the port's rule is that the refusal is
+  lifted only after the numbers match.
