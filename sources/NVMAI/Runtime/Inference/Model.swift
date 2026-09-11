@@ -1029,6 +1029,26 @@ extension Model {
                     + "\(Self.maximumThreadgroupTileWidth)-element threadgroup tiles "
                     + "the MoE and GDN kernels are compiled with")
         }
+        // The attention kernels size their scratch from two compile-time
+        // ceilings: `Attention.maxQHeads` (the host-side split-KV reduction
+        // buffer) and `kAttnMaxHeadDim` in `attention.metal`, which declares
+        // `q_smem` and the per-thread row from it. Nothing bounded the config
+        // against either. A manifest with more query heads than the ceiling
+        // reaches `Attention.encode`'s own precondition and **traps** -- an abort
+        // on install-derived data -- and a head dimension above the kernel's
+        // constant overruns threadgroup memory, silently. Refused at load, for
+        // the same reason as the hidden-size bound above.
+        guard config.numHeads <= Attention.maxQHeads else {
+            throw ModelError.unsupportedArchitecture(
+                detail: "numHeads \(config.numHeads) exceeds the \(Attention.maxQHeads)-head "
+                    + "split-KV scratch the attention kernels are built with")
+        }
+        guard config.fullHeadDim <= Attention.maxHeadDim,
+              config.headDim <= Attention.maxHeadDim else {
+            throw ModelError.unsupportedArchitecture(
+                detail: "head dimension \(max(config.fullHeadDim, config.headDim)) exceeds "
+                    + "the \(Attention.maxHeadDim)-element attention threadgroup tile")
+        }
 
     }
 
