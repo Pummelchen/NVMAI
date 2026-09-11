@@ -40,6 +40,23 @@ constant constexpr float kSampleTopMaxK     = 256.0f;  // cap for top-k mask sca
 // ----------------------------------------------------------------------------
 
 inline float softcap_value(float z, float softcap) {
+    // A NaN logit must not take the rest of the row with it. `max(x, NaN)` and
+    // `exp(NaN)` both stay NaN, so one bad value leaves the running max and the
+    // running sum NaN for the whole vocabulary and the normalized row NaN; the
+    // sampler can only answer an in-range index, so it answered token 0 for
+    // every remaining position and a broken model looked like a model that
+    // likes token 0. Folding it to the -inf the sum is already built to
+    // tolerate excludes that element and leaves the softmax over the *finite*
+    // logits, which is the distribution a reader expects.
+    //
+    // This has to come before the softcap == 0 early return: with capping
+    // disabled (`finalLogitSoftcap == 0`) there is no tanh to swallow it, and
+    // the NaN would reach the reduction unchanged.
+    //
+    // Only NaN is folded. A +inf logit is a claim rather than a failure, and
+    // `tanh` below saturates it to `softcap` -- the most likely token, which is
+    // what an infinite logit means.
+    if (isnan(z)) return -INFINITY;
     // softcap <= 0 disables capping (architectures without a final logit
     // softcap, e.g. Qwen 3.6).
     if (softcap <= 0.0f) return z;
@@ -58,6 +75,7 @@ void logit_softcap_softmax(
     device       half*  probs    [[buffer(1)]],   // [V] FP16
     constant     uint&  V        [[buffer(2)]],
     constant     float& softcap  [[buffer(3)]],
+    device       float* row_max  [[buffer(4)]],   // [1] the max this row used
     uint  lid              [[thread_position_in_threadgroup]],
     uint  lsize            [[threads_per_threadgroup]],
     uint  simd_lane_id     [[thread_index_in_simdgroup]],
@@ -77,9 +95,17 @@ void logit_softcap_softmax(
     for (uint i = lid; i < V; i += lsize) {
         float z  = softcap_value(float(logits[i]), softcap);
         float mn = max(m, z);
-        // Guard against the (-inf, -inf) → (-inf, NaN) case on the first iter.
+        // Two guards, and the sum needs both. `scale` rescales the running sum
+        // to the new max; when the first element is -inf the running max is
+        // still -inf, so `exp(-inf - -inf)` would be NaN and `d * 0 + NaN`
+        // poisons the thread's sum for the rest of its elements even though a
+        // -inf logit contributes nothing. `contribution` is that term. This is
+        // reachable whenever the softcap is disabled (`finalLogitSoftcap == 0`,
+        // the Qwen 3.6 production setting) and a logit arrives as -inf: before
+        // this the row came out empty and the sampler answered token 0.
         float scale = (m == -INFINITY) ? 0.0f : logit_softmax_exp(m - mn);
-        d = d * scale + logit_softmax_exp(z - mn);
+        float contribution = (mn == -INFINITY) ? 0.0f : logit_softmax_exp(z - mn);
+        d = d * scale + contribution;
         m = mn;
     }
 
@@ -128,16 +154,28 @@ void logit_softcap_softmax(
             final_m     = m_all;
             // Reciprocal once so the normalize loop is a single multiply.
             final_inv_d = (d_all > 0.0f) ? (1.0f / d_all) : 0.0f;
+            // Published so the host can tell an empty row from a peaked one
+            // without a vocabulary-sized readback. Non-finite here means the
+            // row carried no finite logit at all.
+            row_max[0] = m_all;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     const float m_final     = final_m;
     const float inv_d_final = final_inv_d;
+    // `m_final` is non-finite only when every logit was (the NaN fold above, or
+    // an all -inf row). The row then has no mass; writing zeros keeps it a
+    // *defined* empty distribution instead of exp(-inf - -inf) * 0 = NaN, so
+    // the sampler's own in-range fallback is what answers and the logits stay
+    // the only thing that was broken.
+    const bool has_mass = isfinite(m_final);
 
     for (uint i = lid; i < V; i += lsize) {
         float z = softcap_value(float(logits[i]), softcap);
-        probs[i] = half(logit_softmax_exp(z - m_final) * inv_d_final);
+        probs[i] = has_mass
+            ? half(logit_softmax_exp(z - m_final) * inv_d_final)
+            : half(0.0f);
     }
 }
 
@@ -175,8 +213,10 @@ void logit_softcap_softmax_tiled_stage1(
     for (uint i = base + lid; i < end; i += lsize) {
         float z  = softcap_value(float(logits[i]), softcap);
         float mn = max(m, z);
+        // Same two guards as the single-threadgroup form, same reason.
         float scale = (m == -INFINITY) ? 0.0f : logit_softmax_exp(m - mn);
-        d = d * scale + logit_softmax_exp(z - mn);
+        float contribution = (mn == -INFINITY) ? 0.0f : logit_softmax_exp(z - mn);
+        d = d * scale + contribution;
         m = mn;
     }
     float m_simd = simd_max(m);
@@ -253,7 +293,12 @@ void logit_softcap_softmax_tiled_normalize(
 ) {
     if (gid >= V) return;
     const float z = softcap_value(float(logits[gid]), softcap);
-    probs[gid] = half(logit_softmax_exp(z - pair[0]) * pair[1]);
+    // Same no-mass rule as the single-threadgroup form; `pair[0]` is the row
+    // max the merge pass settled on and is non-finite only for a row with no
+    // finite logit at all.
+    probs[gid] = isfinite(pair[0])
+        ? half(logit_softmax_exp(z - pair[0]) * pair[1])
+        : half(0.0f);
 }
 
 // ----------------------------------------------------------------------------

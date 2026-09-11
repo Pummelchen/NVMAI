@@ -435,5 +435,12 @@ private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
                                outToken: scratch.outToken)
     cb.commit(); cb.waitUntilCompleted()
     timing?.recordKernelGPU(role: "sample", cb)
+    // Read after completion, while the row max is still the one this dispatch
+    // wrote. A row with no finite logit leaves the sampler's in-range fallback
+    // in `outToken`; returning it would report a broken model as a valid token,
+    // and the generation would then feed that token back and loop on it.
+    guard scratch.sampler.lastRowHadFiniteLogit else {
+        throw GeneratorError.degenerateLogitsRow
+    }
     return Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
 }

@@ -60,14 +60,16 @@ import NVMAIValidationSupport
     /// value propagates a garbage token rather than failing cleanly.
     ///
     /// Note on coverage: this does **not** exercise the `kept == 0` branch, and
-    /// the reason once given here was wrong. The softcap stage is
-    /// `softcap * tanh(z / softcap)`, so `tanh(NaN)` is NaN — it propagates
-    /// rather than clamping, and with `finalLogitSoftcap == 0` (the Qwen 3.6
-    /// production setting) there is no softcap stage at all. A NaN row therefore
-    /// *does* reach the reduction with no finite mass, and the kernels fall back
-    /// to token 0 by construction. This test guards the in-range invariant, not
-    /// that path, and the intermittent out-of-range id seen under full-suite GPU
-    /// load is still unidentified.
+    /// the reason once given here was wrong. A row with no finite mass does
+    /// reach the reduction: `softcap_value` now folds each NaN to -inf so one
+    /// bad logit cannot take the row with it (C47), but a row that is
+    /// non-finite *throughout* has no finite value left, and the kernels fall
+    /// back to token 0 by construction. This test guards the in-range
+    /// invariant, not that path. The generation loop reports the empty row
+    /// (`GeneratorError.degenerateLogitsRow`) before that fallback could be fed
+    /// back as a token, and the kernel keeps the fallback anyway, so no path can
+    /// hand an out-of-range id to the vocabulary. The intermittent out-of-range
+    /// id seen under full-suite GPU load is still unidentified.
     @Test func degenerateDistributionStillReturnsAnInRangeToken() throws {
         let v = 64
         let rig = try Rig(vocab: v)
@@ -80,6 +82,34 @@ import NVMAIValidationSupport
                         "sampler returned \(id) (0x\(String(id, radix: 16))) for a distribution with no finite mass; vocab=\(v)")
             }
         }
+    }
+
+    /// The sampler keeps its in-range guarantee -- the generation loop indexes
+    /// the vocabulary and the KV history with the id -- so an empty row is
+    /// *reported*, not answered, and `lastRowHadFiniteLogit` is how. It has to
+    /// be false for the empty row and true for a healthy one: a stale or
+    /// defaulted buffer would read as "fine" for both, which is the failure this
+    /// accessor exists to make impossible.
+    @Test func anEmptyRowIsReportedWhileAHealthyRowIsNot() throws {
+        let v = 64
+        let rig = try Rig(vocab: v)
+        _ = try rig.draw([Float](repeating: .nan, count: v),
+                         config: GenerationConfig(temperature: 1.0, topK: v, seed: 1))
+        #expect(rig.sampler.lastRowHadFiniteLogit == false,
+                "an all-NaN row must report as empty")
+
+        _ = try rig.draw([Float](repeating: 0.5, count: v),
+                         config: GenerationConfig(temperature: 1.0, topK: v, seed: 1))
+        #expect(rig.sampler.lastRowHadFiniteLogit)
+
+        // One NaN logit among finite ones must *not* empty the row; the fold in
+        // `softcap_value` is what keeps this true.
+        var oneNaN = [Float](repeating: -30, count: v)
+        oneNaN[0] = .nan
+        _ = try rig.draw(oneNaN,
+                         config: GenerationConfig(temperature: 1.0, topK: v, seed: 1))
+        #expect(rig.sampler.lastRowHadFiniteLogit,
+                "a single NaN logit must not empty the row")
     }
 
     @Test func greedy_picksArgmax() throws {

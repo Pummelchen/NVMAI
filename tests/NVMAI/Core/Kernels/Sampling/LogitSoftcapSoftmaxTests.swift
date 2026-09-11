@@ -110,6 +110,67 @@ import NVMAIValidationSupport
         #expect(abs(g - c) / c < Tolerance.fp16Reduction, "g=\(g) c=\(c)")
     }
 
+    /// A single NaN logit used to take the whole row with it: `tanh(NaN)` is
+    /// NaN, the running sum went NaN, and every probability came out NaN, which
+    /// the sampler can only answer with its in-range fallback. `softcap_value`
+    /// now folds NaN to -inf, leaving the softmax over the finite logits. This
+    /// fails on the old code at the first `isFinite` assertion.
+    ///
+    /// Both softcap settings are covered because the fold has to precede the
+    /// `softcap <= 0` early return: with capping disabled there is no `tanh` to
+    /// swallow the NaN, which is exactly the Qwen 3.6 production setting.
+    @Test func oneNaNLogitDoesNotPoisonTheRow() throws {
+        let v = 1024
+        var logits = [Float16](repeating: Float16(-30.0), count: v)
+        logits[0] = .nan
+        for softcap in [Float(0), 30.0] {
+            let probs = try Self.runKernel(logitsFp16: logits, v: v, softcap: softcap)
+            #expect(probs.allSatisfy { $0.isFinite },
+                    "softcap \(softcap): non-finite probability")
+            let total = probs.reduce(0, +)
+            #expect(abs(total - 1.0) < 2e-2,
+                    "softcap \(softcap): probabilities sum to \(total)")
+            #expect(probs[0] == 0, "softcap \(softcap): the NaN entry kept mass")
+        }
+    }
+
+    /// A row where *every* logit is NaN cannot be rescued by folding: there is
+    /// no finite value left, so the kernel writes a defined all-zero row
+    /// (instead of `exp(-inf - -inf) * 0 = NaN`) and publishes a non-finite row
+    /// max for the caller to report. Both front-ends are checked, because a
+    /// silent NaN row is what the sampler's in-range fallback turns into an
+    /// endless run of token 0.
+    @Test func anAllNaNRowIsEmptyAndReportsNoRowMax() throws {
+        let ctx = try MetalContext()
+        let v = 512
+        let single = try LogitSoftcapSoftmax(context: ctx)
+        let tiled = try LogitSoftcapSoftmaxTiled(context: ctx, vocab: v)
+        for useTiled in [false, true] {
+            guard let logits = Fp16Buffer.make(ctx.device,
+                                               halves: [Float16](repeating: .nan, count: v)),
+                  let probs = Fp16Buffer.make(ctx.device, count: v),
+                  let cb = ctx.queue.makeCommandBuffer() else {
+                Issue.record("Metal resource allocation failed")
+                return
+            }
+            if useTiled {
+                try tiled.encode(commandBuffer: cb, logits: logits, probs: probs,
+                                 v: UInt32(v), softcap: 30.0)
+            } else {
+                try single.encode(commandBuffer: cb, logits: logits, probs: probs,
+                                  v: UInt32(v), softcap: 30.0)
+            }
+            cb.commit()
+            cb.waitUntilCompleted()
+            let row = Fp16Buffer.read(probs, count: v)
+            #expect(row.allSatisfy { $0 == 0 },
+                    "tiled=\(useTiled): an all-NaN row must be empty, not NaN")
+            let rowMax = useTiled ? tiled.rowMax : single.rowMax
+            #expect(!rowMax.isFinite,
+                    "tiled=\(useTiled): row max \(rowMax) should be non-finite")
+        }
+    }
+
     /// The tiled front-end must agree with the single-threadgroup original.
     ///
     /// Online-softmax rescaling is associative in exact arithmetic, so the two

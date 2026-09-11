@@ -196,6 +196,12 @@ final class Sampler {
     /// nanosecond still draw distinct non-deterministic seeds (R34).
     private static let nondeterministicSeedCounter = Atomic<UInt64>(0)
 
+    /// Which front-end the last `sample` encoded, so `lastRowHadFiniteLogit`
+    /// reads the buffer the GPU actually wrote. Reading at encode time would
+    /// return the constructor's sentinel: the dispatch has not run yet.
+    private enum FrontEnd { case singleThreadgroup, tiled }
+    private var lastFrontEnd: FrontEnd = .singleThreadgroup
+
     init(context: MetalContext, vocab: Int = 262_144,
                 logitSoftcap: Float = 30.0) throws {
         self.softcap = try LogitSoftcapSoftmax(context: context)
@@ -235,10 +241,12 @@ final class Sampler {
             try softcapTiled.encode(commandBuffer: commandBuffer,
                                     logits: logits, probs: probs, v: v,
                                     softcap: logitSoftcap)
+            lastFrontEnd = .tiled
         } else {
             try softcap.encode(commandBuffer: commandBuffer,
                                logits: logits, probs: probs, v: v,
                                softcap: logitSoftcap)
+            lastFrontEnd = .singleThreadgroup
         }
 
         let isGreedy = config.temperature == 0
@@ -276,6 +284,24 @@ final class Sampler {
 
         if appliedPenalty { return .hostPenalty }
         return isGreedy ? .greedyGPU : .gpuSampled
+    }
+
+    /// Whether the row the last `sample` ran on carried at least one finite
+    /// logit. Valid once that command buffer has completed.
+    ///
+    /// `false` means the softmax wrote an all-zero probability row, so the id
+    /// this sample returned is the kernel's in-range fallback and not an answer
+    /// drawn from a distribution. The kernels keep that fallback on purpose --
+    /// it is the invariant that keeps an out-of-range id out of the vocabulary
+    /// -- so the emptiness has to be reported by whoever can see it, which is
+    /// here. `softcap_value` already stops one NaN logit from emptying the row;
+    /// this catches the row where every logit is NaN, which no folding in the
+    /// kernel can turn into a distribution.
+    var lastRowHadFiniteLogit: Bool {
+        switch lastFrontEnd {
+        case .singleThreadgroup: return softcap.rowMax.isFinite
+        case .tiled: return softcapTiled?.rowMax.isFinite ?? true
+        }
     }
 
     // MARK: - Repetition penalty (host, in place)

@@ -117,10 +117,17 @@ import NVMAIValidationSupport
 
     func runLoop(seq: [Int32], end: Int32, prompt: String = "go",
                          config: GenerationConfig) async throws -> (Collected, RawDecodeResult) {
+        try await runLoop(step: automaton(seq, end: end), prompt: prompt, config: config)
+    }
+
+    /// Same loop with the logit script supplied directly, for cases the
+    /// token-keyed automaton cannot express (a NaN row, a single NaN logit).
+    func runLoop(step: @escaping @Sendable (Int32, Int) -> ScriptedLogitProducer.Step,
+                         prompt: String = "go",
+                         config: GenerationConfig) async throws -> (Collected, RawDecodeResult) {
         let ctx = try MetalContext()
         let tok = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
-        let producer = ScriptedLogitProducer(vocabSize: tok.vocabSize,
-                                             step: automaton(seq, end: end))
+        let producer = ScriptedLogitProducer(vocabSize: tok.vocabSize, step: step)
         let promptIds = tok.encode(prompt, addBOS: true)
         let scratch = try RawCompletionScratch(context: ctx, vocab: tok.vocabSize)
         var collected = Collected()

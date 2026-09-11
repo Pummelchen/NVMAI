@@ -12,9 +12,31 @@ import Metal
 /// (and tests) can disable it by passing a very large number.
 final class LogitSoftcapSoftmax {
     private let pso: MTLComputePipelineState
+    /// The row max the kernel settled on, in FP32, `.storageModeShared` so the
+    /// host can read it after the command buffer completes. Non-finite means
+    /// the row carried no finite logit: the kernel writes an all-zero
+    /// probability row for that case, and the caller reports it instead of
+    /// letting the sampler's in-range fallback look like a real answer.
+    private let rowMaxBuffer: MTLBuffer
 
     init(context: MetalContext) throws {
         self.pso = try context.pipeline("logit_softcap_softmax")
+        guard let rowMax = context.device.makeBuffer(
+                  length: MemoryLayout<Float>.stride,
+                  options: .storageModeShared) else {
+            throw MetalError.noDevice
+        }
+        // Non-finite until a dispatch writes it, so a caller that reads this
+        // without having encoded (or after a failed encode) sees "no row"
+        // rather than a stale finite max.
+        rowMax.contents().bindMemory(to: Float.self, capacity: 1)[0] = -.infinity
+        self.rowMaxBuffer = rowMax
+    }
+
+    /// The max of the row most recently encoded. Valid once the command buffer
+    /// carrying that encode has completed.
+    var rowMax: Float {
+        rowMaxBuffer.contents().load(as: Float.self)
     }
 
     /// Encodes the kernel onto `commandBuffer`. `logits` and `probs` are FP16
@@ -35,6 +57,7 @@ final class LogitSoftcapSoftmax {
         var softcapVar = softcap
         enc.setBytes(&vVar,       length: MemoryLayout<UInt32>.size, index: 2)
         enc.setBytes(&softcapVar, length: MemoryLayout<Float>.size,  index: 3)
+        enc.setBuffer(rowMaxBuffer, offset: 0, index: 4)
 
         let threadsPerGroup = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         let gridSize = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
@@ -79,11 +102,21 @@ final class LogitSoftcapSoftmaxTiled {
                   options: .storageModePrivate),
               let pair = context.device.makeBuffer(
                   length: 2 * MemoryLayout<Float>.stride,
-                  options: .storageModePrivate)
+                  // Shared, not private: `pair[0]` is the row max the merge pass
+                  // settled on, and the host reads it to tell an empty row from
+                  // a peaked one. Eight bytes, written once per token.
+                  options: .storageModeShared)
         else { throw MetalError.noDevice }
+        pair.contents().bindMemory(to: Float.self, capacity: 2)[0] = -.infinity
         self.tileMax = tileMax
         self.tileSum = tileSum
         self.pair = pair
+    }
+
+    /// The max of the row most recently encoded, as `logit_softcap_softmax_
+    /// tiled_merge` published it. Valid once the command buffer has completed.
+    var rowMax: Float {
+        pair.contents().load(as: Float.self)
     }
 
     func encode(commandBuffer: MTLCommandBuffer,
