@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import NVMAI
 @testable import NVMAIServerCore
 
 @Suite struct ResponsesAPIMapperTests {
@@ -19,6 +20,26 @@ import Testing
         #expect(validated.generationConfig.topK == 20)
         #expect(validated.generationConfig.topP == 0.95)
         #expect(validated.generationConfig.presencePenalty == 0)
+    }
+
+    /// An omitted sampling field must stay nil through the mapper, so the
+    /// validator can resolve it from the *served model's* profile. Filling it
+    /// with a fixed number here made the profile unreachable, and Qwen3.8-
+    /// Flash-Next -- whose card says temperature 1.0 -- sampled at 0.6 on this
+    /// surface while /v1/chat/completions honoured the profile.
+    @Test func omittedSamplingFollowsTheServedModelNotAFixedDefault() throws {
+        let request = try decode("""
+        {"model": "m", "input": [{"role": "user", "content": "hi"}]}
+        """)
+
+        let chat = try ResponsesAPIMapper.chatRequest(request)
+        // Deliberately not the house default: that is the only way this tells
+        // "the mapper left it alone" apart from "the mapper hardcoded 0.6".
+        let validated = try OpenAIRequestValidator.validate(
+            chat, modelID: "m",
+            sampling: GenerationDefaults.Sampling(temperature: 1.0, topK: 20, topP: 0.95))
+
+        #expect(validated.generationConfig.temperature == 1.0)
     }
 
     @Test func samplingControlsMapExplicitly() throws {

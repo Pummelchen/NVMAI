@@ -880,6 +880,12 @@ struct NVMAIBench {
         }
         print(failures == 0 ? "all continuations correct"
               : "\(failures) of \(checks.count) wrong")
+        // Exit non-zero on a mismatch. Without this the process returned 0
+        // after printing "N of 3 wrong", so a scripted run -- and this command
+        // exists to be scripted -- read a dead forward pass as a pass. The
+        // whole point of `cpu35` is to be the check that says the Swift forward
+        // pass matches the oracle.
+        exit(failures == 0 ? 0 : 1)
     }
 
 
@@ -949,7 +955,9 @@ struct NVMAIBench {
             .flatMap(Int.init)
         let model = try CPUQwen35(snapshot: snapshot, threads: requested)
         guard let tokenizer = try loadTokenizer(directory) else {
-            print("no tokenizer in \(path)"); return
+            // Non-zero: a run that never checked anything is not a pass.
+            FileHandle.standardError.write(Data("no tokenizer in \(path)\n".utf8))
+            exit(2)
         }
         let ids = tokenizer.encode(prompt, addBOS: false).map(Int.init)
         print("prompt: \(prompt.debugDescription) -> \(ids.count) tokens, "
@@ -981,7 +989,11 @@ struct NVMAIBench {
             .flatMap(Int.init)
         let model = try CPUQwen35(snapshot: snapshot, threads: requested)
         let tokenizer = try loadTokenizer(directory)
-        guard let tokenizer else { print("no tokenizer in \(path)"); return }
+        guard let tokenizer else {
+            // Non-zero: a run that never checked anything is not a pass.
+            FileHandle.standardError.write(Data("no tokenizer in \(path)\n".utf8))
+            exit(2)
+        }
 
         let lines = try String(contentsOf: input, encoding: .utf8)
             .split(separator: "\n", omittingEmptySubsequences: true)

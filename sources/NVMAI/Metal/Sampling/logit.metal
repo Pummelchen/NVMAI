@@ -745,7 +745,12 @@ void sample_topk64_final(
         (void)xorshift64(rng);
         float u = uniform01(rng) * surviving;
         float running = 0.0f;
-        uint picked = indices[0];
+        // Same fallback as the generic `sample` kernel, for the same reason:
+        // `kept == 0` means every slot failed the isfinite test, so `indices[0]`
+        // is still the UINT_MAX sentinel. Emitting it hands the generation loop
+        // an out-of-range id to index the vocabulary with. The default path for
+        // topK <= 64 is this kernel, not the generic one.
+        uint picked = (kept > 0) ? indices[0] : 0u;
         for (uint i = 0; i < kept; ++i) {
             running += values[i];
             if (u <= running) {

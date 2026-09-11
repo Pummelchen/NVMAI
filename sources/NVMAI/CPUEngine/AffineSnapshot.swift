@@ -352,6 +352,20 @@ public struct AffineSnapshot: Sendable {
             throw SafeTensorsFile.Failure.malformed(
                 "\(stem): empty weight, scales or biases in the resident index")
         }
+        // The same extent check the safetensors branch below makes, on the same
+        // arithmetic, so a corrupt or hand-edited index is refused at load
+        // instead of being read as neighbouring bytes of the same mapping. The
+        // resident file is one mapping, so a wrong span does not fault -- it
+        // silently dequantizes whatever is next to it. BF16 companions are two
+        // bytes per group per row, and the scales and biases must match.
+        let perRow = columns / groupSize
+        guard entry.scaleSize == UInt64(rows * perRow * 2),
+              entry.biasSize == entry.scaleSize else {
+            throw SafeTensorsFile.Failure.malformed(
+                "\(stem): scales/biases are \(entry.scaleSize)/\(entry.biasSize) bytes "
+                + "but \(rows)x\(columns) at group \(groupSize) needs "
+                + "\(rows * perRow * 2) each")
+        }
         guard let base = weights.base else {
             throw SafeTensorsFile.Failure.malformed("model_weights.bin could not be mapped")
         }

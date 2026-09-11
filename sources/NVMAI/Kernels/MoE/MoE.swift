@@ -29,6 +29,19 @@ public struct MoEExpertOffsets {
 }
 
 final class MoE {
+    /// The largest expert count `encodeRouter` accepts, and therefore the size
+    /// the router-logits scratch has to cover.
+    ///
+    /// The allocation and `encodeRouter`'s guard are two halves of one
+    /// contract and must move together. They did not: the guard was raised to
+    /// 512 "for Qwen3.8-Flash-Next" with a comment calling the old 256 "a
+    /// conservative guard rather than a width limit", while the scratch stayed
+    /// 256 floats. At 512 experts the router GEMV writes and the selector reads
+    /// 2048 bytes through a 1024-byte `MTLBuffer` — out of bounds relative to
+    /// the buffer's declared length, and non-faulting only because the driver's
+    /// allocation is page-granular. That is undefined behaviour that happens to
+    /// work, on a pinned model, on every layer and every token.
+    static let maxRouterExperts = 512
     /// Experts one routed dispatch serves — the architecture's `topKExperts`,
     /// supplied at init. It sizes the routed argument buffer and every
     /// per-dispatch validation; nothing may assume the literal 8 (the
@@ -185,7 +198,7 @@ final class MoE {
             constants: moeConstants)
 
         guard let logits = context.device.makeBuffer(
-            length: 256 * MemoryLayout<Float>.stride,
+            length: Int(Self.maxRouterExperts) * MemoryLayout<Float>.stride,
             options: .storageModeShared),
               let readyStatus = context.device.makeBuffer(
             length: MemoryLayout<UInt32>.stride,
@@ -218,11 +231,15 @@ final class MoE {
                                    d: UInt32,
                                    topK: UInt32) throws {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
-        // 512 for Qwen3.8-Flash-Next. Expert ids are UInt32 end to end
-        // (ExpertResidencyTable) and the kernels read num_experts
-        // dynamically, so the old 256 was a conservative guard rather than a
-        // width limit -- confirmed by reading both, not assumed.
-        precondition(numExperts <= 512)
+        // Expert ids are UInt32 end to end (ExpertResidencyTable) and the
+        // kernels read num_experts dynamically, so the guard is a real width
+        // limit on the scratch, not a conservative one: see `maxRouterExperts`.
+        precondition(numExperts <= Self.maxRouterExperts,
+                     "encodeRouter: numExperts \(numExperts) exceeds the router-logits scratch (\(Self.maxRouterExperts))")
+        // The scratch is sized for the maximum above, but this is the check that
+        // would have caught the two drifting apart in the first place.
+        precondition(routerLogits.length >= Int(numExperts) * MemoryLayout<Float>.stride,
+                     "encodeRouter: routerLogits must cover [numExperts] Float (allocated \(routerLogits.length) bytes, need \(Int(numExperts) * MemoryLayout<Float>.stride))")
         precondition(topK == UInt32(maxStreamedExperts))
         // K16: `router_gemv_r4` multiplies every hidden element by
         // `effective_scale[idx]` and `router_topk_select_k8` multiplies every

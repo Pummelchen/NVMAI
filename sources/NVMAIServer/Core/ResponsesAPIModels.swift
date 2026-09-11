@@ -383,8 +383,15 @@ public enum ResponsesAPIMapper {
             messages: chatMessages,
             stream: request.stream ?? false,
             streamOptions: nil,
-            temperature: request.temperature ?? GenerationDefaults.temperature,
-            topP: request.topP ?? GenerationDefaults.topP,
+            // Sampling the request omitted stays nil on purpose. Filling it here
+            // with the generic `GenerationDefaults` makes the served model's own
+            // defaults unreachable: the validator resolves each field as
+            // `request.value ?? sampling.value`, where `sampling` is the loaded
+            // model's profile. Qwen3.8-Flash-Next's card says temperature 1.0, so
+            // a fixed 0.6 here sampled it wrong on this surface while
+            // /v1/chat/completions honoured the profile.
+            temperature: request.temperature,
+            topP: request.topP,
             // Codex and OpenCode omit max_output_tokens; forward nil so the
             // chat validator applies its context-bounded default (no
             // artificial output cap) instead of a fixed token budget.
@@ -400,12 +407,11 @@ public enum ResponsesAPIMapper {
             // decoder cannot promise a single call per turn, and refusing
             // would refuse Codex; the value is echoed and not enforced.
             parallelToolCalls: nil,
-            topK: request.topK ?? GenerationDefaults.topK,
+            topK: request.topK,
             repetitionPenalty: nil,
             n: 1,
             logprobs: nil,
-            presencePenalty: request.presencePenalty
-                ?? GenerationDefaults.presencePenalty,
+            presencePenalty: request.presencePenalty,
             frequencyPenalty: nil,
             reasoningEffort: request.reasoning?.effort)
     }

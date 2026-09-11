@@ -31,6 +31,20 @@ import Testing
         #expect(validated.generationConfig.stopStrings == ["END"])
     }
 
+    /// See the note in `ResponsesAPIMapperTests`: an omitted field stays nil so
+    /// the served model's profile decides, and the Anthropic surface is the
+    /// second place that used to hardcode the house defaults instead.
+    @Test func omittedSamplingFollowsTheServedModelNotAFixedDefault() throws {
+        let chat = try map("""
+        {"model":"m","max_tokens":64,
+         "messages":[{"role":"user","content":"hi"}]}
+        """)
+        let validated = try OpenAIRequestValidator.validate(
+            chat, modelID: "m",
+            sampling: GenerationDefaults.Sampling(temperature: 1.0, topK: 20, topP: 0.95))
+        #expect(validated.generationConfig.temperature == 1.0)
+    }
+
     @Test func systemTextBlocksJoin() throws {
         let chat = try map("""
         {"model":"m","max_tokens":8,

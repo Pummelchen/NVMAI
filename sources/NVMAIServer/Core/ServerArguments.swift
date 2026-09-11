@@ -145,8 +145,10 @@ public struct ServerArguments: Equatable, Sendable {
                              and Qwen 3.6 reject it.
       --expert-cache-slots <count>
                              Routed-expert cache slots per layer:
-                             \(ServerArguments.expertCacheSlotsHelp)
-                             (default 64). Environment override:
+                             \(ServerArguments.expertCacheSlotsHelp).
+                             The default is derived from the model
+                             profile's tuned budget, not fixed.
+                             Environment override:
                              NVMAI_EXPERT_CACHE_SLOTS.
       --ram-budget <size>    Bytes the routed-expert cache may use, e.g. 8G,
                              2G, 512M. Slots are derived from this and the

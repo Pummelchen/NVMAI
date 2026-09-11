@@ -422,7 +422,12 @@ kernel void prefill_router_block(
 
         for (uint e = 0; e < NE; ++e) {
             float s = scores[e];
-            if (KK > 0 && s <= top_score[KK - 1]) continue;
+            // Strictly less than, mirroring the decode router. `<=` skipped an
+            // expert on an exact tie with the k-th score, while decode admitted
+            // it and let the lower-index tie-break decide -- so a prompt and its
+            // continuation could select different experts for identical logits,
+            // which this kernel's own nearby comment forbids.
+            if (KK > 0 && s < top_score[KK - 1]) continue;
             uint pos = KK;
             for (uint i = 0; i < KK; ++i) {
                 if (s > top_score[i] || (s == top_score[i] && e < top_idx[i])) {

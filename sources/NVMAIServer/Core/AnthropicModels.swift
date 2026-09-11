@@ -443,8 +443,12 @@ public enum AnthropicMapper {
             messages: messages,
             stream: request.stream ?? false,
             streamOptions: nil,
-            temperature: request.temperature ?? GenerationDefaults.temperature,
-            topP: request.topP ?? GenerationDefaults.topP,
+            // Nil, not `GenerationDefaults`: see the same note in
+            // `ResponsesAPIModels`. The validator fills each omitted field from
+            // the loaded model's profile, and a hardcoded 0.6 here would override
+            // a model whose card says otherwise.
+            temperature: request.temperature,
+            topP: request.topP,
             maxTokens: maxTokens,
             maxCompletionTokens: nil,
             stop: stop,
@@ -452,11 +456,11 @@ public enum AnthropicMapper {
             tools: try tools(request.tools),
             toolChoice: try toolChoice(request.toolChoice),
             parallelToolCalls: nil,
-            topK: request.topK ?? GenerationDefaults.topK,
+            topK: request.topK,
             repetitionPenalty: nil,
             n: 1,
             logprobs: nil,
-            presencePenalty: GenerationDefaults.presencePenalty,
+            presencePenalty: nil,
             frequencyPenalty: nil,
             reasoningEffort: nil)
     }

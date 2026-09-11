@@ -203,6 +203,10 @@ let package = Package(
             dependencies: [
                 "NVMAIServerCore",
                 "NVMAIMemory",
+                // `GenerationDefaults.Sampling`, so the mapper tests can pin
+                // that an omitted field follows the served model's profile
+                // rather than a hardcoded house default.
+                "NVMAI",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             path: "tests/NVMAIServer",

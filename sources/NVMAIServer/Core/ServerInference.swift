@@ -929,10 +929,39 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
     ///
     /// Mutates the cache and `activePromptCacheEntryID`, so it must run on the
     /// actor and before any generation begins.
+    /// Whether a reasoning-level change forbids reusing any cached prefix.
+    ///
+    /// A request rendered at a different level than the session loaded at must
+    /// not splice onto a cached KV range, and this is what makes the claim on
+    /// `ValidatedChatRequest.reasoning` true.
+    ///
+    /// Comparing rendered token IDs is enough for the direct-prefix path, which
+    /// is what that claim was written against: a level change renders different
+    /// IDs, so it misses. It is *not* enough for a text continuation, which
+    /// re-renders only the tail -- `matchTextContinuation` calls
+    /// `applyChatTemplate` again -- and that used to happen with the session's
+    /// tokenizer. The model then saw a generation prompt built for the loaded
+    /// level while the decoder was built for the requested one, so either
+    /// chain-of-thought leaked into `content` or the whole answer was reported
+    /// as reasoning with `content` empty.
+    ///
+    /// Re-prefilling is the correct cost of a switch: the cached KV belongs to a
+    /// different render, and the honest outcome is a miss.
+    private func reasoningForbidsCacheReuse(_ requested: RequestReasoning?) -> Bool {
+        guard let requested else { return false }
+        return !requested.matches(loadedReasoning)
+    }
+
     private func resolveCacheStart(
         cacheRequest: ValidatedChatRequest,
-        promptIDs: [Int32]
+        promptIDs: [Int32],
+        requestedReasoning: RequestReasoning?
     ) async throws -> (effectivePromptIDs: [Int32], start: RawCompletionStart) {
+        if reasoningForbidsCacheReuse(requestedReasoning) {
+            promptCache.invalidate()
+            activePromptCacheEntryID = nil
+            return (promptIDs, .reset)
+        }
         let effectivePromptIDs: [Int32]
         var completionStart: RawCompletionStart
         if promptCacheMode == .singlePrefix {
@@ -1122,7 +1151,8 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
 
         let resolved = try await resolveCacheStart(
             cacheRequest: cacheRequest,
-            promptIDs: promptIDs)
+            promptIDs: promptIDs,
+            requestedReasoning: request.reasoning)
         let effectivePromptIDs = resolved.effectivePromptIDs
         let completionStart = resolved.start
 

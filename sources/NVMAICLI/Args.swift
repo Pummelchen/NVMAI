@@ -145,9 +145,14 @@ extension Args {
       --seed <uint64>           Deterministic sampling seed (default off).
       --stop <string>           Stop substring (repeatable).
       --rdadvise <mode>         Expert read-ahead advice: off, default,
-                                bounded, or adaptive (default off).
+                                bounded, or adaptive. The default is
+                                `default`, which leaves advice ON; pass
+                                off to disable it.
       --expert-cache-slots <n>  Routed-expert cache slots per layer:
-                                \(Self.expertCacheSlotsHelp) (default 64).
+                                \(Self.expertCacheSlotsHelp). The default
+                                is derived from the model profile's tuned
+                                budget, not fixed; 64 is only the
+                                fallback when the manifest cannot be read.
                                 More slots raise the hit rate but use more
                                 memory.
       --prefill-chunk <n|auto>  Prefill chunk tokens. Larger chunks reduce
@@ -276,7 +281,12 @@ extension Args {
                 topPWasSet = true
             case "--repetition-penalty":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed > 0 else {
+                // At least 1, matching AppGenerationRequest: a penalty below
+                // 1 multiplies the repeated logit instead of dividing it, so
+                // it rewards repetition -- the opposite of the flag. This CLI
+                // is the scripted verification path, so it must not accept a
+                // sampling configuration every other front end rejects.
+                guard let parsed = Float(value), parsed.isFinite, parsed >= 1 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 repetitionPenalty = parsed
