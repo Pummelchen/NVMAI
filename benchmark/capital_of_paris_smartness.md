@@ -1,18 +1,17 @@
 # One prompt, every served model: "Capital of Paris"
 
 A fixed, deliberately ambiguous prompt -- *"Capital of Paris"* -- sent to
-This is the tracked report. The raw rows it was generated from -- one JSON
-object per run, plus the re-check -- are written to
-`benchmark/benchmark-results/capital-of-paris-20260911T1935/`
-(`results.jsonl`, `recheck.jsonl`); `benchmark-results/` is gitignored, and the
-harness that produced them is `benchmark/capital_of_paris_smartness.py`.
-
 every model the local server serves, on every engine it serves it on, with
 **thinking off** (`--reasoning off`), `temperature: 0`, `max_tokens: 128`, one
 warm-up request per model (discarded; it loads or switches the model) and then
 one measured streaming request. Times come from the SSE stream: TTFT is the
 first content or reasoning delta, decode rate is `(completion_tokens - 1)`
 over the time between that first delta and the last one.
+
+The raw rows behind this report -- one JSON object per run, plus the re-check --
+are written to `benchmark/benchmark-results/capital-of-paris-20260911T1935/`
+(`results.jsonl`, `recheck.jsonl`), which is gitignored; the harness that
+produced them is `benchmark/capital_of_paris_smartness.py`.
 
 ## Protocol
 
