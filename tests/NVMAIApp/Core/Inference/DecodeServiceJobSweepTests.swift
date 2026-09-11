@@ -72,3 +72,19 @@ import Foundation
         #expect(!DecodeServiceJobSweep.processIsAlive(pid_t(Int32.max)))
     }
 }
+
+/// The app's read timeout for one generation event. Prefill is one long
+/// uninterruptible stretch per chunk, so the decode interval is the wrong
+/// yardstick for it; getting this wrong tears down a healthy helper and
+/// relaunches it (with the model load that goes with it).
+@Suite struct DecodeServiceEventTimeoutTests {
+    @Test func prefillGetsItsOwnBudgetAndDecodeGetsTheDecodeOne() {
+        let prefill = DecodeServiceInferenceClient.eventTimeout(hasVisibleText: false)
+        let decode = DecodeServiceInferenceClient.eventTimeout(hasVisibleText: true)
+        #expect(decode == 60)
+        #expect(prefill > decode,
+                "a prefill chunk must be allowed to outlast the decode interval")
+        // Not a timeout that never fires: a wedged service still has to surface.
+        #expect(prefill <= 600)
+    }
+}

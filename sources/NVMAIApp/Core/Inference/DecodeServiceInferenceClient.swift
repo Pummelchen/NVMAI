@@ -38,6 +38,15 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
 
     private static let loadEventTimeout: TimeInterval = 30
     private static let generationEventTimeout: TimeInterval = 60
+    /// The inter-event budget while the service is still prefilling.
+    ///
+    /// Prefill is one long uninterruptible stretch per chunk, and the first
+    /// event of a session is the whole first chunk after a cold start, so the
+    /// decode interval is the wrong yardstick for it: a large prompt on a busy
+    /// machine exceeds 60 s of silence with the helper working perfectly, and
+    /// the app would tear down a healthy service and relaunch it. Once text is
+    /// flowing, silence really does mean wedged and 60 s applies.
+    private static let prefillEventTimeout: TimeInterval = 300
     private static let unloadResponseTimeout: TimeInterval = 30
 
     public var currentInferenceMemoryBytes: UInt64? {
@@ -355,10 +364,18 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         }
     }
 
+    /// The inter-event budget for the next read: the prefill budget until
+    /// visible text has been seen, the decode budget after. Pure so the policy
+    /// is testable without a live helper; the two constants are the whole rule.
+    static func eventTimeout(hasVisibleText: Bool) -> TimeInterval {
+        hasVisibleText ? generationEventTimeout : prefillEventTimeout
+    }
+
     /// Runs one generation session over the current connection. Events are
-    /// delivered with a 60 s inter-event timeout so a hung service surfaces a
-    /// clear error instead of hanging forever (D2). Connection errors are
-    /// rethrown so `generate` can reconnect and resume (D1).
+    /// delivered with an inter-event timeout so a hung service surfaces a clear
+    /// error instead of hanging forever (D2) -- 60 s once text is flowing, the
+    /// longer prefill budget before that. Connection errors are rethrown so
+    /// `generate` can reconnect and resume (D1).
     private func runGenerationSession(
         request: AppGenerationRequest,
         command: DecodeGenerationRequest,
@@ -382,7 +399,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         var pendingText = ""
         while true {
             let event = try await handles.responses.next(
-                matching: generationID, timeout: Self.generationEventTimeout)
+                matching: generationID,
+                timeout: Self.eventTimeout(hasVisibleText: hasYieldedVisibleText))
             inferenceMemory.withLock { $0 = event.currentMemoryBytes }
             guard event.generationID == generationID else { continue }
 
