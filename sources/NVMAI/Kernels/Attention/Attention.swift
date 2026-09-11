@@ -129,10 +129,14 @@ final class Attention {
         }
         self.mPartial = m; self.dPartial = d; self.oPartial = o
         self.splitStateLock = NSLock()
+        // A `uint` placeholder, not a byte: the decode kernels bind this where
+        // they declare `device const uint*`, which is what the prefill side's
+        // comment explains at length.
         guard let empty = context.device.makeBuffer(
-                  length: 1, options: .storageModeShared) else {
+                  length: MemoryLayout<UInt32>.size, options: .storageModeShared) else {
             throw MetalError.bufferAllocationFailed("attention keep-mask placeholder")
         }
+        empty.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = 0
         empty.label = "attention.keepMask.unused"
         self.emptyKeepMask = empty
         self.splitInFlight = false

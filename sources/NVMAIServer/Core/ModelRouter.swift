@@ -175,16 +175,43 @@ public actor ModelRouter: ServerInferenceBackend, ResidencyManaging, PromptToken
         var served: [ServedModel] = []
         var choices: [String: ReasoningChoice] = [:]
         var entries: [String: ModelCatalog.Entry] = [:]
-        for entry in catalog.entries {
+        /// Registers an entry under its own id, and remembers it for the
+        /// `/v1/models` listing only once per install.
+        func register(_ entry: ModelCatalog.Entry, into servedList: inout [ServedModel]) throws {
             let choice = try ReasoningFallback.choice(for: entry.kind, requested: reasoning)
             choices[entry.id] = choice
             entries[entry.id] = entry
-            served.append(ServedModel(
+            servedList.append(ServedModel(
                 id: entry.id,
                 displayName: entry.name,
                 maximumContext: Self.context(for: entry, configured: maximumContext),
                 sampling: entry.sampling,
                 reasoningProfile: Self.profile(for: entry, choice: choice)))
+        }
+        for entry in catalog.entries {
+            try register(entry, into: &served)
+            // Every engine the install can be served by, named by a suffix, so
+            // one request can ask for the CPU copy of a dense model and the
+            // next for the GPU one: `qwen3.5-2b_4-Bit@cpu`. The aliases share
+            // the install and are listed beside it.
+            for engine in entry.engines {
+                let aliasID = "\(entry.id)@\(engine.rawValue)"
+                guard aliasID != entry.id,
+                      let alias = entry.served(by: engine, id: aliasID) else { continue }
+                // A single-engine install gets the alias so the explicit
+                // spelling resolves, but it is not *listed*: it names the same
+                // engine as the bare id, and two entries for one model in
+                // `/v1/models` is noise. A second engine is a real choice and
+                // is listed.
+                if entry.engines.count > 1, engine != entry.backend {
+                    try register(alias, into: &served)
+                } else {
+                    let choice = try ReasoningFallback.choice(for: alias.kind,
+                                                              requested: reasoning)
+                    choices[alias.id] = choice
+                    entries[alias.id] = alias
+                }
+            }
         }
         guard let initial = served.first(where: { $0.id == initialModelID }) else {
             throw ModelRouterError.notInCatalog(initialModelID)

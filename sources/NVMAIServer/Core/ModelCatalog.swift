@@ -26,6 +26,21 @@ public struct ModelCatalog: Sendable {
             }
         }
 
+        /// The kind that serves the same install on `backend`, where the
+        /// runtime implements the family there too.
+        public func kind(forBackend backend: Backend) -> Kind? {
+            switch (self, backend) {
+            case (.gpu, .gpu), (.cpu, .cpu):
+                return self
+            case (.gpu(.qwen35Dense), .cpu), (.cpu(.qwen35Dense), .gpu):
+                // The dense family is the one both engines implement, and its
+                // payload is identical for either.
+                return backend == .cpu ? .cpu(.qwen35Dense) : .gpu(.qwen35Dense)
+            default:
+                return nil
+            }
+        }
+
         public var familyName: String {
             switch self {
             case .gpu(let family): family.rawValue
@@ -74,10 +89,18 @@ public struct ModelCatalog: Sendable {
         /// whatever the server was configured for.
         public let contextLimit: Int?
         public let sizeBytes: Int64
+        /// Every engine that can serve this install, most-preferred first.
+        ///
+        /// One for almost everything -- a MoE family is GPU-only and a snapshot
+        /// is CPU-only -- but the dense Qwen 3.5 models run on both, and that is
+        /// what makes `cpu` or `gpu` a request-level choice rather than a
+        /// property of the model. `kind` is the default; the others are named by
+        /// an `@cpu` / `@gpu` suffix on the id.
+        public let engines: [Backend]
 
         public init(id: String, name: String, kind: Kind, quant: Int, path: URL,
                     sampling: GenerationDefaults.Sampling, contextLimit: Int? = nil,
-                    sizeBytes: Int64 = 0) {
+                    sizeBytes: Int64 = 0, engines: [Backend]? = nil) {
             self.id = id
             self.name = name
             self.kind = kind
@@ -86,9 +109,26 @@ public struct ModelCatalog: Sendable {
             self.sampling = sampling
             self.contextLimit = contextLimit
             self.sizeBytes = sizeBytes
+            // Defaulting to the entry's own engine keeps every existing caller
+            // (and every earlier catalog) meaning what it meant.
+            self.engines = engines ?? [kind.backend]
         }
 
         public var backend: Backend { kind.backend }
+
+        /// The same install served by `backend`, or nil when that engine cannot
+        /// serve it. Only the dense Qwen 3.5 family has two engines today: its
+        /// `.gturbo` payload is the same file for either, and the runtime picks
+        /// the engine.
+        public func served(by backend: Backend, id aliasID: String) -> Entry? {
+            guard engines.contains(backend),
+                  let kind = kind.kind(forBackend: backend) else { return nil }
+            return Entry(id: aliasID,
+                         name: "\(name) (\(backend.rawValue.uppercased()))",
+                         kind: kind, quant: quant, path: path, sampling: sampling,
+                         contextLimit: contextLimit, sizeBytes: sizeBytes,
+                         engines: engines)
+        }
     }
 
     public struct Skipped: Sendable, Equatable {
@@ -202,17 +242,16 @@ public struct ModelCatalog: Sendable {
         return .success(Entry(
             id: id,
             name: displayNames[base] ?? base,
-            // The one line that routes a .gturbo dense install to the CPU
-            // engine. Everything else about the install -- manifest, receipt,
-            // verify-install -- is the shared GPU path, which is the point of
-            // repacking these at all.
-            kind: identity.family == .qwen35Dense
-                ? .cpu(.qwen35Dense)
-                : .gpu(identity.family),
+            // A dense install is served by the GPU engine by default now that
+            // the family is implemented there, and by the CPU engine when the
+            // request (or the launch) names it -- `engines` is what says both
+            // are available, and `ModelRouter` derives the `@cpu` alias from it.
+            kind: .gpu(identity.family),
             quant: identity.weightBits,
             path: directory,
             sampling: ModelProfile.resolve(identity: identity).sampling,
-            sizeBytes: sizeOnDisk(directory)))
+            sizeBytes: sizeOnDisk(directory),
+            engines: identity.family == .qwen35Dense ? [.gpu, .cpu] : nil))
     }
 
     private static func probeSnapshot(_ directory: URL) -> Result<Entry, ProbeFailure> {
@@ -365,6 +404,7 @@ public struct ModelCatalog: Sendable {
             ("family", try quoted(entry.kind.familyName)),
             ("quant", String(entry.quant)),
             ("backend", try quoted(entry.backend.rawValue)),
+            ("engines", try quoted(entry.engines.map(\.rawValue).joined(separator: ","))),
             ("path", try quoted(entry.path.path)),
             ("thinking", "[" + thinking.joined(separator: ",") + "]"),
             ("sampling", sampling),

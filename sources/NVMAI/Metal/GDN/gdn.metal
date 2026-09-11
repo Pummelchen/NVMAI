@@ -1,4 +1,10 @@
 #include <metal_stdlib>
+
+/// Widest activation the Gated-DeltaNet staging tile covers. The dense
+/// Qwen 3.5 9B is 4096 wide; 8192 bytes of threadgroup memory, well
+/// inside the 32 KB limit, and this kernel is the only one that stages
+/// an activation of that width.
+constant constexpr uint kGDNActivationMaxD = 4096;
 using namespace metal;
 
 // ============================================================================
@@ -845,7 +851,7 @@ kernel void NAME(                                                          \
     const uint Z   = gdn_in_fc_z(zRows);                                   \
     const uint AB  = gdn_in_fc_ab(abRows);                                 \
     const uint NN  = gdn_in_fc_n(N);                                       \
-    threadgroup half xt[2816];                                             \
+    threadgroup half xt[kGDNActivationMaxD];                               \
     if (XSH) {                                                             \
         for (uint i = lane; i < NN; i += 32u) { xt[i] = x[i]; }            \
         threadgroup_barrier(mem_flags::mem_threadgroup);                   \

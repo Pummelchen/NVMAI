@@ -200,6 +200,16 @@ extension Model {
             device: device,
             fileDescriptor: weightsFD)
 
+        // A checkpoint may keep the small per-head tensors the GDN kernels read
+        // as bf16 in fp32 instead (the dense Qwen 3.5 installs do, following
+        // their source checkpoints); promote those once here.
+        let promotedBF16 = try Model.buildBF16ReadableViews(
+            device: device,
+            schema: TensorSchema.schema(for: expecting.family),
+            config: expecting,
+            residentIndex: residentIndex,
+            residentBuffer: residentBuffer.buffer)
+
         return Model(
             device: device,
             config: expecting,
@@ -211,7 +221,8 @@ extension Model {
             packedExpertsLayout: layout,
             manifest: manifest,
             directoryURL: directoryURL,
-            modelDirectory: modelDirectory)
+            modelDirectory: modelDirectory,
+            promotedBF16: promotedBF16)
     }
 
     private static func validateTrustedReceiptLayerLayout(
@@ -219,6 +230,13 @@ extension Model {
         manifest: Manifest,
         layout: PackedExpertsLayout
     ) throws {
+        // A dense install packs no experts: its layout names one file per layer
+        // with an empty expert list, and the repacker wrote none of them, so
+        // there is no per-layer payload for the receipt to attest. That is a
+        // property of the install rather than a missing file -- anything that
+        // does pack experts still goes through the loop below, and a zero-expert
+        // layout that names experts was already refused when the layout decoded.
+        guard layout.expertsPerLayer > 0, layout.expertStride > 0 else { return }
         for layer in layout.layers {
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
@@ -240,10 +258,17 @@ extension Model {
     }
 
     /// Width of the fixed threadgroup tiles the MoE and GDN kernels stage
-    /// activations into: `kMoEXMaxD` in `moe.metal` and `xt[2816]` in
-    /// `gdn.metal`. A hidden size above this writes past the tile, so
-    /// `validateRuntimeSchema` refuses it rather than letting the kernel do it.
+    /// activations into: `kMoEXMaxD` in `moe.metal` and
+    /// `kGDNActivationMaxD` in `gdn.metal`. A hidden size above this writes
+    /// past the tile, so `validateRuntimeSchema` refuses it rather than letting
+    /// the kernel do it.
+    ///
+    /// The bound is per kernel family because a model dispatches one or the
+    /// other: the MoE tiles are 2816 wide and the dense Qwen 3.5 9B (4096) never
+    /// reaches them, while its Gated-DeltaNet layers do reach the staging tile,
+    /// which is sized for 4096.
     static let maximumThreadgroupTileWidth = 2816
+    static let maximumDenseThreadgroupTileWidth = 4096
 
     /// Refuses model geometry the compiled kernels cannot serve.
     ///
@@ -269,11 +294,17 @@ extension Model {
                     + "implemented on the GPU path: the gated attention branch runs "
                     + "every non-linear layer as full attention")
         }
-        guard config.hiddenSize <= Self.maximumThreadgroupTileWidth else {
+        // A model with no routed experts never dispatches the MoE kernels, so
+        // only the Gated-DeltaNet tile bounds it -- and that tile is wider.
+        let tileWidth = config.numExperts == 0
+            ? Self.maximumDenseThreadgroupTileWidth
+            : Self.maximumThreadgroupTileWidth
+        guard config.hiddenSize <= tileWidth else {
             throw ModelError.unsupportedArchitecture(
                 detail: "hiddenSize \(config.hiddenSize) exceeds the "
-                    + "\(Self.maximumThreadgroupTileWidth)-element threadgroup tiles "
-                    + "the MoE and GDN kernels are compiled with")
+                    + "\(tileWidth)-element threadgroup tiles the "
+                    + (config.numExperts == 0 ? "Gated-DeltaNet" : "MoE and Gated-DeltaNet")
+                    + " kernels are compiled with")
         }
         // The attention kernels size their scratch from two compile-time
         // ceilings: `Attention.maxQHeads` (the host-side split-KV reduction
@@ -404,15 +435,42 @@ extension Model {
         try validateLayerSchema(checks: checks, layout: layout, config: config,
                                 quant: quant, overrides: manifest.quantOverrides)
 
-        // Validation is complete; execution is not. The dense FFN stage lands in
-        // S2 of `docs/plan-dense-gpu-engine.md`, and until it does a dense
-        // install must not reach the MoE stages: those would compute fluent
-        // nonsense rather than fail, which is the one outcome this project has
-        // shipped before and refuses to ship again.
-        if config.family == .qwen35Dense {
-            throw ModelError.unsupportedArchitecture(
-                detail: "qwen3_5_dense validates, but the GPU feed-forward stage for it "
-                    + "is not implemented yet (docs/plan-dense-gpu-engine.md, step S2)")
+    }
+
+    /// One kernel per role is built, so a role has to be uniform.
+    ///
+    /// The runner asks a role for its width once and builds a single GEMV for
+    /// it (`Model.qoProjectionWeightBits`, `kvProjectionWeightBits`,
+    /// `ffnWeightBits`, `gdnProjectionWeightBits`). A manifest that declared
+    /// `k_proj` at 4 bits on one layer and 8 on the next would have half its
+    /// layers read at the wrong width -- the silent-wrongness failure this
+    /// whole path exists to avoid -- so the install is refused by name instead.
+    private static func validateRoleUniformity(overrides: [String: Int],
+                                               family: ModelFamily) throws {
+        guard !overrides.isEmpty else { return }
+        // The runtime's roles, not one suffix per tensor: q/o share a
+        // dispatcher, as do k/v, the three FFN projections and the three GDN
+        // ones.
+        let roles: [(name: String, suffixes: [String])] = [
+            ("qo", [".self_attn.q_proj", ".self_attn.o_proj"]),
+            ("kv", [".self_attn.k_proj", ".self_attn.v_proj"]),
+            ("ffn", [".mlp.gate_proj", ".mlp.up_proj", ".mlp.down_proj"]),
+            ("gdn", [".linear_attn.in_proj_qkv", ".linear_attn.in_proj_z",
+                     ".linear_attn.out_proj"]),
+            ("head", [".lm_head"]),
+        ]
+        for role in roles {
+            var seen: (bits: Int, stem: String)?
+            for (stem, bits) in overrides.sorted(by: { $0.key < $1.key })
+            where role.suffixes.contains(where: { stem.hasSuffix($0) }) {
+                if let seen, seen.bits != bits {
+                    throw ModelError.unsupportedArchitecture(
+                        detail: "\(family.rawValue) declares \(stem) at \(bits) bits and "
+                            + "\(seen.stem) at \(seen.bits); the runtime builds one kernel "
+                            + "for the \(role.name) role, so it has to be uniform")
+                }
+                seen = (bits, stem)
+            }
         }
     }
 
@@ -461,6 +519,7 @@ extension Model {
         // linear_attn bundle. The Qwen checkpoints keep no auxiliary
         // sandwich/scale tensors.
         try validateFamilyQuantSupport(config: config, quant: quant)
+        try validateRoleUniformity(overrides: overrides, family: config.family)
         try validateLayerTensors(checks: checks, config: config, quant: quant,
                                  overrides: overrides)
         // A dense install packs no experts at all (`expertsPerLayer: 0` and an
@@ -547,6 +606,13 @@ extension Model {
                                      rows: config.hiddenSize, columns: config.intermediateSize,
                                      slot: ffnSlot(schema.sharedExpertDown(layer)))
 
+            // Each projection resolves its own width: a dense install keeps
+            // k/v at 8 bits while the attention slot says 4, and validating
+            // against the slot would refuse a correct install (or, worse, pass
+            // one whose bytes are later read at the wrong width).
+            func roleSlot(_ name: String, _ fallback: ManifestQuantSlot) -> ManifestQuantSlot {
+                quant.slot(forTensorNamed: name, overrides: overrides, fallback: fallback)
+            }
             if config.layerIsFull(layer) {
                 // Gate-packed [query ; gate] q_proj: 2 * heads * headDim rows.
                 let queryDimension = try checks.checkedIntMultiply(
@@ -561,25 +627,25 @@ extension Model {
                                        count: config.fullHeadDim)
                 try checks.requireAffine(schema.qProj(layer),
                                          rows: queryDimension, columns: config.hiddenSize,
-                                         slot: quant.attention)
+                                         slot: roleSlot(schema.qProj(layer), quant.attention))
                 try checks.requireAffine(schema.kProj(layer),
                                          rows: kvDimension, columns: config.hiddenSize,
-                                         slot: quant.attention)
+                                         slot: roleSlot(schema.kProj(layer), quant.attention))
                 try checks.requireAffine(schema.vProj(layer),
                                          rows: kvDimension, columns: config.hiddenSize,
-                                         slot: quant.attention)
+                                         slot: roleSlot(schema.vProj(layer), quant.attention))
                 try checks.requireAffine(schema.oProj(layer),
                                          rows: config.hiddenSize,
                                          columns: config.numHeads * config.fullHeadDim,
-                                         slot: quant.attention)
+                                         slot: roleSlot(schema.oProj(layer), quant.attention))
             } else if config.layerIsLinear(layer) {
                 let la = config.linearAttention
                 try checks.requireAffine(schema.gdnQKV(layer),
                                          rows: la.qkvDim, columns: config.hiddenSize,
-                                         slot: quant.attention)
+                                         slot: roleSlot(schema.gdnQKV(layer), quant.attention))
                 try checks.requireAffine(schema.gdnZ(layer),
                                          rows: la.valueDim, columns: config.hiddenSize,
-                                         slot: quant.attention)
+                                         slot: roleSlot(schema.gdnZ(layer), quant.attention))
                 try checks.requireAffineOrBF16(schema.gdnA(layer),
                                          rows: la.numVHeads, columns: config.hiddenSize,
                                          slot: quant.attention)
@@ -588,12 +654,12 @@ extension Model {
                                          slot: quant.attention)
                 try checks.requireAffine(schema.gdnOut(layer),
                                          rows: config.hiddenSize, columns: la.valueDim,
-                                         slot: quant.attention)
+                                         slot: roleSlot(schema.gdnOut(layer), quant.attention))
                 try checks.requireBF16(schema.gdnConv(layer),
                                        count: la.qkvDim * la.convKernelSize)
-                try checks.requireBF16(schema.gdnALog(layer), count: la.numVHeads)
-                try checks.requireBF16(schema.gdnDtBias(layer), count: la.numVHeads)
-                try checks.requireBF16(schema.gdnNorm(layer),
+                try checks.requireBF16OrFP32(schema.gdnALog(layer), count: la.numVHeads)
+                try checks.requireBF16OrFP32(schema.gdnDtBias(layer), count: la.numVHeads)
+                try checks.requireBF16OrFP32(schema.gdnNorm(layer),
                                        count: la.valueHeadDim)
             }
         }

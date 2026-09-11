@@ -117,7 +117,16 @@ final class MoE {
         // 16 is the argument buffer's blob-array extent (kMaxStreamedExperts
         // in moe.metal). Router select and phase-2 reduce both have k != 8
         // variants; see docs/qwen38-flash-next-port.md.
-        precondition((1...16).contains(topKExperts),
+        //
+        // `0` is a real value: a dense model has no routed experts, so it has
+        // no router to score and no routed FFN to run. The runtime is still
+        // constructed -- the argument buffers are per-runner scratch and the
+        // pipelines are built once here -- and every routed stage is skipped
+        // when the model has no experts, so this specialization is never
+        // dispatched. The shader's own arrays are sized by the fixed
+        // `kMaxStreamedExperts` rather than by this constant, so a zero needs
+        // no kernel variant.
+        precondition((0...16).contains(topKExperts),
                      "top-\(topKExperts) exceeds the routed argument buffer's "
                          + "expert slots (16)")
         self.maxStreamedExperts = topKExperts

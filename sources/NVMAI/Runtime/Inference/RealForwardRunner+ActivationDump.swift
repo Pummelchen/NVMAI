@@ -11,6 +11,15 @@ import Metal
 /// intermediates and diffing them against a reference is the only check that
 /// localizes such a bug to a single stage.
 ///
+/// A dump recorded during encoding and performed after the layer is awaited.
+struct PendingActivationDump {
+    let name: String
+    let buffer: MTLBuffer
+    let count: Int
+    let position: Int
+    var offset: Int = 0
+}
+
 /// Off unless `NVMAI_ACT_DUMP` names a directory, and every call site is
 /// wrapped so a normal run does no work and takes no synchronization.
 extension RealForwardRunner {
@@ -51,6 +60,65 @@ extension RealForwardRunner {
             atomically: true, encoding: .utf8)
     }
 
+    /// Dumps a **private** buffer by blitting it into shared staging first.
+    ///
+    /// The prefill scratch is `.storageModePrivate` (decode's is shared, which
+    /// is why the decode call sites can read theirs directly). Reading a
+    /// private resource from the CPU is what Metal's validation aborts on --
+    /// `resourceOptions (0x20) specify MTLResourceStorageModePrivate, which is
+    /// not CPU accessible` -- so a prefill dump goes through a blit, and the
+    /// command buffer is awaited before the bytes are read.
+    func dumpActivationPrivate(_ name: String,
+                               _ buffer: MTLBuffer,
+                               count: Int,
+                               position: Int,
+                               offset: Int = 0) {
+        guard activationDumpDirectory(position: position) != nil else { return }
+        let bytes = count * MemoryLayout<Float16>.stride
+        guard offset + bytes <= buffer.length,
+              let staging = ctx.device.makeBuffer(length: bytes,
+                                                  options: .storageModeShared),
+              let cb = ctx.queue.makeCommandBuffer(),
+              let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.copy(from: buffer, sourceOffset: offset,
+                  to: staging, destinationOffset: 0, size: bytes)
+        blit.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        dumpActivation(name, staging, count: count, position: position)
+    }
+
+    /// Records a dump to perform after the buffer's writer has been committed.
+    ///
+    /// A dump taken *between* two encode calls reads a buffer the GPU has not
+    /// been asked to write yet: the encode is still accumulating in an
+    /// uncommitted command buffer, so a staging blit submitted now copies
+    /// whatever the buffer held before -- which for scratch first used on this
+    /// layer is zeros. That reads exactly like a stage computing nothing.
+    /// Deferring to the end of the layer, after the wait, is what makes a
+    /// mid-layer dump mean what it says.
+    func dumpActivationDeferred(_ name: String,
+                                _ buffer: MTLBuffer,
+                                count: Int,
+                                position: Int,
+                                offset: Int = 0) {
+        guard activationDumpDirectory(position: position) != nil else { return }
+        pendingDumps.append(PendingActivationDump(name: name, buffer: buffer,
+                                                  count: count, position: position,
+                                                  offset: offset))
+    }
+
+    /// Performs every deferred dump. Call once the layer's work is awaited.
+    func flushDeferredDumps() {
+        guard !pendingDumps.isEmpty else { return }
+        let pending = pendingDumps
+        pendingDumps.removeAll(keepingCapacity: true)
+        for dump in pending {
+            dumpActivationPrivate(dump.name, dump.buffer, count: dump.count,
+                                  position: dump.position, offset: dump.offset)
+        }
+    }
+
     /// Writes `count` fp16 values as raw little-endian fp16 (numpy
     /// `dtype='<f2'`). Synchronizes first: the caller passes the command
     /// buffer that produced the values, because reading a shared buffer the
@@ -66,7 +134,15 @@ extension RealForwardRunner {
         else { return }
         commandBuffer?.waitUntilCompleted()
         let bytes = count * MemoryLayout<Float16>.stride
-        guard offset + bytes <= buffer.length else { return }
+        guard offset + bytes <= buffer.length else {
+            // Reported rather than skipped in silence: a dump that quietly
+            // writes nothing looks exactly like a stage computing zeros, which
+            // is the confusion this facility exists to remove.
+            FileHandle.standardError.write(Data(
+                ("NVMAI_ACT_DUMP: \(name) needs \(offset + bytes) bytes but the buffer "
+                 + "holds \(buffer.length); nothing written\n").utf8))
+            return
+        }
         let data = Data(bytes: buffer.contents().advanced(by: offset),
                         count: bytes)
         try? data.write(to: directory.appendingPathComponent("\(name).f16"))

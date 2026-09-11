@@ -37,6 +37,9 @@ public struct Model {
     }
     public let device: MTLDevice
     public let config: ArchConfig
+    /// bf16 views of fp32 tensors the kernels read as bf16, promoted at load.
+    /// Empty for every family whose checkpoints already store them as bf16.
+    let promotedBF16: [String: TensorView]
     public let streamingMode: ExpertStreamingMode
     public let expertCachePolicy: ExpertCachePolicy
     public let integrityPolicy: ModelIntegrityPolicy
@@ -46,13 +49,15 @@ public struct Model {
         sharedTargetWeights?.embeddingBits ?? manifest.quant?.embedding.weightBits ?? 4
     }
     public var lmHeadWeightBits: Int {
-        // Fallback to the embedding slot: qwen36 keeps a separate lm_head, but
-        // the repacker quantizes it with the same layout as the embedding
-        // (padded to the same vocab rows). `validateRuntimeSchema` checks the
-        // lm_head tensor against the embedding slot for qwen36, so the
-        // fallback is only reachable when the validator already accepted the
-        // coupling.
-        sharedTargetWeights?.lmHeadBits ?? manifest.quant?.embedding.weightBits ?? 4
+        // The head is a role of its own: a manifest can declare it separately
+        // from the attention slot (and the dense family's 9B does), so it is
+        // resolved by name first. The embedding slot is the fallback because
+        // the repacker quantizes a separate lm_head with the embedding's layout
+        // (padded to the same vocab rows), which `validateRuntimeSchema`
+        // checks.
+        sharedTargetWeights?.lmHeadBits
+            ?? roleWeightBits(roleSuffix: ".lm_head",
+                              fallback: manifest.quant?.embedding.weightBits ?? 4)
     }
     public var attentionWeightBits: Int { manifest.quant?.attention.weightBits ?? 4 }
     public var routerWeightBits: Int { manifest.quant?.router.weightBits ?? 8 }
@@ -81,6 +86,58 @@ public struct Model {
         return view.dtype == 1 ? 16 : routerWeightBits
     }
     public var sharedExpertWeightBits: Int { manifest.quant?.sharedExpert.weightBits ?? 8 }
+
+    /// A tensor's own declared width, when the manifest overrides its slot.
+    ///
+    /// The five slots are the build's defaults; a tensor whose width differs
+    /// from every slot's carries a per-tensor override keyed by stem (the name
+    /// without `.weight`). The dense Qwen 3.5 installs are built that way.
+    func weightBits(forTensorNamed name: String) -> Int? {
+        let stem = name.hasSuffix(".weight") ? String(name.dropLast(".weight".count)) : name
+        return manifest.quantOverrides[stem]
+    }
+
+    /// The width a *role's* tensors are stored at: the per-tensor override the
+    /// manifest declares for that role, else the slot's width.
+    ///
+    /// Keyed by the role's name suffix rather than by one layer's tensor,
+    /// because a manifest's overrides name real tensors: asking for
+    /// `layers.0.self_attn.k_proj` asks about a tensor a Gated-DeltaNet layer
+    /// does not have, and the answer "no override" would silently read an 8-bit
+    /// k_proj as 4-bit nibbles. The dense installs declare their deviations
+    /// exactly that way -- `k_proj`/`v_proj` at 8 bits on the full-attention
+    /// layers only -- so the lookup scans the role.
+    ///
+    /// Uniformity across the role is required, because the runner builds one
+    /// dispatcher per role; `validateRuntimeSchema` refuses an install that
+    /// declares otherwise rather than reading some layers at the wrong width.
+    func roleWeightBits(roleSuffix: String, fallback: Int) -> Int {
+        let matches = manifest.quantOverrides.filter { $0.key.hasSuffix(roleSuffix) }
+        return matches.first?.value ?? fallback
+    }
+
+    /// The width the `q_proj`/`o_proj` pair is stored at.
+    public var qoProjectionWeightBits: Int {
+        roleWeightBits(roleSuffix: ".self_attn.q_proj", fallback: attentionWeightBits)
+    }
+
+    /// The width the `k_proj`/`v_proj` pair is stored at (one role: they share
+    /// a shape and the KV cache treats them together).
+    public var kvProjectionWeightBits: Int {
+        roleWeightBits(roleSuffix: ".self_attn.k_proj", fallback: attentionWeightBits)
+    }
+
+    /// The width the feed-forward projections are stored at. For a dense model
+    /// these are its `mlp.*` tensors, declared per tensor at 4 bits while the
+    /// `sharedExpert` slot says 8; for a MoE family it is the slot, unchanged.
+    public var ffnWeightBits: Int {
+        roleWeightBits(roleSuffix: ".mlp.gate_proj", fallback: sharedExpertWeightBits)
+    }
+
+    /// The width the Gated-DeltaNet projections are stored at.
+    public var gdnProjectionWeightBits: Int {
+        roleWeightBits(roleSuffix: ".linear_attn.in_proj_qkv", fallback: attentionWeightBits)
+    }
     public var routedExpertWeightBits: Int { manifest.quant?.routedExpert.weightBits ?? 4 }
     /// The manifest's recorded digest of `model_weights.bin`. The manifest is
     /// itself bound by the install receipt, so this is a trustworthy identity
@@ -156,7 +213,8 @@ public struct Model {
          manifest: Manifest,
          directoryURL: URL,
          modelDirectory: GTurboModelDirectory,
-         sharedTargetWeights: SharedTargetWeights? = nil) {
+         sharedTargetWeights: SharedTargetWeights? = nil,
+         promotedBF16: [String: TensorView] = [:]) {
         self.device = device
         self.config = config
         self.streamingMode = streamingMode
@@ -168,6 +226,7 @@ public struct Model {
         self.manifest = manifest
         self.directoryURL = directoryURL
         self.modelDirectory = modelDirectory
+        self.promotedBF16 = promotedBF16
         self.sharedTargetWeights = sharedTargetWeights
         self.streamersBox = StreamersBox(numLayers: packedExpertsLayout.numLayers)
         self.streamersQueue = DispatchQueue(label: "NVMAI.expert-streamers")
@@ -474,19 +533,19 @@ public struct Model {
     }
     /// Depthwise causal conv weight, source shape `[convDim, kernel, 1]`, BF16.
     public func linearConv1d(layer L: Int) throws -> TensorView {
-        try resident(name: schema.gdnConv(L))
+        try bf16Readable(schema.gdnConv(L))
     }
     /// Per-value-head decay base, shape `[numVHeads]`, BF16.
     public func linearALog(layer L: Int) throws -> TensorView {
-        try resident(name: schema.gdnALog(L))
+        try bf16Readable(schema.gdnALog(L))
     }
     /// Per-value-head dt bias, shape `[numVHeads]`, BF16.
     public func linearDtBias(layer L: Int) throws -> TensorView {
-        try resident(name: schema.gdnDtBias(L))
+        try bf16Readable(schema.gdnDtBias(L))
     }
     /// Gated RMSNorm weight over the value head dim, shape `[valueHeadDim]`.
     public func linearNorm(layer L: Int) throws -> TensorView {
-        try resident(name: schema.gdnNorm(L))
+        try bf16Readable(schema.gdnNorm(L))
     }
 
     /// Resolve a tensor name to a `TensorView` against the resident buffer.
@@ -497,20 +556,86 @@ public struct Model {
         guard let entry = residentIndex.entries[name] else {
             throw ModelError.tensorNotFound(name: name)
         }
-        let residentFileOffset = residentIndex.header.indexSize
-        let relativeOffset = entry.fileOffset - residentFileOffset
-        let scaleRel: UInt64 = entry.scaleSize > 0
-            ? entry.scaleOffset - residentFileOffset : 0
-        let biasRel: UInt64 = entry.biasSize > 0
-            ? entry.biasOffset - residentFileOffset : 0
+        return Self.residentView(entry: entry,
+                                 indexSize: residentIndex.header.indexSize,
+                                 buffer: residentBuffer.buffer)
+    }
+
+    /// The `TensorView` a resident index entry describes. Shared with the
+    /// promotion step, which builds views over buffers it allocates itself and
+    /// must handle the same file-to-buffer offset translation.
+    static func residentView(entry: ResidentIndexEntry,
+                             indexSize: UInt64,
+                             buffer: MTLBuffer) -> TensorView {
+        let relativeOffset = entry.fileOffset - indexSize
+        let scaleRel: UInt64 = entry.scaleSize > 0 ? entry.scaleOffset - indexSize : 0
+        let biasRel: UInt64 = entry.biasSize > 0 ? entry.biasOffset - indexSize : 0
         return TensorView(
-            buffer: residentBuffer.buffer,
+            buffer: buffer,
             offset: relativeOffset,
             length: entry.sizeBytes,
             scaleOffset: scaleRel, scaleLength: entry.scaleSize,
             biasOffset:  biasRel,  biasLength:  entry.biasSize,
             shape: entry.shape,
             dtype: entry.dtype)
+    }
+
+    /// Promotes every fp32 tensor the kernels read as bf16 into a bf16 buffer.
+    ///
+    /// The dense Qwen 3.5 installs keep `A_log` and the gated norm at fp32 (as
+    /// their source checkpoints do) while `gdn.metal` declares `device const
+    /// bfloat*` for them, so the bytes would be read as the wrong type. The
+    /// promotion is the same rounding the MoE installs already ship -- their
+    /// `A_log` is bf16 on disk and passes the oracle baselines -- and it keeps
+    /// the kernels unchanged. Round-half-to-even, per `Quantization.bf16Bits`.
+    ///
+    /// Only the small per-head tensors are considered: the quantized
+    /// projections keep their own path, and a bf16 tensor is left alone.
+    static func buildBF16ReadableViews(
+        device: MTLDevice,
+        schema: TensorSchema,
+        config: ArchConfig,
+        residentIndex: ResidentIndex,
+        residentBuffer: MTLBuffer
+    ) throws -> [String: TensorView] {
+        var promoted: [String: TensorView] = [:]
+        for layer in 0..<config.numLayers where config.layerIsLinear(layer) {
+            let names = [schema.gdnALog(layer), schema.gdnDtBias(layer),
+                         schema.gdnConv(layer), schema.gdnNorm(layer)]
+            for name in names {
+                guard let entry = residentIndex.entries[name], entry.dtype == 3 else { continue }
+                let source = residentView(entry: entry,
+                                          indexSize: residentIndex.header.indexSize,
+                                          buffer: residentBuffer)
+                let elements = Int(entry.sizeBytes) / MemoryLayout<Float>.size
+                guard let converted = device.makeBuffer(
+                    length: max(elements * MemoryLayout<UInt16>.size, 4),
+                    options: .storageModeShared) else {
+                    throw ModelError.indexCorrupt(
+                        detail: "could not allocate a bf16 promotion buffer for \(name)")
+                }
+                let sourcePointer = (source.buffer.contents() + Int(source.offset))
+                    .assumingMemoryBound(to: Float.self)
+                let destination = converted.contents()
+                    .assumingMemoryBound(to: UInt16.self)
+                for index in 0..<elements {
+                    destination[index] = Quantization.bf16Bits(sourcePointer[index])
+                }
+                promoted[name] = TensorView(
+                    buffer: converted, offset: 0,
+                    length: UInt64(elements * MemoryLayout<UInt16>.size),
+                    scaleOffset: 0, scaleLength: 0, biasOffset: 0, biasLength: 0,
+                    shape: entry.shape, dtype: 1)
+            }
+        }
+        return promoted
+    }
+
+    /// A tensor the kernels read as bf16: its promoted view when the checkpoint
+    /// stored it in fp32, else the resident bytes themselves.
+    private func bf16Readable(_ name: String) throws -> TensorView {
+        if let promoted = promotedBF16[name] { return promoted }
+        return try resident(name: name)
     }
 
     // MARK: - Routed expert (lazy)
@@ -795,6 +920,27 @@ struct RuntimeSchemaChecks {
             throw ModelError.tensorNotFound(name: name)
         }
         return e
+    }
+
+    /// Accepts a tensor the kernels read as bf16 whether the checkpoint kept it
+    /// at bf16 or at fp32.
+    ///
+    /// The dense Qwen 3.5 installs keep `A_log` and the gated norm in fp32, as
+    /// their source checkpoints do, while `gdn.metal` takes `device const
+    /// bfloat*` for both; the runtime promotes them once at load (`Model`
+    /// builds the bf16 view), so both widths are executable. Any other dtype is
+    /// still refused -- the kernels would read it as bf16 regardless.
+    func requireBF16OrFP32(_ name: String, count: Int) throws {
+        let e = try entry(name)
+        guard e.dtype == 1 || e.dtype == 3 else {
+            throw ModelError.indexCorrupt(detail: "\(name) is neither BF16 nor FP32")
+        }
+        let dims = [e.shape.0, e.shape.1, e.shape.2, e.shape.3]
+        let elements = dims.reduce(1) { $0 * ($1 == 0 ? 1 : Int($1)) }
+        guard elements == count else {
+            throw ModelError.tensorSizeMismatch(
+                name: name, expected: UInt64(count), actual: UInt64(elements))
+        }
     }
 
     func requireBF16(_ name: String, count: Int) throws {

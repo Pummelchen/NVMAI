@@ -446,7 +446,8 @@ extension RealForwardRunner {
     struct LayerPrefillQKVViews {
         let inputNorm: TensorView
         let postAttention: TensorView
-        let router: TensorView
+        /// The router, or nil for a family with no routed mixture (dense).
+        let router: TensorView?
         // Softmax-attention layers only (nil on linear-attention layers).
         let q: TensorView?
         let k: TensorView?
@@ -466,8 +467,12 @@ extension RealForwardRunner {
         let linNorm: TensorView?
     }
 
+    /// `weightBits` is the *role's* width, not the attention slot's: the dense
+    /// Qwen 3.5 installs keep k/v at 8 bits with q/o at 4, and the int4-only
+    /// batched paths below would read an 8-bit tensor as packed nibbles.
     func encodeAffineProjection(commandBuffer: MTLCommandBuffer,
                               family: PrefillProjectionFamily,
+                              weightBits: Int,
                               weights: TensorView,
                               x: MTLBuffer,
                               y: MTLBuffer,
@@ -486,9 +491,10 @@ extension RealForwardRunner {
         // smallest tensors in the model, which is why they were chosen.
         if weights.dtype == 1 {
             for row in 0..<tokenCount {
-                try encodePrimaryGEMV(
+                try encodeRoleGEMV(
                     commandBuffer: commandBuffer,
                     projection: weights,
+                    weightBits: weightBits,
                     x: x,
                     xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
                     y: y,
@@ -498,7 +504,7 @@ extension RealForwardRunner {
             }
             return
         }
-        if tokenCount >= 32,
+        if tokenCount >= 32, weightBits == 4,
            family == .q || family == .kv || family == .o,
            let candidate = prefillMPPAffineInt4 {
             let path = try candidate.encode(
@@ -520,7 +526,7 @@ extension RealForwardRunner {
         }
         if useTwoRowProjection && tokenCount == 2
             && xStrideElements == columns && yStrideElements == rows {
-            if model.attentionWeightBits == 4 {
+            if weightBits == 4 {
                 try int4.encodeTwoRows(
                     commandBuffer: commandBuffer,
                     weights: weights.buffer,
@@ -549,7 +555,8 @@ extension RealForwardRunner {
             }
             return
         }
-        if PrefillProjectionDispatchPolicy.selectedDispatch(
+        if weightBits == model.attentionWeightBits,
+           PrefillProjectionDispatchPolicy.selectedDispatch(
                 for: family,
                 chunkTokens: tokenCount) == .qmm {
             try prefillQMM.encode(commandBuffer: commandBuffer,
@@ -567,9 +574,10 @@ extension RealForwardRunner {
             return
         }
         for row in 0..<tokenCount {
-            try encodePrimaryGEMV(
+            try encodeRoleGEMV(
                 commandBuffer: commandBuffer,
                 projection: weights,
+                weightBits: weightBits,
                 x: x,
                 xOffset: row * xStrideElements * MemoryLayout<Float16>.stride,
                 y: y,
@@ -758,6 +766,7 @@ extension RealForwardRunner {
         let la = cfg.linearAttention
         try encodeAffineProjection(commandBuffer: cb,
                              family: .q,
+                             weightBits: model.gdnProjectionWeightBits,
                              weights: linQKV,
                              x: scratch.normed,
                              y: scratch.q,
@@ -769,6 +778,7 @@ extension RealForwardRunner {
                              useTwoRowProjection: useTwoRowProjection)
         try encodeAffineProjection(commandBuffer: cb,
                              family: .kv,
+                             weightBits: model.gdnProjectionWeightBits,
                              weights: linZ,
                              x: scratch.normed,
                              y: scratch.gdnZ,
@@ -780,6 +790,7 @@ extension RealForwardRunner {
                              useTwoRowProjection: useTwoRowProjection)
         try encodeAffineProjection(commandBuffer: cb,
                              family: .kv,
+                             weightBits: model.gdnProjectionWeightBits,
                              weights: linA,
                              x: scratch.normed,
                              y: scratch.gdnA,
@@ -791,6 +802,7 @@ extension RealForwardRunner {
                              useTwoRowProjection: useTwoRowProjection)
         try encodeAffineProjection(commandBuffer: cb,
                              family: .kv,
+                             weightBits: model.gdnProjectionWeightBits,
                              weights: linB,
                              x: scratch.normed,
                              y: scratch.gdnB,
@@ -848,6 +860,7 @@ extension RealForwardRunner {
                             rows: t)
         try encodeAffineProjection(commandBuffer: cb,
                              family: .o,
+                             weightBits: model.gdnProjectionWeightBits,
                              weights: linOut,
                              x: scratch.attentionOutput,
                              y: scratch.h1,
@@ -876,6 +889,7 @@ extension RealForwardRunner {
         let qProjRows = cfg.attnOutputGate ? 2 * qDim : qDim
         try encodeAffineProjection(commandBuffer: cb,
                              family: .q,
+                             weightBits: model.qoProjectionWeightBits,
                              weights: views.q!,
                              x: scratch.normed,
                              y: scratch.q,
@@ -887,6 +901,7 @@ extension RealForwardRunner {
                              useTwoRowProjection: useTwoRowProjection)
         try encodeAffineProjection(commandBuffer: cb,
                              family: .kv,
+                             weightBits: model.kvProjectionWeightBits,
                              weights: views.k!,
                              x: scratch.normed,
                              y: scratch.kStage,
@@ -898,6 +913,7 @@ extension RealForwardRunner {
                              useTwoRowProjection: useTwoRowProjection)
         try encodeAffineProjection(commandBuffer: cb,
                              family: .kv,
+                             weightBits: model.kvProjectionWeightBits,
                              weights: views.v!,
                              x: scratch.normed,
                              y: scratch.vStage,
@@ -907,6 +923,16 @@ extension RealForwardRunner {
                              xStrideElements: D,
                              yStrideElements: kvDim,
                              useTwoRowProjection: useTwoRowProjection)
+        if activationDumpActive(position: startPosition) {
+            dumpActivationDeferred("L\(L)_in", scratch.normed,
+                                   count: t * D, position: startPosition)
+            dumpActivationDeferred("L\(L)_qpacked", scratch.q,
+                                   count: t * qProjRows, position: startPosition)
+            dumpActivationDeferred("L\(L)_kraw", scratch.kStage,
+                                   count: t * kvDim, position: startPosition)
+            dumpActivationDeferred("L\(L)_vraw", scratch.vStage,
+                                   count: t * kvDim, position: startPosition)
+        }
 
         // The attention input Q: the packed q_proj output is split
         // into per-head query/gate halves for gated architectures.
@@ -1033,6 +1059,7 @@ extension RealForwardRunner {
         }
         try encodeAffineProjection(commandBuffer: cb,
                                  family: .o,
+                                 weightBits: model.qoProjectionWeightBits,
                                  weights: views.o!,
                                  x: scratch.attentionOutput,
                                  y: scratch.h1,
@@ -1052,7 +1079,7 @@ extension RealForwardRunner {
             return LayerPrefillQKVViews(
                 inputNorm: try model.inputNorm(layer: L),
                 postAttention: try model.postAttnNorm(layer: L),
-                router: try model.router(layer: L),
+                router: cfg.numExperts == 0 ? nil : try model.router(layer: L),
                 q: isLinear ? nil : try model.qProj(layer: L),
                 k: isLinear ? nil : try model.kProj(layer: L),
                 v: isLinear ? nil
@@ -1155,8 +1182,79 @@ extension RealForwardRunner {
         }
         finalCB.commit()
         try waitForCompletion(finalCB)
+        if activationDumpDirectory != nil {
+            // The head has run and is complete, so these are the numbers the
+            // reference's top-k printout compares against.
+            dumpActivation("prefill_logits", logits, count: cfg.vocabSize,
+                           position: 0)
+            dumpActivationPrivate("final_normed", scratch.normed,
+                                  count: D, position: 0)
+        }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             lastGreedyToken = greedyTokenBuf.contents().load(as: UInt32.self)
+        }
+    }
+
+    /// The dense family's prefill FFN.
+    ///
+    /// The shared-expert block *is* this family's feed-forward network, so this
+    /// is that block plus the residual add the MoE tail performs for the shared
+    /// branch -- the same arithmetic, without a mixture to route, fetch or
+    /// reduce. `sharedExpertGated` is false for the family and its schema has no
+    /// gate tensor, so the scalar-gate step the MoE path applies has nothing to
+    /// read here.
+    func encodeDenseFFNPrefill(
+        cb: inout MTLCommandBuffer,
+        layer L: Int,
+        scratch: PrefillChunkScratchBuffers,
+        tokenCount t: Int,
+        hiddenSize D: Int
+    ) throws {
+        // Commit and drain the incoming buffer first: it carries this layer's
+        // attention and its MLP entry norm. The MoE stage does the same at the
+        // top of its pipeline (it needs the routing readback), and without it
+        // the layer's attention work is never submitted -- the buffers below
+        // stay zero and the stack produces a zero hidden state, which reads as
+        // confident nonsense rather than as an error.
+        cb.commit()
+        try waitForCompletion(cb)
+        guard let sharedCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        let sharedProj = sharedExpertProjections[L]
+        try prefillSharedExpert.encodeBlock(commandBuffer: sharedCB,
+                                            x: scratch.routedX,
+                                            y: scratch.h1,
+                                            gate: sharedProj.gate,
+                                            up: sharedProj.up,
+                                            down: sharedProj.down,
+                                            scratchGate: scratch.sharedGateScratch,
+                                            scratchUp: scratch.sharedUpScratch,
+                                            scratchAct: scratch.sharedActScratch,
+                                            queryCount: t,
+                                            d: D,
+                                            intermediate: cfg.intermediateSize,
+                                            xStrideElements: D,
+                                            yStrideElements: D)
+        sharedCB.commit()
+        try waitForCompletion(sharedCB)
+        recordKernelGPU(role: "prefill_shared_expert", sharedCB)
+
+        guard let tailCB = ctx.queue.makeCommandBuffer() else {
+            throw ModelError.residentBufferWrapFailed
+        }
+        try elementwise!.encodeResidualAdd(commandBuffer: tailCB,
+                                           hidden: scratch.hidden,
+                                           delta: scratch.h1,
+                                           count: t * D)
+        tailCB.commit()
+        try waitForCompletion(tailCB)
+        recordKernelGPU(role: "prefill_dense_ffn_tail", tailCB)
+        if L + 1 < cfg.numLayers {
+            guard let nextCB = ctx.queue.makeCommandBuffer() else {
+                throw ModelError.residentBufferWrapFailed
+            }
+            cb = nextCB
         }
     }
 
@@ -1181,18 +1279,30 @@ extension RealForwardRunner {
         tailNanos prefillTailNanos: inout UInt64,
         activeExperts prefillActiveExperts: inout UInt64
     ) async throws {
+        // A dense model has no routed mixture: its FFN is the shared-expert
+        // block, so the router, the readback and the routed tiles do not exist
+        // for it. Taken here, at the top, so none of them is encoded.
+        if cfg.numExperts == 0 {
+            try encodeDenseFFNPrefill(cb: &cb, layer: L, scratch: scratch,
+                                      tokenCount: t, hiddenSize: D)
+            return
+        }
+        guard let routerView = views.router else {
+            throw ModelError.internalInconsistency(
+                detail: "routed prefill stage reached for a model with no router")
+        }
         var prefillRouteEnd = prefillLayerStart
         var prefillTileEnd = prefillLayerStart
         let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
             (onesPerExpertScale!, 0)
         try prefillRouter.encodeBlock(
                     commandBuffer: cb,
-                    weights: views.router.buffer,
-                    weightsOffset: Int(views.router.offset),
-                    scales: views.router.buffer,
-                    scalesOffset: Int(views.router.scaleOffset),
-                    biases: views.router.buffer,
-                    biasesOffset: Int(views.router.biasOffset),
+                    weights: routerView.buffer,
+                    weightsOffset: Int(routerView.offset),
+                    scales: routerView.buffer,
+                    scalesOffset: Int(routerView.scaleOffset),
+                    biases: routerView.buffer,
+                    biasesOffset: Int(routerView.biasOffset),
                     hidden: scratch.routedX,
                     effectiveScale: effectiveScaleBuffers[L],
                     perExpertScale: perExpertScale.buffer,
@@ -1641,6 +1751,14 @@ extension RealForwardRunner {
                 tileNanos: &prefillTileNanos,
                 tailNanos: &prefillTailNanos,
                 activeExperts: &prefillActiveExperts)
+        }
+        // The stage above awaits its own command buffers, so the layer's output
+        // hidden is complete here. This is the number a reference dump compares
+        // against (`layerN`), which is what localizes a wrong stage to a layer.
+        if activationDumpActive(position: startPosition), L <= dumpLayerLimit {
+            dumpActivationPrivate("L\(L)_after", scratch.hidden,
+                                  count: t * D, position: startPosition)
+            flushDeferredDumps()
         }
     }
 

@@ -491,14 +491,21 @@ extension RealForwardRunner {
         let halfBytes = MemoryLayout<Float16>.stride
         let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
             (onesPerExpertScale!, 0)
+        // The MTP draft verifies against a MoE target and has no dense sibling,
+        // so its stage always has a router; the view is optional because the
+        // dense family shares the view type.
+        guard let routerView = views.router else {
+            throw ModelError.internalInconsistency(
+                detail: "MTP prefill stage reached for a model with no router")
+        }
         try prefillRouter.encodeBlock(
                     commandBuffer: cb,
-                    weights: views.router.buffer,
-                    weightsOffset: Int(views.router.offset),
-                    scales: views.router.buffer,
-                    scalesOffset: Int(views.router.scaleOffset),
-                    biases: views.router.buffer,
-                    biasesOffset: Int(views.router.biasOffset),
+                    weights: routerView.buffer,
+                    weightsOffset: Int(routerView.offset),
+                    scales: routerView.buffer,
+                    scalesOffset: Int(routerView.scaleOffset),
+                    biases: routerView.buffer,
+                    biasesOffset: Int(routerView.biasOffset),
                     hidden: scratch.routedX,
                     effectiveScale: effectiveScaleBuffers[L],
                     perExpertScale: perExpertScale.buffer,

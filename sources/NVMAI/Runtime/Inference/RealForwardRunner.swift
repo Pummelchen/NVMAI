@@ -152,6 +152,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     let rms: RMSNorm
     let int4: DequantInt4GEMV
     let affine: AffineQuantGEMV?
+    /// The k/v role's dispatcher when its width differs from the attention slot's.
+    let affineKV: AffineQuantGEMV?
+    /// Every affine dispatcher this model's roles need, by width. `int4` covers
+    /// 4, which needs no entry here.
+    let affineByWidth: [Int: AffineQuantGEMV]
     /// Vocabulary head GEMV, keyed off `lmHeadWeightBits` rather than the
     /// attention slot. Nil when the head is 4-bit.
     let affineHead: AffineQuantGEMV?
@@ -169,6 +174,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
     /// so a family without hyper-connections allocates nothing.
     /// Set by `NVMAI_ACT_DUMP`; nil disables every dump call site.
     let activationDumpDirectory: URL?
+    /// Dumps recorded mid-layer, performed once the layer's work is awaited.
+    /// The runner is single-flight per generation, so this needs no lock; it is
+    /// only ever touched from the encoding task.
+    var pendingDumps: [PendingActivationDump] = []
     let hyperConnection: HyperConnection?
     /// The n-gram (PLE) block, its row addressing, and the table it reads.
     /// All three or none: a family without PLE layers leaves them nil.
@@ -413,7 +422,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
             || ProcessInfo.processInfo.environment["NVMAI_KERNEL_STATS"] != nil {
             FileHandle.standardError.write(Data(("NVMAI \(profile.summary)\n").utf8))
         }
-        let rawPrefetchEnabled = profile.prefetchDepth > 0
+        // A model with no routed experts has nothing to prefetch -- the ring
+        // reads expert blobs, and `topKExperts`/`prefetchDepth` both describe a
+        // mixture. `(1...0)` is not a range, so the guard below trapped the
+        // runner's construction for a dense install instead of refusing it:
+        // a value from a manifest reaching a range that requires a mixture.
+        let denseFFN = cfg.numExperts == 0
+        let rawPrefetchEnabled = !denseFFN && profile.prefetchDepth > 0
         // One read deep, not four. The ring depth is a bandwidth decision, not
         // a coverage one: the SSD is saturated while it reads, so a speculative
         // read that misses its layer has stolen service from a demand read that
@@ -423,9 +438,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         // Measured on qwen38 4-bit, interleaved against prefetch off:
         // M=1 +12.2% (hit 78.7%), M=2 +6.0% (77.9%), M=4 -9.8% (77.1%).
         let rawPrefetchTopM = max(1, profile.prefetchDepth)
-        guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
-            throw ModelError.internalInconsistency(
-                detail: "NVMAI_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
+        if !denseFFN {
+            guard (1...cfg.topKExperts).contains(rawPrefetchTopM) else {
+                throw ModelError.internalInconsistency(
+                    detail: "NVMAI_PREFETCH_TOP_M must be 1...\(cfg.topKExperts)")
+            }
         }
         self.predictivePrefetch = rawPrefetchEnabled
             ? try ExpertPrefetchRing(
@@ -495,9 +512,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.int4      = try DequantInt4GEMV(
             context: context,
             additionalShapes: cfg.decodeInt4GEMVShapes)
-        self.affine = model.attentionWeightBits == 4 ? nil
-            : try AffineQuantGEMV(context: context,
-                                  weightBits: model.attentionWeightBits)
+        // One affine dispatcher per width the model's *roles* actually use.
+        // Most families need one (their roles share the attention slot); the
+        // dense Qwen 3.5 installs need two at once, because their full-attention
+        // `k_proj`/`v_proj` are 8-bit while `q_proj`/`o_proj` are 4-bit. Asking
+        // the roles rather than the slot is also what keeps an 8-bit tensor
+        // from being read as nibbles.
+        var affineByWidth: [Int: AffineQuantGEMV] = [:]
+        for width in Set([model.attentionWeightBits, model.qoProjectionWeightBits,
+                          model.kvProjectionWeightBits,
+                          model.gdnProjectionWeightBits]).sorted() where width != 4 {
+            affineByWidth[width] = try AffineQuantGEMV(context: context, weightBits: width)
+        }
+        self.affineByWidth = affineByWidth
+        self.affine = affineByWidth[model.attentionWeightBits]
+        self.affineKV = affineByWidth[model.kvProjectionWeightBits]
         // The vocabulary head carries its own bit width. It matched the
         // attention slot in every earlier family, so the head simply reused
         // the attention GEMV -- which reads an 8-bit head as packed 4-bit the
@@ -513,7 +542,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.kvQuantizer = runtimeConfiguration.kvCachePrecision.isQuantized
             ? try KVCacheQuantizer(context: context) : nil
         self.shared    = try SharedExpertRuntime(context: context,
-                                                  weightBits: model.sharedExpertWeightBits,
+                                                  weightBits: model.ffnWeightBits,
                                                   siluActivation: silu)
         if ProcessInfo.processInfo.environment["NVMAI_DEBUG_PROMOTION"] != nil {
             FileHandle.standardError.write(Data((
@@ -553,7 +582,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
                                                weightBits: model.effectiveRouterWeightBits)
         self.prefillSharedExpert = try PrefillSharedExpert(
             context: context,
-            weightBits: model.sharedExpertWeightBits,
+            weightBits: model.ffnWeightBits,
             siluActivation: silu)
         self.prefillGroupedMoE = try PrefillGroupedRoutedMoE(
             context: context,
@@ -820,8 +849,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, ContextWindowReporti
         self.sharedExpertProjections = sharedViews
 
         func bf16OnesBuffer(count: Int, label: String) throws -> MTLBuffer {
-            guard let buf = device.makeBuffer(length: count * MemoryLayout<UInt16>.size,
-                                              options: .storageModeShared) else {
+            // `max(count, 1)`: a dense model has no experts, so its per-expert
+            // scale holds nothing -- and Metal needs a non-empty allocation.
+            // Nothing reads it on that path (the router stage is skipped), so
+            // the one element is a placeholder, not a value.
+            guard let buf = device.makeBuffer(
+                length: max(count, 1) * MemoryLayout<UInt16>.size,
+                options: .storageModeShared) else {
                 throw ModelError.residentBufferWrapFailed
             }
             let dst = buf.contents().assumingMemoryBound(to: UInt16.self)

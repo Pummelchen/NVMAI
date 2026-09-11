@@ -176,22 +176,30 @@ extension RealForwardRunner {
             }
             let tBodyStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let isLinear = cfg.layerIsLinear(L)
+            // A dense model has no routed mixture at all: its FFN is the
+            // shared-expert stage (whose projections the dense schema points at
+            // `mlp.*`), so there is no router to read, no expert to fetch and
+            // nothing to classify. Every MoE-only binding and stage below is
+            // skipped rather than fed a zero-expert placeholder -- the router
+            // role resolves to a name that cannot exist for this family, and
+            // reading it would fail the layer.
+            let denseFFN = cfg.numExperts == 0
 
             let inNorm   = try model.inputNorm(layer: L)
             let postAttn = try model.postAttnNorm(layer: L)
             let sharedProj = sharedExpertProjections[L]
-            let routerW  = try model.router(layer: L)
             let nextRouterW: TensorView?
-            if nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
+            if !denseFFN, nextLayerPredictionEnabled, L + 1 < cfg.numLayers {
                 nextRouterW = try model.router(layer: L + 1)
             } else {
                 nextRouterW = nil
             }
             let next2RouterW: TensorView? =
-                ((Self.probe2TraceEnabled || (predictivePrefetch != nil && Self.prefetchAhead == 2))
+                (!denseFFN
+                 && (Self.probe2TraceEnabled || (predictivePrefetch != nil && Self.prefetchAhead == 2))
                  && L + 2 < cfg.numLayers)
                 ? try model.router(layer: L + 2) : nil
-            let residencyResources = decodeExpertExecution == .gpuResidency
+            let residencyResources = (!denseFFN && decodeExpertExecution == .gpuResidency)
                 ? try model.routedExpertResidency(layer: L) : nil
             let perExpertScale: (buffer: any MTLBuffer, offset: Int) =
                 (onesPerExpertScale!, 0)
@@ -259,6 +267,9 @@ extension RealForwardRunner {
                                           layer: L, eps: eps)
             try rotate(&tailCB, role: "glue.entry_mlp")
 
+            var earlyHitsThisLayer = false
+            if !denseFFN {
+            let routerW = try model.router(layer: L)
             try moe.encodeRouter(commandBuffer: tailCB,
                 weights: routerW.buffer, weightsOffset: Int(routerW.offset),
                 scales:  routerW.buffer, scalesOffset:  Int(routerW.scaleOffset),
@@ -304,7 +315,6 @@ extension RealForwardRunner {
                     numExperts: UInt32(cfg.numExperts), d: D,
                     topK: UInt32(cfg.topKExperts))
             }
-            var earlyHitsThisLayer = false
             if let residencyResources {
                 try moe.encodeResidencyClassification(
                     commandBuffer: tailCB,
@@ -323,6 +333,7 @@ extension RealForwardRunner {
                    residencyResources.expertPool != nil {
                     earlyHitsThisLayer = true
                 }
+            }
             }
             attnCB.commit()
             if let attentionCB = softmaxCB {
@@ -381,7 +392,7 @@ extension RealForwardRunner {
                     dumpActivation("ple_gated", ple.gatedBuf, count: wide, position: position)
                     dumpActivation("ple_conv", ple.convOut, count: wide, position: position)
                 }
-                dumpActivation("L\(L)_attn_in", normed, count: cfg.hiddenSize, position: position)
+                dumpActivationPrivate("L\(L)_attn_in", normed, count: cfg.hiddenSize, position: position)
                 dumpActivation("L\(L)_attn_out", oOut, count: cfg.hiddenSize, position: position)
                 dumpActivation("L\(L)_mlp_in", routedX, count: cfg.hiddenSize, position: position)
                 dumpActivation("L\(L)_hidden_post_attn", hidden,
@@ -445,6 +456,21 @@ extension RealForwardRunner {
             // CPU readback to fetch routed-expert blobs from disk. The expert
             // id list is reused host scratch (R16); the runner is single-flight
             // per generation, so it never aliases concurrent decode work.
+            if denseFFN {
+                // The shared-expert stage *is* this family's FFN: its output is
+                // the layer's MLP contribution, added to the residual exactly
+                // as the routed stage's phase-2 reduce adds a mixture's. The
+                // buffer is submitted after `sharedCB` on the same queue, so the
+                // read of `h1Buf` is ordered behind its write.
+                guard let denseCB = ctx.queue.makeCommandBuffer() else {
+                    throw ModelError.residentBufferWrapFailed
+                }
+                try encodeResidualExitDecode(commandBuffer: denseCB,
+                                             hidden: hidden, delta: h1Buf,
+                                             sublayer: .mlp, layer: L)
+                recordKernelGPU(role: "dense_ffn_exit", denseCB)
+                denseCB.commit()
+            } else {
             try await encodeDecodeRoutedMoE(
                 layer: L, position: position, sharedProj: sharedProj,
                 attnCB: attnCB, tailCB: tailCB,
@@ -458,6 +484,7 @@ extension RealForwardRunner {
                 predictedNextLayerWeights: predictedNextLayerWeights,
                 earlyHits: earlyHitsThisLayer,
                 earlyHitCB: earlyHitCB)
+            }
         }
         if let pending = pendingRoutedCommand {
             try finishPendingRoutedCommand(pending, waitIfNeeded: true)
@@ -605,8 +632,14 @@ extension RealForwardRunner {
         let gatedNormW = try model.linearNorm(layer: L)
 
         // One dispatch over the concatenated qkv/z/a/b row space instead of four
-        // separate GEMVs (a and b were 4 threadgroups each).
-        if model.attentionWeightBits == 4 {
+        // separate GEMVs (a and b were 4 threadgroups each). The fused kernel
+        // reads all four as packed 4-bit nibbles, so it is only usable when all
+        // four *are* affine: the dense Qwen 3.5 installs keep `a` and `b` at
+        // bf16, and the per-projection GEMV below routes bf16, 4- and 8-bit.
+        // Reading bf16 bytes as nibbles is silent nonsense, not an error.
+        let fusedIsUsable = model.attentionWeightBits == 4
+            && qkvW.dtype == 0 && zW.dtype == 0 && aW.dtype == 0 && bW.dtype == 0
+        if fusedIsUsable {
             if !ablated("inproj") {
         try gdn.encodeInputProjections(commandBuffer: cb,
                                        x: normed,
@@ -617,16 +650,20 @@ extension RealForwardRunner {
                                        hiddenSize: cfg.hiddenSize)
         }
         } else {
-            try encodePrimaryGEMV(commandBuffer: cb, projection: qkvW,
+            try encodeRoleGEMV(commandBuffer: cb, projection: qkvW,
+                              weightBits: model.gdnProjectionWeightBits,
                               x: normed, y: gdnQKVRaw,
                               m: UInt32(la.qkvDim), n: D)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: zW,
+            try encodeRoleGEMV(commandBuffer: cb, projection: zW,
+                              weightBits: model.gdnProjectionWeightBits,
                               x: normed, y: gdnZ,
                               m: UInt32(la.valueDim), n: D)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: aW,
+            try encodeRoleGEMV(commandBuffer: cb, projection: aW,
+                              weightBits: model.gdnProjectionWeightBits,
                               x: normed, y: gdnA,
                               m: UInt32(la.numVHeads), n: D)
-            try encodePrimaryGEMV(commandBuffer: cb, projection: bW,
+            try encodeRoleGEMV(commandBuffer: cb, projection: bW,
+                              weightBits: model.gdnProjectionWeightBits,
                               x: normed, y: gdnB,
                               m: UInt32(la.numVHeads), n: D)
         }
@@ -692,7 +729,7 @@ extension RealForwardRunner {
         let k = try model.kProj(layer: layer)
         let v = try model.vProj(layer: layer)
         let hiddenDimension = UInt32(cfg.hiddenSize)
-        if model.attentionWeightBits == 4 {
+        if model.qoProjectionWeightBits == 4 && model.kvProjectionWeightBits == 4 {
             try fusedQKVGEMV.encode(commandBuffer: cb,
                             qWeights: q.buffer, qWeightsOffset: Int(q.offset),
                             qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
@@ -828,6 +865,53 @@ extension RealForwardRunner {
                     biases: o.buffer, biasesOffset: Int(o.biasOffset),
                     x: attnOut, y: oOut, m: D, n: qDim)
         try rotate(&cb, role: "qsa.oproj")
+    }
+
+    /// The quantized GEMV for a projection at the width its *role* declares.
+    ///
+    /// The runner holds one affine dispatcher per width it needs, chosen from
+    /// the roles the manifest distinguishes; this picks the right one. A bf16
+    /// tensor -- the dense installs' GDN `a`/`b`, or a promoted projection --
+    /// takes the bf16 kernel regardless of the role's width, because it carries
+    /// no scales or biases to read.
+    func encodeRoleGEMV(commandBuffer cb: MTLCommandBuffer,
+                        projection p: TensorView,
+                        weightBits: Int,
+                        x: MTLBuffer, xOffset: Int = 0,
+                        y: MTLBuffer, yOffset: Int = 0,
+                        m: UInt32, n: UInt32) throws {
+        if p.dtype == 1 {
+            try bf16Projection.encode(commandBuffer: cb,
+                                      weights: p.buffer,
+                                      weightsOffset: Int(p.offset),
+                                      x: x, xOffset: xOffset,
+                                      y: y, yOffset: yOffset,
+                                      m: m, n: n)
+            return
+        }
+        // Four-bit weights are always executable (`int4` is unconditional);
+        // anything wider needs the affine dispatcher for that width -- the KV
+        // role's own when the install declares it differently from the
+        // attention slot's, else the attention one.
+        if weightBits == 4 {
+            try int4.encode(commandBuffer: cb,
+                            weights: p.buffer, weightsOffset: Int(p.offset),
+                            scales: p.buffer, scalesOffset: Int(p.scaleOffset),
+                            biases: p.buffer, biasesOffset: Int(p.biasOffset),
+                            x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                            m: m, n: n)
+            return
+        }
+        guard let dispatcher = affineByWidth[weightBits] else {
+            throw ModelError.unsupportedArchitecture(
+                detail: "no \(weightBits)-bit GEMV is built for a \(m)x\(n) projection")
+        }
+        try dispatcher.encode(commandBuffer: cb,
+                              weights: p.buffer, weightsOffset: Int(p.offset),
+                              scales: p.buffer, scalesOffset: Int(p.scaleOffset),
+                              biases: p.buffer, biasesOffset: Int(p.biasOffset),
+                              x: x, xOffset: xOffset, y: y, yOffset: yOffset,
+                              m: m, n: n)
     }
 
     func encodePrimaryGEMV(commandBuffer cb: MTLCommandBuffer,
@@ -969,9 +1053,11 @@ extension RealForwardRunner {
 
             // Width-aware, like the gated branch above: the fused kernel is
             // int4-only, so an 8-bit attention install would have had its q/k/v
-            // read as packed nibbles. `encodePrimaryGEMV` takes the tensor and
-            // routes 4-bit, 8-bit and a promoted bf16 projection correctly.
-            if model.attentionWeightBits == 4 {
+            // read as packed nibbles. It is also all-or-nothing -- one dispatch
+            // reads q, k and v at one width -- so it is usable only while both
+            // roles are 4-bit; `encodeRoleGEMV` below routes each projection at
+            // its own width, including 8-bit and a promoted bf16.
+            if model.qoProjectionWeightBits == 4 && model.kvProjectionWeightBits == 4 {
                 try fusedQKVGEMV.encode(commandBuffer: attnCB,
                                     qWeights: q.buffer, qWeightsOffset: Int(q.offset),
                                     qScales: q.buffer, qScalesOffset: Int(q.scaleOffset),
@@ -990,14 +1076,21 @@ extension RealForwardRunner {
                                     kvRows: kvDim,
                                     n: D)
             } else {
-                try encodePrimaryGEMV(commandBuffer: attnCB, projection: q,
-                                      x: normed, y: qScratch, m: qDim, n: D)
-                try encodePrimaryGEMV(commandBuffer: attnCB, projection: k,
-                                      x: normed, y: kWrite.buffer,
-                                      yOffset: kWrite.offset, m: kvDim, n: D)
-                try encodePrimaryGEMV(commandBuffer: attnCB, projection: vProj,
-                                      x: normed, y: vWrite.buffer,
-                                      yOffset: vWrite.offset, m: kvDim, n: D)
+                // Each projection at its own role's width: the dense Qwen 3.5
+                // installs keep k/v at 8 bits with q/o at 4, and reading an
+                // 8-bit tensor through the 4-bit kernel is nonsense rather than
+                // an error.
+                try encodeRoleGEMV(commandBuffer: attnCB, projection: q,
+                                   weightBits: model.qoProjectionWeightBits,
+                                   x: normed, y: qScratch, m: qDim, n: D)
+                try encodeRoleGEMV(commandBuffer: attnCB, projection: k,
+                                   weightBits: model.kvProjectionWeightBits,
+                                   x: normed, y: kWrite.buffer,
+                                   yOffset: kWrite.offset, m: kvDim, n: D)
+                try encodeRoleGEMV(commandBuffer: attnCB, projection: vProj,
+                                   weightBits: model.kvProjectionWeightBits,
+                                   x: normed, y: vWrite.buffer,
+                                   yOffset: vWrite.offset, m: kvDim, n: D)
             }
 
             let rotated = isFull
@@ -1069,16 +1162,9 @@ extension RealForwardRunner {
             }
             // Same width-awareness as the projections above; `int4` here was the
             // last int4-only call on this branch.
-            if model.attentionWeightBits == 4 {
-                try int4.encode(commandBuffer: tailCB,
-                            weights: o.buffer, weightsOffset: Int(o.offset),
-                            scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
-                            biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
-                            x: attnOut, y: oOut, m: D, n: qDim)
-            } else {
-                try encodePrimaryGEMV(commandBuffer: tailCB, projection: o,
-                                      x: attnOut, y: oOut, m: D, n: qDim)
-            }
+            try encodeRoleGEMV(commandBuffer: tailCB, projection: o,
+                               weightBits: model.qoProjectionWeightBits,
+                               x: attnOut, y: oOut, m: D, n: qDim)
         }
 
         // Plain pre-norm residual block: hidden += attention branch,

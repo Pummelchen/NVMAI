@@ -23,9 +23,11 @@ extension TensorSchema {
 
     static let qwen35Dense = TensorSchema(
         embedding: "language_model.model.embed_tokens.weight",
-        // The 2B and 4B tie the embedding and never read this. The 9B does not,
-        // and stores its head *without* the `.weight` suffix Qwen 3.6 uses.
-        lmHead: "language_model.lm_head",
+        // The 2B and 4B tie the embedding and never read this. The 9B does not:
+        // it ships a real head at `language_model.lm_head.weight` (the manifest's
+        // per-tensor quant key drops the `.weight`, which is the stem, not the
+        // tensor name).
+        lmHead: "language_model.lm_head.weight",
         finalNorm: "language_model.model.norm.weight",
         qProj: { denseLayer($0, "self_attn.q_proj.weight") },
         kProj: { denseLayer($0, "self_attn.k_proj.weight") },

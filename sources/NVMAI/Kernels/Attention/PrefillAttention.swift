@@ -86,10 +86,17 @@ final class PrefillAttention {
         // one per key. NVMAI_QSA_TILED=0 falls back for A/B on one build.
         self.psoCausalQSATiled = (try? context.pipeline(
             "attention_prefill_causal_qsa_tiled"))
+        // Four bytes, not one: the kernels declare `keepIdx`/`keepIndices` as
+        // `device const uint*`, and Metal's own validation aborts a binding
+        // whose length is shorter than the argument it is bound to ("space for
+        // 1 bytes, but argument has a length(4)"). The value is never read when
+        // `useKeep` is 0, so zero is also the honest placeholder: a stray read
+        // keeps nothing rather than whatever the allocator left there.
         guard let empty = context.device.makeBuffer(
-                  length: 1, options: .storageModeShared) else {
+                  length: MemoryLayout<UInt32>.size, options: .storageModeShared) else {
             throw PrefillAttentionError.commandEncoderFailed
         }
+        empty.contents().bindMemory(to: UInt32.self, capacity: 1).pointee = 0
         empty.label = "prefillAttention.keepMask.unused"
         self.emptyKeepMask = empty
         if context.device.supportsFamily(.apple10) {
