@@ -220,6 +220,11 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
 
     private func launchIndependentService() throws
         -> (input: FileHandle, responses: DecodeServiceResponseRouter) {
+        // Before adding a job under a new pid+token label, remove the ones a
+        // previous run left behind. A force-quit never reaches
+        // `tearDownService`, so its helper is still resident with the model
+        // mapped (~20 GB) and this launch would otherwise be the second one.
+        Self.sweepOrphanedServices()
         guard FileManager.default.isExecutableFile(atPath: serviceURL.path) else {
             throw AppInferenceError.modelLoadFailed(
                 "decode service executable is missing at \(serviceURL.path); run swift build -c release before launching the app")
@@ -520,6 +525,29 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             _ = kill(pid, SIGKILL)
         }
         if let socketPath { unlink(socketPath) }
+    }
+
+    /// Boots out decode-service jobs whose owning app is gone, killing any
+    /// helper still holding the model. Best effort by design: the app must still
+    /// be able to start its own helper if `launchctl` cannot be run or read.
+    private static func sweepOrphanedServices() {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["list"]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return }
+        process.waitUntilExit()
+        guard let data = try? output.fileHandleForReading.readToEnd(),
+              let text = String(data: data, encoding: .utf8) else { return }
+        let directory = try? socketDirectory()
+        let jobs = DecodeServiceJobSweep.parseLaunchctlList(text, uid: getuid())
+        for job in DecodeServiceJobSweep.orphans(in: jobs,
+                                                 isAlive: DecodeServiceJobSweep.processIsAlive) {
+            let socketPath = directory?.appendingPathComponent(job.socketName).path
+            tearDownService(label: job.label, socketPath: socketPath)
+        }
     }
 
     private static func pidOfLaunchJob(label: String) -> pid_t? {
