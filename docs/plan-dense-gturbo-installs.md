@@ -108,15 +108,53 @@ contents.
 
 `docs/gturbo-format.md` now exists, and documents all of the above.
 
+A fifth is a migration concern rather than a format one. `install_one` treats
+"the directory exists" as "installed", so a user who installed the 2B before
+this would be told it is installed and left without a manifest and receipt
+forever — the inconsistency this work removed, kept alive for everyone who
+installed first. A dense directory with no manifest is now recognised as a
+legacy snapshot and moved into the converter's staging area instead of being
+downloaded and quantized again, because it is already the same bytes. Verified
+by planting a snapshot at `models/qwen3.5_2B_8Bit` with the staging directory
+removed: the installer staged it, repacked, passed `--verify-install`, and
+produced a `.gturbo` byte-identical across all 320 resident tensors; a second
+run reports it as installed and touches nothing.
+
+## What "done" looks like, checked
+
+- `tools/install_models.sh qwen35-2b|qwen35-4b|qwen35-9b` (and `-8bit`)
+  produces `models/qwen3.5_*Bit/` with `manifest.json`, `packed_experts/`, and
+  `verified-install.json`. **Done.** The installer converts and repacks, drops
+  the intermediate snapshot, and migrates a legacy snapshot in place.
+- `NVMAIRepack --verify-install --input-gturbo <dir>` passes on all six.
+  **Done.**
+- The catalog lists them, the CPU engine serves them, and the equivalence check
+  holds for each. **Done** — six distinct ids on the `cpu` backend, and the
+  server answers through the catalog path on a 4-bit and an 8-bit install,
+  including unloading one to load the other.
+- `README.md`, `docs/site/04-choosing-a-model.md` and the wiki drop the
+  "snapshots, not `.gturbo` — no receipt" caveat. **Done.**
+- Not done, and worth knowing: the equivalence gate is not part of
+  `swift test`. It loads real models, which the unit tests deliberately never
+  do, so it is opt-in and read by a human. A regression in the resident-index
+  mapping would be caught by `tools/repack_dense.sh` and by nothing automatic.
+
 ## Why it was not done at the time
 
-`NVMAIRepack --input-snapshot` refuses a dense snapshot with
-`config.json invalid: no text_config`, and `ArchInfo.load` accepts only
+Historical, and kept because the shape of the mistake is the useful part.
+
+`NVMAIRepack --input-snapshot` refused a dense snapshot with
+`config.json invalid: no text_config`, and `ArchInfo.load` accepted only
 `qwen3_5_moe`, `qwen3_5_mtp` and `qwen4_exp` (`ArchInfo.swift:162-183`). At
 that point the honest reading was "the repacker cannot express this
 architecture", so the installer wrote the snapshot directly and the trade —
 no receipt, `--verify-install` does not apply — was documented in the README
-and the forum series. That trade is real and still stands until this lands.
+and the forum series.
+
+That reading was right about `ArchInfo` and wrong about where the work was. The
+dense shape was the easy half; the hard half was an undocumented contract, and
+the bug hiding behind it was a writer dropping a field, not a reader misreading
+one.
 
 ## What the reconnaissance established
 
@@ -234,14 +272,3 @@ re-proves the `lm_head` mapping survives a repack.
 Until that comparison passes, the snapshot path stays the shipped one and no
 install is migrated. A `.gturbo` CPU model that has not been diffed against its
 own snapshot is not a verified install; it is a second opinion.
-
-## What "done" looks like
-
-- `tools/install_models.sh qwen35-2b|qwen35-4b|qwen35-9b` produces
-  `models/qwen3.5_*Bit/` with `manifest.json`, `packed_experts/` (empty or
-  absent), and `verified-install.json`.
-- `NVMAIRepack --verify-install --input-gturbo <dir>` passes on all three.
-- The catalog lists them, the CPU engine serves them, and the equivalence check
-  above holds for each.
-- `README.md`, `docs/site/04-choosing-a-model.md` and the wiki drop the
-  "snapshots, not `.gturbo` — no receipt" caveat, because it stops being true.
