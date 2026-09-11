@@ -303,8 +303,32 @@ cannot. Saying "audited" without that sentence would overstate what happened.
 ## Verification status of the fixes
 
 Unit tests and lint gate every batch (1448 tests in 223 suites, `tools/lint.sh`
-clean). Three fixes are verified *against real inference* and three are not, and
-the difference matters:
+clean). **The golden baseline now runs and passes on both pinned families**, so
+the runtime fixes are verified against real inference rather than only against
+tests and argument:
+
+```
+tools/golden-baseline.sh --check qwen38-4   -> ok — output identical to baseline
+tools/golden-baseline.sh --check ornith-4   -> ok — output identical to baseline
+```
+
+Both at `765e9f0`, greedy and fixed-seed, byte-identical to `benchmark/golden/`.
+That covers every runtime change this audit made -- the MoE router scratch (C8),
+the restore guard (C16), the indexer's bf16 prefill branch (C22), the attention
+widths (C44), the sampler's NaN and empty-row handling (C47/C48), the geometry
+bounds (C76) and the hyper-connection kernel (C78, whose *unfused* path the
+baseline exercises while the fused one stays opt-in) -- on Qwen3.8-Flash-Next
+125B-A6B 4-bit and Ornith 1.5 35B-A3B 4-bit.
+
+The two blockers recorded for thirty rounds are gone: the other checkout's
+`swiftpm-testing-helper` had exited, and the remaining guard hit was **this
+audit's own stale test helper** (pid 34114, orphaned by a round-20 teeth check
+whose shell was killed before its child was) -- started here, so it was killed
+here. A future run should check `pgrep -fl swiftpm-testing-helper` for its own
+leavings before concluding the machine is busy.
+
+The earlier framing of this section follows, kept because it records what the
+gap was:
 
 - **Covered by real inference:** C12 (the equivalence gate loaded the 2B and 9B
   dense installs through the changed reader), C13 (a full `--verify-install` of
@@ -324,7 +348,8 @@ the difference matters:
   run here: the 4B/9B snapshots were deleted to reclaim disk, and the golden baseline is
   blocked by another checkout's test helper. It does not cover the GPU sampler, the GPU
   forward path, or the 35B families, so the rows below still need the baseline.
-- **Not covered — the golden baseline is blocked.** C8 (MoE router scratch), C16
+- **Historically not covered — the golden baseline was blocked.** (It now runs
+  and passes; see above.) C8 (MoE router scratch), C16
   (the restore guard), C22 (the indexer's bf16 prefill branch) and C44 (the
   non-gated attention widths) change the
   runtime, and `tools/golden-baseline.sh` is the only check that exercises real
