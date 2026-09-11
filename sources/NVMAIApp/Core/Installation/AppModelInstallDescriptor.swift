@@ -142,6 +142,15 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         "Qwen-AgentWorld 35B-A3B 8-bit", "Qwen/Qwen-AgentWorld-35B-A3B",
         "cf0056887d0985c96aae3939a8bdcd371a1c762dac49ea9bd07e549e42108b95",
         37_800_000_000, "qwen-agentworld_35B_A3B_8Bit")
+    // KAT-Coder-V2.5-Dev's two descriptors belong here, and the reason they
+    // are not is worth recording: this field is the **converted snapshot's**
+    // index hash -- the same value the install manifest records as
+    // `sourceSnapshotHash` -- not the source repository's. It cannot be known
+    // before `tools/prepare_agentworld.py --model katcoder` has written a
+    // snapshot, so the entries land with the install, reading the value back
+    // from `models/kat-coder-v2.5_35B_A3B_{4,8}Bit/manifest.json`. Until then
+    // the app recognizes a KAT install by nothing, which is why
+    // `everyInstalledBuildIsSelectableAndRecognized` still lists eight builds.
     public static let qwen38 = converted(
         "Qwen3.8-Flash-Next 125B-A6B 4-bit", "Qwen/Qwen3.8-Flash-Next",
         "331102fda39f492e5957d4f773d78927addc6b998570e52389c748c84966be23",

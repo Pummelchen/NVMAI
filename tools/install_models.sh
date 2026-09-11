@@ -27,6 +27,8 @@ CATALOGUE=(
   "qwen38flash|qwen3.8-flash-next_125B_A6B_4Bit|4|convert"
   "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|convert"
   "qwen38flash-mtp|qwen3.8-flash-next_125B_A6B_MTP_4Bit|4|convert_qwen38_mtp"
+  "katcoder|kat-coder-v2.5_35B_A3B_4Bit|4|convert_qwen35moe"
+  "katcoder-8bit|kat-coder-v2.5_35B_A3B_8Bit|8|convert_qwen35moe"
   "agentworld|qwen-agentworld_35B_A3B_4Bit|4|convert_qwen35moe"
   "agentworld-8bit|qwen-agentworld_35B_A3B_8Bit|8|convert_qwen35moe"
   # The dense Qwen 3.5 models. Small enough to run on the CPU, and the only
@@ -58,7 +60,7 @@ Sources
   shared-expert gate, the DeltaNet gating projections and every norm stay
   at bf16 in both widths.
 
-  convert_qwen35moe   tools/prepare_agentworld.py --model {ornith15,qwen36,agentworld}
+  convert_qwen35moe   tools/prepare_agentworld.py --model {ornith15,qwen36,agentworld,katcoder}
                       One ~70 GB download yields both widths.
   convert_qwen35      tools/prepare_qwen35.py --size {2b,4b,9b}, then
                       NVMAIRepack --input-snapshot. One fetch yields both
@@ -176,6 +178,7 @@ install_one() {
         local preset="${name%-8bit}" model_id
         case "$preset" in
           agentworld) model_id="qwen-agentworld" ;;
+          katcoder)   model_id="kat-coder-v2.5" ;;
           qwen36)     model_id="qwen3.6-35b-a3b" ;;
           ornith15)   model_id="ornith-1.5-35b-a3b" ;;
         esac

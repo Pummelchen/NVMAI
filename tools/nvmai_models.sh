@@ -28,6 +28,10 @@ nvmai_resolve_model() {
       NVMAI_MODEL_KEY=agentworld
       NVMAI_MODEL_STEM="qwen-agentworld_35B_A3B"
       NVMAI_MODEL_LABEL="Qwen-AgentWorld 35B-A3B" ;;
+    katcoder|kat|kat-coder)
+      NVMAI_MODEL_KEY=katcoder
+      NVMAI_MODEL_STEM="kat-coder-v2.5_35B_A3B"
+      NVMAI_MODEL_LABEL="KAT-Coder-V2.5-Dev 35B-A3B" ;;
     qwen38|qwen3.8)
       NVMAI_MODEL_KEY=qwen38
       NVMAI_MODEL_STEM="qwen3.8-flash-next_125B_A6B"
@@ -47,7 +51,7 @@ nvmai_resolve_model() {
       NVMAI_MODEL_STEM="qwen3.5_9B"
       NVMAI_MODEL_LABEL="Qwen 3.5 9B" ;;
     *)
-      echo "unknown AI model: ${1:-} (ornith|qwen36|agentworld|qwen38|qwen35-2b|qwen35-4b|qwen35-9b)" >&2
+      echo "unknown AI model: ${1:-} (ornith|qwen36|agentworld|katcoder|qwen38|qwen35-2b|qwen35-4b|qwen35-9b)" >&2
       return 2 ;;
   esac
 }
@@ -69,7 +73,7 @@ nvmai_model_port() {
 
 # Every (model, quantization) this checkout knows about, for help text and
 # for the fallback list when the server cannot report its catalog.
-NVMAI_ALL_MODELS=(ornith qwen36 agentworld qwen38)
+NVMAI_ALL_MODELS=(ornith qwen36 agentworld katcoder qwen38)
 
 # --- Installed models, from the server's catalog -----------------------
 #

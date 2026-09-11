@@ -48,6 +48,11 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
 ### Supported LLMs
 
 - **Qwen3.8-Flash-Next 125B-A6B**
+- **KAT-Coder-V2.5-Dev 35B-A3B** — Kwaipilot's agentic-coding fine-tune of
+  Qwen 3.6 35B-A3B, at 4-bit and 8-bit
+  (`tools/install_models.sh katcoder|katcoder-8bit`). Same geometry as Qwen 3.6,
+  with the checkpoint's own sampling (temperature 1.0) rather than the Qwen 3.6
+  series' 0.6.
 - **Qwen-AgentWorld 35B-A3B**
 - **Ornith 1.5 35B-A3B**
 - **Qwen 3.6 35B-A3B**

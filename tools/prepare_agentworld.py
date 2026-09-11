@@ -60,6 +60,15 @@ MODELS = {
     "agentworld": ("Qwen/Qwen-AgentWorld-35B-A3B", "60d2b0434a53d2e62a7c00a489586815d94ebffb"),
     "qwen36":     ("Qwen/Qwen3.6-35B-A3B",         "995ad96eacd98c81ed38be0c5b274b04031597b0"),
     "ornith15":   ("ornith-ai/Ornith-1.5-35B-A3B",  "10fbf86fed7ecee4a061f8b499a618f46001cac1"),
+    # KAT-Coder-V2.5-Dev is a Qwen3.6-35B-A3B fine-tune, so it has the same
+    # geometry and the same tensor names (`model.language_model.*`, `lm_head`)
+    # as the three above -- verified against its own index rather than assumed:
+    # 31,333 tensors, none outside the namespaces this converter knows, no
+    # `model.visual.*` and no `mtp.*`, so `skipped()` removes nothing here. Its
+    # config declares a `vision_config` and the multimodal wrapper, which is why
+    # the checkpoint was checked for vision tensors rather than trusted to lack
+    # them.
+    "katcoder":   ("Kwaipilot/KAT-Coder-V2.5-Dev",  "7be56fe773e72b6f5ca93c1ae45d828ddb893922"),
 }
 REPO = MODELS["agentworld"][0]
 COMMIT = MODELS["agentworld"][1]

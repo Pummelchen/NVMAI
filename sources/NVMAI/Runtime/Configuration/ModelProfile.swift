@@ -124,6 +124,21 @@ public struct ModelProfile: Sendable, Equatable {
         Key("qwen-agentworld", 8): (12 << 30, 1, 0, 4_096,
                                     GenerationDefaults.Sampling(temperature: 0.6, topK: GenerationDefaults.topK, topP: 0.95),
                                     true, true, false, false, true, false),
+        // KAT-Coder-V2.5-Dev: a Qwen3.6-35B-A3B fine-tune with the same
+        // geometry, so the cache budget, prefetch depth and wired cache are
+        // taken from the rows above **by inference, not measured on this
+        // install** -- the same inheritance the AgentWorld comment records.
+        // What is not inherited is the sampling: the checkpoint's own
+        // `generation_config.json` specifies temperature 1.0 with top-k 20 and
+        // top-p 0.95, so stating 0.6 here (the Qwen 3.6 series setting) would
+        // quietly run a coding model at a temperature its authors did not ask
+        // for.
+        Key("kat-coder-v2.5", 4): (10 << 30, 1, 0, 4_096,
+                                   GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
+                                   true, true, false, false, true, false),
+        Key("kat-coder-v2.5", 8): (12 << 30, 1, 0, 4_096,
+                                   GenerationDefaults.Sampling(temperature: 1.0, topK: GenerationDefaults.topK, topP: 0.95),
+                                   true, true, false, false, true, false),
         // Qwen3.8-Flash-Next: 96 slots (12 GiB) still climbing, prefetch one
         // deep +12%; its card specifies temperature 1.0 / top-p 0.95. The
         // fused hyper-connection gates and the GPU key select are measured

@@ -6,7 +6,8 @@ import Testing
 @Suite struct ModelProfileTests {
     static let shipped: [(String, ModelFamily)] = [
         ("qwen3.6-35b-a3b", .qwen36), ("ornith-1.5-35b-a3b", .qwen36),
-        ("qwen-agentworld", .qwen36), ("qwen3.8-flash-next", .qwen38flash),
+        ("qwen-agentworld", .qwen36), ("kat-coder-v2.5", .qwen36),
+        ("qwen3.8-flash-next", .qwen38flash),
     ]
 
     @Test func everyShippedInstallHasItsOwnRow() {
@@ -17,7 +18,7 @@ import Testing
                 #expect(p.key == ModelProfile.Key(id, bits))
             }
         }
-        #expect(ModelProfile.table.count == 8)
+        #expect(ModelProfile.table.count == 10)
     }
 
     @Test func modelsSharingAFamilyResolveIndependently() {
