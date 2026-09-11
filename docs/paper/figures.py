@@ -3,7 +3,9 @@ directories, so every number in a chart comes from the same files as the
 tables. No plotting dependency: the SVG is written directly."""
 import importlib.util, json, os, re, sys
 from pathlib import Path
-ROOT = Path("/Users/andreborchert/Downloads/NVMAI"); LOGS = ROOT / ".build/benchmark-logs"
+# The repository root, from this file's own location: it was written with the
+# author's checkout baked in, which stops working the moment the project moves.
+ROOT = Path(__file__).resolve().parents[2]; LOGS = ROOT / ".build/benchmark-logs"
 OUT = ROOT / "docs/paper/fig"; OUT.mkdir(exist_ok=True)
 
 def load_mod(name, results):
