@@ -129,7 +129,38 @@ assumptions, two paths that disagree). Files and what the pass turned up:
 
 The rest of the never-cited files have been read once (the passes) but not
 re-read with this register's eyes, and 234 of 293 is where the remaining depth
-is. Saying "audited" without that sentence would overstate what happened.
+is.
+
+A **third pass** took the next tier by size -- `Runtime/Inference/
+RealForwardRunner+MTP.swift` (721), `Kernels/Attention/QSAIndexer.swift` (621),
+`Metal/Attention/attention.metal` (610) -- and again found nothing, which is
+itself the result worth recording:
+
+- `attention.metal`'s `attention_decode_gqa_swa_partial` still carries the early
+  return C35 was about (`q_per_kv > kAttnMaxQPerKV` at `:307`, returning without
+  writing the partials). Its only gate is still `useGQAPartial`, decided at
+  `Kernels/Attention/Attention.swift:441` from `qPerKV <= 2` with C35's stated
+  check at `:436`, so the return is unreachable by construction. The kernel's
+  other early return (`m_glob == -INFINITY`, `:418`) zeroes the row before
+  returning, which is exactly the shape C35 wanted.
+- `QSAIndexer`'s scratch is sized `capacity / compressRatio + 1` scores against a
+  `capacity`-long keep mask, and its `startPosition + tokens <= capacity`
+  precondition is an internal invariant: every caller has already projected the
+  chunk into the raw cache those bounds describe.
+- `RealForwardRunner+MTP.advanceMTP` validates the hidden payload's byte count
+  against the token count before touching scratch, and `finishVerifyPair`'s host
+  argmax compares with `>` (NaN-safe, and a NaN row degrades to a *rejected*
+  prediction because acceptance is decided by the target's own greedy token).
+
+**Strategy for the remaining depth.** Scanning file by file is now low-yield --
+three passes, three files each, nothing found. The remaining rounds audit by
+*invariant* across the whole tree instead, one cross-cutting property at a time,
+because that is what this audit's findings had in common: (a) no file-derived
+value reaches arithmetic before it is validated, (b) no `precondition` is
+reachable from request or manifest input, (c) every silent fallback either is
+documented or reports. Each invariant yields either findings or a positive
+assertion that can be written down and re-checked, which a file-by-file scan
+cannot. Saying "audited" without that sentence would overstate what happened.
 
 ## Verification status of the fixes
 
