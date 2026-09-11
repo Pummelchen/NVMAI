@@ -27,6 +27,16 @@ enum ResidentWriter {
             throw RepackError.scratchExceeded(requested: idxBytes,
                                               limit: BoundedScratch.defaultLimitBytes)
         }
+        // A tensor name comes from the source manifest, so its length is input,
+        // not an invariant of this build: the index stores it in a UInt16 and
+        // `GTurboBinary.writeIndexEntry` traps on anything longer. Checked here
+        // so an over-long name is a report naming the tensor -- and so the trap
+        // inside the binary writer stays an invariant a caller cannot reach.
+        for entry in plan.entries where entry.name.utf8.count > Int(UInt16.max) {
+            throw RepackError.configurationInvalid(
+                detail: "resident tensor name is \(entry.name.utf8.count) bytes, over the "
+                    + "\(UInt16.max)-byte limit the index stores: \(entry.name.prefix(120))")
+        }
         let idxBuf = UnsafeMutableRawBufferPointer.allocate(byteCount: idxBytes,
                                                             alignment: 16_384)
         defer { idxBuf.deallocate() }

@@ -30,6 +30,24 @@ struct Qwen4ExpPassthroughTests {
         #expect(table.capBytes >= 102_400_491_520)
     }
 
+    /// The verifier's per-file cap has to admit every file the planner says it
+    /// will carry. It did not: `ngram_table.bin` was allowed 256 GiB while
+    /// `--verify-install` refused anything over 128 GiB, so the one install that
+    /// carries this file could not be verified. Both read one constant now, and
+    /// this fails if a future cap is raised on only one side.
+    @Test("The verifier's per-file cap admits every declared passthrough cap")
+    func verifierCapAdmitsEveryPassthroughFile() {
+        let families: [RepackModelFamily] = [
+            .qwen35Dense, .qwen36, .qwen36MTP, .qwen38flash, .qwen38flashMTP,
+        ]
+        for family in families {
+            for requirement in RepackPlanner.passthroughRequirements(family: family) {
+                #expect(requirement.capBytes <= VerifiedInstallTool.payloadMaxBytes,
+                        "\(requirement.name) may be \(requirement.capBytes) bytes, above the verifier's \(VerifiedInstallTool.payloadMaxBytes)")
+            }
+        }
+    }
+
     @Test("A passthrough file becomes a resumable range copy at offset zero")
     func passthroughBecomesRangeCopy() throws {
         let table = PassthroughFile(sourceName: "ngram_table.bin",

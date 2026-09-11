@@ -108,6 +108,16 @@ struct RepackPlan: Sendable {
 }
 
 extension RepackPlanner {
+    /// The largest single non-tensor file the repacker will carry, and therefore
+    /// the smallest per-file cap a receipt verifier may use.
+    ///
+    /// `VerifiedInstallTool.payloadMaxBytes` is that cap and used to be pinned at
+    /// 128 GiB while this table admitted 256 GiB for `ngram_table.bin`: an install
+    /// the repacker had just written by design was one `--verify-install`
+    /// refused, with "manifest size … exceeds the per-file cap" naming that file.
+    /// Both read this constant now, so they cannot drift apart again.
+    static let maximumPassthroughFileBytes: UInt64 = 256 * 1024 * 1024 * 1024
+
     /// Non-tensor files this family needs copied into the install. Sizes are
     /// resolved from the remote before planning, because they are standalone
     /// files rather than entries in the safetensors index.
@@ -134,7 +144,7 @@ extension RepackPlanner {
                 // skips the PLE block and stays coherent without it, so a
                 // 102 GB download should not be forced on someone who wants
                 // the backbone first.
-                ("ngram_table.bin", false, 256 * 1024 * 1024 * 1024),
+                ("ngram_table.bin", false, maximumPassthroughFileBytes),
             ]
         }
     }

@@ -26,6 +26,9 @@ enum GTurboBinary {
                                        nameOffset: UInt32) {
         var off = 0
         writeU32LE(dst, &off, nameOffset)
+        // An invariant, not a caller contract: `ResidentWriter.encodeIndex` -- the
+        // only caller -- refuses an over-long name with a thrown error naming the
+        // tensor, because the name comes from the source manifest.
         precondition(entry.name.utf8.count <= Int(UInt16.max),
                      "resident tensor name exceeds UInt16 length")
         writeU16LE(dst, &off, UInt16(entry.name.utf8.count))

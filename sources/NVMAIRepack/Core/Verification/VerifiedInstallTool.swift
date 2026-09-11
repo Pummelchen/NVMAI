@@ -29,7 +29,11 @@ public enum VerifiedInstallTool {
     // The previous 64 GiB predated any file that large and rejected a correct
     // install. Kept finite, and well under any plausible disk, so a manifest
     // claiming a terabyte is still refused before hashing begins.
-    public static let payloadMaxBytes: UInt64 = 128 * 1024 * 1024 * 1024
+    /// The per-file sanity bound on a manifest entry, taken from the repacker's
+    /// own acceptance limit (`RepackPlanner.maximumPassthroughFileBytes`) rather
+    /// than chosen separately: a cap below what the repacker will write makes an
+    /// install the tool just produced impossible to verify.
+    public static let payloadMaxBytes: UInt64 = RepackPlanner.maximumPassthroughFileBytes
 
     public static func run(options: VerifyInstallOptions) throws -> VerifyInstallResult {
         let access = try GTurboDirectoryAccess(rootPath: options.inputGTurbo)
