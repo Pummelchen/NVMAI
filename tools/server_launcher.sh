@@ -16,9 +16,9 @@
 #              qwen35-2b|qwen35-4b|qwen35-9b) optionally followed by 4|8, or a
 #              catalog id such as ornith-1.5-35b-a3b_8-Bit, which names its own
 #              width. The three qwen35-* keys are the dense Qwen 3.5 models
-#              (2B, 4B, 9B): the runtime implements their family
-#              (`qwen3_5_dense`) in the CPU engine only, so they are CPU-only
-#              models and there is no GPU option to offer for them.
+#              (2B, 4B, 9B): both engines implement their family
+#              (`qwen3_5_dense`), so they are the one install shape whose engine
+#              is a real choice -- GPU by default, CPU on request.
 #   <thinking> off, on, or any level the chosen model lists
 #              (minimal, low, medium, high, xhigh, max). The dense Qwen 3.5
 #              models define the binary thinking switch, so their levels are
@@ -33,13 +33,13 @@
 #   --client <c>    server|codex|claude|qwen|opencode|zed
 #   --model <m>     model key or catalog id
 #   --bits <4|8>    quantization for a model key
-#   --engine <cpu|gpu>  which engine serves the model. Each install declares
-#              exactly one -- the catalog probes the manifest's family and the
-#              runtime decides -- so this asserts the engine rather than
-#              choosing it, and a mismatch is refused with the reason: the
-#              dense Qwen 3.5 models are CPU-only because the GPU runtime does
-#              not implement their family, and every MoE family is GPU-only
-#              because the CPU engine does not implement those.
+#   --engine <cpu|gpu>  which engine serves the model. Almost every install
+#              declares exactly one -- a MoE family is GPU-only, a snapshot is
+#              CPU-only -- and asking for the other is refused with the reason.
+#              The dense Qwen 3.5 models (2B/4B/9B) are the exception: both
+#              engines implement their family, so the engine is a real choice,
+#              asked interactively and named by an `@cpu`/`@gpu` suffix on the
+#              model id a request uses.
 #   --mode <fast|full>       fast strips CLI boilerplate; full keeps tools
 #   --answers <default|concise>
 #   --thinking <level>
@@ -305,6 +305,16 @@ if [[ -z "$MODEL_ARG" ]]; then
   else
     echo "Which model?"
   fi
+  # An install both engines can serve says so: `GPU+CPU`. One is the default
+  # and the other is a choice the next question offers.
+  engine_column() {
+    local list="$1"
+    if [[ "$list" == *,* ]]; then
+      printf '%s' "${list^^}" | tr ',' '+'
+    else
+      [[ "$list" == cpu ]] && echo CPU || echo GPU
+    fi
+  }
   # Engine and thinking levels are the two things a person is choosing between
   # here, so both are in the list rather than discovered after the fact.
   printf "  %-3s %-28s %-6s %-4s %8s  %-22s %-24s %s\n" \
@@ -317,7 +327,7 @@ if [[ -z "$MODEL_ARG" ]]; then
     if (( ! dynamic )) && [[ ! -e "${NVMAI_CAT_PATH[$i]}" ]]; then note="$note  (not installed)"; fi
     printf "  %2d) %-28s %s-bit  %-4s %8s  %-22s %-24s%s\n" "$((i + 1))" \
       "${NVMAI_CAT_NAME[$i]}" "${NVMAI_CAT_QUANT[$i]}" \
-      "$( [[ "${NVMAI_CAT_BACKEND[$i]}" == cpu ]] && echo CPU || echo GPU )" \
+      "$( engine_column "${NVMAI_CAT_ENGINES[$i]:-${NVMAI_CAT_BACKEND[$i]}}" )" \
       "$size" "${NVMAI_CAT_ID[$i]}" "${NVMAI_CAT_THINKING[$i]//,/, }" "$note"
   done
   printf "Choice [1-%d] (default %d): " "$count" "$((default_idx + 1))"
@@ -378,20 +388,24 @@ MODEL_DIR="${NVMAI_CAT_PATH[$idx]}"
 IFS=',' read -r -a levels <<< "${NVMAI_CAT_THINKING[$idx]}"
 
 # ============================================================
-# 3b) Engine: what can serve this install, and what was asked for
+# 3b) Engine: which engine serves this install, and what was asked for
 # ============================================================
 
-# The catalog derives this from the manifest's family, and the runtime decides
-# it there: the GPU path refuses `qwen3_5_dense` by name, which is why the
-# dense Qwen 3.5 models (2B/4B/9B) are CPU-only, and no MoE family has a CPU
-# implementation. So an install declares exactly one engine and there is no
-# second one to ask about -- a question here would be answered by the server
-# ignoring it, since it routes on the family. What the launcher owes the person
-# is the statement below, and a refusal that names the reason if they assert
-# the other engine.
-ENGINE="$MODEL_BACKEND"
+# The catalog says which engines can serve an install. Almost every install has
+# exactly one -- a MoE family is GPU-only because the CPU engine does not
+# implement those shapes, and a converted snapshot is CPU-only -- but the dense
+# Qwen 3.5 models (2B/4B/9B) are implemented by *both*, from the same `.gturbo`
+# payload. That is the one case where the engine is a real choice, so it is the
+# one case that asks.
+IFS=',' read -r -a engines <<< "${NVMAI_CAT_ENGINES[$idx]:-$MODEL_BACKEND}"
+default_engine="${NVMAI_CAT_BACKEND[$idx]}"
 engine_family="${NVMAI_CAT_FAMILY[$idx]:--}"
 engine_name() { if [[ "$1" == cpu ]]; then echo CPU; else echo GPU; fi; }
+engine_available() {
+  local candidate
+  for candidate in "${engines[@]}"; do [[ "$candidate" == "$1" ]] && return 0; done
+  return 1
+}
 engine_reason() {
   if [[ "$1" == cpu ]]; then
     echo "$MODEL_NAME ${MODEL_QUANT}-bit declares family $engine_family, which the GPU engine does not implement; it runs on the CPU engine"
@@ -405,18 +419,54 @@ if [[ -n "$ENGINE_ARG" ]]; then
     cpu|gpu) ;;
     *) echo "unknown --engine: $ENGINE_ARG (cpu|gpu)" >&2; exit 2 ;;
   esac
-  if [[ "$ENGINE_ARG" != "$ENGINE" ]]; then
-    echo "$(engine_reason "$ENGINE")." >&2
+  if ! engine_available "$ENGINE_ARG"; then
+    echo "$(engine_reason "$default_engine")." >&2
     echo "--engine $ENGINE_ARG is not available for it." >&2
     exit 2
   fi
+  ENGINE="$ENGINE_ARG"
+elif (( ${#engines[@]} > 1 )) && (( INTERACTIVE )); then
+  echo ""
+  echo "Which engine? $MODEL_NAME ${MODEL_QUANT}-bit runs on both."
+  default_choice=1
+  for (( i = 0; i < ${#engines[@]}; i++ )); do
+    note=""
+    if [[ "${engines[$i]}" == "$default_engine" ]]; then
+      default_choice=$((i + 1))
+      note="  (default)"
+    fi
+    printf "  %d) %s%s\n" "$((i + 1))" "$(engine_name "${engines[$i]}")" "$note"
+  done
+  printf "Choice [1-%d] (default %d): " "${#engines[@]}" "$default_choice"
+  read -r engine_choice || exit 1
+  engine_choice="${engine_choice:-$default_choice}"
+  if [[ "$engine_choice" =~ ^[0-9]+$ ]] \
+     && (( engine_choice >= 1 && engine_choice <= ${#engines[@]} )); then
+    ENGINE="${engines[$((engine_choice - 1))]}"
+  else
+    echo "invalid choice: $engine_choice" >&2; exit 2
+  fi
+else
+  ENGINE="$default_engine"
 fi
 
-engine_line="$(engine_name "$ENGINE") only -- $(engine_reason "$ENGINE")"
-# Stated where a person is choosing, not only in the banner: which engine a
-# model runs on is a fact about the model, and the list's engine column alone
-# does not say why there is no choice.
+# The engine is stated, and whether it was a choice. The list's engine column
+# shows the default; this says which one this run will use and why there is (or
+# is not) an alternative.
+if (( ${#engines[@]} > 1 )); then
+  engine_line="$(engine_name "$ENGINE") -- your choice of $(printf '%s' "${engines[*]}" | tr ' ' '/')"
+else
+  engine_line="$(engine_name "$ENGINE") only -- $(engine_reason "$ENGINE")"
+fi
 if (( INTERACTIVE )); then echo "Engine: $engine_line"; fi
+# The request names the engine with an `@cpu`/`@gpu` suffix when it is not the
+# install's default; the server registers those aliases from the same catalog
+# field, so the two cannot disagree about what is available.
+MODEL_ID_LAUNCH="$MODEL_ID"
+if [[ "$ENGINE" != "$default_engine" ]]; then
+  MODEL_ID_LAUNCH="${MODEL_ID}@${ENGINE}"
+fi
+MODEL_BACKEND="$ENGINE"
 
 # ============================================================
 # 4) Answers: standard or concise
@@ -665,7 +715,7 @@ if [[ -n "$ram_gb" && "$MODEL_BACKEND" != "cpu" ]]; then
 fi
 
 if (( dynamic )); then
-  server_cmd=("$BINARY" --models-dir "$MODELS_DIR" --model "$MODEL_ID" --reasoning "$thinking_level" --port "$PORT")
+  server_cmd=("$BINARY" --models-dir "$MODELS_DIR" --model "$MODEL_ID_LAUNCH" --reasoning "$thinking_level" --port "$PORT")
 else
   server_cmd=("$BINARY" --model "$MODEL_DIR" --port "$PORT" --thinking "$( [[ "$thinking_level" == off ]] && echo off || echo on )")
 fi
@@ -832,7 +882,7 @@ fi
 # The id the server actually advertises for this install. The catalog knows
 # it when it is available; otherwise ask the running server.
 if (( dynamic )); then
-  MODEL="$MODEL_ID"
+  MODEL="$MODEL_ID_LAUNCH"
 else
   MODEL="$(printf '%s' "$models_json" \
     | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' \

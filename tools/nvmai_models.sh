@@ -85,6 +85,7 @@ NVMAI_ALL_MODELS=(ornith qwen36 agentworld qwen38)
 #   NVMAI_CAT_ID  NVMAI_CAT_NAME  NVMAI_CAT_QUANT (4|8)  NVMAI_CAT_BACKEND (gpu|cpu)
 #   NVMAI_CAT_PATH  NVMAI_CAT_THINKING (comma-separated, off first)  NVMAI_CAT_SIZE (GB, or -)
 #   NVMAI_CAT_FAMILY (the manifest's family, e.g. qwen3_5_dense)
+#   NVMAI_CAT_ENGINES (comma-separated engines that can serve it, default first)
 # and returns 1 with the reason in NVMAI_CATALOG_ERROR when there is no
 # usable catalog.
 
@@ -114,9 +115,10 @@ for model in models:
         levels = [l for l in LEVELS if l in listed] + [l for l in listed if l not in LEVELS]
         size = model.get("size_gb")
         family = field(model.get("family") or "-")
+        engines = field(model.get("engines") or backend)
         row = [field(model["id"]), field(model["name"]), field(int(model["quant"])),
                backend, field(model["path"]), field(",".join(levels)),
-               "%.1f" % float(size) if size is not None else "-", family]
+               "%.1f" % float(size) if size is not None else "-", family, engines]
     except (AttributeError, KeyError, TypeError, ValueError) as error:
         name = model.get("id") if isinstance(model, dict) else model
         print("catalog: skipping %r (%s)" % (name, error), file=sys.stderr)
@@ -129,11 +131,12 @@ for row in gpu + cpu:
 nvmai_reset_catalog() {
   NVMAI_CAT_ID=(); NVMAI_CAT_NAME=(); NVMAI_CAT_QUANT=(); NVMAI_CAT_BACKEND=()
   NVMAI_CAT_PATH=(); NVMAI_CAT_THINKING=(); NVMAI_CAT_SIZE=(); NVMAI_CAT_FAMILY=()
+  NVMAI_CAT_ENGINES=()
 }
 
 nvmai_load_catalog() {
   local binary="$1" models_dir="$2" json rows
-  local id name quant backend path thinking size family
+  local id name quant backend path thinking size family engines
   NVMAI_CATALOG_ERROR=""
   nvmai_reset_catalog
   if [[ -n "${NVMAI_CATALOG_JSON:-}" ]]; then
@@ -158,12 +161,12 @@ nvmai_load_catalog() {
   fi
   # Tab-separated with no empty fields (the parser writes "-"), because
   # read collapses runs of tabs and an empty column would shift the rest.
-  while IFS=$'\t' read -r id name quant backend path thinking size family; do
+  while IFS=$'\t' read -r id name quant backend path thinking size family engines; do
     [[ -n "$id" ]] || continue
     NVMAI_CAT_ID+=("$id"); NVMAI_CAT_NAME+=("$name"); NVMAI_CAT_QUANT+=("$quant")
     NVMAI_CAT_BACKEND+=("$backend"); NVMAI_CAT_PATH+=("$path")
     NVMAI_CAT_THINKING+=("$thinking"); NVMAI_CAT_SIZE+=("$size")
-    NVMAI_CAT_FAMILY+=("$family")
+    NVMAI_CAT_FAMILY+=("$family"); NVMAI_CAT_ENGINES+=("$engines")
   done <<< "$rows"
   if (( ${#NVMAI_CAT_ID[@]} == 0 )); then
     NVMAI_CATALOG_ERROR="it lists no installed models"
@@ -184,7 +187,7 @@ nvmai_static_catalog() {
       NVMAI_CAT_ID+=("-"); NVMAI_CAT_NAME+=("$NVMAI_MODEL_LABEL"); NVMAI_CAT_QUANT+=("$bits")
       NVMAI_CAT_BACKEND+=(gpu); NVMAI_CAT_PATH+=("$models_dir/${NVMAI_MODEL_STEM}_${NVMAI_QUANT_DIR}")
       NVMAI_CAT_THINKING+=("off,on"); NVMAI_CAT_SIZE+=("-")
-      NVMAI_CAT_FAMILY+=("${NVMAI_MODEL_KEY}")
+      NVMAI_CAT_FAMILY+=("${NVMAI_MODEL_KEY}"); NVMAI_CAT_ENGINES+=("gpu")
     done
   done
 }
