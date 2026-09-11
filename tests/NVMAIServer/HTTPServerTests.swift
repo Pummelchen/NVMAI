@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import NIOCore
+import Synchronization
 import Testing
 @testable import NVMAI
 @testable import NVMAIServerCore
@@ -474,6 +475,60 @@ struct HTTPServerTests {
         #expect(stream.contains(#""tool_calls""#))
         #expect(stream.contains(#""finish_reason":"tool_calls""#))
 
+        try await server.shutdown()
+    }
+
+    /// A drainer cancelled *between* iterations used to park forever. The task
+    /// cancellation handler runs before the continuation is installed when the
+    /// task is already cancelled, so it found nothing to resume and the `next()`
+    /// that followed stored a continuation no frame would ever reach: the
+    /// request task and the in-flight count it decrements stayed outstanding,
+    /// which is what made `shutdown()` wait for a drain that had no drainer.
+    @Test func aCancelledNextResolvesInsteadOfParking() async {
+        let outbox = SSEOutbox(capacity: 4)
+        // Polled rather than awaited: with the bug the drainer stays parked
+        // forever, and a test that awaits it would hang the whole run instead of
+        // failing. The parked task is abandoned when the test ends.
+        let settled = Mutex(false)
+        let drainer = Task {
+            // Cancel before the first suspension, so `next()` registers its
+            // handler on an already-cancelled task: the ordering that broke.
+            withUnsafeCurrentTask { $0?.cancel() }
+            _ = await outbox.next()
+            settled.withLock { $0 = true }
+        }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline, !settled.withLock({ $0 }) {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(settled.withLock { $0 },
+                "next() parked after cancellation instead of resolving")
+        drainer.cancel()
+    }
+
+    /// A HEAD response must have a head and nothing else. The two read routes
+    /// answered head-only; every other path fell through to the method-error or
+    /// not-found writer and came back with a JSON body, which a keep-alive client
+    /// parses as the start of its next response.
+    @Test func headRequestsNeverCarryABody() async throws {
+        let server = NVMAIHTTPServer(modelID: "test-model", queueLimit: 1,
+                                     backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+        for path in ["/health", "/v1/models", "/v1/chat/completions", "/nope"] {
+            let socket = try connectedSocket(port: port)
+            defer { Darwin.close(socket) }
+            try writeAll(socket: socket,
+                         text: "HEAD \(path) HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            let reply = try readAvailable(socket: socket, timeoutMilliseconds: 2_000)
+            #expect(reply.hasPrefix("HTTP/1.1 "), "\(path): no status line in \(reply)")
+            let separator = try #require(reply.range(of: "\r\n\r\n"),
+                                         "\(path): no head terminator")
+            let body = reply[separator.upperBound...]
+            #expect(body.isEmpty, "\(path): HEAD carried a body: \(body.prefix(80))")
+            #expect(reply.lowercased().contains("content-length: 0"),
+                    "\(path): HEAD did not declare an empty body: \(reply)")
+        }
         try await server.shutdown()
     }
 

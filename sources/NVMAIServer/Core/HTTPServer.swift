@@ -444,6 +444,19 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         let segments = path.split(separator: "/").map(String.init)
         let jsonBody = head.headers.first(name: "content-type")?
             .lowercased().hasPrefix("application/json") == true
+        // S28: a HEAD response must never carry a body, and only the two read
+        // routes below support HEAD. Everything else -- a POST route, a per-id
+        // route, or nothing at all -- would otherwise answer with the body its
+        // ordinary path writes, which on a keep-alive connection is read as the
+        // *next* response's head by a simple client. Every other method error on
+        // a known route is already a 405 (`method_not_allowed`), so answering
+        // HEAD the same way keeps this one rule rather than a second route table;
+        // the cost is that a HEAD for an unknown path says 405 where a GET says
+        // 404, and both are head-only.
+        if head.method == .HEAD, path != "/health", path != "/v1/models" {
+            writeHeadOnly(context, status: .methodNotAllowed)
+            return
+        }
         switch (head.method, path) {
         case (.GET, "/health"):
             writeJSON(context, status: .ok, object: ["status": "ok"])
@@ -2276,7 +2289,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
 /// unchecked-invariant: every field is guarded by `lock`. The queue is written
 /// from the generation task and drained from the event loop, which is exactly
 /// why the lock is here rather than relying on loop confinement.
-private final class SSEOutbox: @unchecked Sendable {
+/// Internal rather than private so the cancellation ordering below can be
+/// exercised directly: it is a scheduling property, not a routing one.
+final class SSEOutbox: @unchecked Sendable {
     private let lock = NSLock()
     private var frames: [Data] = []
     private var pendingDrain: CheckedContinuation<Data?, Never>?
@@ -2284,6 +2299,11 @@ private final class SSEOutbox: @unchecked Sendable {
     private var overflowed = false
     private var abandoned = false
     private var closeAfterDrain = false
+    /// Set by the cancellation handler. The handler runs *before* the
+    /// continuation is installed when the task is already cancelled, so a flag
+    /// is what the installing side can see; `pendingDrain` alone is nil at that
+    /// moment and the continuation would park with nothing left to resume it.
+    private var drainCancelled = false
     let capacity: Int
 
     init(capacity: Int) {
@@ -2358,7 +2378,10 @@ private final class SSEOutbox: @unchecked Sendable {
                 lock.withLock {
                     if !frames.isEmpty {
                         continuation.resume(returning: frames.removeFirst())
-                    } else if closed {
+                    } else if closed || drainCancelled {
+                        // A frame or a terminal close that arrived after the
+                        // cancellation is still delivered by the branches above;
+                        // only an empty, open outbox ends the drain here.
                         continuation.resume(returning: nil)
                     } else {
                         pendingDrain = continuation
@@ -2384,6 +2407,7 @@ private final class SSEOutbox: @unchecked Sendable {
 
     private func cancelPendingDrain() {
         lock.withLock {
+            drainCancelled = true
             if let continuation = pendingDrain {
                 pendingDrain = nil
                 continuation.resume(returning: nil)
