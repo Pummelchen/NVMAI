@@ -212,6 +212,24 @@ and each is bounded before use:
   checked arithmetic (C29); the install receipt is path-bound and structurally
   validated (D3).
 
+**Buffer length versus indexing count, checked.** The class where a Metal
+buffer is sized one way and indexed another, walked for the buffers whose size
+and index come from *different* sources:
+
+- **KV slots**: `kSlot`/`vSlot` refuse a linear layer outright ("linear layers
+  have no KV slots"), capacity is a constructor invariant for the layers that
+  have storage, and `physicalSlot` is `position % capacityTokens[layer]` against a
+  buffer whose length is `capacity * stride` -- the index is bounded by
+  construction, not by a caller's good manners. A ring range that would wrap is
+  refused loudly (`validateContiguousPhysicalRange`), not read.
+- **Prefill scratch**: the chunk size is clamped by the planner and
+  `validateChunkedPrefill` refuses a token count above `scratch.layout.chunkTokens`
+  (fail-loud, C31's sibling).
+- **Threadgroup ceilings**: hidden size (C31), query heads and head dimension
+  (C76), and the sliding-window mask (C43) are all refused at load, so the
+  `config * config` narrowings (`numKV * headDim`, `dim * streams`) that feed
+  kernel arguments cannot exceed their ceilings.
+
 **Invariant (b), executed: no trap reachable from input.** All 283 `precondition`/
 `preconditionFailure`/`fatalError` sites in `sources/` were classified by the
 layer the value comes from rather than one at a time:
