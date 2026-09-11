@@ -690,8 +690,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                      avoidingSlots rawAvoidingSlots: Set<Int>,
                                      prefetched: [Int: UnsafeMutableRawPointer])
         -> ExpertCachePlan? {
-        precondition(experts.count <= slotCount,
-                     "expert cache needs at least \(experts.count) slots")
+        // K10: too few slots for the requested expert set is a recoverable
+        // placement failure, not a programming error, and both entry points are
+        // already built to handle it -- `planExpertsCached` turns nil into
+        // `expertCacheUnplaceable`, and `planExpertsCachedIfPossible` returns
+        // nil, which the prefill tile scheduler reads as "no plan available"
+        // and falls back on. A trap here aborted the process instead, on a
+        // user-selectable configuration: `--expert-cache-slots 8` against
+        // Qwen3.8-Flash-Next, which routes top-10 experts, whose prefill tiles
+        // can carry up to 16 live experts.
+        guard experts.count <= slotCount else { return nil }
         let avoidingSlots = Set(rawAvoidingSlots.filter { $0 >= 0 && $0 < slotCount })
 
         cacheLock.lock()

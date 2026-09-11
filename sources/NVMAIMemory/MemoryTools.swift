@@ -276,7 +276,22 @@ public enum MemoryToolValue: Sendable, Equatable {
         }
     }
 
-    public var intValue: Int? { doubleValue.map(Int.init) }
+    /// The integer value, or nil when the value is not a finite number.
+    ///
+    /// `Int(_: Double)` **traps** on NaN, on ±infinity and on anything outside
+    /// `Int`'s range, and this is fed straight from a model-authored tool
+    /// argument: `<parameter=limit>1e999</parameter>` parses as +infinity and a
+    /// literal above `Int.max` is representable as a Double, so either would
+    /// abort the process holding the loaded model. A trap is not a Swift error,
+    /// so nothing upstream can catch it. Out-of-range values clamp rather than
+    /// fail: a caller asking for a limit beyond `Int.max` wants "as many as
+    /// possible", and the store's own bounds then decide.
+    public var intValue: Int? {
+        guard let value = doubleValue, value.isFinite else { return nil }
+        if value >= Double(Int.max) { return Int.max }
+        if value <= Double(Int.min) { return Int.min }
+        return Int(value)
+    }
 
     public var stringArrayValue: [String]? {
         switch self {

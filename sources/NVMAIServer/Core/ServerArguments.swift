@@ -76,6 +76,17 @@ public struct ServerArguments: Equatable, Sendable {
             && promptCacheDiskDirectory == nil
     }
 
+    /// The accepted slot counts, spelled from the validator that enforces them.
+    ///
+    /// The help text used to list them by hand and had already drifted: it
+    /// stopped at 128 while `RuntimeConfiguration.allowedExpertCacheSlots`
+    /// accepts 40, 48, 112, 160, 192 and 256 as well. Spelled from the source
+    /// of truth so it cannot drift again.
+    static var expertCacheSlotsHelp: String {
+        RuntimeConfiguration.allowedExpertCacheSlots
+            .map(String.init).joined(separator: ", ")
+    }
+
     public static let usage = """
     usage: NVMAIServer --model <completed .gturbo directory> [options]
            NVMAIServer --models-dir <dir> --model <id or dir> [options]
@@ -133,9 +144,10 @@ public struct ServerArguments: Equatable, Sendable {
                              effort levels (Qwen3.8-Flash-Next); Ornith 1.5
                              and Qwen 3.6 reject it.
       --expert-cache-slots <count>
-                             Routed-expert cache slots per layer: 8, 16, 24,
-                             32, 64, 96, or 128 (default 64). Environment
-                             override: NVMAI_EXPERT_CACHE_SLOTS.
+                             Routed-expert cache slots per layer:
+                             \(ServerArguments.expertCacheSlotsHelp)
+                             (default 64). Environment override:
+                             NVMAI_EXPERT_CACHE_SLOTS.
       --ram-budget <size>    Bytes the routed-expert cache may use, e.g. 8G,
                              2G, 512M. Slots are derived from this and the
                              model's expert stride, so this is the knob and

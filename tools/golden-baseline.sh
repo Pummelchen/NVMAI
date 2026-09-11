@@ -56,6 +56,29 @@ SEED="${SEED:-1234}"
 PORT="${PORT:-8757}"
 READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 
+# Pin the ANE prefill switch OFF, and export it so the CLI, the server, and
+# anything the server spawns all inherit it.
+#
+# `RuntimePrefillANE.environmentValue` returns `.on` when the variable is unset,
+# so without this line the gate follows that default. It must not, because the
+# ANE sidecar is deliberately NOT byte-identical to the GPU path -- fp16 with a
+# different reduction order, ~1% mean per-layer deviation -- which is the one
+# property this script exists to rely on.
+#
+# The runner reasons that stored baselines still hold because the ANE path only
+# engages at >= one full 4,096-token chunk and the baseline prompt is shorter.
+# That is true of the current PROMPT and MAX_NEW, but both are overridable above,
+# and a longer PROMPT is the natural thing to pass when testing long context.
+# Worse, whether a sidecar exists at all is a property of the machine, not of
+# the (machine, build, model) triple the SCOPE note names -- so the reference
+# would silently stop meaning one thing. A gate whose meaning depends on an
+# unrelated local file is not a gate.
+#
+# This measures the GPU path, deliberately not following the default: the ANE
+# path is a qualified speed/quality trade rather than the reference arithmetic,
+# and a regression in the GPU path is what this has to catch.
+export NVMAI_PREFILL_ANE=off
+
 mode=capture
 server_mode=0
 targets=()

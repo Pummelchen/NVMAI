@@ -395,7 +395,12 @@ public actor SessionLog {
             turnStarts.append(offset)
         }
         guard turnStarts.count > keeping else { return 0 }
-        let cut = turnStarts[turnStarts.count - keeping]
+        // `keeping == 0` means "drop every turn", and the cut for it is past the
+        // end rather than `turnStarts[count]` -- one past the array, which
+        // traps. Session boundary events survive either way, per the doc
+        // comment above. The environment path clamps its own value to >= 1, but
+        // this is public API and `JournalLimits(turnsPerSession: 0)` reaches it.
+        let cut = keeping == 0 ? folded.count : turnStarts[turnStarts.count - keeping]
         var kept: [SessionEvent] = []
         for (offset, event) in folded.enumerated() {
             if offset >= cut || event.kind == .sessionStarted || event.kind == .sessionEnded {

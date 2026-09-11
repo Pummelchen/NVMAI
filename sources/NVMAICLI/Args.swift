@@ -109,6 +109,18 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 }
 
 extension Args {
+    /// The accepted slot counts, spelled from the validator that enforces them.
+    ///
+    /// The help text used to list them by hand and had already drifted: it
+    /// stopped at 128 while `RuntimeConfiguration.allowedExpertCacheSlots`
+    /// accepts 40, 48, 112, 160, 192 and 256 as well, so a caller reading
+    /// `--help` would not know 160 was legal. Spelled from the source of truth
+    /// so it cannot drift again.
+    static var expertCacheSlotsHelp: String {
+        RuntimeConfiguration.allowedExpertCacheSlots
+            .map(String.init).joined(separator: ", ")
+    }
+
     public static let usage = """
     NVMAICLI — Qwen3.5-MoE 35B-A3B text generation
 
@@ -134,9 +146,10 @@ extension Args {
       --stop <string>           Stop substring (repeatable).
       --rdadvise <mode>         Expert read-ahead advice: off, default,
                                 bounded, or adaptive (default off).
-      --expert-cache-slots <n>  Routed-expert cache slots per layer: 8, 16,
-                                24, 32, 64, 96, or 128 (default 64). More
-                                slots raise the hit rate but use more memory.
+      --expert-cache-slots <n>  Routed-expert cache slots per layer:
+                                \(Self.expertCacheSlotsHelp) (default 64).
+                                More slots raise the hit rate but use more
+                                memory.
       --prefill-chunk <n|auto>  Prefill chunk tokens. Larger chunks reduce
                                 routed-expert file sweeps but use more GPU
                                 scratch. Allowed: 32, 64, 128, 256, 512,

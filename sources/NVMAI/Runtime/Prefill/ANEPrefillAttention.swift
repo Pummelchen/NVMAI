@@ -2,15 +2,26 @@ import CoreML
 import Foundation
 import Metal
 
-/// Opt-in switch for the ANE prefill attention path (Track A).
+/// Switch for the ANE prefill attention path (Track A).
 ///
 /// `on` routes every full-attention layer's prefill attention block through a
 /// Core ML sidecar exported by `tools/export_ane_prefill.py`, leaving GDN
 /// layers, the MoE, the KV cache format, and all of decode untouched. Output
 /// is NOT byte-identical to the GPU path — the sidecar computes in fp16 with
 /// a different reduction order (measured ~1% per-layer mean deviation against
-/// an fp32 reference) — so this ships like every other experiment here: off
-/// by default, qualified on its own evidence, never silently selected.
+/// an fp32 reference) — and it engages only once a prefill reaches one full
+/// chunk, so shorter prompts never reach it.
+///
+/// **On by default** since v4.6: `environmentValue` returns `.on` when
+/// `NVMAI_PREFILL_ANE` is unset, and a model with no sidecar falls back to the
+/// GPU quietly, which is the normal case. `NVMAI_PREFILL_ANE=off` opts out.
+/// The asymmetry is deliberate and lives in `wasRequestedExplicitly`: someone
+/// who asked for `on` and has no sidecar is told, because they meant it; the
+/// default must not fail a load over an optional experiment.
+///
+/// Anything that must be byte-reproducible has to pin this rather than follow
+/// the default — `tools/golden-baseline.sh` exports `NVMAI_PREFILL_ANE=off` for
+/// exactly that reason.
 public enum RuntimePrefillANE: String, Codable, Sendable {
     case off
     case on
