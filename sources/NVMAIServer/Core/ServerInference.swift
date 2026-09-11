@@ -1437,19 +1437,54 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
         }
     }
 
-    /// Prompt tokens of a request as the chat template would render it. The
-    /// same encoding generation uses, minus the generation.
+    /// Prompt tokens of a request as generation would render it — the same
+    /// encoding, minus the generation.
+    ///
+    /// The tokenizer is resolved per request for the same reason `generate`
+    /// resolves one: a request that names a different thinking mode or effort is
+    /// rendered at that level, and an effort sentence is tens of tokens on a model
+    /// that has levels. Counting with the session's tokenizer reported the loaded
+    /// level's number for a request that would not be rendered at it.
     public func countPromptTokens(_ request: ValidatedChatRequest) async throws -> Int {
-        try Self.promptTokenCount(request, tokenizer: tokenizer)
+        try Self.promptTokenCount(
+            request,
+            tokenizer: try await resolvedTokenizer(for: request.reasoning),
+            concisePrompt: concisePrompt)
     }
 
-    /// The count from a tokenizer alone, which is how the router answers for
-    /// a GPU model that is not the one loaded.
+    /// The count from a tokenizer alone, which is how the router answers for a
+    /// GPU model that is not the one loaded.
+    ///
+    /// `concisePrompt` is passed in rather than read because it is a property of a
+    /// *loaded session*; the router's path has no session, so it counts without
+    /// one and is the one case that can differ from what a concise-mode server
+    /// would spend.
     static func promptTokenCount(_ request: ValidatedChatRequest,
-                                 tokenizer: GFTokenizer) throws -> Int {
-        try encodePrompt(
-            tokenizer: tokenizer, messages: request.messages, tools: request.tools,
-            usesToolTemplate: usesToolTemplate(messages: request.messages, tools: request.tools)).count
+                                 tokenizer: GFTokenizer,
+                                 concisePrompt: String? = nil) throws -> Int {
+        // The same two transformations `preparePrompt` applies, in the same order.
+        // This used to encode the request verbatim, so the count was inflated for
+        // the `<model>-fast` alias and whenever `NVMAI_STRIP_CLI_PROMPT` is set,
+        // and under-reported in concise mode — the opposite direction in each case,
+        // which is why neither showed up as a single discrepancy.
+        let filteredMessages: [GFTokenizer.Message]
+        let filteredTools: [GFTokenizer.FunctionDefinition]
+        if request.stripCLIPrompt || CLIStrip.isEnabled() {
+            let filtered = CLIStrip.filter(messages: request.messages,
+                                           tools: request.tools)
+            filteredMessages = filtered.messages
+            filteredTools = filtered.tools
+        } else {
+            filteredMessages = request.messages
+            filteredTools = request.tools
+        }
+        let messages = concisePrompt.map {
+            ConcisePrompt.appendingSystemPrompt($0, to: filteredMessages)
+        } ?? filteredMessages
+        return try encodePrompt(
+            tokenizer: tokenizer, messages: messages, tools: filteredTools,
+            usesToolTemplate: usesToolTemplate(messages: filteredMessages,
+                                               tools: filteredTools)).count
     }
 
     /// The tokenizer this request should be rendered with.
