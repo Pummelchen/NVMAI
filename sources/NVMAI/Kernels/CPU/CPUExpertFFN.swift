@@ -85,6 +85,12 @@ public enum CPUExpertFFN {
                              rows: Int,
                              n: Int,
                              out: UnsafeMutablePointer<Float>) {
+        // Same contract as the standalone wrapper: the kernel's row stride and
+        // its scale/bias groups are both derived from `n`, so a width that is not
+        // a whole number of 64-element groups mis-strides every row after the
+        // first. This one hardcodes the 4-bit packing, so a width check is the
+        // only thing standing between a caller and silently wrong output.
+        Int8AffineGEMV.requireWholeGroups(n, "CPUExpertFFN.gemv")
         nvmai_int4_affine_gemv(weights, scales, biases, x, rows, n, out)
     }
 

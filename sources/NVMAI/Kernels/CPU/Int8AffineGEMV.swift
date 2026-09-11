@@ -39,6 +39,22 @@ public enum Int8AffineGEMV {
 
     /// Single-threaded. `weights` is `rows * n` bytes, `scales` and `biases`
     /// are `rows * (n / 64)` BF16 bit patterns each, all row-major.
+    /// The contract both entry points share with the C kernel behind them.
+    ///
+    /// `n` is the input width, and the kernel derives two things from it: the
+    /// scale/bias groups per row, `n / 64`, and the packed bytes per row,
+    /// `n / 2` at 4 bits or `n` at 8. A width that is not a whole number of
+    /// groups makes those two disagree — every row after the first is read from
+    /// the wrong byte offset and `x` is truncated to whole groups — so the result
+    /// is silently wrong rather than short. The header documents the requirement
+    /// and nothing enforced it; every Metal wrapper does check.
+    @inline(__always)
+    static func requireWholeGroups(_ n: Int, _ what: String) {
+        precondition(n % Quantization.groupSize == 0,
+                     "\(what): input width \(n) is not a whole number of "
+                        + "\(Quantization.groupSize)-element groups")
+    }
+
     @inline(__always)
     public static func apply(weights: UnsafePointer<UInt8>,
                              scales: UnsafePointer<UInt16>,
@@ -47,6 +63,7 @@ public enum Int8AffineGEMV {
                              rows: Int,
                              n: Int,
                              out: UnsafeMutablePointer<Float>) {
+        requireWholeGroups(n, "Int8AffineGEMV.apply")
         nvmai_int8_affine_gemv(weights, scales, biases, x, rows, n, out)
     }
 
@@ -70,6 +87,7 @@ public enum Int8AffineGEMV {
                                 n: Int,
                                 out: UnsafeMutablePointer<Float>,
                                 threads: Int = preferredThreads) {
+        requireWholeGroups(n, "Int8AffineGEMV.threaded")
         let groups = n / Quantization.groupSize
         let usable = max(1, min(threads, rows / minimumRowsPerThread))
         if usable == 1 {

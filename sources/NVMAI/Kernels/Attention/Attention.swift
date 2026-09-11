@@ -424,6 +424,19 @@ final class Attention {
                                  numChunks: Int,
                                  useGQAPartial: Bool,
                                  ringCapacity: UInt32 = 0) -> MTLComputePipelineState {
+        // `attention_decode_gqa_swa_partial` sizes its threadgroup arrays to
+        // `kAttnMaxQPerKV` (2) queries per KV head and *returns without writing
+        // its partials* when the span is wider — so the combine pass would
+        // normalize the previous layer's values instead of failing. The geometry
+        // below already refuses to select this path above that span; stating the
+        // limit here, where the kernel is chosen, means a caller that reaches it
+        // another way fails loudly rather than quietly.
+        if useGQAPartial {
+            precondition(numKVHeads > 0 && numQHeads / numKVHeads <= 2,
+                         "attention_decode_gqa_swa_partial needs at most 2 queries "
+                            + "per KV head; got \(numQHeads) queries and "
+                            + "\(numKVHeads) KV heads")
+        }
         if ringCapacity > 0 {
             let name = useGQAPartial ? "attention_decode_gqa_swa_partial" : "attention_decode_partial"
             let specializedChunks = numChunks == 16 ? Optional(UInt32(numChunks)) : nil
