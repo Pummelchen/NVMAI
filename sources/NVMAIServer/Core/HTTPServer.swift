@@ -675,6 +675,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                             phase: phaseState.value,
                                             stream: request.stream,
                                             outbox: outbox,
+                                            streamState: streamState,
                                             surface: .chat)
                 }
                 if let drainer {
@@ -938,6 +939,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     self.handleAsyncFailure(
                         error, context: contextBox.value, id: responseID,
                         phase: phaseState.value, stream: request.stream, outbox: outbox,
+                        streamState: streamState,
                         surface: .responses,
                         failureFrames: self.responsesFailureFrames(
                             id: responseID, created: created, echo: echo, itemState: itemState))
@@ -1389,6 +1391,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     self.handleAsyncFailure(
                         error, context: contextBox.value, id: messageID,
                         phase: phaseState.value, stream: request.stream, outbox: outbox,
+                        streamState: streamState,
                         surface: .anthropic, requestID: requestID)
                 }
                 if let drainer {
@@ -1646,6 +1649,7 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                     phase: String,
                                     stream: Bool,
                                     outbox: SSEOutbox?,
+                                    streamState: StreamState,
                                     surface: APISurface,
                                     requestID: String? = nil,
                                     failureFrames: (@Sendable (OpenAIErrorEnvelope) -> [Data])? = nil) {
@@ -1664,7 +1668,14 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         if !(error is CancellationError) {
             ServerLog.failed(id: id, phase: phase, status: status.code, error: error)
         }
-        if stream, let outbox {
+        // The stream branch is only correct once the SSE head exists -- it is
+        // written by `startStream`, which the coordinator calls when it admits
+        // the request. A rejection that happens *before* admission (queue full,
+        // shutting down) never gets there, and the frames queued here were then
+        // written as a body with no status line: the client saw `data: {...}`
+        // bytes where a 429 should have been, on every streaming surface.
+        // Falling through writes a real response instead.
+        if stream, let outbox, streamState.isStarted {
             // S5/S20: never leave a streaming client without a terminal frame.
             if error is CancellationError {
                 outbox.enqueueTerminal(surface == .chat ? [Self.doneFrame()] : [],

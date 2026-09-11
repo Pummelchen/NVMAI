@@ -230,6 +230,52 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// A streaming request the server refuses before admitting it still gets an
+    /// HTTP response.
+    ///
+    /// The SSE head is written by `startStream`, which the coordinator calls on
+    /// admission. A queue-full rejection happens before that, and the failure
+    /// path used to queue error frames on an outbox whose drainer wrote them as
+    /// a body with no status line -- the client saw `data: {...}` where a 429
+    /// belonged, on every streaming surface. URLSession refuses a response with
+    /// no head outright, so this fails loudly on the old behaviour.
+    @Test func aStreamingRequestTheQueueRefusesStillGetsAStatus() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend(delayNanoseconds: 2_000_000_000))
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        func streamingRequest() -> URLRequest {
+            var request = URLRequest(
+                url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = Data(#"""
+            {"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}
+            """#.utf8)
+            return request
+        }
+
+        // queueLimit 1 admits one active request plus one queued; the third is
+        // refused. Launch the first two and give them time to take those slots.
+        let active = Task { try await URLSession.shared.data(for: streamingRequest()) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let queued = Task { try await URLSession.shared.data(for: streamingRequest()) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let (data, response) = try await URLSession.shared.data(for: streamingRequest())
+        let status = (response as? HTTPURLResponse)?.statusCode
+        #expect(status == 429,
+                "a pre-admission rejection must carry a status line; got \(status.map(String.init) ?? "no HTTP response")")
+        #expect(String(decoding: data, as: UTF8.self).contains("queue_full"))
+
+        _ = try? await active.value
+        _ = try? await queued.value
+        try await server.shutdown()
+    }
+
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = NVMAIHTTPServer(
             modelID: "test-model",
