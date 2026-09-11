@@ -114,7 +114,7 @@ the constraint that produced it.
 What comes back names what went in:
 
 ```swift
-snapshot.memoryItemIDs      // included, in render order
+snapshot.memoryItemIDs      // included, most relevant first (not render order)
 snapshot.memoryVersions     // address -> version, so it can be explained later
 snapshot.droppedItemIDs     // matched but did not fit
 snapshot.estimatedTokenCount

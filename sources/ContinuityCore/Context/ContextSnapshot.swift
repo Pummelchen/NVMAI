@@ -11,7 +11,15 @@ public struct ContextSnapshot: Identifiable, Codable, Sendable, Equatable {
     public let taskID: UUID
     public let sessionID: UUID?
     public let createdAt: Date
-    /// The included items, in the order they were rendered.
+    /// The included items, most relevant first: the order the assembler
+    /// *selected* them in (priority namespace, then importance, then recency).
+    ///
+    /// This is not the order `renderedContext` lists them in. That rendering
+    /// groups by namespace and sorts by key, so it is stable and readable for
+    /// the model rather than ordered by relevance, and two snapshots with the
+    /// same items can order this list differently from the text. Consumers that
+    /// present an ordered list of the facts (the memory bootstrap does) want
+    /// this order; consumers that need to explain the text should read the text.
     public let memoryItemIDs: [UUID]
     /// Address to version, for the items above.
     public let memoryVersions: [String: Int]

@@ -46,6 +46,31 @@ import Testing
         #expect(ordered.first == items[1].id)
     }
 
+    /// `memoryItemIDs` is ordered by *relevance* and the rendering is ordered
+    /// by namespace and key, so the two disagree whenever the most relevant item
+    /// is not the one the text happens to list first. It used to be documented as
+    /// "render order", which is the opposite; this pins the distinction in both
+    /// directions.
+    @Test func selectionOrderIsNotRenderOrder() throws {
+        // "zebra" sorts last in the rendering but wins the selection on
+        // importance.
+        let ranked = item("zebra", "alpha_key", "most relevant", importance: 1.0)
+        let renderedFirst = item("alpha", "zeta_key", "listed first", importance: 0.1)
+        let budget = ContextBudget(maxTokens: 4096, recentTurnCount: 0)
+        let snapshot = try DefaultContextAssembler().assemble(
+            request([renderedFirst, ranked], budget: budget))
+
+        #expect(snapshot.memoryItemIDs == [ranked.id, renderedFirst.id],
+                "memoryItemIDs follows the selection, not the text")
+        let rendered = snapshot.renderedContext
+        let alpha = try #require(rendered.range(of: "### alpha"))
+        let zebra = try #require(rendered.range(of: "### zebra"))
+        #expect(alpha.lowerBound < zebra.lowerBound,
+                "the rendering groups by namespace and sorts it")
+        // Same items, so the counts agree; only the order differs.
+        #expect(snapshot.memoryItemIDs.count == 2)
+    }
+
     /// The budget is the whole point of the assembler, so it is checked
     /// against the rendered text rather than against the selection.
     @Test func theBudgetIsRespectedAndOverflowIsReported() throws {
