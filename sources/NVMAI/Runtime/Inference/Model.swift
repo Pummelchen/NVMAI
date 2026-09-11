@@ -1003,6 +1003,21 @@ extension Model {
         // error, and reachable only by a config that has never shipped (every
         // preset here is 2048, 2560 or 2816). This is the guard for the next
         // family, and it is what lets the tile stay a compile-time constant.
+        // A sliding-window layer (mask 0) is a valid `ArchConfig` value and the
+        // CPU engine implements it, but the GPU path does not: the gated
+        // attention branch runs every non-linear layer as *full* attention with
+        // `fullHeadDim`, `numFullKVHeads` and `fullRopeTheta`, and prefill's neox
+        // branch uses `fullRopeTheta` unconditionally too. A mask-0 layer would
+        // attend to the whole context with the wrong row geometry, silently. No
+        // shipped preset declares one (they use 1 and 2), so this refuses rather
+        // than guessing — implementing windowed handling in that branch is the
+        // alternative, and this guard is what says which one is missing.
+        guard !config.fullAttentionLayerMask.contains(0) else {
+            throw ModelError.unsupportedArchitecture(
+                detail: "a sliding-window layer (fullAttentionLayerMask == 0) is not "
+                    + "implemented on the GPU path: the gated attention branch runs "
+                    + "every non-linear layer as full attention")
+        }
         guard config.hiddenSize <= Self.maximumThreadgroupTileWidth else {
             throw ModelError.unsupportedArchitecture(
                 detail: "hiddenSize \(config.hiddenSize) exceeds the "

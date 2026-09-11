@@ -23,6 +23,72 @@ import Metal
         return (ctx, kv)
     }
 
+    /// A prefix longer than the initial capacity restores into a fresh manager.
+    ///
+    /// `snapshotSegmentLengths` records `min(position, capacity)`, so the lengths
+    /// are a function of capacity — and a fresh receiver's full-attention layers
+    /// start at `initialCapacityTokens` (8192). Before the restore grew to the
+    /// snapshot's position, any prefix past 8192 produced different lengths on
+    /// the two sides and was refused as `invalidLayout`, so the disk tier could
+    /// not restore the long conversations it exists for.
+    ///
+    /// The assertion is on the *growth*, not on a completed restore: with an empty
+    /// payload the copy fails either way (and both failures are the same
+    /// `invalidLayout` case, so a test cannot tell them apart), while the capacity
+    /// moving to the snapshot's position is exactly what the fix does and exactly
+    /// what was missing.
+    @Test func aSnapshotPastTheInitialCapacityGrowsTheReceiver() throws {
+        let target = 8_500
+        let (_, saver) = try makeManager(maxContext: 9_000)
+        // Mirrors the runner: reserve before advancing (`advance` never grows).
+        try saver.reserve(tokens: target)
+        saver.advance(by: target)
+        let lengths = try saver.snapshotSegmentLengths(at: target)
+
+        let (_, receiver) = try makeManager(maxContext: 9_000)
+        #expect(receiver.capacity(layer: 3) == KVCacheManager.initialCapacityTokens,
+                "precondition: a fresh manager starts at the initial capacity")
+        var empty = Data()
+        var offset = 0
+        // The copy is expected to fail on the empty payload; what matters is that
+        // the length check ran against a capacity grown to the snapshot.
+        _ = try? empty.withUnsafeBytes { bytes in
+            try receiver.restoreSnapshot(position: target, segmentLengths: lengths,
+                                          bytes: bytes, offset: &offset)
+        }
+        #expect(receiver.capacity(layer: 3) >= target, Comment(rawValue:
+                "the restore must grow to the snapshot's position before comparing "
+                    + "lengths; without that any prefix past "
+                    + "\(KVCacheManager.initialCapacityTokens) is refused"))
+    }
+
+    /// A short prefix round-trips through save and restore.
+    ///
+    /// The save/restore path had no test at all, which is how the capacity
+    /// asymmetry above survived: nothing exercised it.
+    @Test func aSnapshotRoundTripsThroughRestore() throws {
+        let (_, saver) = try makeManager(maxContext: 128)
+        saver.advance(by: 100)
+        let lengths = try saver.snapshotSegmentLengths(at: 100)
+        var payload = Data()
+        try saver.appendSnapshotPayload(to: &payload, segmentLengths: lengths)
+        // Full-attention layers only; each contributes K and V.
+        #expect(payload.count == lengths.reduce(0, +))
+        // Full-attention layers only, and each contributes K and V.
+        let fullLayers = (0..<config.numLayers)
+            .filter { saver.layerKind($0) != .linear }.count
+        #expect(payload.count == fullLayers * 2 * 100 * saver.stride(layer: 3))
+
+        let (_, receiver) = try makeManager(maxContext: 128)
+        var offset = 0
+        try payload.withUnsafeBytes { bytes in
+            try receiver.restoreSnapshot(position: 100, segmentLengths: lengths,
+                                          bytes: bytes, offset: &offset)
+        }
+        #expect(receiver.position == 100)
+        #expect(offset == payload.count)
+    }
+
     @Test func strideAndBufferSizes_matchConfig() throws {
         let (_, kv) = try makeManager(maxContext: 128)
 

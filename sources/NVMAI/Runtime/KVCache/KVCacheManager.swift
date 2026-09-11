@@ -392,6 +392,16 @@ public final class KVCacheManager {
                          segmentLengths: [Int],
                          bytes: UnsafeRawBufferPointer,
                          offset: inout Int) throws {
+        // Grow to the snapshot's position *before* computing the expected
+        // lengths, because those lengths are a function of capacity:
+        // `snapshotSegmentLengths` records `min(position, capacity)`. The saving
+        // runner had grown to hold its prefix; a fresh receiver's full-attention
+        // layers start at `initialCapacityTokens` (8192), so any snapshot past
+        // that produced a different set of lengths and was refused as
+        // `invalidLayout`. The restore could therefore never succeed for a long
+        // prefix — which is the case the disk tier exists for, and why the
+        // feature appeared simply not to work.
+        try reserve(tokens: snapshotPosition)
         let expected = try snapshotSegmentLengths(at: snapshotPosition)
         guard segmentLengths == expected else {
             throw InferenceStateSnapshotError.invalidLayout
