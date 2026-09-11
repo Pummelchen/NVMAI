@@ -66,6 +66,38 @@ import Testing
     /// bit pattern rather than by a library — because the one it would have
     /// used cannot decode BF16 at all, which is how this reader came to
     /// exist.
+    /// A shape from the file used to reach a trapping multiplication: `count`
+    /// was `shape.reduce(1, *)` on every access, so this header parsed cleanly
+    /// and the process aborted the first time anything asked. The shape is
+    /// validated with reporting arithmetic now, so it is a thrown error at load --
+    /// and the test fails rather than aborting, which is the point.
+    @Test func anUnusableShapeIsRefusedRatherThanTrapping() throws {
+        let url = try writeShard([("a", "F32", [Int.max, 2], [0, 0, 0, 0])])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: SafeTensorsFile.Failure.self) {
+            _ = try SafeTensorsFile(url: url)
+        }
+    }
+
+    @Test func aNegativeDimensionIsRefused() throws {
+        let url = try writeShard([("a", "F32", [2, -3], [0, 0, 0, 0])])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: SafeTensorsFile.Failure.self) {
+            _ = try SafeTensorsFile(url: url)
+        }
+    }
+
+    /// The valid case keeps working, and `count` is the shape's product.
+    @Test func aValidShapeStillCountsItsElements() throws {
+        let url = try writeShard([("a", "F32", [2, 3], [UInt8](repeating: 0, count: 24))])
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let file = try SafeTensorsFile(url: url)
+        #expect(try file.entry("a").count == 6)
+    }
+
     @Test func widensBFloatByBitPattern() throws {
         let values: [Float] = [1, -2, 0.5, 1024, 0]
         let url = try writeShard([("g", "BF16", [values.count], bf16(values))])

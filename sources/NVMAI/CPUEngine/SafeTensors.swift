@@ -22,8 +22,14 @@ public struct SafeTensorsFile: Sendable {
         /// Offsets relative to the start of the payload, not the file.
         public let start: Int
         public let end: Int
-
-        public var count: Int { shape.reduce(1, *) }
+        /// The product of `shape`, computed once while the header is validated.
+        ///
+        /// This used to be `shape.reduce(1, *)` on every access: a trapping
+        /// multiplication over values taken straight out of the file, so a
+        /// header declaring an absurd shape parsed cleanly and aborted the
+        /// process the first time anything asked -- which makes it look like a
+        /// crash in whatever happened to ask first.
+        public let count: Int
     }
 
     public enum Failure: Error, CustomStringConvertible {
@@ -112,8 +118,23 @@ public struct SafeTensorsFile: Sendable {
                   payload + offsets[1] <= length else {
                 throw Failure.malformed("entry \(name) runs past the file")
             }
+            // The shape is validated with reporting arithmetic before anything
+            // can multiply it: a dimension from the file must not be negative
+            // and the product must not overflow `Int`, or `count` would trap.
+            // Checked here so the failure names the tensor at load.
+            var count = 1
+            for dimension in shape {
+                guard dimension >= 0 else {
+                    throw Failure.malformed("entry \(name) has a negative shape \(shape)")
+                }
+                let (product, overflow) = count.multipliedReportingOverflow(by: dimension)
+                guard !overflow else {
+                    throw Failure.malformed("entry \(name) has an unusable shape \(shape)")
+                }
+                count = product
+            }
             parsed[name] = Entry(dtype: dtype, shape: shape,
-                                 start: offsets[0], end: offsets[1])
+                                 start: offsets[0], end: offsets[1], count: count)
         }
         entries = parsed
     }
