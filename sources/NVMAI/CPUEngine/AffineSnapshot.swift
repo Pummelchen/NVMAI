@@ -204,19 +204,6 @@ public struct AffineSnapshot: Sendable {
     /// silently changes which layers use DeltaNet and which use attention.
     public init(gturbo directory: URL) throws {
         self.directory = directory
-        // Refused deliberately, and loudly, until the reader is corrected.
-        //
-        // The repacker produces a byte-identical dense `.gturbo`
-        // (`tools/gturbo_diff_snapshot.py` checks that), but this reader does
-        // not yet interpret the resident index correctly: it loads, it is
-        // fast, and it produces fluent nonsense. A silently wrong answer is
-        // the one failure this project refuses, so the install is rejected
-        // with the reason rather than served. Flip this once the equivalence
-        // check passes -- same model, both paths, token-for-token.
-        throw SafeTensorsFile.Failure.malformed(
-            "dense .gturbo reading is not implemented yet: use the affine "
-            + "snapshot install for this model (tools/install_models.sh "
-            + "qwen35-2b|qwen35-4b|qwen35-9b writes one)")
         let manifest = try ManifestReader.read(directoryURL: directory)
         let arch = manifest.arch
         // The family is an identity fact, not an arch field; reading it keeps a
@@ -264,28 +251,33 @@ public struct AffineSnapshot: Sendable {
         }
         baseBits = quant.attention.weightBits
         groupSize = quant.attention.groupSize
-        // The manifest names slots, not tensors. Every dense tensor is an
-        // attention-slot tensor except the embedding and the head, and the
-        // engine asks by name, so those two carry the override.
         let embeddingBits = quant.embedding.weightBits
-        var widths: [String: Int] = [:]
         let weightsURL = directory.appendingPathComponent("model_weights.bin")
         let index = try ResidentIndexReader.load(fileURL: weightsURL)
         // Mapped once, held for the snapshot's life; see `ResidentWeights`.
         let weights = ResidentWeights(
             data: try Data(contentsOf: weightsURL, options: .alwaysMapped))
+
+        // Per-tensor width overrides, keyed by stem, exactly as the snapshot
+        // reads them from its `quantization` block.
+        //
+        // The manifest names *slots* plus a `quantization` block keyed by the
+        // same stem the snapshot uses, and those keys are what a 4-bit build
+        // leans on: its embedding and every attention K/V are 8-bit where the
+        // body is 4. Ignoring the block made `k_proj`/`v_proj` dequantize as
+        // 4-bit -- the bytes are the same, but they get unpacked wrongly, and
+        // that is enough to turn the answer into nonsense while every shape
+        // still checks out. The snapshot has always honoured this; a reader
+        // that does not is worse than one that refuses.
+        var widths: [String: Int] = manifest.quantOverrides
         for name in index.entries.keys {
             let stem = name.hasSuffix(".weight")
                 ? String(name.dropLast(".weight".count)) : name
-            if stem.hasSuffix("embed_tokens") || stem.hasSuffix("lm_head")
-                || stem == "language_model.lm_head" {
-                widths[stem] = embeddingBits
+            // The embedding is the head too when the output is tied, and the
+            // manifest's override may not name it; the slot carries its width.
+            if stem.hasSuffix("embed_tokens") || stem.hasSuffix("lm_head") {
+                widths[stem] = widths[stem] ?? embeddingBits
             }
-        }
-        if embeddingBits != baseBits {
-            // `matrix(_:)` keys widths by stem, and the head is read by name.
-            widths["language_model.model.embed_tokens"] = embeddingBits
-            widths["language_model.lm_head"] = embeddingBits
         }
         self.widths = widths
         storage = .gturbo(index: index, weights: weights)

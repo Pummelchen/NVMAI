@@ -190,6 +190,17 @@ public enum VerifiedInstallTool {
             }
             try GTurboPathValidator.validateBasename(
                 layer.file, field: "packed_experts/layout.json layers[\(layer.layer)].file")
+            // A layer with no routed experts has no file, and writing one
+            // empty `layer_NN.bin` per layer to satisfy this loop would be
+            // worse than the check: the dense Qwen 3.5 installs are exactly
+            // this shape, 24 layouts and no packed experts at all. The
+            // expected size is what makes this safe rather than a hole --
+            // `expectedLayerSize` is 0 only when the layer is empty, so a
+            // layer that should carry bytes still fails on a missing file
+            // below, with a non-zero expected size to compare against.
+            if expectedLayerSize == 0 {
+                continue
+            }
             let relativePath = "packed_experts/\(layer.file)"
             guard let manifestEntry = manifest.files[relativePath] else {
                 throw RepackError.configurationInvalid(detail: "manifest missing \(relativePath)")

@@ -781,13 +781,25 @@ public final class RemoteStreamingRepacker {
                                expertStride: UInt64,
                                resolvedCommit: String,
                                modelIDOverride: String?) throws {
-        // Determine quantization bits from actual tensor data, not hardcoded
+        // Determine quantization bits from actual tensor data, not hardcoded.
+        //
+        // `routedExpert` starts at the source's *base* affine width rather than
+        // a literal 4, and that is load-bearing for a model with no routed
+        // experts at all. The dense Qwen 3.5 installs are exactly that: no
+        // `.mlp.switch_mlp.*`, so the loop below never assigns the slot and the
+        // layer-derived override at the end never fires, leaving the width at
+        // whatever it started as. At a literal 4 every dense install claimed to
+        // be 4-bit -- and the routed-expert width is what `ManifestIdentity`
+        // reads and `apiModelID` turns into the `_<bits>-Bit` suffix, so the
+        // 8-bit 2B/4B/9B came back as `qwen3.5-2b_4-Bit` and the catalog
+        // skipped them as duplicates of the 4-bit ones. A MoE install is
+        // unaffected: the layer-derived width still overrides this below.
         var bits = GTurboJSON.QuantBitWidths(
-            embedding: 4,
-            attention: 4,
+            embedding: metadata.baseBits,
+            attention: metadata.baseBits,
             router: 8,
             sharedExpert: 8,
-            routedExpert: 4)
+            routedExpert: metadata.baseBits)
         for e in plan.resident.entries {
             guard let quantSpec = e.quantSpec else { continue }
             if e.name.hasSuffix(".embed_tokens.weight") {

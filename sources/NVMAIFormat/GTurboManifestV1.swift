@@ -166,12 +166,74 @@ package struct GTurboManifestQuantV1: Codable, Equatable, Sendable {
     package let router: GTurboManifestQuantSlotV1
     package let sharedExpert: GTurboManifestQuantSlotV1
     package let routedExpert: GTurboManifestQuantSlotV1
+    /// Per-tensor width overrides, keyed by tensor stem.
+    ///
+    /// The writer emits these beside the five slots and the decoder used to
+    /// drop them, which mattered as soon as a reader needed them: a 4-bit
+    /// build keeps its embedding and every attention K/V at 8 bits, and
+    /// dequantizing those as 4-bit unpacks the same bytes wrongly. Absent in
+    /// manifests written before this field existed, and in builds that have no
+    /// overrides at all.
+    package let overrides: [String: GTurboManifestQuantSlotV1]?
+
+    private enum CodingKeys: String, CodingKey {
+        case embedding, attention, router, sharedExpert, routedExpert
+    }
+
+    /// Hand-written because the object mixes five fixed slots with an open set
+    /// of per-tensor overrides keyed by tensor stem. A synthesised `Codable`
+    /// silently dropped the open set, which is how a 4-bit install's 8-bit
+    /// K/V got read back as 4-bit.
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        embedding = try container.decode(GTurboManifestQuantSlotV1.self, forKey: .embedding)
+        attention = try container.decode(GTurboManifestQuantSlotV1.self, forKey: .attention)
+        router = try container.decode(GTurboManifestQuantSlotV1.self, forKey: .router)
+        sharedExpert = try container.decode(GTurboManifestQuantSlotV1.self,
+                                            forKey: .sharedExpert)
+        routedExpert = try container.decode(GTurboManifestQuantSlotV1.self,
+                                            forKey: .routedExpert)
+        let dynamic = try decoder.container(keyedBy: AnyKey.self)
+        var overrides: [String: GTurboManifestQuantSlotV1] = [:]
+        for key in dynamic.allKeys {
+            guard CodingKeys(stringValue: key.stringValue) == nil else { continue }
+            if let slot = try? dynamic.decode(GTurboManifestQuantSlotV1.self, forKey: key) {
+                overrides[key.stringValue] = slot
+            }
+        }
+        self.overrides = overrides.isEmpty ? nil : overrides
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(embedding, forKey: .embedding)
+        try container.encode(attention, forKey: .attention)
+        try container.encode(router, forKey: .router)
+        try container.encode(sharedExpert, forKey: .sharedExpert)
+        try container.encode(routedExpert, forKey: .routedExpert)
+        if let overrides {
+            var dynamic = encoder.container(keyedBy: AnyKey.self)
+            for (stem, slot) in overrides {
+                try dynamic.encode(slot, forKey: AnyKey(stringValue: stem)!)
+            }
+        }
+    }
+
+    /// A decoder/encoder key for the arbitrary tensor stems in the object.
+    private struct AnyKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
 
     package init(embedding: GTurboManifestQuantSlotV1,
                  attention: GTurboManifestQuantSlotV1,
                  router: GTurboManifestQuantSlotV1,
                  sharedExpert: GTurboManifestQuantSlotV1,
-                 routedExpert: GTurboManifestQuantSlotV1) {
+                 routedExpert: GTurboManifestQuantSlotV1,
+                 overrides: [String: GTurboManifestQuantSlotV1]? = nil) {
+        self.overrides = overrides
         self.embedding = embedding
         self.attention = attention
         self.router = router

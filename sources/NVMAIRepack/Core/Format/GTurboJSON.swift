@@ -91,23 +91,7 @@ enum GTurboJSON {
             archDict["routerNormTopK"] = arch.routerNormTopK
             archDict["quantGroupSize"] = arch.quantGroupSize
         }
-        let quantBits = [
-            "embedding": bitWidths.embedding,
-            "attention": bitWidths.attention,
-            "router": bitWidths.router,
-            "sharedExpert": bitWidths.sharedExpert,
-            "routedExpert": bitWidths.routedExpert,
-        ]
-        var quantDict: [String: Any] = [:]
-        for (slot, bits) in quantBits {
-            quantDict[slot] = [
-                "weightBits": bits,
-                "scheme": plan.baseMode,
-                "scaleType": "BF16",
-                "biasType": "BF16",
-                "groupSize": plan.baseGroupSize
-            ]
-        }
+        let quantDict = quantObject(plan: plan, bitWidths: bitWidths)
 
         var filesDict: [String: Any] = [:]
         for (path, info) in files {
@@ -135,6 +119,54 @@ enum GTurboJSON {
         ]
         return try JSONSerialization.data(withJSONObject: manifest,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+    }
+
+    /// The `quant` object: the five width *slots*, plus one entry per
+    /// quantified resident tensor.
+    ///
+    /// The slots alone cannot describe a build. They are what the installer
+    /// *derives* from the tensor data, not what the source checkpoint
+    /// declared, and a "4-bit" model is not uniformly 4-bit: the Qwen 3.5
+    /// 2B/4B/9B keep their embedding and several attention K/V pairs at 8
+    /// bits while the slots say `attention: 4`. Both statements are true of
+    /// different tensors, and only the per-tensor entries say which is which.
+    ///
+    /// This is the bug that was shipped and then found by comparing `.gturbo`
+    /// logits against the snapshot's: a reader that trusts the slots unpacks
+    /// those 8-bit tensors as 4-bit. The word count changes, the strides
+    /// still divide evenly, every shape check passes, and the model answers
+    /// fluently and wrongly. Writing the real width for every tensor makes
+    /// the manifest say what was actually packed, so no reader has to
+    /// re-derive it from the slots and none can get it wrong.
+    ///
+    /// Unquantized tensors (norms, scalars) carry no `quantSpec` and are
+    /// deliberately absent: they are read as BF16 by `dtype` and never
+    /// dequantized. A stem that collides with a slot name would overwrite a
+    /// slot, so it is skipped.
+    private static func quantObject(plan: RepackPlan,
+                                    bitWidths: QuantBitWidths) -> [String: Any] {
+        let slots = [
+            "embedding": bitWidths.embedding,
+            "attention": bitWidths.attention,
+            "router": bitWidths.router,
+            "sharedExpert": bitWidths.sharedExpert,
+            "routedExpert": bitWidths.routedExpert,
+        ]
+        func entry(_ bits: Int) -> [String: Any] {
+            ["weightBits": bits, "scheme": plan.baseMode,
+             "scaleType": "BF16", "biasType": "BF16",
+             "groupSize": plan.baseGroupSize]
+        }
+        var dict: [String: Any] = [:]
+        for (slot, bits) in slots { dict[slot] = entry(bits) }
+        for resident in plan.resident.entries {
+            guard let spec = resident.quantSpec else { continue }
+            let stem = resident.name.hasSuffix(".weight")
+                ? String(resident.name.dropLast(".weight".count)) : resident.name
+            guard dict[stem] == nil else { continue }
+            dict[stem] = entry(spec.bits)
+        }
+        return dict
     }
 
     static func encodeLayout(plan: RepackPlan,

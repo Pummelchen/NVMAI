@@ -34,13 +34,12 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
   8-bit, converted from Qwen's own bf16 release by this project's converter
   (`tools/install_models.sh qwen35-2b|qwen35-4b|qwen35-9b`). The 9B is the
   vision-language build and is converted text-only, like every model here.
-  These install as affine snapshots — the format the CPU engine reads — not as
-  `.gturbo` installs, so they carry no verification receipt. That is the one
-  install-tree inconsistency left, and it is tracked with its blocker in
-  [`docs/plan-dense-gturbo-installs.md`](docs/plan-dense-gturbo-installs.md):
-  the repacker already produces a correct dense `.gturbo`, but the CPU reader
-  does not yet interpret it, so a dense `.gturbo` is refused rather than
-  served.
+  These install as `.gturbo` directories with the same manifest and
+  path-bound verification receipt as every other model here. They were affine
+  snapshots until the repacker learned the dense shape; the two formats are
+  verified equivalent rather than assumed to be, by a byte comparison of every
+  resident tensor and by an identical-logits check
+  (`tools/repack_dense.sh`, `docs/gturbo-format.md`).
 
 
 ### Usage

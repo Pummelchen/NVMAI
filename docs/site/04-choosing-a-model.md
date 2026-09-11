@@ -80,11 +80,10 @@ tools/install_models.sh qwen35-2b     # or qwen35-4b, qwen35-9b
 Add `-8bit` for the 8-bit build (`qwen35-2b-8bit`), and note that each one
 runs on the processor rather than the graphics chip.
 
-One difference worth knowing: the 35B models install as `.gturbo` files with a
-verification receipt, while these are **snapshots** — the format the CPU
-engine reads directly. The converter still had to produce them correctly, but
-there is no receipt to check afterwards, and `--verify-install` does not apply
-to them. Everything you run is quantized from Qwen's own release, never a
+These install exactly like the 35B models do: a `.gturbo` directory with a
+manifest and a verification receipt, so `--verify-install` applies to them too.
+The only difference left is where they run — on the processor rather than the
+graphics chip. Everything you run is quantized from Qwen's own release, never a
 third-party repack.
 
 ## Which should you pick?

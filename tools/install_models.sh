@@ -60,11 +60,13 @@ Sources
 
   convert_qwen35moe   tools/prepare_agentworld.py --model {ornith15,qwen36,agentworld}
                       One ~70 GB download yields both widths.
-  convert_qwen35      tools/prepare_qwen35.py --size {2b,4b,9b}. One fetch
-                      yields both widths. These are the dense models, and the
-                      only ones the CPU engine runs; the 9B is the
-                      vision-language build, converted text-only like the
-                      others.
+  convert_qwen35      tools/prepare_qwen35.py --size {2b,4b,9b}, then
+                      NVMAIRepack --input-snapshot. One fetch yields both
+                      widths. These are the dense models, and the only ones
+                      the CPU engine runs; the 9B is the vision-language
+                      build, converted text-only like the others.
+                      tools/repack_dense.sh re-runs the repack and the
+                      equivalence check against a retained snapshot.
   convert             tools/prepare_qwen38.py, one 360 GB fetch per width.
                       Qwen's own FP8 build is not used either: it quantizes
                       only the routed experts, in [128, 128] blocks that do
@@ -210,18 +212,19 @@ install_one() {
       convert_qwen35)
         # The dense Qwen 3.5 models, from Qwen's own bf16 release. One
         # download yields both widths, so the other width installs without a
-        # second fetch.
+        # second fetch: only the converted *staging* directory is per-width,
+        # the source shards in .build/<preset>-shards are shared.
         #
-        # These are *snapshots*, not .gturbo installs, and that is the whole
-        # difference from every other row here. The CPU engine serves an
-        # affine snapshot directory directly, reading its config.json; the
-        # repacker is the GPU path and its ArchInfo understands only the MoE
-        # shapes, so `NVMAIRepack --input-snapshot` refuses a dense model with
-        # "no text_config". Adding a fourth shape there to reach a receipt
-        # would duplicate a loader the CPU engine already has. So the
-        # converter writes the snapshot straight into models/, where the
-        # catalog finds it by its own `model_id` and `display_name` — exactly
-        # how the 2B and 4B here were already installed by hand.
+        # Convert, then repack, then drop the staging directory. The snapshot
+        # the converter writes is an intermediate, not the install: every
+        # model this project serves is a .gturbo directory with a manifest and
+        # a path-bound receipt, and a snapshot has neither. Keeping the
+        # intermediate would double the disk for a 9B and buy nothing, since
+        # it is reproducible from the cached shards.
+        #
+        # The receipt is bound to the absolute output path, so the repack must
+        # write straight into models/. Nothing here may move the directory
+        # afterwards.
         local preset="${name%-8bit}" size_key model_id
         case "$preset" in
           qwen35-2b) size_key=2b; model_id="qwen3.5-2b" ;;
@@ -229,16 +232,27 @@ install_one() {
           qwen35-9b) size_key=9b; model_id="qwen3.5-9b" ;;
           *) echo "unknown Qwen 3.5 size: $preset" >&2; return 2 ;;
         esac
+        [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
+        if [[ -f "$MODELS/$dir/manifest.json" ]]; then
+          echo "installed $name -> models/$dir (already present)"
+          return 0
+        fi
         # The 9B checkpoint is the vision-language build; the converter drops
         # the model.visual.* tower and writes the text model, so the install
         # is text-only like every other model here.
-        if [[ ! -f "$MODELS/$dir/config.json" ]]; then
-          echo "converting Qwen 3.5 ${size_key} -> models/$dir"
+        local stage=".build/qwen35-${size_key}-affine-${width}bit"
+        if [[ ! -f "$stage/config.json" ]]; then
+          echo "converting Qwen 3.5 ${size_key} ${width}-bit -> $stage"
           python3.13 tools/prepare_qwen35.py --size "$size_key" --bits "$width" \
-              --output "$MODELS/$dir" \
+              --output "$stage" \
               --work ".build/${preset}-shards" || return 1
         fi
-        echo "installed $name -> models/$dir ($(basename "$model_id") snapshot)"
+        echo "repacking $stage -> models/$dir"
+        "$BIN" --input-snapshot "$stage" --model-id "$model_id" \
+            --output "$MODELS/$dir" || return 1
+        "$BIN" --verify-install --input-gturbo "$MODELS/$dir" || return 1
+        rm -rf "$stage"
+        echo "installed $name -> models/$dir (.gturbo)"
         ;;
       unsupported)
         cat <<EOF

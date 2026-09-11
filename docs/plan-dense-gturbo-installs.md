@@ -7,44 +7,70 @@ because that is what the CPU engine reads. Every other install is a `.gturbo`
 directory with a manifest, a layout, and a path-bound `verified-install.json`
 receipt. This plan makes the dense models consistent with the rest.
 
-Status: **stage 1 done and verified; stage 2 blocked, and the reason is
-recorded below.** The family decision is made (a new dense value, below) and
-the repacker produces a correct dense `.gturbo`. The CPU engine reading it
-does not yet, so the reader refuses rather than lies. The reconnaissance was
-done on 2026-09-11 against `main`; every claim carries the source it came from.
+Status: **done and verified on all three models.** The family decision is made
+(a new dense value, below), the repacker produces a correct dense `.gturbo`, and
+the CPU engine reads it. The blocker in the previous revision of this document
+was not where it was recorded: the reader was right and the *writer* was
+dropping data. That is corrected and explained below. Every claim carries the
+source it came from.
 
 ## Where it actually got to (2026-09-11)
 
-**Stage 1 -- the repacker -- is correct and checked.** `NVMAIRepack
---input-snapshot` accepts a dense snapshot; the 2B repacks into a `.gturbo`
-that is byte-identical to its source. `tools/gturbo_diff_snapshot.py` proves
-it rather than assuming it: it parses the resident index and the safetensors
-shards directly and compared all 320 resident tensors, weight + scales +
-biases, with zero mismatches. The two companion facts worth keeping:
+**Stages 1 and 2 are done, and the migration is done.** `NVMAIRepack
+--input-snapshot` accepts a dense snapshot; all six dense installs (2B/4B/9B at
+4-bit and 8-bit) repack into a `.gturbo` that is byte-identical to its source and
+logit-identical through the CPU engine. `tools/repack_dense.sh` runs the whole
+thing — stage, repack, byte-diff, re-issue the receipt, run the equivalence
+gate — and is the reproducible way to redo it.
 
-  - `ArchInfo` accepts the converter's *flat* config, where the root is the
-    text config. The MoE loader is reused for the shared DeltaNet and
-    attention contract with the four MoE-only keys stubbed, so there is one
-    reader for that contract rather than two that can drift.
-  - `ManifestArch` gained the five gated-DeltaNet fields as optionals, and the
-    wire codec now decodes the `linear_*` keys the writer had always emitted
-    but the reader silently dropped. Optional, so existing installs are
-    unaffected.
+The verifications, in the order they ran:
 
-**Stage 2 -- the CPU reader -- is not correct, and is refused.** It loads, it
-is fast, and it produces fluent nonsense. The blocker is precise:
+    install                    residents  byte-diff   receipt  logits
+    qwen3.5_2B_4Bit                  320   320/320      PASS    0 (exact)
+    qwen3.5_4B_4Bit                  426   426/426      PASS    0 (exact)
+    qwen3.5_9B_4Bit                  427   427/427      PASS    0 (exact)
+    qwen3.5_2B_8Bit                  320   320/320      PASS    0 (exact)
+    qwen3.5_4B_8Bit                  426   426/426      PASS    0 (exact)
+    qwen3.5_9B_8Bit                  427   427/427      PASS    0 (exact)
 
-    tensor            snapshot packed  snapshot logical  scales/row  wire shape[1]
-    embed_tokens          [248320, 512]            2048         32          2048
-    gate_proj               [6144, 256]            1024         32          2048
+The 9B carries the extra value: it is the untied-head case, so it also proves
+the `lm_head` mapping survives a repack, at both widths.
 
-`shape[1]` is neither the packed nor the logical width, and for `gate_proj`
-the scale span implies 32 groups/row (2048 logical columns at group 64) while
-its weight bytes per row at 4 bits give 512. Those cannot both be true, so one
-of the readings is wrong. `docs/gturbo-format.md` is referenced by
-`GTurboEncoders.swift` and **does not exist**, and no dense `.gturbo` exists
-in the wild, so the field is undocumented for a CPU reader. Reading
-`ResidentBuffer`'s consumer is the fastest way to settle it.
+Served, not just loaded: the catalog lists all six with distinct ids and the
+`cpu` backend, and the server answers through the catalog path on both a 4-bit
+and an 8-bit install, including unloading one to load the other.
+
+    qwen3.5-2b_4-Bit  Qwen 3.5 2B  quant=4 backend=cpu
+    qwen3.5-2b_8-Bit  Qwen 3.5 2B  quant=8 backend=cpu
+    qwen3.5-4b_4-Bit  Qwen 3.5 4B  quant=4 backend=cpu
+    qwen3.5-4b_8-Bit  Qwen 3.5 4B  quant=8 backend=cpu
+    qwen3.5-9b_4-Bit  Qwen 3.5 9B  quant=4 backend=cpu
+    qwen3.5-9b_8-Bit  Qwen 3.5 9B  quant=8 backend=cpu
+
+**The blocker was the writer, not the reader.** The previous revision recorded
+the failure as "the CPU reader produces fluent nonsense, so refuse it". The
+reader was correct. The repacker was writing only the five **slots** into
+`manifest.json -> quant` and dropping the source checkpoint's per-tensor widths,
+because `GTurboJSON.encodeManifest` built `quantDict` from
+`bitWidths.{embedding,attention,router,sharedExpert,routedExpert}` and nothing
+else.
+
+That matters because a 4-bit build is not uniformly 4-bit. The 2B keeps its
+embedding and the K/V projections of its six full-attention layers at 8 bits —
+13 tensors, declared in the source snapshot's own `quantization` block. The
+slots say `attention: 4`, which is true of the other attention tensors. A reader
+that trusts the slots unpacks those 8-bit tensors as 4-bit: the word count
+changes, the strides still divide evenly, every shape check passes, and the
+model answers fluently and wrongly.
+
+The fix is small and the shape of it is the point: emit every quantified
+resident tensor's real width beside the slots, so the manifest says what was
+actually packed and no reader has to re-derive it. The contract already existed
+— `GTurboManifestQuantV1` had hand-written `init(from:)`/`encode(to:)` to
+preserve the open key set, and `ManifestReader.quantOverrides` already read it —
+so only the writer was missing. The bug that made the overrides necessary in the
+first place was a synthesised `Codable` silently dropping them; the same class
+of bug, one layer up.
 
 Two further findings from building the reader, both worth not rediscovering:
 
@@ -58,10 +84,29 @@ Two further findings from building the reader, both worth not rediscovering:
     repeatedly; mapping once and holding it took generation from never
     finishing to 2 seconds. `ResidentWeights` documents that invariant.
 
-`AffineSnapshot.init(gturbo:)` therefore **throws** until the reader is
-correct. The guard and the unreachable code beneath it must be removed in the
-same commit that lands the fix. Nothing has been migrated: the shipped 2B, 4B
-and 9B are still snapshots and still work.
+A third finding came out of the migration: `verify-install` required a
+`packed_experts/layer_NN.bin` for every layer, and a dense install has none —
+`expertsPerLayer` is 0, so each layer's expected size is 0 and its file is
+never written. Writing 24 empty files to satisfy the check would have been
+worse than the check, so the validator skips a layer whose expected size is
+zero. It still requires the file when the size is non-zero, so no MoE install
+lost a check.
+
+A fourth came out of the 8-bit half, and it is the same disease one layer up:
+`routedExpert` was initialised to a literal `4` in `writeManifest` and only
+overwritten from the layer plan's sub-tensors. A dense model has no routed
+experts, so the slot kept the literal and **every** dense install claimed to be
+4-bit. That value is what `ManifestIdentity.weightBits` reads and what
+`apiModelID` turns into the `_<bits>-Bit` suffix, so all three 8-bit installs
+came back as `qwen3.5-2b_4-Bit` and the catalog skipped them as duplicates of
+the 4-bit ones — an 8-bit install that installs, verifies, loads, and cannot be
+selected. Initialising the slot from the source's base affine width fixes it,
+and the 4-bit manifests are byte-unchanged, which is how the fix was confirmed
+to be scoped. It was caught by reading `NVMAIServer --catalog` output rather
+than by a test; nothing in the suite compares a manifest's slots to its
+contents.
+
+`docs/gturbo-format.md` now exists, and documents all of the above.
 
 ## Why it was not done at the time
 

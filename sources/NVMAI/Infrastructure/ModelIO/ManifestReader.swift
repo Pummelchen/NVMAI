@@ -86,6 +86,10 @@ public struct Manifest: Decodable, Equatable, Sendable {
     public let sourceSnapshotHash: String?
     public let arch: ManifestArch
     public let quant: ManifestQuant?
+    /// Per-tensor width overrides, keyed by tensor stem ("language_model
+    /// .model.layers.3.self_attn.k_proj" -> 8). Absent when the build has no
+    /// overrides, and in manifests written before this existed.
+    public let quantOverrides: [String: Int]
     public let files: [String: ManifestFileEntry]
     public let expertsPerLayer: Int
     public let numLayers: Int
@@ -487,6 +491,7 @@ private extension Manifest {
                   sourceSnapshotHash: wire.sourceSnapshotHash,
                   arch: ManifestArch(wire: wire.arch),
                   quant: wire.quant.map(ManifestQuant.init(wire:)),
+                  quantOverrides: wire.quant?.overrides?.mapValues(\.weightBits) ?? [:],
                   files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
                   expertsPerLayer: wire.expertsPerLayer,
                   numLayers: wire.numLayers,
