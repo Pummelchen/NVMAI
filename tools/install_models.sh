@@ -101,8 +101,17 @@ install_one() {
     [[ "$name" == "$want" ]] || continue
     found=1
     if [[ -d "$MODELS/$dir" ]]; then
-      echo "$name is already installed at models/$dir"
-      return 0
+      # A dense install from before this project repacked them is an affine
+      # snapshot: the directory exists but carries no manifest and no receipt.
+      # Returning here would leave it that way forever, because "the directory
+      # exists" is what this check means. Fall through and let the branch
+      # repack it, which is the only way it becomes verifiable in place.
+      if [[ "$source" == convert_qwen35 && ! -f "$MODELS/$dir/manifest.json" ]]; then
+        echo "$name is an affine snapshot; repacking it as .gturbo"
+      else
+        echo "$name is already installed at models/$dir"
+        return 0
+      fi
     fi
     case "$source" in
       repack)
@@ -233,24 +242,37 @@ install_one() {
           *) echo "unknown Qwen 3.5 size: $preset" >&2; return 2 ;;
         esac
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
-        if [[ -f "$MODELS/$dir/manifest.json" ]]; then
-          echo "installed $name -> models/$dir (already present)"
-          return 0
-        fi
         # The 9B checkpoint is the vision-language build; the converter drops
         # the model.visual.* tower and writes the text model, so the install
         # is text-only like every other model here.
         local stage=".build/qwen35-${size_key}-affine-${width}bit"
         if [[ ! -f "$stage/config.json" ]]; then
-          echo "converting Qwen 3.5 ${size_key} ${width}-bit -> $stage"
-          python3.13 tools/prepare_qwen35.py --size "$size_key" --bits "$width" \
-              --output "$stage" \
-              --work ".build/${preset}-shards" || return 1
+          if [[ -f "$MODELS/$dir/config.json" ]]; then
+            # A legacy snapshot: move it into the converter's staging area
+            # rather than converting it again. It is the same bytes the
+            # converter would fetch and quantize, and it is already here.
+            echo "staging the existing snapshot -> $stage"
+            rm -rf "$stage"
+            mv "$MODELS/$dir" "$stage"
+          else
+            echo "converting Qwen 3.5 ${size_key} ${width}-bit -> $stage"
+            python3.13 tools/prepare_qwen35.py --size "$size_key" --bits "$width" \
+                --output "$stage" \
+                --work ".build/${preset}-shards" || return 1
+          fi
         fi
+        # The receipt is bound to the absolute output path below, and it is
+        # written by the repack, so the destination must be empty first and
+        # must never be moved afterwards.
         echo "repacking $stage -> models/$dir"
+        rm -rf "$MODELS/$dir"
         "$BIN" --input-snapshot "$stage" --model-id "$model_id" \
             --output "$MODELS/$dir" || return 1
         "$BIN" --verify-install --input-gturbo "$MODELS/$dir" || return 1
+        # The staging snapshot is an intermediate and is reproducible from the
+        # cached shards, so it does not outlive the install. Use
+        # tools/repack_dense.sh instead if you want it kept for the
+        # equivalence gate.
         rm -rf "$stage"
         echo "installed $name -> models/$dir (.gturbo)"
         ;;
