@@ -153,6 +153,30 @@ itself the result worth recording:
   argmax compares with `>` (NaN-safe, and a NaN row degrades to a *rejected*
   prediction because acceptance is decided by the target's own greedy token).
 
+**Invariant (c), executed: every silent fallback is documented or reports.**
+All 203 `try?` sites in `sources/` were classified by what the fallback *is*,
+which is what the invariant asks rather than whether `try?` appears:
+
+- **Documented capability probes**: the MPP prefill path (`try?` pipeline build,
+  with the per-row GEMV fallback and the reason recorded), `routerSelectKNSimdPSO`,
+  and the bandwidth/unroll variants -- each drops to a slower path that is
+  defined and tested.
+- **Cleanup**: `try? removeItem`/`close`/`unlink` in the streaming, memory and
+  repacker layers, where the operation either already succeeded or the process is
+  unwinding.
+- **Union decoding**: `OpenAIModels`' string-or-array content and stop sequences --
+  the `try?` is the probe and the other branch still throws.
+- **Injected-store degradation**: `MemoryService`'s bootstrap and search answer
+  empty when the durable store is unavailable, which is the whole point of
+  `degradesToLocalStore` (and the service's tests exercise it).
+- **`ContinuityJournalStore.record`, which is silent by *contract*, not by
+  accident**: `SessionJournal` states "Never throws at the caller: a journal that
+  can fail a completion is worse than no journal." A turn whose task cannot be
+  resolved, whose session cannot be opened, or whose append throws is dropped on
+  purpose. Recorded under **Deliberate** below rather than changed -- the
+  invariant is satisfied *and* the residual is stated, which is the difference
+  between this and the silent fallbacks the audit fixed.
+
 **Invariant (a), executed: no file-derived value reaches arithmetic
 unvalidated.** The chains that carry values out of a file were walked end to end,
 and each is bounded before use:
@@ -308,6 +332,20 @@ other.
 | D8 | `docs/v4.5-ane-prefill.md` | Claimed ANE prefill is "off by default"; `environmentValue` returns `.on` when the variable is unset, and has since v4.6. Marked historical and corrected. (Carried the number C4 while it sat in the fixed-code table; the numbering gap above is explained there.) |
 
 ## Deliberate, verified, not changed
+
+**`ContinuityJournalStore.record` drops a turn it cannot write, silently.**
+`SessionJournal`'s contract says so in as many words ("Never throws at the
+caller: a journal that can fail a completion is worse than no journal"), and the
+two failure paths -- `store.taskID(for:)` throwing, and `engine.recordUserPrompt`/
+`recordAssistantResponse` throwing -- return early with no report. The trade is
+deliberate and the alternative is worse: failing or delaying a completion to
+protect a transcript nobody asked to be transactional. It stays, with the
+residual written down: a turn can be missing from the journal with no trace, so
+a future reader should not treat the transcript as complete when a store error
+occurred. Adding an `os.Logger` line there would cost nothing and change no
+contract; it is listed here as the improvement to make if the silence ever costs
+someone an investigation.
+
 
 - `RuntimePrefillANE`'s asymmetry — an explicit `on` with no sidecar throws, the default degrades quietly — is correct and explained in `wasRequestedExplicitly`. Only the doc comment was wrong (C5).
 - `executeExpertCachePlan`'s preconditions validate a plan the type itself constructs, not user input; once `makeExpertCachePlan` returns non-nil they hold by construction.
