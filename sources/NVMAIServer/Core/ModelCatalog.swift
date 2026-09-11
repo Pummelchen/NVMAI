@@ -255,9 +255,25 @@ public struct ModelCatalog: Sendable {
             sizeBytes: sizeOnDisk(directory)))
     }
 
-    /// A CPU snapshot's family, for a single-model server fitting --reasoning
-    /// to it before the snapshot itself is opened.
+    /// A single-model CPU server's family, for fitting `--reasoning` to it
+    /// before the model itself is opened.
+    ///
+    /// Both shapes ship: a safetensors snapshot declares its architecture in
+    /// `config.json`, and a `.gturbo` install declares it in `manifest.json`.
+    /// Reading only the first is how `--cpu` against an installed dense model
+    /// died with a raw `NSCocoaErrorDomain` "config.json couldn't be opened"
+    /// instead of naming the family -- and a `.gturbo` install is exactly the
+    /// shape the three dense Qwen 3.5 models are installed as.
     static func snapshotFamily(_ directory: URL) throws -> CPUModelFamily {
+        if FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("manifest.json").path) {
+            let family = try ManifestReader.peekFamily(directoryURL: directory)
+            guard family == .qwen35Dense else {
+                throw CPUModelBackend.CPUBackendError.unsupported(
+                    CPUModelFamily.refusal(modelType: family.rawValue))
+            }
+            return .qwen35Dense
+        }
         let data = try Data(contentsOf: directory.appendingPathComponent("config.json"))
         let config = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let modelType = config?["model_type"] as? String

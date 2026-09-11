@@ -13,23 +13,37 @@
 #   <client>   server (default), or one of the coding clients:
 #              codex, claude, qwen, opencode, zed
 #   <model>    an install key (ornith|qwen36|agentworld|qwen38, or
-#              qwen35-2b|qwen35-4b|qwen35-9b for the CPU models) optionally followed
-#              by 4|8, or a catalog id such as ornith-1.5-35b-a3b_8-Bit,
-#              which names its own width
+#              qwen35-2b|qwen35-4b|qwen35-9b) optionally followed by 4|8, or a
+#              catalog id such as ornith-1.5-35b-a3b_8-Bit, which names its own
+#              width. The three qwen35-* keys are the dense Qwen 3.5 models
+#              (2B, 4B, 9B): the runtime implements their family
+#              (`qwen3_5_dense`) in the CPU engine only, so they are CPU-only
+#              models and there is no GPU option to offer for them.
 #   <thinking> off, on, or any level the chosen model lists
-#              (minimal, low, medium, high, xhigh, max)
+#              (minimal, low, medium, high, xhigh, max). The dense Qwen 3.5
+#              models define the binary thinking switch, so their levels are
+#              exactly off|on -- off for a direct answer, on to reason first.
 #   <ram>      the routed-expert cache budget: 1, 2, 4, 8, 16 or 32 (GB).
-#              Omit it to use the install's own measured profile.
+#              Omit it to use the install's own measured profile. The CPU
+#              engine has no expert cache, so it does not ask and the flag
+#              does not apply there.
 #
 # Flags (override the positional form, and work in any order):
 #
 #   --client <c>    server|codex|claude|qwen|opencode|zed
 #   --model <m>     model key or catalog id
 #   --bits <4|8>    quantization for a model key
+#   --engine <cpu|gpu>  which engine serves the model. Each install declares
+#              exactly one -- the catalog probes the manifest's family and the
+#              runtime decides -- so this asserts the engine rather than
+#              choosing it, and a mismatch is refused with the reason: the
+#              dense Qwen 3.5 models are CPU-only because the GPU runtime does
+#              not implement their family, and every MoE family is GPU-only
+#              because the CPU engine does not implement those.
 #   --mode <fast|full>       fast strips CLI boilerplate; full keeps tools
 #   --answers <default|concise>
 #   --thinking <level>
-#   --ram <1|2|4|8|16|32>   expert-cache budget in GB
+#   --ram <1|2|4|8|16|32>   expert-cache budget in GB (GPU models only)
 #   --context <n|native|max> native 262144, or 524288/1048576 with --yarn
 #   --kv <4|8|16>   KV-cache precision (default 8)
 #   --yarn          enable YaRN context scaling
@@ -45,11 +59,15 @@
 # budget, prefetch and its I/O tier, the prefill chunk, sampling -- comes from
 # the install's own ModelProfile row, clamped to this machine's RAM, so the
 # launcher never overrides a measured optimum unless you pass --ram. CPU
-# models take none of the pinned flags: that backend has no prompt cache and
-# no quantized KV.
+# models take none of the pinned flags: that backend has no prompt cache, no
+# quantized KV and no expert cache, so --kv, --context, --yarn and --ram are
+# reported as not applying rather than passed or dropped in silence.
 #
 # Overrides: NVMAI_PORT, NVMAI_THINKING_MODE, NVMAI_CATALOG_JSON,
 # NVMAI_LAUNCHER_DRY_RUN=1, and the per-client ones below.
+# NVMAI_LAUNCHER_ASSUME_TTY=1 answers the interactive questions from a pipe
+# while still starting nothing (it is the test seam for this script's
+# questions, not something a person needs).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -73,18 +91,22 @@ DRY_RUN=0
 if [[ "${NVMAI_LAUNCHER_DRY_RUN:-0}" == 1 ]]; then DRY_RUN=1; fi
 
 # A dry run and a piped run must never block on a question: they take every
-# default instead. Interactive only when a person is actually there.
+# default instead. Interactive only when a person is actually there -- except
+# under the test seam, which answers the questions from a pipe while the dry
+# run still decides that nothing is started.
 INTERACTIVE=1
 if [[ "$DRY_RUN" == "1" || ! -t 0 ]]; then INTERACTIVE=0; fi
+if [[ "${NVMAI_LAUNCHER_ASSUME_TTY:-0}" == "1" ]]; then INTERACTIVE=1; fi
 
 CLIENT=""; MODE=""; MODEL_ARG=""; BITS=""; ANSWERS=""; THINKING_ARG=""
-RAM_ARG=""; CONTEXT_ARG=""; KV_ARG=""; YARN=0; PORT_ARG=""; MEMORY=0
+RAM_ARG=""; CONTEXT_ARG=""; KV_ARG=""; YARN=0; PORT_ARG=""; MEMORY=0; ENGINE_ARG=""
 positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --client)   CLIENT="${2:?--client needs a value}"; shift 2 ;;
     --model)    MODEL_ARG="${2:?--model needs a value}"; shift 2 ;;
     --bits)     BITS="${2:?--bits needs 4 or 8}"; shift 2 ;;
+    --engine)   ENGINE_ARG="${2:?--engine needs cpu or gpu}"; shift 2 ;;
     --mode)     MODE="${2:?--mode needs fast or full}"; shift 2 ;;
     --answers)  ANSWERS="${2:?--answers needs default or concise}"; shift 2 ;;
     --thinking) THINKING_ARG="${2:?--thinking needs a level}"; shift 2 ;;
@@ -283,15 +305,20 @@ if [[ -z "$MODEL_ARG" ]]; then
   else
     echo "Which model?"
   fi
+  # Engine and thinking levels are the two things a person is choosing between
+  # here, so both are in the list rather than discovered after the fact.
+  printf "  %-3s %-28s %-6s %-4s %8s  %-22s %-24s %s\n" \
+    "#" "model" "bits" "engine" "size" "api id" "thinking" ""
   for (( i = 0; i < count; i++ )); do
     size=""
     if [[ "${NVMAI_CAT_SIZE[$i]}" != "-" ]]; then size="${NVMAI_CAT_SIZE[$i]} GB"; fi
     note=""
     if (( i == default_idx )); then note="  (default)"; fi
     if (( ! dynamic )) && [[ ! -e "${NVMAI_CAT_PATH[$i]}" ]]; then note="$note  (not installed)"; fi
-    printf "  %2d) %-28s %s-bit  %-3s %8s  %-24s%s\n" "$((i + 1))" "${NVMAI_CAT_NAME[$i]}" \
-      "${NVMAI_CAT_QUANT[$i]}" "$( [[ "${NVMAI_CAT_BACKEND[$i]}" == cpu ]] && echo CPU || echo GPU )" \
-      "$size" "${NVMAI_CAT_ID[$i]}" "$note"
+    printf "  %2d) %-28s %s-bit  %-4s %8s  %-22s %-24s%s\n" "$((i + 1))" \
+      "${NVMAI_CAT_NAME[$i]}" "${NVMAI_CAT_QUANT[$i]}" \
+      "$( [[ "${NVMAI_CAT_BACKEND[$i]}" == cpu ]] && echo CPU || echo GPU )" \
+      "$size" "${NVMAI_CAT_ID[$i]}" "${NVMAI_CAT_THINKING[$i]//,/, }" "$note"
   done
   printf "Choice [1-%d] (default %d): " "$count" "$((default_idx + 1))"
   read -r pick || exit 1
@@ -322,6 +349,20 @@ else
     # No width given means 8-bit, the historical default.
     nvmai_resolve_quant "${BITS:-8}" || exit 2
     if ! idx="$(nvmai_catalog_find_dir "${NVMAI_MODEL_STEM}_${NVMAI_QUANT_DIR}")"; then
+      # The fallback list is the GPU installs, so a CPU model is absent from
+      # it even when it is installed. Saying "not installed" here would send
+      # someone to re-install a model that is already there.
+      if (( ! dynamic )) && [[ "${NVMAI_MODEL_KEY}" == qwen35-* ]]; then
+        echo "ERROR: $NVMAI_MODEL_LABEL is a CPU-engine model, and the built-in" >&2
+        echo "       fallback list covers the GPU installs only, so it is not offered" >&2
+        echo "       here. Two ways out:" >&2
+        echo "         - let this launcher read the catalog by building the server:" >&2
+        echo "             swift build -c release --product NVMAIServer" >&2
+        echo "           (or point NVMAI_CATALOG_JSON at that binary's --catalog output)" >&2
+        echo "         - or start it yourself, which the single-model form supports:" >&2
+        echo "             .build/release/NVMAIServer --model <install dir> --cpu" >&2
+        exit 1
+      fi
       echo "ERROR: $NVMAI_MODEL_LABEL $NVMAI_QUANT is not installed (the catalog has no ${NVMAI_MODEL_STEM}_${NVMAI_QUANT_DIR})" >&2
       echo "Install it first: tools/install_models.sh (see --help for the target names)" >&2
       exit 1
@@ -335,6 +376,47 @@ MODEL_QUANT="${NVMAI_CAT_QUANT[$idx]}"
 MODEL_BACKEND="${NVMAI_CAT_BACKEND[$idx]}"
 MODEL_DIR="${NVMAI_CAT_PATH[$idx]}"
 IFS=',' read -r -a levels <<< "${NVMAI_CAT_THINKING[$idx]}"
+
+# ============================================================
+# 3b) Engine: what can serve this install, and what was asked for
+# ============================================================
+
+# The catalog derives this from the manifest's family, and the runtime decides
+# it there: the GPU path refuses `qwen3_5_dense` by name, which is why the
+# dense Qwen 3.5 models (2B/4B/9B) are CPU-only, and no MoE family has a CPU
+# implementation. So an install declares exactly one engine and there is no
+# second one to ask about -- a question here would be answered by the server
+# ignoring it, since it routes on the family. What the launcher owes the person
+# is the statement below, and a refusal that names the reason if they assert
+# the other engine.
+ENGINE="$MODEL_BACKEND"
+engine_family="${NVMAI_CAT_FAMILY[$idx]:--}"
+engine_name() { if [[ "$1" == cpu ]]; then echo CPU; else echo GPU; fi; }
+engine_reason() {
+  if [[ "$1" == cpu ]]; then
+    echo "$MODEL_NAME ${MODEL_QUANT}-bit declares family $engine_family, which the GPU engine does not implement; it runs on the CPU engine"
+  else
+    echo "$MODEL_NAME ${MODEL_QUANT}-bit declares family $engine_family, which the CPU engine does not implement; it runs on the GPU engine"
+  fi
+}
+
+if [[ -n "$ENGINE_ARG" ]]; then
+  case "$ENGINE_ARG" in
+    cpu|gpu) ;;
+    *) echo "unknown --engine: $ENGINE_ARG (cpu|gpu)" >&2; exit 2 ;;
+  esac
+  if [[ "$ENGINE_ARG" != "$ENGINE" ]]; then
+    echo "$(engine_reason "$ENGINE")." >&2
+    echo "--engine $ENGINE_ARG is not available for it." >&2
+    exit 2
+  fi
+fi
+
+engine_line="$(engine_name "$ENGINE") only -- $(engine_reason "$ENGINE")"
+# Stated where a person is choosing, not only in the banner: which engine a
+# model runs on is a fact about the model, and the list's engine column alone
+# does not say why there is no choice.
+if (( INTERACTIVE )); then echo "Engine: $engine_line"; fi
 
 # ============================================================
 # 4) Answers: standard or concise
@@ -405,7 +487,13 @@ if ! default_word="$(normalize_level "$thinking_default")"; then
   echo "invalid NVMAI_THINKING_MODE: $thinking_default (off|on|minimal|low|medium|high|xhigh|max)" >&2
   exit 2
 fi
-default_level="$(level_for_model "$default_word")" || default_level="${levels[0]}"
+if ! default_level="$(level_for_model "$default_word")"; then
+  # A default the model cannot render is a person's mistake worth naming, not
+  # a level to substitute in silence.
+  default_level="${levels[0]}"
+  echo "NOTE: NVMAI_THINKING_MODE=$thinking_default is not a level $MODEL_NAME ${MODEL_QUANT}-bit renders" >&2
+  echo "      ($(level_names)); using $default_level." >&2
+fi
 
 if [[ -n "$THINKING_ARG" ]]; then
   if ! word="$(normalize_level "$THINKING_ARG")"; then
@@ -426,9 +514,10 @@ elif (( ! INTERACTIVE )); then
 else
   echo ""
   if [[ "${levels[*]}" == "off on" ]]; then
-    echo "Reasoning (thinking)?"
+    echo "Reasoning (thinking)? $MODEL_NAME ${MODEL_QUANT}-bit defines the binary switch"
+    echo "off|on; a client can switch it per request with reasoning_effort."
   else
-    echo "Reasoning effort?"
+    echo "Reasoning effort? $MODEL_NAME ${MODEL_QUANT}-bit renders $(level_names)."
   fi
   default_choice=1
   for (( i = 0; i < ${#levels[@]}; i++ )); do
@@ -479,6 +568,10 @@ if [[ -n "$RAM_ARG" ]]; then
     echo "unknown RAM limit: $RAM_ARG (1, 2, 4, 8, 16 or 32 GB)" >&2
     exit 2
   fi
+elif [[ "$ENGINE" == "cpu" ]]; then
+  # Nothing to ask: the CPU engine holds the whole model resident and has no
+  # routed-expert cache, so a budget would be a number that changes nothing.
+  ram_gb=""
 elif (( ! INTERACTIVE )); then
   # Unattended or dry run: keep the install's own measured profile.
   ram_gb=""
@@ -502,11 +595,14 @@ fi
 ram_note="model default (measured)"
 if [[ -n "$ram_gb" ]]; then ram_note="${ram_gb} GB (your choice)"; fi
 
-# A CPU model ignores the routed-expert cache entirely; say so rather than
-# pretending the choice does something.
-if [[ -n "$ram_gb" && "$MODEL_BACKEND" == "cpu" ]]; then
-  echo "NOTE: $MODEL_NAME runs on the CPU and has no routed-expert cache;" >&2
-  echo "      the RAM limit does not apply to it." >&2
+# A CPU model ignores the routed-expert cache entirely, so say what the number
+# does rather than leaving a budget that never takes effect.
+if [[ "$ENGINE" == "cpu" ]]; then
+  ram_note="not applicable (no routed-expert cache on the CPU engine)"
+  if [[ -n "$RAM_ARG" ]]; then
+    echo "NOTE: $MODEL_NAME runs on the CPU and has no routed-expert cache;" >&2
+    echo "      --ram $RAM_ARG does not apply to it." >&2
+  fi
 fi
 
 # ============================================================
@@ -532,6 +628,22 @@ elif [[ -n "$CONTEXT_ARG" ]]; then
 fi
 
 PORT="${PORT_ARG:-${NVMAI_PORT:-$NVMAI_DEFAULT_PORT}}"
+
+# The context, KV and YaRN flags reach the GPU runtime only. Asking for one of
+# them against a CPU model is a misunderstanding worth naming: the CPU engine
+# takes its context from the model's own config (clamped by the backend) and
+# has no quantized KV cache to pick a width for.
+if [[ "$ENGINE" == "cpu" ]]; then
+  inert_flags=()
+  [[ -n "$KV_ARG" ]] && inert_flags+=(--kv)
+  [[ -n "$CONTEXT_ARG" ]] && inert_flags+=(--context)
+  (( YARN )) && inert_flags+=(--yarn)
+  if (( ${#inert_flags[@]} > 0 )); then
+    echo "NOTE: ${inert_flags[*]} do not apply to the CPU engine; ignoring" >&2
+    echo "      ${inert_flags[*]} for $MODEL_NAME." >&2
+  fi
+  kv_bits=""; max_context=""; rope_scaling="none"
+fi
 
 if [[ "$MEMORY" == "1" ]]; then
   export NVMAI_MEMORY=1
@@ -631,6 +743,7 @@ print_setup() {
     echo "switching models needs a restart."
   fi
   echo "  Runtime:    $runtime_note"
+  echo "  Engine:     $engine_line"
   if [[ "$MEMORY" == "1" ]]; then
     echo "  Memory:     on (persistent, repo-scoped; guard on)"
   fi

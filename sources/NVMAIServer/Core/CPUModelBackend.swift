@@ -29,6 +29,10 @@ public actor CPUModelBackend: ServerInferenceBackend {
     /// tokenizer for that configuration through the shared
     /// `(folder, thinking, effort)` cache rather than reusing this one.
     private let snapshotDirectory: URL
+    /// The folder the tokenizer was loaded from: the model directory for a
+    /// snapshot, its `tokenizer/` sidecar for a `.gturbo` install. Kept so a
+    /// mid-session re-render reads from the same place the load did.
+    private let tokenizerFolder: URL
     private let loadedReasoning: RequestReasoning
     private let context: Int
     private let defaults: GenerationDefaults.Sampling
@@ -90,21 +94,20 @@ public actor CPUModelBackend: ServerInferenceBackend {
         threads = engine.threads
         model = engine
         // A snapshot keeps its tokenizer at the directory root; a `.gturbo`
-        // keeps it under `tokenizer/`. Try the root first, which is what the
-        // snapshot path has always done -- including the synthetic snapshots
-        // the tests build -- then fall back to the shared lookup.
-        let rootTokenizer = snapshotDirectory.appendingPathComponent("tokenizer.json")
-        let folder: URL
-        if FileManager.default.fileExists(atPath: rootTokenizer.path) {
-            folder = snapshotDirectory
-        } else if let found = GFTokenizer.tokenizerFolder(forModelDirectory: snapshotDirectory) {
-            folder = found
-        } else {
+        // keeps it under `tokenizer/`. The folder is kept, not just used: a
+        // request that switches thinking mode re-renders through this
+        // tokenizer, and re-deriving the folder there is how the re-render
+        // came to hand `load(from:)` a directory that has no `tokenizer.json`
+        // -- which every `.gturbo` install has, so the switch failed for all
+        // of them.
+        guard let folder = GFTokenizer.resolvedTokenizerFolder(
+            forModelDirectory: snapshotDirectory) else {
             throw CPUBackendError.unsupported(
                 "no tokenizer in \(snapshotDirectory.lastPathComponent)")
         }
+        tokenizerFolder = folder
         tokenizer = try await GFTokenizer.load(from: folder,
-                                               thinkingMode: thinkingMode)
+                                              thinkingMode: thinkingMode)
         self.snapshotDirectory = snapshotDirectory
         self.loadedReasoning = RequestReasoning(thinkingMode: thinkingMode,
                                                 effort: nil)
@@ -242,7 +245,7 @@ extension CPUModelBackend: PromptTokenCounting {
         guard let reasoning, !reasoning.matches(loadedReasoning) else {
             return tokenizer
         }
-        return try await GFTokenizer.load(from: snapshotDirectory,
+        return try await GFTokenizer.load(from: tokenizerFolder,
                                           thinkingMode: reasoning.thinkingMode,
                                           reasoningEffort: reasoning.effort)
     }

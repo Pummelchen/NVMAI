@@ -458,10 +458,10 @@ enum DenseModelError: Error, CustomStringConvertible {
     /// GFTokenizer loads asynchronously and these commands are one-shot
     /// tools, so they wait rather than restructuring `main` around it.
     ///
-    /// A shipped `.gturbo` install keeps its tokenizer in a `tokenizer/`
-    /// sidecar; a flat HF snapshot keeps `tokenizer.json` at the top level.
-    /// Both are accepted, sidecar first, so these commands reach the models
-    /// that are actually installed.
+    /// The folder resolution is the shared one, so a shipped `.gturbo` install
+    /// (tokenizer in a `tokenizer/` sidecar) and a flat HF snapshot
+    /// (`tokenizer.json` at the top level) are both reached without a second
+    /// copy of that rule living here.
     static func loadTokenizer(_ directory: URL) throws -> GFTokenizer? {
         // unchecked-invariant: written only inside the Task below and read
         // only after `semaphore.wait()` returns, which the signal orders after
@@ -469,13 +469,11 @@ enum DenseModelError: Error, CustomStringConvertible {
         final class Box: @unchecked Sendable { var value: GFTokenizer? }
         let box = Box()
         let semaphore = DispatchSemaphore(value: 0)
+        guard let folder = GFTokenizer.resolvedTokenizerFolder(forModelDirectory: directory) else {
+            return nil
+        }
         Task {
-            box.value = try? await GFTokenizer.load(forModelDirectory: directory)
-            if box.value == nil,
-               FileManager.default.fileExists(
-                   atPath: directory.appendingPathComponent("tokenizer.json").path) {
-                box.value = try? await GFTokenizer.load(from: directory)
-            }
+            box.value = try? await GFTokenizer.load(from: folder)
             semaphore.signal()
         }
         semaphore.wait()

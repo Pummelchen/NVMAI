@@ -160,6 +160,30 @@ public struct GFTokenizer: @unchecked Sendable {
         return hasTokenizerJSON(in: overrideURL, fileManager: fileManager) ? overrideURL : nil
     }
 
+    /// The folder to hand to `load(from:)` for a model directory, in either
+    /// shape this project ships: a safetensors snapshot keeps `tokenizer.json`
+    /// at the directory root, a `.gturbo` install keeps it under `tokenizer/`.
+    ///
+    /// `tokenizerFolder(forModelDirectory:)` answers only the second shape --
+    /// it is about locating a *sidecar* -- so a caller that has a model
+    /// directory and needs the folder `load(from:)` can actually read must use
+    /// this instead. Passing the model directory to `load(from:)` works for a
+    /// snapshot and fails for every install, which is the bug this exists to
+    /// keep from being written twice.
+    public static func resolvedTokenizerFolder(
+        forModelDirectory modelDirectory: URL,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> URL? {
+        let root = modelDirectory.standardizedFileURL
+        if hasTokenizerJSON(in: root, fileManager: fileManager) {
+            return root
+        }
+        return tokenizerFolder(forModelDirectory: root,
+                               environment: environment,
+                               fileManager: fileManager)
+    }
+
     static func loadUncached(
         from folder: URL,
         thinkingMode: ModelThinkingMode,

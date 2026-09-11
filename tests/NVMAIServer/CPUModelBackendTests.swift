@@ -30,7 +30,8 @@ import Testing
     /// `2 * 9^k` against `3 * 9^k` for `chain[k + 1]`, and every row outside
     /// the chain is zero -- so the successor wins at every step, with a
     /// margin that BF16 scales cannot close.
-    private func writeScriptedModel(chain: [Int32], tokenizer: URL) throws -> URL {
+    private func writeScriptedModel(chain: [Int32], tokenizer: URL,
+                                    sidecar: Bool = false) throws -> URL {
         let hidden = 64
         let rows = 248_320
         precondition(chain.count < hidden)
@@ -74,9 +75,17 @@ import Testing
         try JSONSerialization.data(withJSONObject: [
             "weight_map": Dictionary(uniqueKeysWithValues: names.map { ($0, "model.safetensors") })])
             .write(to: directory.appendingPathComponent("model.safetensors.index.json"))
+        // A shipped `.gturbo` install keeps the tokenizer in a `tokenizer/`
+        // sidecar; a converter's snapshot keeps it at the root. Both shapes
+        // ship, so both are fixtures.
+        let tokenizerDirectory = sidecar
+            ? directory.appendingPathComponent("tokenizer")
+            : directory
+        try FileManager.default.createDirectory(at: tokenizerDirectory,
+                                                withIntermediateDirectories: true)
         for file in ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja"] {
             try FileManager.default.copyItem(at: tokenizer.appendingPathComponent(file),
-                                             to: directory.appendingPathComponent(file))
+                                             to: tokenizerDirectory.appendingPathComponent(file))
         }
         return directory
     }
@@ -117,13 +126,15 @@ import Testing
         var all: [ServerInferenceEvent] { lock.withLock { events } }
     }
 
-    private func request(stops: [String] = []) -> ValidatedChatRequest {
+    private func request(stops: [String] = [],
+                         reasoning: RequestReasoning? = nil) -> ValidatedChatRequest {
         var configuration = GenerationConfig(maxNewTokens: 32, temperature: 0)
         configuration.stopStrings = stops
         return ValidatedChatRequest(messages: [GFTokenizer.Message(role: .user, content: "hi")],
                                     tools: [], stream: true, includeUsage: false,
                                     generationConfig: configuration,
-                                    maximumCompletionTokens: 32)
+                                    maximumCompletionTokens: 32,
+                                    reasoning: reasoning)
     }
 
     /// Runs the scripted model through the backend: after the prompt it
@@ -187,5 +198,48 @@ import Testing
         #expect(run.completion.content == before)
         #expect(run.completion.reasoning.isEmpty)
         #expect(!run.events.contains { if case .reasoning = $0 { true } else { false } })
+    }
+
+    /// A request that switches thinking mode re-renders through a tokenizer
+    /// for the requested mode, and on a `.gturbo` install that tokenizer lives
+    /// in a `tokenizer/` sidecar. The re-render used to hand
+    /// `GFTokenizer.load(from:)` the *model directory*, which has no
+    /// `tokenizer.json` in that layout, so every thinking switch against an
+    /// installed model failed: HTTP 500, stderr
+    /// `HubClientError.configurationMissing("tokenizer.json")`. The fixture
+    /// here is that layout, and both entry points a client can reach are
+    /// exercised -- generation and the Messages count.
+    @Test func aThinkingSwitchWorksWithASidecarTokenizer() async throws {
+        let fixture = try TokenizerFixture.folder()
+        let tok = try await GFTokenizer.load(from: fixture, thinkingMode: .off)
+        let prompt = tok.encode(try tok.applyChatTemplate(request().messages), addBOS: false)
+        func single(_ text: String) throws -> Int32 {
+            let ids = tok.encode(text, addBOS: false)
+            try #require(ids.count == 1)
+            return ids[0]
+        }
+        let spoken = [try single("h"), try single("m"), try #require(tok.thinkEndID),
+                      try single("o"), try single("k")]
+        let chain = [try #require(prompt.last)] + spoken + [tok.eosID]
+        try #require(Set(chain).count == chain.count, "the walk needs distinct tokens")
+
+        let directory = try writeScriptedModel(chain: chain, tokenizer: fixture, sidecar: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let backend = try await CPUModelBackend(snapshotDirectory: directory, resident: false,
+                                                thinkingMode: .off)
+
+        // Counting resolves a tokenizer for the switch without generating.
+        let count = try await backend.countPromptTokens(
+            request(reasoning: RequestReasoning(thinkingMode: .on, effort: nil)))
+        #expect(count > 0)
+
+        // Generating does too, and the switch has to change the split: the
+        // scripted model's "hm" is a thought only while thinking is on.
+        let sink = Sink()
+        let completion = try await backend.generate(
+            request(reasoning: RequestReasoning(thinkingMode: .on, effort: nil))) { sink.append($0) }
+        #expect(completion.reasoning == "hm")
+        #expect(completion.content == "ok")
+        #expect(completion.finishReason == "stop")
     }
 }

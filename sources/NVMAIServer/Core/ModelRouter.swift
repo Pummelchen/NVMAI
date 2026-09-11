@@ -441,7 +441,15 @@ extension ModelRouter {
                                                        reasoningEffort: choice.effort)
             return try ServerModelSession.promptTokenCount(request, tokenizer: tokenizer)
         case .cpu:
-            let tokenizer = try await GFTokenizer.load(from: entry.path,
+            // The folder, not the model directory: a `.gturbo` install keeps
+            // `tokenizer.json` in a `tokenizer/` sidecar, so handing
+            // `load(from:)` the model directory fails for every installed CPU
+            // model (the GPU branch above resolves the same way).
+            guard let folder = GFTokenizer.resolvedTokenizerFolder(
+                forModelDirectory: entry.path) else {
+                throw GFTokenizerError.missingToolTemplate
+            }
+            let tokenizer = try await GFTokenizer.load(from: folder,
                                                        thinkingMode: choice.thinking)
             return try CPUModelBackend.promptTokenCount(request, tokenizer: tokenizer)
         }

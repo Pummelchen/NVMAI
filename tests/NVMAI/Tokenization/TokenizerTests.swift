@@ -277,3 +277,48 @@ struct TokenizerTests {
         #expect(assembled == target, "stream reassembly mismatch: got '\(assembled)' want '\(target)'")
     }
 }
+
+/// The folder `load(from:)` can read, for both shapes this project ships.
+///
+/// A safetensors snapshot keeps `tokenizer.json` at the model directory's root
+/// and a `.gturbo` install keeps it under `tokenizer/`, and
+/// `tokenizerFolder(forModelDirectory:)` answers only the second -- it is the
+/// *sidecar* lookup, not the general one. Callers that resolve a model
+/// directory and then load need the resolver below, and getting that wrong is
+/// not theoretical: two server call sites passed the model directory to
+/// `load(from:)`, which works for a snapshot and fails for every install.
+@Suite("Tokenizer folder resolution")
+struct TokenizerFolderResolutionTests {
+    @Test func answersBothShapesAndRefusesNeither() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("tokenizer-shapes-\(UUID().uuidString)")
+        func seed(_ url: URL) throws {
+            try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: url.appendingPathComponent("tokenizer.json"))
+        }
+        defer { try? fileManager.removeItem(at: root) }
+
+        // A snapshot: tokenizer.json at the root, no sidecar.
+        let snapshot = root.appendingPathComponent("snapshot")
+        try seed(snapshot)
+        // Compare canonical paths: the resolver standardises what it returns,
+        // which adds the trailing slash a directory URL carries.
+        #expect(GFTokenizer.resolvedTokenizerFolder(forModelDirectory: snapshot)?.path
+                == snapshot.path)
+        // The sidecar lookup alone finds nothing here, which is what the
+        // broken call sites were really asking for.
+        #expect(GFTokenizer.tokenizerFolder(forModelDirectory: snapshot) == nil)
+
+        // An install: tokenizer/ only.
+        let install = root.appendingPathComponent("install")
+        try seed(install.appendingPathComponent("tokenizer"))
+        #expect(GFTokenizer.resolvedTokenizerFolder(forModelDirectory: install)?.path
+                == install.appendingPathComponent("tokenizer").path)
+
+        // Neither: refuse rather than name a folder with nothing in it.
+        let empty = root.appendingPathComponent("empty")
+        try fileManager.createDirectory(at: empty, withIntermediateDirectories: true)
+        #expect(GFTokenizer.resolvedTokenizerFolder(forModelDirectory: empty) == nil)
+    }
+}
