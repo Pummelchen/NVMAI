@@ -101,6 +101,15 @@ import NVMAI
         var value = base
         value.expertCacheSlots = 24; variants.append(value)
         value = base; value.expertCachePolicy = .lru; variants.append(value)
+        // The prefill pair is load-time: `prefillChunkTokens` becomes the KV
+        // cache's `maxPrefillChunkTokens` and sizes the prefill scratch, and
+        // `prefillEnabled` picks the prefill policy. Treating them as
+        // request-time is what let the Prefill controls change a setting the
+        // loaded session could not honour -- no Reload appeared, and the
+        // generation failed with "runtime options do not match the loaded
+        // session".
+        value = base; value.prefillEnabled = false; variants.append(value)
+        value = base; value.prefillChunkTokens = 64; variants.append(value)
         value = base; value.rdadvisePolicy = .bounded; variants.append(value)
         value = base; value.modelVerification = .trustedInstall; variants.append(value)
         value = base; value.kvCachePrecision = .int4; variants.append(value)
@@ -119,15 +128,36 @@ import NVMAI
             options: base,
             forceLogitsHead: true) != baseline)
 
-        value = base; value.prefillEnabled = false
+        // Request-time: applied while each request's prompt is rendered, so it
+        // changes what the model reads without touching what the load
+        // allocated. A Reload here would throw away a loaded model for a
+        // prompt-formatting flag.
+        value = base; value.conciseMode = true
         #expect(AppLoadedRuntimeKey(
             modelDirectory: directory,
             maxContextTokens: 4096,
             options: value) == baseline)
-        value = base; value.prefillChunkTokens = 64
-        #expect(AppLoadedRuntimeKey(
-            modelDirectory: directory,
-            maxContextTokens: 4096,
-            options: value) == baseline)
+    }
+
+    /// `SessionLoadKey` is what the client refuses a request against, and it has
+    /// to draw the same line as the UI key: a concise-only change may run, a
+    /// prefill change may not.
+    @Test func sessionLoadKeyComparesOnlyTheLoadIdentity() {
+        let directory = URL(fileURLWithPath: "/tmp/model.gturbo")
+        let base = AppRuntimeOptions()
+        let baseline = SessionLoadKey(directory: directory, maxContext: 4096, options: base)
+
+        var concise = base; concise.conciseMode = true
+        #expect(SessionLoadKey(directory: directory, maxContext: 4096,
+                               options: concise) == baseline)
+
+        var prefill = base; prefill.prefillChunkTokens = 64
+        #expect(SessionLoadKey(directory: directory, maxContext: 4096,
+                               options: prefill) != baseline)
+
+        #expect(SessionLoadKey(directory: directory, maxContext: 8192,
+                               options: base) != baseline)
+        #expect(SessionLoadKey(directory: URL(fileURLWithPath: "/tmp/other.gturbo"),
+                               maxContext: 4096, options: base) != baseline)
     }
 }

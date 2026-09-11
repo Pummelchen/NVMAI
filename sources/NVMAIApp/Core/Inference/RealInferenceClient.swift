@@ -78,6 +78,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                                 maxContext: maxContextTokens,
                                 options: options,
                                 forceLogitsHead: forceLogitsHead),
+            options: options,
             onState: onState)
     }
 
@@ -116,7 +117,10 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
 struct SessionLoadKey: Equatable, Sendable {
     var directory: URL
     var maxContext: Int
-    var options: AppRuntimeOptions
+    /// The load-time choices, not the whole options struct: `conciseMode` is
+    /// applied per request while the prompt is rendered, so a change to it must
+    /// not turn a running session into a `reloadRequired` failure.
+    var identity: AppRuntimeOptions.LoadIdentity
     var forceLogitsHead: Bool
 
     init(directory: URL,
@@ -125,7 +129,7 @@ struct SessionLoadKey: Equatable, Sendable {
          forceLogitsHead: Bool = false) {
         self.directory = directory.standardizedFileURL
         self.maxContext = maxContext
-        self.options = options
+        self.identity = options.loadIdentity
         self.forceLogitsHead = forceLogitsHead
     }
 }
@@ -160,7 +164,13 @@ actor RealInferenceSession {
     private var runner: RealForwardRunner?
     private var scratch: RawCompletionScratch?
 
+    /// `key` says whether the loaded session still matches what is being asked
+    /// for; `options` are what to load with. They are separate arguments because
+    /// they answer different questions: the key compares only the load-time
+    /// identity (`conciseMode` is applied per request and is not part of it),
+    /// while the options carry every field the load itself needs.
     func ensureLoaded(key: SessionLoadKey,
+                      options: AppRuntimeOptions,
                       onState: @Sendable (AppModelLoadState) -> Void) async throws {
         if loadedKey == key, runner != nil { return }
 
@@ -178,12 +188,12 @@ actor RealInferenceSession {
 
             onState(.loading(.tokenizer))
             if tokenizer == nil
-                || tokenizer?.thinkingMode != key.options.thinkingMode
+                || tokenizer?.thinkingMode != options.thinkingMode
                 || tokenizerDirectoryCache.shouldReload(for: key.directory) {
                 do {
                     tokenizer = try await Self.loadTokenizer(
                         for: key.directory,
-                        thinkingMode: key.options.thinkingMode)
+                        thinkingMode: options.thinkingMode)
                     tokenizerDirectoryCache.markLoaded(for: key.directory)
                 } catch {
                     throw AppInferenceError.tokenizerUnavailable("\(error)")
@@ -192,7 +202,7 @@ actor RealInferenceSession {
             try Task.checkCancellation()
 
             onState(.loading(.verifyingWeights))
-            let runtimeConfiguration = try key.options.resolvedRuntimeConfiguration(
+            let runtimeConfiguration = try options.resolvedRuntimeConfiguration(
                 forceLogitsHead: key.forceLogitsHead,
                 maxContextTokens: key.maxContext,
                 modelDirectory: key.directory)
@@ -208,7 +218,7 @@ actor RealInferenceSession {
                 device: context.device,
                 streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
                 expertCachePolicy: runtimeConfiguration.modelExpertCachePolicy,
-                integrityPolicy: key.options.modelVerification.runtimeValue)
+                integrityPolicy: options.modelVerification.runtimeValue)
             try Task.checkCancellation()
 
             onState(.loading(.preparingRunner))

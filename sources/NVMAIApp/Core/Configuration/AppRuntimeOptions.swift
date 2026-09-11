@@ -70,6 +70,50 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var kvCachePrecision: KVCachePrecision
     public var ropeScalingMode: RuntimeRoPEScalingMode
 
+    /// The choices a loaded session is *bound* to.
+    ///
+    /// One list, three readers: `AppLoadedRuntimeKey` (whether the UI offers a
+    /// Reload), the decode service's `SessionLoadKey` (whether a request may run
+    /// against the loaded session at all) and the helper's
+    /// `DecodeRuntimeOptions.loadIdentity` (the same question across the IPC
+    /// boundary). When they disagree, a control either fails with "runtime
+    /// options do not match the loaded session" while no Reload appears, or
+    /// silently does nothing -- which is exactly what the Prefill and Concise
+    /// controls did.
+    ///
+    /// `conciseMode` is deliberately absent. It is applied while rendering each
+    /// request's prompt (`RealInferenceClient`), so it changes what the model
+    /// reads without touching anything the load allocated. Everything present
+    /// sizes or selects state at load: the expert cache (slots and policy), the
+    /// prefill policy and chunk -- which become the KV cache's
+    /// `maxPrefillChunkTokens`, the prefill scratch and the gated blocks'
+    /// resident rows -- RDADVISE, receipt verification, the KV layout, RoPE
+    /// scaling, and the thinking mode the tokenizer and reasoning decoder are
+    /// built for.
+    public struct LoadIdentity: Equatable, Sendable {
+        public var expertCacheSlots: Int
+        public var expertCachePolicy: AppExpertCachePolicy
+        public var prefillEnabled: Bool
+        public var prefillChunkTokens: Int
+        public var rdadvisePolicy: AppRDAdvicePolicy
+        public var modelVerification: AppModelVerification
+        public var kvCachePrecision: KVCachePrecision
+        public var ropeScalingMode: RuntimeRoPEScalingMode
+        public var thinkingMode: ModelThinkingMode
+    }
+
+    public var loadIdentity: LoadIdentity {
+        LoadIdentity(expertCacheSlots: expertCacheSlots,
+                     expertCachePolicy: expertCachePolicy,
+                     prefillEnabled: prefillEnabled,
+                     prefillChunkTokens: prefillChunkTokens,
+                     rdadvisePolicy: rdadvisePolicy,
+                     modelVerification: modelVerification,
+                     kvCachePrecision: kvCachePrecision,
+                     ropeScalingMode: ropeScalingMode,
+                     thinkingMode: thinkingMode)
+    }
+
     public init(expertCacheSlots: Int = automaticSlotCount,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
                 prefillEnabled: Bool = true,
@@ -173,14 +217,13 @@ public struct AppRuntimeOptions: Equatable, Sendable {
 public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var modelDirectory: URL
     public var maxContextTokens: Int
-    public var expertCacheSlots: Int
-    public var expertCachePolicy: AppExpertCachePolicy
-    public var rdadvisePolicy: AppRDAdvicePolicy
-    public var modelVerification: AppModelVerification
     public var forceLogitsHead: Bool
-    public var kvCachePrecision: KVCachePrecision
-    public var ropeScalingMode: RuntimeRoPEScalingMode
-    public var thinkingMode: ModelThinkingMode
+    /// The load-time choices, from the one list of them
+    /// (`AppRuntimeOptions.loadIdentity`). Keeping the identity in one place is
+    /// what stops this key, the client's `SessionLoadKey` and the helper's
+    /// `DecodeRuntimeOptions.loadIdentity` from disagreeing about which
+    /// controls need a reload.
+    public var identity: AppRuntimeOptions.LoadIdentity
 
     public init(modelDirectory: URL,
                 maxContextTokens: Int,
@@ -188,13 +231,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
                 forceLogitsHead: Bool = false) {
         self.modelDirectory = modelDirectory.standardizedFileURL
         self.maxContextTokens = maxContextTokens
-        self.expertCacheSlots = options.expertCacheSlots
-        self.expertCachePolicy = options.expertCachePolicy
-        self.rdadvisePolicy = options.rdadvisePolicy
-        self.modelVerification = options.modelVerification
         self.forceLogitsHead = forceLogitsHead
-        self.kvCachePrecision = options.kvCachePrecision
-        self.ropeScalingMode = options.ropeScalingMode
-        self.thinkingMode = options.thinkingMode
+        self.identity = options.loadIdentity
     }
 }

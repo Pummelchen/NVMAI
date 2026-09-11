@@ -108,14 +108,37 @@ import Testing
         #expect(try model.makeRequest().maxNewTokens == AppContextLengthOption.sixtyFourK.tokens)
     }
 
+    /// The prefill pair sizes state the load created (the KV cache's
+    /// `maxPrefillChunkTokens`, the prefill scratch, the gated blocks' resident
+    /// rows), so changing it has to offer a Reload. It used to leave the session
+    /// "ready", and the generation then failed with a reload error while the
+    /// control appeared to do nothing.
     @MainActor
-    @Test func requestTimePrefillChangeDoesNotMarkReadySessionStale() {
+    @Test func loadTimePrefillChangeMarksReadySessionStale() {
         let model = AppModel(client: MockLifecycleInferenceClient())
         let directory = FileManager.default.temporaryDirectory
         model.modelPathText = directory.path
         model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
 
         model.runtimeOptions.prefillEnabled = false
+        #expect(model.hasStaleLoadedRuntime)
+
+        model.runtimeOptions.prefillEnabled = true
+        model.runtimeOptions.prefillChunkTokens = 64
+        #expect(model.hasStaleLoadedRuntime)
+    }
+
+    /// Concise mode is applied while each request's prompt is rendered, so it is
+    /// *not* a reason to reload -- the opposite mistake from the prefill pair,
+    /// and the one that made the Concise switch unusable.
+    @MainActor
+    @Test func requestTimeConciseChangeDoesNotMarkReadySessionStale() {
+        let model = AppModel(client: MockLifecycleInferenceClient())
+        let directory = FileManager.default.temporaryDirectory
+        model.modelPathText = directory.path
+        model.applyLoadState(.ready(modelDirectory: directory, loadSeconds: 0))
+
+        model.runtimeOptions.conciseMode = true
 
         #expect(!model.hasStaleLoadedRuntime)
     }

@@ -141,7 +141,15 @@ import NVMAIDecodeProtocol
                         error: "model is not loaded"), to: handles.output)
                     continue
                 }
-                guard request.runtimeOptions == loadedOptions else {
+                // Only the load-time identity is compared, not the whole struct:
+                // `conciseMode` is applied per request while rendering the
+                // prompt, so a concise-only change is a valid request and must
+                // not be refused here. Everything in the identity sizes or
+                // selects state the load created, so a change to any of it does
+                // need a reload -- which is what the app's loaded-runtime key
+                // uses to offer one.
+                guard let loaded = loadedOptions,
+                      request.runtimeOptions.loadIdentity == loaded.loadIdentity else {
                     writeBestEffort(DecodeServiceEvent(
                         kind: .failed, generationID: request.generationID,
                         error: "generation runtime options do not match the loaded session"),

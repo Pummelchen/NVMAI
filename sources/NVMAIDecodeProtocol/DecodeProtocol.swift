@@ -13,6 +13,49 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var kvCacheBits: Int
     public var ropeScalingMode: String
 
+    /// The part of these options a loaded session is *bound* to.
+    ///
+    /// This is the one list of load-time choices on the IPC side, and it has to
+    /// match `AppRuntimeOptions.loadIdentity` field for field: the app's
+    /// `AppLoadedRuntimeKey` (which decides whether the UI offers a Reload),
+    /// the helper's client key and the guard in `DecodeService/Entry.swift` all
+    /// answer the same question, and when they disagree a control either fails
+    /// with "runtime options do not match the loaded session" while no Reload
+    /// appears, or silently does nothing.
+    ///
+    /// `conciseMode` is deliberately absent. `RealInferenceClient` applies it
+    /// while rendering each request's prompt, so it changes what the model reads
+    /// without touching anything the load allocated -- treating it as load-time
+    /// is what made the Concise switch look broken after a model was loaded.
+    /// Everything present sizes or selects state at load: the expert cache
+    /// (slots and policy), the prefill policy and chunk (the KV cache's
+    /// `maxPrefillChunkTokens`, the prefill scratch, the gated blocks' resident
+    /// rows), RDADVISE, receipt verification, the KV layout, RoPE scaling, and
+    /// the thinking mode the tokenizer and reasoning decoder are built for.
+    public struct LoadIdentity: Equatable, Sendable {
+        public var expertCacheSlots: Int
+        public var expertCachePolicy: String
+        public var prefillEnabled: Bool
+        public var prefillChunkTokens: Int
+        public var rdadvisePolicy: String
+        public var modelVerification: String
+        public var thinkingMode: String
+        public var kvCacheBits: Int
+        public var ropeScalingMode: String
+    }
+
+    public var loadIdentity: LoadIdentity {
+        LoadIdentity(expertCacheSlots: expertCacheSlots,
+                     expertCachePolicy: expertCachePolicy,
+                     prefillEnabled: prefillEnabled,
+                     prefillChunkTokens: prefillChunkTokens,
+                     rdadvisePolicy: rdadvisePolicy,
+                     modelVerification: modelVerification,
+                     thinkingMode: thinkingMode,
+                     kvCacheBits: kvCacheBits,
+                     ropeScalingMode: ropeScalingMode)
+    }
+
     public init(expertCacheSlots: Int = 0,
                 expertCachePolicy: String = "lfu",
                 prefillEnabled: Bool = true,
