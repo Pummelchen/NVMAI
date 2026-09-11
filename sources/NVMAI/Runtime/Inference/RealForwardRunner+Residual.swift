@@ -436,19 +436,41 @@ extension RealForwardRunner {
         let destination = try indexer.rawKeyDestination(
             layer: layer, startPosition: startPosition)
         let key = weights.keyProjection
-        try prefillQMM.encode(commandBuffer: commandBuffer,
-                              weights: key.buffer,
-                              weightsOffset: Int(key.offset),
-                              scales: key.buffer,
-                              scalesOffset: Int(key.scaleOffset),
-                              biases: key.buffer,
-                              biasesOffset: Int(key.biasOffset),
-                              x: blockInput,
-                              y: destination.buffer,
-                              yOffset: destination.offset,
-                              t: tokens,
-                              n: indexer.headDim,
-                              k: Int(key.shape.1))
+        // A promoted projection has no scales or biases, and the quantized QMM
+        // cannot read one: it would take the first k bytes of each 2k-byte bf16
+        // row as 8-bit codes and multiply by scales read from offset 0.
+        // `prepare_qwen38.py` promotes index_q_proj and index_k_proj exactly
+        // that way for an 8-bit build, and decode already branches on dtype.
+        // One GEMV per row, the same shape the hyper-connection prefill
+        // projections use.
+        if key.dtype == 1 {
+            let half = MemoryLayout<Float16>.stride
+            let columns = Int(key.shape.1)
+            let rows = indexer.headDim
+            for row in 0..<tokens {
+                try bf16Projection.encode(
+                    commandBuffer: commandBuffer,
+                    weights: key.buffer, weightsOffset: Int(key.offset),
+                    x: blockInput, xOffset: row * columns * half,
+                    y: destination.buffer,
+                    yOffset: destination.offset + row * rows * half,
+                    m: UInt32(rows), n: UInt32(columns))
+            }
+        } else {
+            try prefillQMM.encode(commandBuffer: commandBuffer,
+                                  weights: key.buffer,
+                                  weightsOffset: Int(key.offset),
+                                  scales: key.buffer,
+                                  scalesOffset: Int(key.scaleOffset),
+                                  biases: key.buffer,
+                                  biasesOffset: Int(key.biasOffset),
+                                  x: blockInput,
+                                  y: destination.buffer,
+                                  yOffset: destination.offset,
+                                  t: tokens,
+                                  n: indexer.headDim,
+                                  k: Int(key.shape.1))
+        }
         try indexer.encodePoolPrefill(commandBuffer: commandBuffer,
                                       weights: weights, layer: layer,
                                       startPosition: startPosition,
@@ -465,6 +487,19 @@ extension RealForwardRunner {
             weights: weights, layer: layer,
             startPosition: startPosition, tokens: tokens, eps: eps,
             project: { cb, view, x, y, rows, columns, count in
+                // Same promoted-projection branch as the key path above.
+                if view.dtype == 1 {
+                    let half = MemoryLayout<Float16>.stride
+                    for row in 0..<count {
+                        try self.bf16Projection.encode(
+                            commandBuffer: cb,
+                            weights: view.buffer, weightsOffset: Int(view.offset),
+                            x: x, xOffset: row * columns * half,
+                            y: y, yOffset: row * rows * half,
+                            m: UInt32(rows), n: UInt32(columns))
+                    }
+                    return
+                }
                 try self.prefillQMM.encode(commandBuffer: cb,
                                            weights: view.buffer,
                                            weightsOffset: Int(view.offset),

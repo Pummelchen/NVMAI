@@ -102,8 +102,18 @@ fi
 
 # AGENTS.md: never run alongside another model process, and never terminate one
 # we did not start. Refuse rather than race.
-if pgrep -f 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' >/dev/null 2>&1; then
-  echo "a model process is already running; stop it yourself, then re-run" >&2
+#
+# The refusal names what it matched, because the pattern is deliberately broad:
+# `swiftpm-testing-helper` belongs to *any* SwiftPM package on the machine, so a
+# run in an unrelated checkout trips it. That is the safe direction -- a foreign
+# test helper may itself be driving the GPU and this script cannot tell -- but
+# "a model process is already running" sent the operator looking for the wrong
+# thing when it was another project's tests. Do not narrow the pattern to fix
+# that: reporting the matches is what lets a human judge.
+if busy=$(pgrep -fl 'NVMAIServer|NVMAIMac|NVMAIDecodeService|NVMAICLI|NVMAIPackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm' 2>/dev/null); then
+  echo "refusing to start: these processes match the model-process guard" >&2
+  echo "$busy" | sed 's/^/  /' >&2
+  echo "stop them yourself, or re-run when they are gone. This script never terminates a process it did not start." >&2
   exit 3
 fi
 
