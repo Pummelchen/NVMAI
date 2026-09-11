@@ -431,7 +431,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                 actual: UInt64(fileStats.st_size))
         }
 
-        let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
+        // `Int(...)` traps for a stride above `Int.max`, and the sum in the
+        // rounding would trap again near it. Everything upstream bounds the
+        // *product* `expertsPerLayer * expertStride` (C69) and pins each expert's
+        // range inside a file whose size is verified -- but the stride itself is
+        // the only thing that bounds this allocation, so it is converted exactly
+        // (which reports) rather than trapping on a value that came out of a
+        // layout file.
+        guard let stride = Int(exactly: layout.expertStride), stride > 0,
+              stride <= Int.max - (pageSize - 1) else {
+            close(openedFD)
+            throw StreamerError.offsetOutOfRange(layout.expertStride)
+        }
+        let allocationSize = ((stride + pageSize - 1) / pageSize) * pageSize
         // The pool base retains the validated 2 MiB allocation alignment.
         // Individual offsets need only VM-page alignment for pread and Metal;
         // rounding every slot to 2 MiB inflated the 8-bit pool by several GiB.

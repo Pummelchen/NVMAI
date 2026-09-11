@@ -6,6 +6,26 @@ import Testing
 @testable import NVMAI
 
 extension PreadExpertStreamerTests {
+  /// A stride that cannot be represented as an `Int` used to trap in the slot
+  /// allocation (`Int(layout.expertStride)`), which is a crash on a value that
+  /// arrived in a layout file. The stream range is small and fits the synthetic
+  /// file, so the open-time check passes and the allocation is what is asked
+  /// about.
+  @Test func aStrideTooLargeToAllocateIsRefused() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let huge = StreamLayout(path: url.path,
+                            streamOffset: 0,
+                            streamSize: Self.streamOffset + Self.streamSize,
+                            expertsPerLayer: 1,
+                            expertStride: UInt64.max)
+
+    #expect(throws: StreamerError.self) {
+      _ = try PreadExpertStreamer(layout: huge, device: device, slotCount: 1)
+    }
+  }
+
   /// A layout whose stream range wraps must be refused, not wrapped. `required`
   /// came out of an unchecked `streamOffset + streamSize`, so an install layout
   /// with a corrupt offset could produce a small `required`, pass the file-size
