@@ -58,6 +58,19 @@ enum IndexLoader {
             if let b = quant["bits"] as? Int      { baseBits  = b }
             if let g = quant["group_size"] as? Int { baseGroup = g }
             if let m = quant["mode"] as? String   { baseMode  = m }
+            // The planner derives every packed tensor's logical width as
+            // `scalesShape.last * 64`, a literal, and records `baseGroup` here
+            // and in the manifest. A source with any other group size therefore
+            // writes an index whose `shape[1]` is wrong by 64/groupSize -- an
+            // install the runtime rejects at load, after 20-236 GB have been
+            // written. Refuse it at the point the config is read instead. The
+            // whole format is group-64 affine; nothing here can honour another.
+            guard baseGroup == 64 else {
+                throw RepackError.configJsonInvalid(
+                    path: configPath,
+                    detail: "quantization.group_size is \(baseGroup); this repacker "
+                        + "derives logical widths at group 64 and cannot express another")
+            }
             for (k, v) in quant where !(k == "bits" || k == "group_size" || k == "mode") {
                 guard let entry = v as? [String: Any] else { continue }
                 let bits = (entry["bits"] as? Int) ?? baseBits

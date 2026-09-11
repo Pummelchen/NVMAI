@@ -98,6 +98,15 @@ public struct GenerationConfig: Sendable {
             throw GeneratorError.invalidGenerationConfig(
                 "topP must be greater than zero and at most one")
         }
+        // The only float the sampler divides by. At 0 the penalty pass computes
+        // `z / 0` (+infinity), and below 1 it *multiplies* the repeated logit,
+        // so a penalty under one rewards repetition -- the opposite of the flag.
+        // Every production entry point checks this separately; a library caller
+        // that went through `validate` alone did not.
+        guard repetitionPenalty.isFinite, repetitionPenalty >= 1 else {
+            throw GeneratorError.invalidGenerationConfig(
+                "repetitionPenalty must be finite and at least one")
+        }
         guard presencePenalty.isFinite, presencePenalty == 0 else {
             throw GeneratorError.invalidGenerationConfig(
                 "presencePenalty must be zero; nonzero presence penalties are not implemented")
