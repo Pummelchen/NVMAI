@@ -421,7 +421,15 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         // An I/O error (e.g. a write to a disconnected client) means the
         // stream can no longer be delivered; cancel the generation so it
         // stops promptly, then let the pipeline handle the error.
-        activeTask?.cancel()
+        //
+        // Only when one request is in flight on this connection. `activeTask` is
+        // a single slot, so with a pipelined follow-up already started it holds
+        // *that* request's task and cancelling it would stop a generation whose
+        // bytes are not the ones that failed -- the identity rule S25 applies in
+        // `channelInactive`, which this call did not. With more than one in
+        // flight the failure belongs to one response and is handled where that
+        // response is written; the generation there ends on its own at worst.
+        if inFlightRequests <= 1 { activeTask?.cancel() }
         context.fireErrorCaught(error)
     }
 
@@ -2039,7 +2047,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                                            type: "server_error")
         outbox.enqueueTerminal(Self.failureFrames(envelope, surface: surface),
                                closeWhenDrained: true)
-        activeTask?.cancel()
+        // Cancel the generation this runs in, by identity: `failStream` is called
+        // from the generation's own task (the event callback), so this is exact,
+        // and it is not `activeTask` -- a pipelined follow-up request may already
+        // have replaced that. The frames above are delivered by the drainer,
+        // which runs in a separate task and is unaffected.
+        withUnsafeCurrentTask { $0?.cancel() }
     }
 
     /// Drain the outbox with backpressure: each chunk's write future is
@@ -2054,8 +2067,12 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 try await writeSSEChunk(context, frame)
             } catch {
                 // The write failed (client gone or socket error): nothing more
-                // can be delivered. Cancel the generation and close.
-                activeTask?.cancel()
+                // can be delivered. Cancel the generation and close -- but only
+                // when the slot still holds the generation this drainer belongs
+                // to. This drainer runs in its own task, so `activeTask` is the
+                // only handle it has, and under pipelining that is the *next*
+                // request's task; cancelling it would stop the wrong generation.
+                if inFlightRequests <= 1 { activeTask?.cancel() }
                 context.close(promise: nil)
                 return
             }

@@ -171,6 +171,26 @@ enum GTurboJSON {
 
     static func encodeLayout(plan: RepackPlan,
                                     expertStride: UInt64) throws -> Data {
+        // Every layer that carries experts must share one stride. The manifest
+        // records a single value and `GTurboLayoutValidator` refuses a layout
+        // whose layers disagree, so a plan like that cannot be written correctly
+        // -- and the validator runs after the caller has already written the
+        // packed payload, which for the 35B families is hundreds of gigabytes.
+        // The two callers take the stride from the first non-empty layer, so a
+        // disagreement between layers is exactly what would go unnoticed here.
+        let layerStrides = Set(plan.layers.filter { $0.expertsPerLayer > 0 }
+            .map(\.expertStride))
+        guard layerStrides.count <= 1 else {
+            throw RepackError.configurationInvalid(
+                detail: "packed expert stride differs between layers: "
+                    + "\(layerStrides.sorted())")
+        }
+        if let only = layerStrides.first, only != expertStride {
+            throw RepackError.configurationInvalid(
+                detail: "packed expert stride \(expertStride) does not match the "
+                    + "layers' \(only); the layout is written from the first "
+                    + "non-empty layer, so these have to agree")
+        }
         let arch = plan.arch
         var layersArr: [[String: Any]] = []
         layersArr.reserveCapacity(plan.layers.count)
