@@ -34,6 +34,16 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     private let serviceURL: URL
     private let inferenceMemory = Mutex<UInt64?>(nil)
     private let activeGenerationID = Mutex<UUID?>(nil)
+    /// A Stop that arrived before a generation had an id to name.
+    ///
+    /// `cancel()` targets the active generation so a late cancel cannot hit a
+    /// later one (D7). A Stop pressed inside the start window -- after the app
+    /// asked for a generation, before `runGenerationSession` publishes its id --
+    /// therefore sent `cancel(nil)` while the service had nothing active yet, and
+    /// the request that followed ran to completion: the button did nothing. The
+    /// request is latched here and re-sent as a *targeted* cancel once the id
+    /// exists, after the service has seen the generate frame.
+    private let pendingCancel = Mutex<Bool>(false)
     public let generationTranscriptMailbox = GenerationTranscriptMailbox()
 
     private static let loadEventTimeout: TimeInterval = 30
@@ -138,7 +148,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
 
     public func generate(_ request: AppGenerationRequest)
         -> AsyncThrowingStream<AppInferenceEvent, Error> {
-        AsyncThrowingStream { continuation in
+        // A new request clears any latched Stop, so a press while idle cannot
+        // cancel the generation the user asks for next.
+        pendingCancel.withLock { $0 = false }
+        return AsyncThrowingStream { continuation in
             let task = Task.detached(priority: .userInitiated) { [self] in
                 do {
                     try request.validate()
@@ -201,6 +214,12 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         // are serialized with the other commands so cancel frames can never
         // interleave with an in-flight load/generate frame.
         let generationID = activeGenerationID.withLock { $0 }
+        if generationID == nil {
+            // No id to name yet: remember it for the generation about to
+            // register. The untargeted frame is still sent, in case the service
+            // has something active this client lost track of (a load).
+            pendingCancel.withLock { $0 = true }
+        }
         try? writeCommand(DecodeServiceCommand.cancel(generationID))
     }
 
@@ -392,6 +411,16 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             }
         }
         try writeCommand(DecodeServiceCommand.generate(command))
+        // A Stop that landed between the request and this write named nothing;
+        // the service has now seen the generate, so the cancel can be targeted
+        // and will not be dropped (O31).
+        let cancelledWhileStarting = pendingCancel.withLock { pending -> Bool in
+            defer { pending = false }
+            return pending
+        }
+        if cancelledWhileStarting {
+            try? writeCommand(DecodeServiceCommand.cancel(generationID))
+        }
 
         var expectedSequence: UInt64 = 1
         var lastMetricYield = Date.distantPast
