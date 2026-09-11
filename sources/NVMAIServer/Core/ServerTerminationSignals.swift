@@ -39,11 +39,21 @@ public actor ServerTerminationSignals {
         }
     }
 
-    public func wait() async -> Int32 {
+    /// The signal that ended the wait, or `nil` when the wait was cancelled
+    /// before any signal arrived.
+    ///
+    /// This used to `preconditionFailure` here ("termination signal stream ended
+    /// without a signal"). Production is ordered correctly -- `main` waits and
+    /// only cancels on the way out -- so the trap was unreachable rather than
+    /// wrong, but nothing stops a caller of this public API from cancelling
+    /// first, and a trap a caller can reach by ordering is a landmine rather
+    /// than an invariant. Invariant (b) of this audit, applied to the one public
+    /// ordering it could reach.
+    public func wait() async -> Int32? {
         for await signal in stream {
             return signal
         }
-        preconditionFailure("termination signal stream ended without a signal")
+        return nil
     }
 
     public func cancel() {

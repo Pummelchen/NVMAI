@@ -94,6 +94,7 @@ got wrong, and says how.
 | C70 | medium | `NVMAIServer/Core/ServerTerminationSignals.swift:50`, `tests/NVMAIServer/ServerTerminationSignalTests.swift` (was the last Unconfirmed item) | **The intermittent full-suite abort was a test killing its own test run.** The register carried "a full-suite run can end without a summary" for several rounds, with one run ending between suites and no crash report. It was not random: `ServerTerminationSignals`' handler calls `exit(1)` on a *second* signal delivery during shutdown (S33, deliberate) and `repeatedSignalDeliveryKeepsTheFirstSignal` sends two `kill`s -- so the test process ended itself. Because the delivery is asynchronous, the exit could land *after* the test returned, aborting whichever suite ran next, which is why the endings looked unrelated and the failure never named a test. The forced exit is injectable now (`forceExit: @Sendable () -> Void`, defaulting to `exit(1)`), so the behaviour is asserted without ending the process, and three tests cover it: one signal crosses into async code and reaches the waiter, a later signal calls the hook, and repeated delivery keeps the first signal for the waiter while forcing exit once. Reaching this took running the two suites that bracket the abort *together*: they reproduce it deterministically in isolation, which is how the cause was found rather than shrugged at. |
 | C71 | low-medium | `NVMAIApp/Core/Inference/DecodeServiceInferenceClient.swift:36`, `:139`, `:198`, `:394` (was O31's last item) | **A Stop pressed inside the generation-start window was dropped.** `cancel()` targets the active generation on purpose, so a late cancel cannot hit a later one (D7) -- and the service's untargeted `cancel(nil)` only cancels a generation it *already* has active. A Stop landing after the app asked for a generation but before `runGenerationSession` published its id therefore sent `cancel(nil)` while the service had nothing running, and the `generate` frame that followed ran the whole generation: the button did nothing and the GPU stayed busy for the full answer. The request is latched now and re-sent as a *targeted* cancel immediately after the generate frame (the service has the generation by then), and the latch is cleared when a new generation is requested, so a press while idle cannot cancel the next one. Read-verified: driving this needs a live decode-service socket and a Stop inside a window that is microseconds wide; the register says so rather than implying a test exists. |
 | C72 | low | `NVMAIServer/Core/ServerInference.swift:1198` (was O30) | **The generation loop detokenized and stop-checked with a different tokenizer than the one that rendered the prompt.** `renderTokenizer` is resolved per request from the reasoning level (`resolvedTokenizer(for:)`), and it is what renders the prompt, what `count_tokens` counts with (C37) and what the `StructuredAssistantDecoder` is built with -- but `runRawCompletion` was handed the *session's* tokenizer, i.e. the level the model was loaded at. So a mid-session reasoning switch ran the decoder on one tokenizer and the detokenizer plus the stop-id check (`stopTokenIDs`, `endOfTurnID`, `toolResponseID`, the tool-call markers) on another. They coincide across a loaded folder today, which is exactly why the register called it harmless, but nothing guarantees it and the generation loop is the wrong place to depend on it. Read-verified: nothing observable changes while the two agree, and a test would need a fixture pair whose stop ids or special tokens differ -- the bundled fixtures are one folder per mode with the same control tokens. |
+| C73 | low | `NVMAIServer/Core/ServerTerminationSignals.swift:34` | **`wait()` trapped when the stream was cancelled before a signal arrived.** It ended with `preconditionFailure("termination signal stream ended without a signal")`, and `wait()`/`cancel()` are both public -- nothing stops a caller from cancelling first, and the audit's own signal tests do exactly that afterwards. Production is ordered correctly (`main` waits, then cancels on the way out), so the trap was unreachable rather than wrong; but a trap a caller can reach by call ordering is a landmine, not an invariant. `wait()` returns `Int32?` now, nil meaning "cancelled without a signal", and a test covers cancel-then-wait: with the trap restored the test process dies with **signal 5 (SIGTRAP)**, which is the teeth check. Found by working invariant (b) -- *no trap reachable from input or call ordering* -- across the layers rather than by reading another file. |
 
 ## Coverage — what has been read, and how deeply
 
@@ -105,7 +106,7 @@ and this register rather than asserted:
 | Modules read | 15 of 15 | The seven read-only passes covered every module once |
 | Source files / lines | 293 files, 76 753 lines (Swift, Metal, C, headers) | The whole tree |
 | Files carrying at least one recorded finding | 59 (20%), 32 639 lines (43%) | The evidence trail, not the reading: most files read produced nothing to record, and one row can cite a 1 700-line file for one function |
-| Findings resolved | 71 code + 8 documentation = 79 of 82 (96%) | 1 open (O5), 3 disproved, 0 unconfirmed |
+| Findings resolved | 72 code + 8 documentation = 80 of 83 (96%) | 1 open (O5), 3 disproved, 0 unconfirmed |
 | Explicitly read-verified (no executable check possible) | 6 of 71 | Each says so in its row: C53's wiring, C61 (a mid-stream fault on one of two pipelined responses), C63 (a signal inside one `pread`), C64 (a KV view no code path builds), C67 (a flag no caller sets), C69 and C71 (crafted-install and socket-timing paths) |
 
 **A second pass over the largest never-cited files** was made after the finding
@@ -152,6 +153,27 @@ itself the result worth recording:
   argmax compares with `>` (NaN-safe, and a NaN row degrades to a *rejected*
   prediction because acceptance is decided by the target's own greedy token).
 
+**Invariant (b), executed: no trap reachable from input.** All 283 `precondition`/
+`preconditionFailure`/`fatalError` sites in `sources/` were classified by the
+layer the value comes from rather than one at a time:
+
+- `NVMAIFormat` 0, `NVMAIApp` 0, `NVMAICLI` 0, `NVMAIDecodeService` 0,
+  `ContinuityCore` 0, `NVMAIMemory` 0 -- the layers that parse files and
+  requests contain no traps at all; they throw.
+- `NVMAIRepack` 2: the tensor-name length C57 guarded from its caller, and a
+  byte-offset sanity check inside the index encoder.
+- `NVMAIServer` 5: four constructor-argument checks on configured limits, one
+  store-consistency check between an entry and its snapshot descriptor, and the
+  `wait()` trap that became C73.
+- `Runtime/` and `Infrastructure/`: dimension, width and slot invariants on
+  values already validated by `RuntimeConfiguration`/`validateRuntimeSchema`, or
+  preceded by a throwing check -- `PLEHash`'s array preconditions are the case
+  C30 added `PLEConstants.validate` in front of, and `KVCacheManager.advance`'s
+  `position + count <= maxContext` is enforced by the callers' own overflow rule
+  (`prompt + 1 <= maxContext`, since speculative rows rewind rather than
+  advancing by two).
+- The rest are inside kernel wrappers and `NVMAIValidation` reference code:
+  shapes the dispatch itself fixes.
 **Strategy for the remaining depth.** Scanning file by file is now low-yield --
 three passes, three files each, nothing found. The remaining rounds audit by
 *invariant* across the whole tree instead, one cross-cutting property at a time,
@@ -164,7 +186,7 @@ cannot. Saying "audited" without that sentence would overstate what happened.
 
 ## Verification status of the fixes
 
-Unit tests and lint gate every batch (1443 tests in 223 suites, `tools/lint.sh`
+Unit tests and lint gate every batch (1444 tests in 223 suites, `tools/lint.sh`
 clean). Three fixes are verified *against real inference* and three are not, and
 the difference matters:
 

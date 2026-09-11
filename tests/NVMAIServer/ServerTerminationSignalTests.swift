@@ -29,6 +29,17 @@ struct ServerTerminationSignalTests {
         await signals.cancel()
     }
 
+    /// Cancelling before any signal resolves the wait with nil instead of
+    /// trapping. `wait()` used to `preconditionFailure` when the stream ended
+    /// without a signal -- reachable simply by ordering the two calls, since the
+    /// API is public. Production waits first, so it never hit it.
+    @Test func cancellingBeforeWaitingResolvesWithNil() async {
+        let signals = ServerTerminationSignals([SIGUSR1], forceExit: {})
+        await signals.cancel()
+
+        #expect(await signals.wait() == nil)
+    }
+
     /// The first signal reaches the waiter, and a second one during shutdown
     /// forces exit instead of being dropped (S33). The forced exit is injected:
     /// with the real `exit(1)` this test ended the test process -- asynchronously,
