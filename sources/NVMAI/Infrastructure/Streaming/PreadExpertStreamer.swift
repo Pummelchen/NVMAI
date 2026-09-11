@@ -414,7 +414,16 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             close(openedFD)
             throw ModelError.posixFailed(call: "fstat(\(layout.path))", errno: statErrno)
         }
-        let required = layout.streamOffset + layout.streamSize
+        // Checked: `streamOffset` and `streamSize` come from the install's own
+        // layout, so a corrupt one must not wrap into a small `required` and pass
+        // the size check below -- every expert offset is later computed as
+        // `streamOffset + regionOffset` and would then point outside the file.
+        let (required, streamRangeOverflow) = layout.streamOffset
+            .addingReportingOverflow(layout.streamSize)
+        guard !streamRangeOverflow else {
+            close(openedFD)
+            throw StreamerError.offsetOutOfRange(layout.streamOffset)
+        }
         if UInt64(fileStats.st_size) < required {
             close(openedFD)
             throw StreamerError.sizeMismatch(
@@ -610,7 +619,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private func loadExpertUnlocked(layer: Int, expert: Int, slot: Int) throws
         -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
         let regionOffset = layout.expertOffset(layer: layer, expert: expert)
-        guard regionOffset + layout.expertStride <= layout.streamSize else {
+        // Checked for the same reason: a wrapped sum here would read as "in
+        // range" and the pread below would take an offset past the end of the
+        // mapped file. With this and the open-time check, every sum in this type
+        // that mixes a layout offset with a region is known not to wrap.
+        let (regionEnd, regionOverflow) = regionOffset
+            .addingReportingOverflow(layout.expertStride)
+        guard !regionOverflow, regionEnd <= layout.streamSize else {
             throw StreamerError.offsetOutOfRange(regionOffset)
         }
         slotGeneration[slot] &+= 1
@@ -1099,7 +1114,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         let regionOffset = layout.expertOffset(
             layer: plan.layer,
             expert: plan.experts[index])
-        guard regionOffset + layout.expertStride <= layout.streamSize else {
+        // Checked for the same reason: a wrapped sum here would read as "in
+        // range" and the pread below would take an offset past the end of the
+        // mapped file. With this and the open-time check, every sum in this type
+        // that mixes a layout offset with a region is known not to wrap.
+        let (regionEnd, regionOverflow) = regionOffset
+            .addingReportingOverflow(layout.expertStride)
+        guard !regionOverflow, regionEnd <= layout.streamSize else {
             throw StreamerError.offsetOutOfRange(regionOffset)
         }
         return layout.streamOffset + regionOffset
@@ -1468,7 +1489,9 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                                     layer: Int) -> [(offset: UInt64, count: UInt64)] {
         experts.compactMap { expert in
             let regionOffset = layout.expertOffset(layer: layer, expert: expert)
-            guard regionOffset + layout.expertStride <= layout.streamSize else { return nil }
+            let (regionEnd, regionOverflow) = regionOffset
+                .addingReportingOverflow(layout.expertStride)
+            guard !regionOverflow, regionEnd <= layout.streamSize else { return nil }
             return (layout.streamOffset + regionOffset, layout.expertStride)
         }
     }

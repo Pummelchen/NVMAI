@@ -6,6 +6,31 @@ import Testing
 @testable import NVMAI
 
 extension PreadExpertStreamerTests {
+  /// A layout whose stream range wraps must be refused, not wrapped. `required`
+  /// came out of an unchecked `streamOffset + streamSize`, so an install layout
+  /// with a corrupt offset could produce a small `required`, pass the file-size
+  /// check, and leave every later offset -- all of them `streamOffset +
+  /// regionOffset` -- pointing outside the file.
+  @Test func aWrappingStreamRangeIsRefused() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let wrapping = StreamLayout(path: url.path,
+                                streamOffset: UInt64.max - 8,
+                                streamSize: 64,
+                                expertsPerLayer: Self.numExperts,
+                                expertStride: UInt64(Self.expertStride))
+
+    #expect(throws: StreamerError.self) {
+      _ = try PreadExpertStreamer(layout: wrapping, device: device, slotCount: 2)
+    }
+
+    // The valid layout still opens, so this is not a guard that refuses
+    // everything.
+    _ = try PreadExpertStreamer(layout: Self.makeLayout(path: url.path),
+                                device: device, slotCount: 2)
+  }
+
   @Test func preadRoundTrip_matchesTaggedBytes() throws {
     let url = try Self.writeSyntheticLayer()
     defer { try? FileManager.default.removeItem(at: url) }
