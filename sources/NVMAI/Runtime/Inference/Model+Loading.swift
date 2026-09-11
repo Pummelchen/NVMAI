@@ -320,14 +320,8 @@ extension Model {
 
         switch config.family {
         case .qwen35Dense:
-            // Unreachable by construction: a dense family is served by the CPU
-            // engine, which validates its own snapshot schema and never goes
-            // through `Model.load`. Throwing is the honest outcome if that
-            // routing is ever broken -- the alternative is validating a dense
-            // payload against the MoE checks, which would fail confusingly on
-            // a missing routed-expert tensor.
-            throw ModelError.unsupportedArchitecture(
-                detail: "qwen35Dense is served by the CPU engine, not Model.load")
+            try Self.validateDenseSchema(checks: checks, config: config,
+                                         quant: quant, overrides: manifest.quantOverrides)
         case .qwen38flash:
             // Embedding and head are 8-bit in this checkpoint while the body
             // is 4-bit, so both are validated against the embedding slot the
@@ -407,8 +401,48 @@ extension Model {
                 ? config.hiddenSize * config.hyperConnections.count
                 : config.hiddenSize)
 
-        try validateLayerSchema(checks: checks, layout: layout,
-                                config: config, quant: quant)
+        try validateLayerSchema(checks: checks, layout: layout, config: config,
+                                quant: quant, overrides: manifest.quantOverrides)
+
+        // Validation is complete; execution is not. The dense FFN stage lands in
+        // S2 of `docs/plan-dense-gpu-engine.md`, and until it does a dense
+        // install must not reach the MoE stages: those would compute fluent
+        // nonsense rather than fail, which is the one outcome this project has
+        // shipped before and refuses to ship again.
+        if config.family == .qwen35Dense {
+            throw ModelError.unsupportedArchitecture(
+                detail: "qwen3_5_dense validates, but the GPU feed-forward stage for it "
+                    + "is not implemented yet (docs/plan-dense-gpu-engine.md, step S2)")
+        }
+    }
+
+    /// The dense Qwen 3.5 family's own tensors.
+    ///
+    /// No router and no shared expert, an MLP that *is* the FFN, and per-tensor
+    /// widths that differ from the slots: `mlp.*` is 4-bit against an 8-bit
+    /// `sharedExpert` slot, and the full-attention `k_proj`/`v_proj` are 8-bit
+    /// against a 4-bit `attention` slot. Every check resolves the tensor's own
+    /// slot, which is why this family has a branch of its own rather than
+    /// reusing the qwen36 one.
+    private static func validateDenseSchema(
+        checks: RuntimeSchemaChecks,
+        config: ArchConfig,
+        quant: ManifestQuant,
+        overrides: [String: Int]
+    ) throws {
+        let dense = TensorSchema.schema(for: .qwen35Dense)
+        try checks.requireAffine(
+            dense.embedding, rows: config.vocabSize, columns: config.hiddenSize,
+            slot: quant.slot(forTensorNamed: dense.embedding,
+                             overrides: overrides, fallback: quant.embedding))
+        if !config.tieWordEmbeddings {
+            // The 9B. The 2B and 4B tie the embedding and ship no head tensor
+            // at all, so requiring one there would refuse a correct install.
+            try checks.requireAffine(
+                dense.lmHead, rows: config.vocabSize, columns: config.hiddenSize,
+                slot: quant.slot(forTensorNamed: dense.lmHead,
+                                 overrides: overrides, fallback: quant.embedding))
+        }
     }
 
     /// Per-layer tensor schema: shapes, dtypes and quant layouts for every
@@ -417,7 +451,8 @@ extension Model {
         checks: RuntimeSchemaChecks,
         layout: PackedExpertsLayout,
         config: ArchConfig,
-        quant: ManifestQuant
+        quant: ManifestQuant,
+        overrides: [String: Int]
     ) throws {
         // Qwen 3.6 schema, verified against the installed checkpoints:
         // every layer carries the layer norms, the router and the gated
@@ -426,9 +461,15 @@ extension Model {
         // linear_attn bundle. The Qwen checkpoints keep no auxiliary
         // sandwich/scale tensors.
         try validateFamilyQuantSupport(config: config, quant: quant)
-        try validateLayerTensors(checks: checks, config: config, quant: quant)
-        try validateRoutedExpertLayout(checks: checks, layout: layout,
-                                       config: config, quant: quant)
+        try validateLayerTensors(checks: checks, config: config, quant: quant,
+                                 overrides: overrides)
+        // A dense install packs no experts at all (`expertsPerLayer: 0` and an
+        // empty layout), so the routed cross-check has nothing to cross-check
+        // and would divide by zero experts.
+        if config.numExperts > 0 {
+            try validateRoutedExpertLayout(checks: checks, layout: layout,
+                                           config: config, quant: quant)
+        }
     }
 
     /// Refuse a width no kernel on the path can execute.
@@ -461,36 +502,50 @@ extension Model {
     private static func validateLayerTensors(
         checks: RuntimeSchemaChecks,
         config: ArchConfig,
-        quant: ManifestQuant
+        quant: ManifestQuant,
+        overrides: [String: Int]
     ) throws {
         // Names resolve through the family's schema; only shapes are spelled
         // here. A family whose per-sublayer norm is the hyper-connection's
         // spans the whole residual rather than one stream.
         let schema = TensorSchema.schema(for: config.family)
+        // A dense model has no router and no shared expert: its `mlp.*` FFN is
+        // what the schema's shared-expert roles name, and the routed half of
+        // the layer does not exist.
+        let denseFFN = config.numExperts == 0
         let blockNormWidth = config.hyperConnections.enabled
             ? config.hiddenSize * config.hyperConnections.count
             : config.hiddenSize
         for layer in 0..<config.numLayers {
             try checks.requireBF16(schema.inputNorm(layer), count: blockNormWidth)
             try checks.requireBF16(schema.postAttnNorm(layer), count: blockNormWidth)
-            try checks.requireAffineOrBF16(schema.router(layer),
-                                     rows: config.numExperts, columns: config.hiddenSize,
-                                     slot: quant.router)
-            // The shared-expert scalar gate is quantized at the ROUTER's bit
-            // width (8-bit on the target checkpoint, 4-bit on the MTP
-            // sidecar), independent of the sharedExpert slot.
-            try checks.requireAffineOrBF16(schema.sharedExpertScalarGate(layer),
-                                     rows: 1, columns: config.hiddenSize,
-                                     slot: quant.router)
+            if !denseFFN {
+                try checks.requireAffineOrBF16(schema.router(layer),
+                                         rows: config.numExperts, columns: config.hiddenSize,
+                                         slot: quant.router)
+                // The shared-expert scalar gate is quantized at the ROUTER's bit
+                // width (8-bit on the target checkpoint, 4-bit on the MTP
+                // sidecar), independent of the sharedExpert slot.
+                try checks.requireAffineOrBF16(schema.sharedExpertScalarGate(layer),
+                                         rows: 1, columns: config.hiddenSize,
+                                         slot: quant.router)
+            }
+            // Each projection resolves its own width: a dense install declares
+            // `mlp.*` per tensor (4-bit) while the sharedExpert slot says 8, and
+            // reading the slot there is a silently wrong model, not an error.
+            func ffnSlot(_ name: String) -> ManifestQuantSlot {
+                quant.slot(forTensorNamed: name, overrides: overrides,
+                           fallback: quant.sharedExpert)
+            }
             try checks.requireAffine(schema.sharedExpertGate(layer),
                                      rows: config.intermediateSize, columns: config.hiddenSize,
-                                     slot: quant.sharedExpert)
+                                     slot: ffnSlot(schema.sharedExpertGate(layer)))
             try checks.requireAffine(schema.sharedExpertUp(layer),
                                      rows: config.intermediateSize, columns: config.hiddenSize,
-                                     slot: quant.sharedExpert)
+                                     slot: ffnSlot(schema.sharedExpertUp(layer)))
             try checks.requireAffine(schema.sharedExpertDown(layer),
                                      rows: config.hiddenSize, columns: config.intermediateSize,
-                                     slot: quant.sharedExpert)
+                                     slot: ffnSlot(schema.sharedExpertDown(layer)))
 
             if config.layerIsFull(layer) {
                 // Gate-packed [query ; gate] q_proj: 2 * heads * headDim rows.

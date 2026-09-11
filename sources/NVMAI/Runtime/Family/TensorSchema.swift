@@ -101,11 +101,7 @@ public struct TensorSchema: Sendable {
         case .qwen36MTP: return .qwen36MTP
         case .qwen38flash: return .qwen38flash
         case .qwen38flashMTP: return .qwen38flashMTP
-        // The CPU engine validates a dense install against its own snapshot
-        // schema, so this mapping is never consulted for one. Returning the
-        // MoE schema keeps the switch exhaustive; a dense model never reaches
-        // `Model.load`, which is the only caller.
-        case .qwen35Dense: return .qwen36
+        case .qwen35Dense: return .qwen35Dense
         }
     }
 }

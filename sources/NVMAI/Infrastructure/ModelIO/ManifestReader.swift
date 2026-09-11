@@ -75,6 +75,26 @@ public struct ManifestQuant: Decodable, Equatable, Sendable {
     public let router: ManifestQuantSlot
     public let sharedExpert: ManifestQuantSlot
     public let routedExpert: ManifestQuantSlot
+
+    /// The slot a tensor is actually stored in.
+    ///
+    /// The five slots above are the build's *defaults*; a tensor whose width
+    /// differs from every slot's carries a per-tensor override instead, keyed
+    /// by tensor stem (the name without `.weight`). A dense Qwen 3.5 install is
+    /// exactly that case: its `mlp.*` projections are 4-bit and its
+    /// full-attention `k_proj`/`v_proj` 8-bit, while the `sharedExpert` and
+    /// `attention` slots say 8 and 4. Reading the slot where the override
+    /// applies is how a kernel comes to read the wrong number of bytes -- no
+    /// error, just a wrong model -- so every check and every binding that can
+    /// see a tensor name resolves through here.
+    public func slot(forTensorNamed name: String, overrides: [String: Int],
+                     fallback: ManifestQuantSlot) -> ManifestQuantSlot {
+        let stem = name.hasSuffix(".weight") ? String(name.dropLast(".weight".count)) : name
+        guard let bits = overrides[stem], bits != fallback.weightBits else { return fallback }
+        return ManifestQuantSlot(weightBits: bits, scheme: fallback.scheme,
+                                 scaleType: fallback.scaleType, biasType: fallback.biasType,
+                                 groupSize: fallback.groupSize)
+    }
 }
 
 public struct Manifest: Decodable, Equatable, Sendable {

@@ -169,9 +169,26 @@ install and the loader:
    tensor name is the reason this is recorded here rather than discovered in
    S2.
 
-- [ ] **S1 — load.** Dense validation branch + profile; `Model.load` opens a
-      dense install. Execution still refuses, so nothing can produce wrong
+- [x] **S1a — dense schema and validation.** Landed: `TensorSchema.qwen35Dense`
+      (the FFN spelled through the shared-expert roles), `ManifestQuant.slot(forTensorNamed:overrides:fallback:)`
+      so per-tensor widths are honoured rather than assumed, the dense branch in
+      `validateRuntimeSchema`, a dense-aware `validateLayerTensors` (no router,
+      no scalar gate, FFN width per tensor), and the routed-layout cross-check
+      skipped when there are no experts. Build, lint and the suite are green
+      (1458 tests). Execution still refuses, so nothing can produce wrong
       output.
+- [ ] **S1b — architecture resolution.** The runtime resolves a family's
+      architecture from `ArchConfig.knownArchitectures`, which has no dense
+      entry *and could not hold one*: the family is a single enum case and the
+      three models have different geometry (2B/4B hidden 2048 / FFN 6144, 9B
+      FFN 12288). The dense family must take its `ArchConfig` from the
+      manifest's `arch` block (which carries every field, GDN widths included),
+      at the three call sites that currently refuse it
+      (`NVMAICLI/Run.swift:131`, `ServerInference.swift:647`, and the two app
+      probes, which do not offer dense models and can keep their behaviour).
+      Until this lands, `Model.load` is not reached for a dense install and the
+      S1a validation is not yet exercised by a load — which is why S1a is
+      committed as a checkpoint rather than as a finished step.
 - [ ] **S2 — decode FFN.** Dense stage in `+Decode` (skip the routed half when
       `numExperts == 0`), logits compared against the CPU engine on the real
       2B install.
