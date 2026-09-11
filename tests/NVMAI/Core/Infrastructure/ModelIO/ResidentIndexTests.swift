@@ -113,3 +113,57 @@ import NVMAIFormat
     }
 
 }
+
+extension ResidentIndexTests {
+    /// A header declaring a payload region past the end of the file is refused.
+    ///
+    /// Every entry bound the decoder enforces comes from that same header, so
+    /// without a check against the real file an entry can point past the
+    /// mapping and the reader builds a buffer over memory that was never
+    /// mapped. The CPU dense loader hands those pointers out with no further
+    /// size check, so the failure is a SIGBUS or silently wrong weights.
+    @Test func aResidentRegionBeyondEOFIsRefused() throws {
+        let headerBytes = GTurboBinary.indexHeaderBytes
+        let entryBytes = GTurboBinary.indexEntryBytes
+        let name = "layer.0.q_proj.weight"
+        let stringTableBase = headerBytes + entryBytes
+        let rawIndexBytes = stringTableBase + name.utf8.count
+        let aligned = Int(((UInt64(rawIndexBytes) + GTurboFormatV1.alignmentBytes - 1)
+            & ~(GTurboFormatV1.alignmentBytes - 1)))
+        // The file is exactly the index; the header claims a payload after it.
+        var buf = [UInt8](repeating: 0, count: aligned)
+        buf.withUnsafeMutableBytes { raw in
+            let base = raw.baseAddress!
+            GTurboBinary.writeIndexHeader(into: base,
+                                          indexSize: UInt64(aligned),
+                                          residentSize: 4096,
+                                          entryCount: 1)
+            GTurboBinary.writeIndexEntry(
+                into: base.advanced(by: headerBytes),
+                entry: ResidentEntry(
+                    name: name, dtype: 0, logicalShape4: [64, 64, 0, 0],
+                    fileOffset: UInt64(aligned), sizeBytes: 4096,
+                    scaleOffset: 0, scaleSize: 0, biasOffset: 0, biasSize: 0,
+                    quantSpec: nil,
+                    sourceWeight: Self.dummySource(name),
+                    sourceScales: nil, sourceBiases: nil),
+                nameOffset: UInt32(stringTableBase))
+            Array(name.utf8).withUnsafeBytes { src in
+                _ = memcpy(base.advanced(by: stringTableBase),
+                           src.baseAddress!, src.count)
+            }
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gturbo-overrun-\(UUID().uuidString).bin")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(buf).write(to: url)
+
+        do {
+            _ = try ResidentIndexReader.load(fileURL: url)
+            Issue.record("a payload region past EOF was accepted")
+        } catch let error as ModelError {
+            #expect("\(error)".contains("exceeds file size"),
+                    "refused for the wrong reason: \(error)")
+        }
+    }
+}

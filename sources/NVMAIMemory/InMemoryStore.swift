@@ -189,7 +189,18 @@ extension MemoryBootstrap {
 /// what allows one later, and adding one now would be a dependency and an
 /// index to maintain for a store that holds a few hundred short facts.
 public enum MemoryRanking {
+    /// Rank a query's matches, best first, truncated to `query.limit`.
+    ///
+    /// `limit` is applied here rather than left to the caller because the two
+    /// callers disagreed about it: the in-memory store prefixed the ranked
+    /// array, while `ContinuityStore` set `bounded.limit` and passed it in —
+    /// where it was computed and then ignored, so the durable backend returned
+    /// every match (up to its 2000-candidate scan) for a query that asked for
+    /// ten. Both backends now get the same answer, and clamping to
+    /// `MemoryLimits.maximumSearchResults` stays the caller's business because
+    /// only the caller holds the limits.
     public static func rank(_ records: [MemoryRecord], for query: MemoryQuery) -> [MemoryRecord] {
+        let ranked: [MemoryRecord]
         let terms = (query.text ?? "")
             .lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
@@ -209,19 +220,21 @@ public enum MemoryRanking {
             }
             return true
         }
-        guard !terms.isEmpty else {
-            return candidates.sorted { scoreWithoutText($0) > scoreWithoutText($1) }
-        }
-        let scored = candidates.compactMap { record -> (MemoryRecord, Double)? in
-            let score = textScore(record, terms: terms)
-            return score > 0 ? (record, score) : nil
-        }
-        return scored
-            .sorted { left, right in
-                if left.1 != right.1 { return left.1 > right.1 }
-                return left.0.updatedAt > right.0.updatedAt
+        if terms.isEmpty {
+            ranked = candidates.sorted { scoreWithoutText($0) > scoreWithoutText($1) }
+        } else {
+            let scored = candidates.compactMap { record -> (MemoryRecord, Double)? in
+                let score = textScore(record, terms: terms)
+                return score > 0 ? (record, score) : nil
             }
-            .map(\.0)
+            ranked = scored
+                .sorted { left, right in
+                    if left.1 != right.1 { return left.1 > right.1 }
+                    return left.0.updatedAt > right.0.updatedAt
+                }
+                .map(\.0)
+        }
+        return Array(ranked.prefix(max(0, query.limit)))
     }
 
     private static func scoreWithoutText(_ record: MemoryRecord) -> Double {

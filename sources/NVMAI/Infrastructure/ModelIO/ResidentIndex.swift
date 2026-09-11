@@ -97,6 +97,24 @@ enum ResidentIndexReader {
               wireHeader.indexSize <= UInt64(Int.max) else {
             throw ModelError.indexCorrupt(detail: "index region exceeds file size")
         }
+        // The payload region must fit the real file too, not just the header.
+        //
+        // Every entry's `fileOffset`/`sizeBytes`/`scaleOffset`/`biasOffset` is
+        // validated against `indexSize + residentSize` by the decoder -- a bound
+        // that comes from the same header being validated. Without this check a
+        // corrupt or hand-edited `model_weights.bin` of the right *length* can
+        // declare a huge `residentSize` and point an entry past the end of the
+        // mapping, and the reader builds a buffer over memory that was never
+        // mapped. The CPU dense loader maps this file and hands out pointers
+        // with no further size check, so the failure is a SIGBUS or silently
+        // wrong weights rather than an error.
+        let (residentEnd, overflow) = wireHeader.indexSize
+            .addingReportingOverflow(wireHeader.residentSize)
+        guard !overflow, residentEnd <= UInt64(st.st_size) else {
+            throw ModelError.indexCorrupt(
+                detail: "resident payload region (\(wireHeader.indexSize) + "
+                    + "\(wireHeader.residentSize) bytes) exceeds file size \(st.st_size)")
+        }
 
         // -- entire index region (header + entries + string table + padding)
         let regionLen = Int(wireHeader.indexSize)

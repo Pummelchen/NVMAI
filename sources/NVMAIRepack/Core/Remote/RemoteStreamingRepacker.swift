@@ -310,8 +310,16 @@ public final class RemoteStreamingRepacker {
                 to: paths.checkpointFile,
                 parentDirectory: paths.parentDirectory)
         }
+        // The passthrough files are part of the install, not an afterthought:
+        // `createOutputFiles` ftruncates each of them to its full size and the
+        // range provider writes all of it. Leaving them out here let a
+        // Qwen3.8-Flash-Next install pass a reservation that counted the ~66 GiB
+        // backbone while the install really needed ~168 GiB, and die with ENOSPC
+        // after tens of GiB of transfer. Qwen3.8's n-gram table alone is ~95 GiB
+        // against a 256 GiB per-file cap.
         let outputBytes = plan.resident.totalSize
             + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
+            + plan.passthroughFiles.reduce(UInt64(0)) { $0 + $1.size }
         progress(.planning(downloadBytes: rangePlan.remoteBytesToDownload,
                            outputBytes: outputBytes))
         let reusedDestinationBytes = checkpoint.completedRanges.reduce(UInt64(0)) {
@@ -1009,8 +1017,13 @@ public extension RemoteStreamingRepacker {
             rangeChunkBytes: local.rangeChunkBytes,
             layoutMode: "identity",
             layoutOrderSha256: nil)
+        // Same as the remote path above. A passthrough file that is hardlinked
+        // rather than copied -- `--share-ngram-table` -- never enters
+        // `plan.passthroughFiles`, so it is excluded here for free, which is
+        // correct: a hardlink consumes no new blocks.
         let outputBytes = plan.resident.totalSize
             + plan.layers.reduce(UInt64(0)) { $0 + $1.fileSize }
+            + plan.passthroughFiles.reduce(UInt64(0)) { $0 + $1.size }
         progress(.planning(downloadBytes: rangePlan.remoteBytesToDownload,
                            outputBytes: outputBytes))
         let diskRequirement = try DiskSpaceChecker.requireAvailable(

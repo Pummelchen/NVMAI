@@ -98,6 +98,27 @@ import ContinuityCore
         #expect(limited.count == 1)
     }
 
+    /// `limit` bounds the result set on the durable backend too.
+    ///
+    /// It used to be computed and then dropped: `MemoryRanking.rank` never read
+    /// it, so a query asking for two got every match up to the 2000-candidate
+    /// scan, while the in-memory backend honoured it. One tool result could push
+    /// thousands of records into the model's context.
+    @Test func searchHonoursTheLimit() async throws {
+        let store = makeStore()
+        let scope = try scope()
+        for index in 0..<6 {
+            try await store.set(MemoryRecord(key: try key("notes/sync\(index)"),
+                                             value: "the sync race number \(index)",
+                                             importance: 0.5), in: scope)
+        }
+
+        let all = try await store.search(MemoryQuery(text: "sync", limit: 10), in: scope)
+        #expect(all.count == 6)
+        let two = try await store.search(MemoryQuery(text: "sync", limit: 2), in: scope)
+        #expect(two.count == 2)
+    }
+
     @Test func searchRanksByRelevance() async throws {
         let store = makeStore()
         let scope = try scope()
