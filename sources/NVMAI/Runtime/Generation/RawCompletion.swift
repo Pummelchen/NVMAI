@@ -442,5 +442,21 @@ private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
     guard scratch.sampler.lastRowHadFiniteLogit else {
         throw GeneratorError.degenerateLogitsRow
     }
-    return Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
+    return try validatedToken(scratch.outToken.contents().load(as: UInt32.self),
+                              vocab: scratch.sampler.vocab)
+}
+
+/// Checks a sampled id against the vocabulary before anything uses it.
+///
+/// The sampler's contract is an in-range id and its tests pin that, but an
+/// out-of-range one has been seen intermittently under full-suite GPU load and
+/// never identified. A token id indexes the embedding table and extends the KV
+/// history, so an unchecked one is silent corruption exactly like the traps this
+/// audit converted into reports; this makes it a named error instead, with the
+/// id in it, so the next occurrence identifies itself.
+func validatedToken(_ raw: UInt32, vocab: Int) throws -> Int32 {
+    guard raw < UInt32(vocab) else {
+        throw GeneratorError.samplerReturnedOutOfRangeToken(id: raw, vocab: vocab)
+    }
+    return Int32(bitPattern: raw)
 }

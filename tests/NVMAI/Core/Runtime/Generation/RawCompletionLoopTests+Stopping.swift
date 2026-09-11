@@ -74,6 +74,23 @@ extension RawCompletionLoopTests {
     #expect(result.reason == .endOfTurn)
   }
 
+  /// The consumer's side of the sampler's in-range contract. An out-of-range id
+  /// has been observed intermittently under full-suite GPU load and never
+  /// identified; a token id indexes the embedding table and extends the KV
+  /// history, so using one is silent corruption. It is a named error now, with
+  /// the id in it -- which is what makes the next occurrence identify itself
+  /// rather than corrupt something.
+  @Test func anOutOfRangeSampledIdIsReported() throws {
+    #expect(try validatedToken(41, vocab: 42) == 41)
+
+    #expect(throws: GeneratorError.self) {
+      _ = try validatedToken(42, vocab: 42)
+    }
+    #expect(throws: GeneratorError.self) {
+      _ = try validatedToken(0xFFFF_FFFF, vocab: 42)
+    }
+  }
+
   @Test func stopsOnStopString() async throws {
     let tok = try await GFTokenizer.load(from: ChatMLTemplateTests.fixtureFolder())
     let idA = tok.encode("a", addBOS: false).first!
