@@ -171,6 +171,40 @@ struct ChatMLTemplateTests {
                 "expected enable_thinking=false generation prompt, got suffix: \(suffix)")
     }
 
+    /// A historical assistant turn renders its answer, not its reasoning.
+    ///
+    /// The bundled template takes everything after `</think>` as the content and
+    /// wraps it back in `<think>…</think>` only for a turn *after* the last real
+    /// user query — the turn being continued. The manual renderer emitted the raw
+    /// content, so every previous turn's whole chain of thought stayed in the
+    /// prompt: context the template exists to remove, in a shape the model was not
+    /// trained on.
+    @Test("Historical assistant reasoning is stripped, the continued turn keeps it")
+    func assistantReasoningHandling() throws {
+        let answer = Message(role: .assistant,
+                             content: "<think>\nlet me think\n</think>\n\nthe answer")
+
+        // History: the assistant turn sits before the last user query.
+        let history = try tok.applyChatTemplate([
+            Message(role: .user, content: "first"),
+            answer,
+            Message(role: .user, content: "second"),
+        ])
+        #expect(!history.contains("let me think"),
+                "a historical turn kept its reasoning: \(history)")
+        #expect(history.contains("<|im_start|>assistant\nthe answer<|im_end|>"),
+                "the answer is not rendered on its own: \(history)")
+
+        // Continuation: the assistant turn is after the last user query, which is
+        // the one case the template keeps the reasoning for.
+        let continued = try tok.applyChatTemplate([
+            Message(role: .user, content: "first"),
+            answer,
+        ])
+        #expect(continued.contains("<think>\nlet me think\n</think>\n\nthe answer"),
+                "the continued turn should keep its reasoning: \(continued)")
+    }
+
     @Test("Tool chat uses the same explicit thinking mode as text chat")
     func thinkingToolChatRendersJinja() async throws {
         let thinking = try await GFTokenizer.load(

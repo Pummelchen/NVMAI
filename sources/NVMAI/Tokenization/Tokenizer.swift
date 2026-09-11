@@ -525,6 +525,21 @@ public struct GFTokenizer: @unchecked Sendable {
         return instruction.isEmpty ? nil : instruction
     }
 
+
+    /// The bundled template's assistant split:
+    /// `content.split('</think>')[0] … split('<think>')[-1]` for the reasoning
+    /// and `content.split('</think>')[-1].lstrip('\n')` for the answer. The
+    /// reasoning is whitespace-trimmed either way (`reasoning_content|trim`).
+    static func splitThinking(_ content: String) -> (reasoning: String, answer: String) {
+        guard let firstClose = content.range(of: "</think>") else { return ("", content) }
+        let beforeFirst = String(content[content.startIndex..<firstClose.lowerBound])
+        let afterLast = content.range(of: "</think>", options: .backwards)
+            .map { String(content[$0.upperBound...]) } ?? content
+        let reasoning = (beforeFirst.components(separatedBy: "<think>").last ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (reasoning, String(afterLast.drop(while: { $0 == "\n" })))
+    }
+
     public func applyChatTemplate(_ messages: [Message]) throws -> String {
         // Every message is rendered through the ChatML template before
         // encoding; there is no other prompt path.
@@ -538,6 +553,22 @@ public struct GFTokenizer: @unchecked Sendable {
         // otherwise as a synthetic system block of its own.
         if let instruction = effortSystemInstruction, messages.first?.role != .system {
             s += Self.imStartMark + "system\n" + instruction + Self.imEndMark + "\n"
+        }
+        // The bundled template's `ns.last_query_index`: the last user turn that
+        // is not a `<tool_response>` echo. Everything after it is the turn being
+        // *continued* rather than history, which is the distinction the assistant
+        // branch below turns on. Default is the final index, so a chat ending on a
+        // user turn has nothing after it.
+        var lastQueryIndex = messages.count - 1
+        for index in stride(from: messages.count - 1, through: 0, by: -1)
+        where messages[index].role == .user {
+            let trimmed = (messages[index].content ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("<tool_response>"), trimmed.hasSuffix("</tool_response>") {
+                continue
+            }
+            lastQueryIndex = index
+            break
         }
         for (index, message) in messages.enumerated() {
             guard let rawContent = message.content else {
@@ -553,6 +584,21 @@ public struct GFTokenizer: @unchecked Sendable {
             if index == 0, message.role == .system,
                let instruction = effortSystemInstruction {
                 content = content.isEmpty ? instruction : instruction + "\n\n" + content
+            }
+            if message.role == .assistant {
+                // Historical assistant turns carry their reasoning *stripped*:
+                // the template takes everything after the last `</think>` as the
+                // answer and wraps it back in `<think>…</think>` only when the
+                // turn comes after the last real user query (the turn being
+                // continued). This renderer emitted the raw content, so a
+                // previous turn's whole chain of thought stayed in every prompt
+                // — context the template exists to remove, and a prompt shape
+                // the model was not trained on. `preserve_thinking`, which the
+                // template also honours, has no equivalent here.
+                let (reasoning, answer) = Self.splitThinking(content)
+                content = index > lastQueryIndex
+                    ? "<think>\n" + reasoning + "\n</think>\n\n" + answer
+                    : answer
             }
             s += Self.imStartMark + message.role.rawValue + "\n" + content + Self.imEndMark + "\n"
         }

@@ -632,7 +632,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     : nil
                 let drainer = outbox.map { outbox in
                     Task { [self] in
-                        await self.drainOutbox(contextBox.value, outbox: outbox)
+                        await self.drainOutbox(contextBox.value, outbox: outbox,
+                                              streamState: streamState)
                     }
                 }
                 do {
@@ -896,7 +897,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     : nil
                 let drainer = outbox.map { outbox in
                     Task { [self] in
-                        await self.drainOutbox(contextBox.value, outbox: outbox)
+                        await self.drainOutbox(contextBox.value, outbox: outbox,
+                                              streamState: streamState)
                     }
                 }
                 do {
@@ -1338,7 +1340,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                     : nil
                 let drainer = outbox.map { outbox in
                     Task { [self] in
-                        await self.drainOutbox(contextBox.value, outbox: outbox)
+                        await self.drainOutbox(contextBox.value, outbox: outbox,
+                                              streamState: streamState)
                     }
                 }
                 do {
@@ -1675,6 +1678,13 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
         // written as a body with no status line: the client saw `data: {...}`
         // bytes where a 429 should have been, on every streaming surface.
         // Falling through writes a real response instead.
+        if stream, let outbox, !streamState.isStarted {
+            // Refused before admission, so no SSE head was ever written and the
+            // paths below write this response in full. Retire the outbox so its
+            // drainer neither waits forever nor appends an `end` to a response it
+            // did not produce.
+            outbox.abandon()
+        }
         if stream, let outbox, streamState.isStarted {
             // S5/S20: never leave a streaming client without a terminal frame.
             if error is CancellationError {
@@ -1914,7 +1924,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     /// outbound buffer) instead of letting pending memory grow without bound
     /// (S4). Write failures cancel the generation and close the connection.
     private func drainOutbox(_ context: ChannelHandlerContext,
-                             outbox: SSEOutbox) async {
+                             outbox: SSEOutbox,
+                             streamState: StreamState) async {
         while let frame = await outbox.next() {
             do {
                 try await writeSSEChunk(context, frame)
@@ -1926,14 +1937,31 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 return
             }
         }
-        // Outbox closed and drained: end the HTTP response body; close the
-        // connection when the stream ended in failure.
+        // Outbox closed and drained. End the HTTP response body — unless this
+        // outbox was abandoned, which means the request was refused before a
+        // stream head existed and the error response has already been written in
+        // full: an `end` here would be a second one on the same request.
         let endWriteFailed: Bool
-        do {
-            try await writeSSEEnd(context)
+        if outbox.isAbandoned {
             endWriteFailed = false
-        } catch {
-            endWriteFailed = true
+        } else {
+            // Stop the heartbeat *before* the terminal `end`.
+            //
+            // `writeHeartbeat` writes a body part gated only on
+            // `started && !stopped`, and `stop()` otherwise runs in the request
+            // task's `defer` — which is *after* this write. A ping landing in
+            // between is a body with no head outstanding: NIO's
+            // `HTTPServerProtocolErrorHandler` traps on that, and in release it
+            // is a malformed response. The test suite schedules heartbeats every
+            // 10 ms, so the window was being hit intermittently; production's 5 s
+            // interval only makes it rarer.
+            streamState.stop()
+            do {
+                try await writeSSEEnd(context)
+                endWriteFailed = false
+            } catch {
+                endWriteFailed = true
+            }
         }
         let close = outbox.closeWhenDrained
         let contextBox = SendableContext(context)
@@ -2144,6 +2172,7 @@ private final class SSEOutbox: @unchecked Sendable {
     private var pendingDrain: CheckedContinuation<Data?, Never>?
     private var closed = false
     private var overflowed = false
+    private var abandoned = false
     private var closeAfterDrain = false
     let capacity: Int
 
@@ -2178,8 +2207,39 @@ private final class SSEOutbox: @unchecked Sendable {
             for frame in frames { push(frame) }
             closed = true
             if closeWhenDrained { closeAfterDrain = true }
+            // A terminal with no frames still ends the stream, so a drainer parked
+            // on `next()` must be released here: `push` resumes it only when it
+            // has a frame to hand over. The responses and messages surfaces send
+            // an empty terminal on cancellation, and without this the drainer
+            // waited forever — leaving the request task, and the in-flight count
+            // it decrements, outstanding.
+            if frames.isEmpty, let continuation = pendingDrain {
+                pendingDrain = nil
+                continuation.resume(returning: nil)
+            }
         }
     }
+
+    /// Retire the outbox without emitting anything and without ending the HTTP
+    /// response.
+    ///
+    /// For a streaming request refused *before* its SSE head exists: the error is
+    /// written whole by the ordinary response paths, so a frame here would be a
+    /// body with no head and the drainer's `end` would be a second one on the same
+    /// request. Releasing a parked drainer is the same requirement as above.
+    func abandon() {
+        lock.withLock {
+            guard !closed else { return }
+            closed = true
+            abandoned = true
+            if let continuation = pendingDrain {
+                pendingDrain = nil
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+
+    var isAbandoned: Bool { lock.withLock { abandoned } }
 
     /// Await the next frame; nil once the outbox is closed and drained.
     func next() async -> Data? {
