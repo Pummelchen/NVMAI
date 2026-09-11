@@ -40,16 +40,13 @@ public enum ConcisePrompt {
     Always: keep essential steps, caveats, uncertainties, and specifics — brevity never drops correctness. Use the least structure that conveys the answer (plain prose when short; lists or code only when they earn their place). If genuinely uncertain, say so and explain why. If the request is genuinely ambiguous, ask one sharp question instead of guessing.
     """
 
-    /// Select the concise prompt for a routed-expert bit width. Every
-    /// quantization ships the same standard prompt for consistent behavior.
-    public static func prompt(forRoutedExpertBits bits: Int) -> String {
-        standard
-    }
-
-    /// Select the concise prompt for a loaded model.
-    public static func prompt(for model: Model) -> String {
-        prompt(forRoutedExpertBits: model.routedExpertWeightBits)
-    }
+    // There is no per-quantization variant, and there used to be a function
+    // claiming there was: `prompt(forRoutedExpertBits:)` returned `standard` for
+    // every width (`strengthened` has never shipped), and its callers read the
+    // manifest -- pinned to one family, so it silently fell back to 4 for every
+    // other one -- to compute a value that was then discarded. `standard` is the
+    // only prompt, so it is named directly at each call site rather than behind a
+    // selection that selects nothing.
 
     /// Apply the concise system prompt to a message list.
     ///

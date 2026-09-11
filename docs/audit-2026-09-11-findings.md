@@ -102,7 +102,15 @@ the difference matters:
 | O30 | low | `NVMAIServer/Core/ServerInference.swift:1170`, `ModelRouter.swift:439-442` | The reasoning switch reaches the render and the assistant decoder but not `runRawCompletion` or the token-counting path, which still use the session tokenizer — so the doc's claim that "decode … follow[s] the switch" is only half true. |
 | O31 | low | `NVMAIApp/Mac/Generation/...`, `NVMAIMemory/...` | Reported tail, mechanism read but impact bounded: a Stop pressed inside the generation-start window can be dropped (`cancel()` writes `cancel(nil)` before `activeGenerationID` is set); one 60 s inter-event timeout covers prefill as well as decode, so a slow prefill chunk gets a healthy helper killed and reloaded; `MemoryService.sweepStaleWorkspaces` deletes another process's journal and `.lock` by path without checking `flock`; a journal read error is indistinguishable from an empty journal and the next compaction destroys the old records; `ContextAssembler.memoryItemIDs` is ranking order while its comment says render order. |
 
-## False documentation, no behavioural impact yet
+## False documentation — found and fixed
+
+All seven were corrected in one batch. Two turned out to be more than
+documentation and were fixed as behaviour: D3's missing structural validation
+(`--verify-install` could certify a directory the runtime refuses, and would hash
+a manifest's own `verified-install.json` entry and then overwrite it) and D7's
+dead installer branch, which asserted a refusal the runtime does not implement.
+D1 removed a function that selected nothing plus the manifest reads that fed it.
+
 
 | # | Where | What is false |
 | --- | --- | --- |

@@ -64,18 +64,11 @@ public func run(args: Args,
             forModelDirectory: modelURL,
             thinkingMode: args.thinkingMode,
             reasoningEffort: args.reasoningEffort)
-        // Concise mode injects a per-quantization system prompt. The routed
-        // expert bit width comes from the manifest so the right prompt
-        // variant is selected before the full model load.
-        let concisePrompt: String?
-        if args.concise {
-            let bits = (try? ManifestReader.load(
-                directoryURL: modelURL,
-                expecting: .qwen36_35B_A3B).quant?.routedExpert.weightBits) ?? 4
-            concisePrompt = ConcisePrompt.prompt(forRoutedExpertBits: bits)
-        } else {
-            concisePrompt = nil
-        }
+        // Concise mode injects one system prompt for every quantization; there
+        // is no width-dependent variant to select (see `ConcisePrompt`). The
+        // manifest read that used to sit here computed a value nothing consumed,
+        // and named a single family, so it reported 4 bits for every other one.
+        let concisePrompt: String? = args.concise ? ConcisePrompt.standard : nil
         let promptIds: [Int32]
         if let rawPrompt = args.prompt {
             if let concisePrompt {

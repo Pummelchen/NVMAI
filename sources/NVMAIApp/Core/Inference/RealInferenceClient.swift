@@ -309,14 +309,10 @@ actor RealInferenceSession {
                 GFTokenizer.Message(role: .user, content: request.prompt)
             ]
             if request.runtimeOptions.conciseMode {
-                // Concise mode injects the per-quantization system prompt.
-                // The routed expert bit width comes from the manifest.
-                let bits = (try? ManifestReader.load(
-                    directoryURL: request.modelDirectory,
-                    expecting: .qwen36_35B_A3B).quant?.routedExpert.weightBits) ?? 4
+                // One concise prompt for every quantization; the width-dependent
+                // selection this used to read the manifest for does not exist.
                 messages = ConcisePrompt.appendingSystemPrompt(
-                    ConcisePrompt.prompt(forRoutedExpertBits: bits),
-                    to: messages)
+                    ConcisePrompt.standard, to: messages)
             }
             let renderedPrompt = try tokenizer.applyChatTemplate(messages)
             let promptIds = tokenizer.encode(renderedPrompt, addBOS: false)

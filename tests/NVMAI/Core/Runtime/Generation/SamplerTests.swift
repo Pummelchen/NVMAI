@@ -59,12 +59,15 @@ import NVMAIValidationSupport
     /// to index the vocabulary and to extend the KV history, so an out-of-range
     /// value propagates a garbage token rather than failing cleanly.
     ///
-    /// Note on coverage: `-inf`/NaN logits do *not* reach the top-k reduction
-    /// as a degenerate row, because the softcap stage tanh-clamps them first.
-    /// This test therefore does not exercise the `kept == 0` branch and does
-    /// not reproduce the intermittent out-of-range id seen under full-suite GPU
-    /// load — that trigger is still unidentified. It guards the invariant, not
-    /// that bug.
+    /// Note on coverage: this does **not** exercise the `kept == 0` branch, and
+    /// the reason once given here was wrong. The softcap stage is
+    /// `softcap * tanh(z / softcap)`, so `tanh(NaN)` is NaN — it propagates
+    /// rather than clamping, and with `finalLogitSoftcap == 0` (the Qwen 3.6
+    /// production setting) there is no softcap stage at all. A NaN row therefore
+    /// *does* reach the reduction with no finite mass, and the kernels fall back
+    /// to token 0 by construction. This test guards the in-range invariant, not
+    /// that path, and the intermittent out-of-range id seen under full-suite GPU
+    /// load is still unidentified.
     @Test func degenerateDistributionStillReturnsAnInRangeToken() throws {
         let v = 64
         let rig = try Rig(vocab: v)

@@ -802,7 +802,7 @@ public actor ServerModelSession: ServerInferenceBackend, PromptTokenCounting {
                                   promptCache: promptCache,
                                   promptStateStore: promptStateStore,
                                   concisePrompt: conciseModeEnabled()
-                                    ? ConcisePrompt.prompt(for: model) : nil)
+                                    ? ConcisePrompt.standard : nil)
     }
 
     private init(context: MetalContext,

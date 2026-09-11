@@ -277,14 +277,22 @@ install_one() {
         echo "installed $name -> models/$dir (.gturbo)"
         ;;
       unsupported)
+        # No catalogue row uses this today, and the message it used to carry was
+        # false: it said 8-bit Qwen3.8-Flash-Next "cannot execute -- the runtime
+        # refuses it at load", which predates `SlotGEMV` giving the
+        # hyper-connection, PLE and QSA-indexer projections both a 4- and an
+        # 8-bit path. `validateFamilyQuantSupport` now refuses only a width
+        # neither GEMV implements, and the indexer's bf16 prefill branch exists.
+        # Kept as a generic refusal rather than deleted, so wiring a genuinely
+        # unsupported row here later fails loudly instead of falling through this
+        # switch and reporting a successful install it never performed.
         cat <<EOF
-$name cannot be run.
+$name cannot be run by this installer.
 
-Qwen3.8-Flash-Next drives its hyper-connection, PLE and QSA-indexer
-projections through INT4-only kernels, so an 8-bit install builds correctly
-and cannot execute -- the runtime refuses it at load. Use the 4-bit build.
-
-See --help for what making 8-bit work would require.
+A row reaches this branch only when it is known to build an install the runtime
+cannot execute. Check --help for what that model would require; if nothing
+explains it, this message is stale and the row should be fixed rather than
+shipped.
 EOF
         return 1
         ;;

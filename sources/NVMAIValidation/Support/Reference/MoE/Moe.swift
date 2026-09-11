@@ -51,7 +51,7 @@ public enum MoeRef {
         return DequantInt4GemvRef.apply(weightRows: downRows, x: act, n: f)
     }
 
-    /// Routed-only sibling of `applyStreamed`. The parallel-MoE block
+    /// Routed-only counterpart of this file's whole-block path. The parallel-MoE block
     /// computes dense MLP and routed branches separately, then sums; this is
     /// the routed-only half.
     /// `y = residual + Σ wₑ · routed_e(x)`.

@@ -22,8 +22,18 @@ public struct KVView: @unchecked Sendable {
     public let offset: Int
     /// Bytes per token, including affine metadata for quantized storage.
     public let stride: Int
-    /// Number of valid positions written so far (== `position`). Attention reads
-    /// `[0, validTokenCount]` (inclusive of the just-written token).
+    /// Number of valid positions written so far (== `position`), i.e. an
+    /// exclusive bound: attention reads `[0, validTokenCount)`.
+    ///
+    /// Stated as a count because that is what it is and what every kernel
+    /// iterates (`p < seqLen`). It is deliberately *not* "the index of the last
+    /// valid token", which is `validTokenCount - 1`: the decode path passes
+    /// `position + 1` and prefill passes `startPosition + t` precisely so the
+    /// just-written token is included. The `keyView(layer:)` /
+    /// `valueView(layer:)` convenience overloads default to `position`, which
+    /// before `advance()` is one *fewer* than that — correct for a caller reading
+    /// everything but the token it is about to write, and not a bound to copy
+    /// into a new call site without knowing which of the two it wants.
     public let validTokenCount: Int
     public let precision: KVCachePrecision
     public let valueBytes: Int

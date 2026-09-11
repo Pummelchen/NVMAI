@@ -6,8 +6,20 @@ public enum ModelIntegrityPolicy: Sendable, Equatable {
 
     /// Strongest policy that skips re-hashing the full payload: when the
     /// installer's `verified-install.json` receipt is present, the per-file
-    /// hashes were already pinned at install time, so loads verify the
-    /// receipt binding and file sizes instead of re-hashing the weights.
+    /// digests were pinned at install time, so this trusts them rather than
+    /// re-reading the weights.
+    ///
+    /// What the check actually is, because the difference matters when deciding
+    /// whether to trust a directory: `validate` compares the receipt against the
+    /// **manifest** — the file set, and each file's recorded size and digest, plus
+    /// the manifest's own size and digest — so an edited or substituted manifest
+    /// is caught, and the receipt is bound to the absolute install path so a moved
+    /// directory is caught. It reads no files, so it cannot see a payload edited
+    /// in place with its length preserved. Under this policy the only on-disk size
+    /// checks are the loader's own, for `model_weights.bin`, `layout.json` and
+    /// `packed_experts/*.bin`; tokenizer and sidecar files (including
+    /// `ple_constants.json`) are not checked on disk at all.
+    ///
     /// Without a receipt, fall back to a full SHA-256 of everything.
     public static func resolved(directoryURL: URL) -> ModelIntegrityPolicy {
         let receiptURL = directoryURL

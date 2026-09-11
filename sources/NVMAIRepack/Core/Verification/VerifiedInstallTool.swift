@@ -328,9 +328,27 @@ public enum VerifiedInstallTool {
         let size: UInt64
     }
 
+    /// Reads the manifest through **both** decoders.
+    ///
+    /// The local struct carries the fields this tool needs, but it performs none
+    /// of the format layer's structural validation: filesystem-equivalent
+    /// duplicate paths (case-insensitive or Unicode-normalized), reserved
+    /// artifact names such as `verified-install.json`, and file-path-versus-
+    /// directory-prefix collisions. The runtime runs those checks on every load,
+    /// so without them here this tool could certify a directory the runtime then
+    /// refuses — the opposite of what a verifier is for. It also means a manifest
+    /// listing `verified-install.json` is rejected rather than hashed and then
+    /// overwritten by the receipt this run writes.
     private static func loadManifest(access: GTurboDirectoryAccess) throws -> Manifest {
+        let data = try loadMetadataJSON(access: access, relativePath: "manifest.json")
         do {
-            let data = try loadMetadataJSON(access: access, relativePath: "manifest.json")
+            let wire = try GTurboManifestCodec.decodeUnchecked(data)
+            try GTurboManifestCodec.validate(wire)
+        } catch {
+            throw RepackError.configurationInvalid(
+                detail: "manifest.json rejected by the format validator: \(error)")
+        }
+        do {
             return try JSONDecoder().decode(Manifest.self, from: data)
         } catch {
             throw RepackError.configurationInvalid(detail: "manifest.json invalid: \(error)")

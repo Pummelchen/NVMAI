@@ -3,11 +3,17 @@ import Testing
 @testable import NVMAI
 
 @Suite struct ConcisePromptTests {
-    @Test func promptSelectionIsConsistentAcrossQuantizations() {
-        #expect(ConcisePrompt.prompt(forRoutedExpertBits: 4) == ConcisePrompt.standard)
-        #expect(ConcisePrompt.prompt(forRoutedExpertBits: 6) == ConcisePrompt.standard)
-        #expect(ConcisePrompt.prompt(forRoutedExpertBits: 8) == ConcisePrompt.standard)
+    /// The shipped prompt is the only prompt, and it is not the unshipped one.
+    ///
+    /// This replaced `promptSelectionIsConsistentAcrossQuantizations`, which
+    /// asserted that `prompt(forRoutedExpertBits:)` returned `standard` for 4, 6
+    /// and 8 bits. It did — for every value, because no per-width variant ever
+    /// existed — while both callers read the manifest to compute the width it
+    /// ignored. The function is gone rather than left selecting nothing, so the
+    /// assertion worth keeping is that the shipped text is the standard one.
+    @Test func theShippedPromptIsTheStandardOne() {
         #expect(ConcisePrompt.standard != ConcisePrompt.strengthened)
+        #expect(ConcisePrompt.standard.contains("Never:"))
     }
 
     @Test func appendsAfterExistingSystemGuidance() {
