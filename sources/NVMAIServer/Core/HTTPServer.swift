@@ -16,6 +16,36 @@ public actor NVMAIHTTPServer {
     /// S1: reject connections beyond this cap to bound FD/memory usage.
     public static let maximumConcurrentConnections = 64
 
+    /// Ceiling on the *aggregate* request header block, checked when the head
+    /// arrives.
+    ///
+    /// NIO caps a single header field at 80 KiB and nothing else: it has no
+    /// field-count or total-size limit, and `HTTPDecoder` exposes none to
+    /// configure (only `leftOverBytesStrategy` and
+    /// `informationalResponseStrategy`). So a client can send an unbounded
+    /// number of small headers and the decoder will accumulate all of them
+    /// before this handler is handed the head. What this bound can do is refuse
+    /// the request before any routing or generation work and say why; it cannot
+    /// stop NIO's own buffering, which is why the value is generous rather than
+    /// tight — 16 KiB is far more than any real client sends and small enough
+    /// that a request that trips it is not one worth serving.
+    public static let maximumRequestHeaderBytes = 16 * 1024
+
+    /// Ceiling on the number of header fields, for the same reason. A field
+    /// count is what a hostile client can inflate without inflating bytes.
+    public static let maximumRequestHeaderFields = 128
+
+    /// How much of a refused request's body is read and discarded before the
+    /// connection is closed.
+    ///
+    /// Answering and closing immediately is the tempting version and it is
+    /// wrong: a client mid-upload often sees a connection reset instead of the
+    /// response it was just sent, which turns "your body is too large" into "the
+    /// connection broke". Draining a bounded remainder lets the client finish
+    /// writing, read the refusal, and shut down in order — while still bounding
+    /// what a multi-gigabyte body can make the server consume to this much.
+    public static let maximumDrainedBytesAfterReject = 4 * 1024 * 1024
+
     private let group: MultiThreadedEventLoopGroup
     private let modelID: String
     private let backend: any ServerInferenceBackend
@@ -205,6 +235,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     }
     private var body = ByteBuffer()
     private var oversized = false
+    /// This request has already been answered with an error (oversized headers
+    /// or body), so its remaining body is discarded and `.end` closes instead of
+    /// routing.
+    private var rejected = false
+    private var drainedSinceReject = 0
 
     // Access to activeTask is lock-guarded because the SSE drainer and the
     // backpressure fail path read it from the cooperative pool while the event
@@ -264,6 +299,20 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             self.head = head
             body.clear()
             oversized = false
+            rejected = false
+            drainedSinceReject = 0
+            // Checked before this request is routed or counted as in-flight: an
+            // oversized header block is answered here and its body discarded
+            // below. The head is still stored so `.end` can close the connection
+            // in order rather than mid-upload.
+            if Self.headerBlockExceedsLimits(head.headers) {
+                rejected = true
+                writeError(context, status: .requestHeaderFieldsTooLarge,
+                           OpenAIErrorEnvelope(
+                               message: "request headers are too large",
+                               code: "request_headers_too_large"))
+                return
+            }
             // S10/S25: reset per-request phase state and drop the reference to
             // any previous request's (finished) task when a new request head
             // arrives. Pipelined requests are serialized by NIO's pipeline
@@ -273,25 +322,86 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
             activeTask = nil
             inFlightRequests += 1
         case .body(var part):
+            if rejected {
+                _ = drainAfterReject(context, bytes: part.readableBytes)
+                return
+            }
             if body.readableBytes + part.readableBytes > NVMAIHTTPServer.maximumBodyBytes {
+                rejected = true
                 oversized = true
+                body.clear()
+                // Answer now rather than at `.end`. Waiting meant reading and
+                // discarding the whole body first, so a client could make the
+                // server consume an arbitrary number of bytes and as much time
+                // as it liked before learning the request was refused.
+                writeError(context, status: .payloadTooLarge,
+                           OpenAIErrorEnvelope(message: "request body is too large",
+                                               code: "request_too_large"))
             } else {
                 body.writeBuffer(&part)
             }
         case .end:
+            // A refused request was answered when the limit was crossed, and the
+            // connection closes once its body has been consumed: reusing a
+            // keep-alive connection whose request was refused buys nothing and
+            // the client is about to read an error, not a response.
+            if rejected {
+                self.head = nil
+                body.clear()
+                closeAfterPendingWrites(context)
+                return
+            }
             guard let head else { return }
             self.head = nil
             // S35: do not retain the (up to 1 MiB) request body buffer across
             // keep-alive requests.
             defer { body = ByteBuffer() }
             if oversized {
-                writeError(context, status: .payloadTooLarge,
-                           OpenAIErrorEnvelope(message: "request body is too large",
-                                               code: "request_too_large"))
+                // Already answered when the cap was crossed; this is the tail of
+                // a body we stopped reading.
                 return
             }
             route(head: head, body: body, context: context)
         }
+    }
+
+    /// Closes the connection *after* any response already queued has been
+    /// written.
+    ///
+    /// `writeData` and friends queue their head/body/end with
+    /// `eventLoop.execute`, and `channelRead` already runs on the event loop — so
+    /// closing inline here closes before that block runs and the client sees a
+    /// dropped connection instead of the error it was sent. Scheduling the close
+    /// onto the loop puts it behind the queued write, and the loop's task queue is
+    /// FIFO.
+    private func closeAfterPendingWrites(_ context: ChannelHandlerContext) {
+        let contextBox = SendableContext(context)
+        context.eventLoop.execute { contextBox.value.close(promise: nil) }
+    }
+
+    /// Discards what is left of a refused request's body, up to
+    /// `maximumDrainedBytesAfterReject`, then closes the connection. Returns
+    /// false once the connection has been closed.
+    private func drainAfterReject(_ context: ChannelHandlerContext,
+                                  bytes: Int) -> Bool {
+        drainedSinceReject += bytes
+        guard drainedSinceReject <= NVMAIHTTPServer.maximumDrainedBytesAfterReject else {
+            closeAfterPendingWrites(context)
+            return false
+        }
+        return true
+    }
+
+    /// Whether a request head exceeds the aggregate limits above.
+    static func headerBlockExceedsLimits(_ headers: HTTPHeaders) -> Bool {
+        guard headers.count <= NVMAIHTTPServer.maximumRequestHeaderFields else { return true }
+        var total = 0
+        for header in headers {
+            // Name + value + the ": " and CRLF the wire form costs.
+            total += header.name.utf8.count + header.value.utf8.count + 4
+            if total > NVMAIHTTPServer.maximumRequestHeaderBytes { return true }
+        }
+        return false
     }
 
     func channelInactive(context: ChannelHandlerContext) {

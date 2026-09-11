@@ -276,6 +276,65 @@ struct HTTPServerTests {
         try await server.shutdown()
     }
 
+    /// An oversized header block is answered rather than absorbed.
+    ///
+    /// NIO caps one header field at 80 KiB and nothing else, and its decoder
+    /// exposes no field-count or total-size limit, so the only bound available is
+    /// ours: refuse the request before routing it, and say so. Without this the
+    /// server would happily parse a request carrying thousands of headers and do
+    /// the work of routing it.
+    @Test func anOversizedHeaderBlockIsRefused() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/models")!)
+        // One more than the limit, so the count alone trips it (the byte total is
+        // only ~1.4 KiB, well under the other bound).
+        for index in 0...NVMAIHTTPServer.maximumRequestHeaderFields {
+            request.setValue("v", forHTTPHeaderField: "x-h-\(index)")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 431)
+        #expect(String(decoding: data, as: UTF8.self)
+                    .contains("request_headers_too_large"))
+
+        try await server.shutdown()
+    }
+
+    /// An oversized body is refused, and the refusal is readable.
+    ///
+    /// The 413 used to be written at `.end`, so the server read and discarded the
+    /// whole body first — a client could make it consume an arbitrary number of
+    /// bytes before learning the request was refused. Answering at the moment the
+    /// cap is crossed and then draining a bounded remainder keeps the error
+    /// readable: closing immediately would turn it into a connection reset for a
+    /// client that is still uploading.
+    @Test func anOversizedBodyIsRefusedAndReadable() async throws {
+        let server = NVMAIHTTPServer(
+            modelID: "test-model",
+            queueLimit: 1,
+            backend: ScriptedServerBackend())
+        let channel = try await server.start(port: 0)
+        let port = try #require(channel.localAddress?.port)
+
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = Data(repeating: 0x20,
+                                count: NVMAIHTTPServer.maximumBodyBytes + 4096)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 413)
+        #expect(String(decoding: data, as: UTF8.self).contains("request_too_large"))
+
+        try await server.shutdown()
+    }
+
     @Test func streamingUsesStableShapeAndDoneMarker() async throws {
         let server = NVMAIHTTPServer(
             modelID: "test-model",
