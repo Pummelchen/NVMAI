@@ -152,14 +152,22 @@ public enum CPUOps {
             return
         }
         let chunk = (matrix.rows + usable - 1) / usable
+        // `concurrentPerform` returns only after every iteration has finished,
+        // so the buffers and the kernel outlive the closure; Swift cannot see
+        // that through the call and neither closures nor unsafe pointers are
+        // `Sendable`, which is what these bindings record. Workers write
+        // disjoint row ranges, so no byte of `out` is shared.
+        nonisolated(unsafe) let capturedKernel = kernel
+        nonisolated(unsafe) let capturedWeights = weights
+        nonisolated(unsafe) let capturedOut = out
         DispatchQueue.concurrentPerform(iterations: usable) { slice in
             let first = slice * chunk
             guard first < matrix.rows else { return }
             let count = min(chunk, matrix.rows - first)
-            kernel(weights + first * bytesPerRow,
-                   matrix.scales + first * groupsPerRow,
-                   matrix.biases + first * groupsPerRow,
-                   count, out + first)
+            capturedKernel(capturedWeights + first * bytesPerRow,
+                           matrix.scales + first * groupsPerRow,
+                           matrix.biases + first * groupsPerRow,
+                           count, capturedOut + first)
         }
     }
 }

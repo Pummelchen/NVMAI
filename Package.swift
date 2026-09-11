@@ -164,9 +164,9 @@ let package = Package(
             path: "sources/NVMAIValidation/Support"
         ),
         .testTarget(
-            name: "NVMAITestsCore",
+            name: "NVMAITests",
             dependencies: ["NVMAI", "NVMAIValidationSupport", "NVMAIRepackCore", "NVMAICLICore"],
-            path: "tests/NVMAI/Core",
+            path: "tests/NVMAI",
             resources: [.copy("Tokenization/Fixtures"),
                         .copy("Runtime/qwen38_tensor_names.txt"),
                         .copy("Runtime/ple_golden.json")]

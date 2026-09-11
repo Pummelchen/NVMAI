@@ -3,7 +3,7 @@
 # The whole-model check for the dense CPU models on disk: `NVMAIBench cpu35`
 # must print "all continuations correct" for each.
 #
-# The equivalence gate (tests/NVMAI/Core/CPUEngine/DenseGTurboEquivalenceTests.swift,
+# The equivalence gate (tests/NVMAI/CPUEngine/DenseGTurboEquivalenceTests.swift,
 # driven by tools/repack_dense.sh) compares logits against the snapshot a repack
 # came from. This asks the other question -- does the engine continue real text
 # correctly end to end -- so the two are complements, not duplicates.

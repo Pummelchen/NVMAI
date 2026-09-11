@@ -56,3 +56,6 @@ benchmark/mock/
 # Persistent agent memory: one journal per project, user data, never committed.
 memory/
 models/gguf/
+
+# Agent scratch (worktrees, caches); keep git status clean
+.claude/

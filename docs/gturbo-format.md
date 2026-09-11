@@ -308,7 +308,7 @@ verification exact:
 
 - `tools/gturbo_diff_snapshot.py <install> <snapshot>` compares every resident
   tensor, weight plus scales plus biases, byte for byte;
-- `tests/NVMAI/Core/CPUEngine/DenseGTurboEquivalenceTests.swift` loads both and
+- `tests/NVMAI/CPUEngine/DenseGTurboEquivalenceTests.swift` loads both and
   requires **identical logits**.
 
 The second is the one that matters. The first proves the bytes are right, which

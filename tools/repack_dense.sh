@@ -25,7 +25,7 @@
 #      exact comparison and not a tolerance;
 #   4. re-issue and check the receipt (NVMAIRepack --verify-install);
 #   5. run the CPU equivalence gate, which loads both and requires identical
-#      logits (tests/NVMAI/Core/CPUEngine/DenseGTurboEquivalenceTests.swift).
+#      logits (tests/NVMAI/CPUEngine/DenseGTurboEquivalenceTests.swift).
 #
 # Step 5 is the one that matters. Steps 3 and 4 prove the bytes are right and
 # the receipt is right; only step 5 proves the reader interprets them right, and

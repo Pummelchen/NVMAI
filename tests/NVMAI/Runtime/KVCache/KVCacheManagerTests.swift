@@ -48,7 +48,7 @@ import Metal
         let (_, receiver) = try makeManager(maxContext: 9_000)
         #expect(receiver.capacity(layer: 3) == KVCacheManager.initialCapacityTokens,
                 "precondition: a fresh manager starts at the initial capacity")
-        var empty = Data()
+        let empty = Data()
         var offset = 0
         // The copy is expected to fail on the empty payload; what matters is that
         // the length check ran against a capacity grown to the snapshot.

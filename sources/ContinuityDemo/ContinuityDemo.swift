@@ -194,8 +194,13 @@ struct ContinuityDemo {
         let directory = destination?.deletingLastPathComponent()
             ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent("continuity-demo-\(UUID().uuidString)")
-        if destination == nil {
-            defer { try? FileManager.default.removeItem(at: directory) }
+        // Cleans up at return, not at the end of the `if`: `defer` binds to its
+        // enclosing scope, and inside that `if` it ran immediately -- deleting
+        // the directory the journal below is then written to.
+        defer {
+            if destination == nil {
+                try? FileManager.default.removeItem(at: directory)
+            }
         }
         let url = destination ?? directory.appendingPathComponent("journal.ndjson")
 

@@ -297,7 +297,6 @@ import Metal
         let alignmentBytes: UInt64 = 16_384
         let alignedIndexBytes = ((indexBytes + alignmentBytes - 1) / alignmentBytes)
             * alignmentBytes
-        let paddingBytes = alignedIndexBytes - indexBytes
 
         var entries: [ResidentEntry] = []
         entries.reserveCapacity(specs.count)

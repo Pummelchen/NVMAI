@@ -145,6 +145,8 @@ tools/server_launcher.sh --client zed --model qwen38 4 --ram 16
 - [Runtime controls](https://github.com/Pummelchen/NVMAI/wiki/Runtime-Controls)
 - [Benchmarks](https://github.com/Pummelchen/NVMAI/wiki/Benchmarks)
 - [Changelog](https://github.com/Pummelchen/NVMAI/wiki/Changelog)
+- [Repository layout](docs/repository-layout.md) — where everything lives, and
+  the naming and file-size conventions
 
 ## Credits
 

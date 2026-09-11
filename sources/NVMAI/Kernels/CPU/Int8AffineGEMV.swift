@@ -95,6 +95,16 @@ public enum Int8AffineGEMV {
             return
         }
         let chunk = (rows + usable - 1) / usable
+        // `concurrentPerform` returns only after every iteration has finished,
+        // so the buffers outlive the closure; Swift cannot see that through the
+        // call and unsafe pointers are not `Sendable`, which is what these
+        // bindings record. The workers write disjoint row ranges, so no byte of
+        // `out` is shared and no read races a write.
+        nonisolated(unsafe) let weights = weights
+        nonisolated(unsafe) let scales = scales
+        nonisolated(unsafe) let biases = biases
+        nonisolated(unsafe) let x = x
+        nonisolated(unsafe) let out = out
         DispatchQueue.concurrentPerform(iterations: usable) { slice in
             let first = slice * chunk
             guard first < rows else { return }

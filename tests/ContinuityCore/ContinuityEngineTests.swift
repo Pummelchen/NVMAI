@@ -316,7 +316,7 @@ import Testing
         await withTaskGroup(of: Void.self) { group in
             for index in 0..<32 {
                 group.addTask {
-                    try? await memory.write(taskID: taskID, namespace: "n", key: "k",
+                    _ = try? await memory.write(taskID: taskID, namespace: "n", key: "k",
                                             value: "v\(index)")
                 }
             }
