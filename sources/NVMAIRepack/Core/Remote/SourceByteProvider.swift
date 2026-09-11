@@ -26,6 +26,34 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
         self.writeTileBytes = writeTileBytes
     }
 
+    /// The O_RDWR descriptor for a destination, reusing the cached one when it
+    /// still refers to the same file.
+    ///
+    /// The cache holds descriptors for the whole run, so a destination replaced
+    /// underneath us must be reopened rather than written through a stale
+    /// descriptor. The closed number is dropped from the cache *before* the
+    /// reopen, because a throw from the reopen would otherwise leave it there
+    /// and the exit `defer` that closes every cached descriptor would close that
+    /// number a second time — possibly one the kernel has since handed to the
+    /// range temp file or another destination. `LocalSourceByteProvider`
+    /// already removes before closing; this is the same rule.
+    private static func destinationDescriptor(
+        for path: String,
+        cache: inout [String: Int32]
+    ) throws -> Int32 {
+        guard let existing = cache[path] else {
+            let opened = try Posix.openExistingRW(path)
+            cache[path] = opened
+            return opened
+        }
+        if try Posix.descriptorMatchesPath(existing, path: path) { return existing }
+        cache.removeValue(forKey: path)
+        close(existing)
+        let reopened = try Posix.openExistingRW(path)
+        cache[path] = reopened
+        return reopened
+    }
+
     public func copyBatch(
         _ copies: [CoalescedRangeCopy],
         completedRangeIDs: Set<String>,
@@ -76,28 +104,8 @@ public final class HTTPRangeSourceByteProvider: SourceByteProvider {
             var touched = Set<String>()
             do {
                 for destination in copy.destinations {
-                    let destinationFD: Int32
-                    if let existing = outputFDs[destination.destinationPath] {
-                        // The fd cache holds O_RDWR descriptors for the whole
-                        // run; verify the cached fd still refers to the same
-                        // file (dev/ino) before reusing it, and reopen if the
-                        // file was replaced underneath us.
-                        if try Posix.descriptorMatchesPath(
-                            existing,
-                            path: destination.destinationPath) {
-                            destinationFD = existing
-                        } else {
-                            close(existing)
-                            let reopened = try Posix.openExistingRW(
-                                destination.destinationPath)
-                            outputFDs[destination.destinationPath] = reopened
-                            destinationFD = reopened
-                        }
-                    } else {
-                        destinationFD = try Posix.openExistingRW(
-                            destination.destinationPath)
-                        outputFDs[destination.destinationPath] = destinationFD
-                    }
+                    let destinationFD = try Self.destinationDescriptor(
+                        for: destination.destinationPath, cache: &outputFDs)
                     touched.insert(destination.destinationPath)
                     try copyBytes(
                         sourceFD: sourceFD,

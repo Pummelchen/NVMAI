@@ -125,13 +125,50 @@ public struct JournalFilter: Sendable, Equatable {
         var kept = withoutBlocks
         var dropped = text.utf8.count - withoutBlocks.utf8.count
         if kept.utf8.count > maximumMessageBytes {
-            let head = String(kept.prefix(maximumMessageBytes * 2 / 3))
-            let tail = String(kept.suffix(maximumMessageBytes / 4))
-            let omitted = kept.utf8.count - head.utf8.count - tail.utf8.count
+            // Cut on UTF-8 byte offsets, matching the guard above.
+            //
+            // `prefix`/`suffix` count Characters, so for multibyte text the head
+            // was the *whole* string and the result was the full body plus a
+            // duplicated tail with a negative omitted count: 2000 CJK characters
+            // are 6000 bytes but under the 2730-character head budget, which
+            // printed "[... -3072 bytes omitted ...]". The helpers below stop on
+            // a scalar boundary, so a cut never becomes a replacement character
+            // and the reported counts stay true.
+            let head = Self.utf8Prefix(kept, maxBytes: maximumMessageBytes * 2 / 3)
+            let tail = Self.utf8Suffix(kept, maxBytes: maximumMessageBytes / 4)
+            let omitted = max(0, kept.utf8.count - head.utf8.count - tail.utf8.count)
             kept = head + "\n[... \(omitted) bytes omitted ...]\n" + tail
             dropped += omitted
         }
         return (kept.trimmingCharacters(in: .whitespacesAndNewlines), max(0, dropped))
+    }
+
+    /// The longest prefix within `maxBytes`, ending on a UTF-8 scalar boundary.
+    private static func utf8Prefix(_ text: String, maxBytes: Int) -> String {
+        var bytes = 0
+        var end = text.startIndex
+        while end < text.endIndex {
+            let next = text.index(after: end)
+            let width = text[end..<next].utf8.count
+            if bytes + width > maxBytes { break }
+            bytes += width
+            end = next
+        }
+        return String(text[text.startIndex..<end])
+    }
+
+    /// The longest suffix within `maxBytes`, starting on a scalar boundary.
+    private static func utf8Suffix(_ text: String, maxBytes: Int) -> String {
+        var bytes = 0
+        var start = text.endIndex
+        while start > text.startIndex {
+            let previous = text.index(before: start)
+            let width = text[previous..<start].utf8.count
+            if bytes + width > maxBytes { break }
+            bytes += width
+            start = previous
+        }
+        return String(text[start..<text.endIndex])
     }
 
     /// Replaces long fenced blocks with a one-line placeholder. A short block

@@ -379,7 +379,16 @@ public actor FileJournal: ContinuityJournal {
 
         // The lock lives on a sidecar, so swapping this file never gives it
         // up. Reopen the append descriptor on the new inode.
-        if descriptor >= 0 { close(descriptor) }
+        //
+        // Forgetting the number before reopening is the point: if
+        // `openForAppend` throws, the field must not still hold the descriptor
+        // just closed, or the `descriptor >= 0` guard in `writeFully` and
+        // `barrier` passes and a later append writes into whatever object the
+        // kernel has since handed that number to.
+        if descriptor >= 0 {
+            close(descriptor)
+            descriptor = -1
+        }
         descriptor = try Self.openForAppend(url)
         pendingSinceSync = 0
         lastBarrier = ContinuousClock.now

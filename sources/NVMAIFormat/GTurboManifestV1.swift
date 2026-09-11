@@ -144,6 +144,15 @@ package struct GTurboManifestArchV1: Codable, Equatable, Sendable {
 }
 
 package struct GTurboManifestQuantSlotV1: Codable, Equatable, Sendable {
+    /// Weight widths a reader in this project implements.
+    ///
+    /// The kernel arithmetic is `32 / bits` lanes per u32 word and `columns / 8`
+    /// packed words per row at the 4-bit end, so a value outside this set is not
+    /// a wider or narrower packing — it is a number nothing can decode. 6-bit
+    /// was withdrawn (non-power-of-two packing measured 46.8 GB/s against 60 for
+    /// 4-bit and 8-bit).
+    package static let supportedWeightBits: Set<Int> = [4, 8]
+
     package let weightBits: Int
     package let scheme: String
     package let scaleType: String
@@ -197,9 +206,25 @@ package struct GTurboManifestQuantV1: Codable, Equatable, Sendable {
         var overrides: [String: GTurboManifestQuantSlotV1] = [:]
         for key in dynamic.allKeys {
             guard CodingKeys(stringValue: key.stringValue) == nil else { continue }
-            if let slot = try? dynamic.decode(GTurboManifestQuantSlotV1.self, forKey: key) {
-                overrides[key.stringValue] = slot
+            // `try`, not `try?`. A malformed override used to be dropped in
+            // silence, which is precisely how a width goes missing: the reader
+            // then falls back to a slot, and a slot that disagrees with the
+            // payload unpacks the same bytes wrongly. Every key in this object
+            // is one the writer emitted, so a key that does not decode is
+            // corruption rather than an extension this build should tolerate.
+            let slot = try dynamic.decode(GTurboManifestQuantSlotV1.self, forKey: key)
+            // A width no kernel implements would be read by arithmetic that
+            // assumes 4 or 8 bits per value (`32 / bits` lanes, `columns / 8`
+            // packed words). Refusing here is the difference between a load
+            // error and fluent nonsense.
+            guard GTurboManifestQuantSlotV1.supportedWeightBits.contains(slot.weightBits) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: key, in: dynamic,
+                    debugDescription: "quant override for \(key.stringValue) declares "
+                        + "\(slot.weightBits) bits; supported: "
+                        + "\(GTurboManifestQuantSlotV1.supportedWeightBits.sorted())")
             }
+            overrides[key.stringValue] = slot
         }
         self.overrides = overrides.isEmpty ? nil : overrides
     }

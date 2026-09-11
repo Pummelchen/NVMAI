@@ -42,6 +42,32 @@ and `open` row is something I traced in the source myself.
 | C21 | high | `NVMAIServer/Core/HTTPServer.swift:1643`, `:1667` | A streaming request rejected *before* admission (queue full, shutting down) has no SSE head — `startStream` runs on admission — yet `handleAsyncFailure` queued error and `[DONE]` frames that the drainer wrote as body parts. The client got `data: {...}` bytes where a 429 belonged, on all three streaming surfaces. The SSE branch is now gated on `StreamState.isStarted`, and a pre-admission failure falls through to the writers that emit a real status. |
 | C22 | high | `NVMAI/Runtime/Inference/RealForwardRunner+Residual.swift:438`, `:467` | The prefill QSA indexer projections called `prefillQMM.encode` unconditionally, while decode branches on `dtype == 1` to a bf16 GEMV. `prepare_qwen38.py` promotes `index_q_proj`/`index_k_proj` to bf16 for an 8-bit build, so prefill read the first k bytes of each 2k-byte row as 8-bit codes and multiplied by scales from offset 0 — and `validateRuntimeSchema` has no indexer check, so the install loaded clean. Both closures now branch on dtype and use per-row bf16 GEMVs, the same shape the hyper-connection prefill projections use. Gated on `dtype == 1`, so the shipped 4-bit path is untouched. |
 
+## Verification status of the fixes
+
+Unit tests and lint gate every batch (1382 tests in 215 suites, `tools/lint.sh`
+clean). Three fixes are verified *against real inference* and three are not, and
+the difference matters:
+
+- **Covered by real inference:** C12 (the equivalence gate loaded the 2B and 9B
+  dense installs through the changed reader), C13 (a full `--verify-install` of
+  the Ornith 4-bit install, plus the test that fails when the guard is removed),
+  C1/C2/C3/C9-C11/C17-C19/C21 (unit tests with teeth, each confirmed by
+  reverting the fix).
+- **Not covered — the golden baseline is blocked.** C8 (MoE router scratch), C16
+  (the restore guard) and C22 (the indexer's bf16 prefill branch) change the
+  runtime, and `tools/golden-baseline.sh` is the only check that exercises real
+  inference. It refused to start because another checkout's
+  `swiftpm-testing-helper` was running, and this audit does not terminate a
+  process it did not start. C22 is additionally unreachable without an 8-bit
+  Qwen3.8 install, which needs a 360 GB convert.
+
+  **Run `tools/golden-baseline.sh --check ornith-4` and `--check qwen38-4` before
+  trusting C8, C16 or C22**, and re-capture only if the diff is a deliberate
+  numerics change. C8 should be numerically inert (it removes an out-of-bounds
+  access without changing which values are written or read); C16 only refuses a
+  path that previously produced wrong output; C22 is gated on `dtype == 1` and
+  cannot be reached by the 4-bit build.
+
 ## Open — verified, not yet fixed
 
 | # | Sev | Where | What is wrong |

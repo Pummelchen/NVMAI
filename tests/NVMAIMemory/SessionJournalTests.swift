@@ -28,6 +28,28 @@ import Testing
 
     // MARK: - Filter
 
+    /// A multibyte body over the byte budget is summarised truthfully.
+    ///
+    /// The guard is in UTF-8 bytes but the cut used to be in Characters, so a
+    /// body of CJK text went through the "summarise" branch while `prefix`
+    /// returned *all* of it: the record became the whole message plus a
+    /// duplicated tail, with a negative omitted count (2000 CJK characters are
+    /// 6000 bytes and under the 2730-character head budget).
+    @Test func filterSummarisesMultibyteTextTruthfully() {
+        let filter = JournalFilter()
+        let text = String(repeating: "漢", count: 2_000)   // 6,000 UTF-8 bytes
+        let (kept, dropped) = filter.filter(text)
+
+        // The old failure printed "[... -3072 bytes omitted ...]".
+        #expect(!kept.contains("[-"),
+                "the summary reports a negative omitted count: \(kept.suffix(60))")
+        #expect(kept.utf8.count < text.utf8.count, "the summary is not smaller than the body")
+        #expect(dropped > 0)
+        #expect(!kept.contains("\u{FFFD}"), "the cut split a UTF-8 scalar")
+        // The kept head and tail must both be real text, not a doubled copy.
+        #expect(kept.contains("bytes omitted"))
+    }
+
     @Test func filterKeepsOrdinaryProseWhole() {
         let filter = JournalFilter()
         let text = "We're keeping FooManager because it prevents a race in background sync."
