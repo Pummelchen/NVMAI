@@ -80,6 +80,25 @@ private actor GatedBackend: ServerInferenceBackend {
     }
 }
 
+/// Holds a model load open so a manual unload can be issued while it is still
+/// in flight.
+private actor LoadGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var arrived = false
+
+    var hasArrived: Bool { arrived }
+
+    func wait() async {
+        arrived = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func open() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 @Suite("Managed model backend")
 struct ManagedModelBackendTests {
     private func plan() -> ModelSessionPlan {
@@ -286,6 +305,41 @@ struct ManagedModelBackendTests {
         _ = try await managed.generate(request()) { _ in }
         #expect(recorder.loads == 2)
         #expect(await managed.isLoaded)
+    }
+
+    /// An unload that arrives while the model is still loading must release it.
+    ///
+    /// `unload()` looped on `while session != nil`, and `session` is nil until a
+    /// load finishes — so it returned false immediately while the load went on
+    /// to complete and stay resident. The caller was told nothing had been
+    /// released and the model it wanted freed stayed mapped.
+    @Test func unloadWaitsForAnInFlightLoadAndReleasesIt() async throws {
+        let recorder = LoadRecorder()
+        let gate = LoadGate()
+        let managed = ManagedModelBackend(
+            plan: plan(),
+            facts: facts(),
+            idleTimeout: nil,
+            loader: { _, context in
+                try recorder.record(context)
+                await gate.wait()
+                return StubBackend()
+            })
+
+        let request = Task { try await managed.generate(self.request()) { _ in } }
+        while await gate.hasArrived == false {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        // The load is parked inside the loader; unload now.
+        let unloading = Task { await managed.unload() }
+        try await Task.sleep(for: .milliseconds(50))
+        await gate.open()
+
+        #expect(await unloading.value,
+                "unload reported nothing released while a load was in flight")
+        #expect(await managed.isLoaded == false)
+        _ = try await request.value
     }
 
     @Test func unloadIsIdempotentWhenNothingIsLoaded() async throws {

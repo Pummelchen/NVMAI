@@ -105,6 +105,20 @@ public actor ManagedModelBackend: ServerInferenceBackend, ResidencyManaging, Pro
         // restarts it.
         reaper?.cancel()
         reaper = nil
+        // A load in flight is not "nothing loaded": it is about to become
+        // resident. Returning false here left the model mapped while telling the
+        // caller nothing had been released, so the request that motivated the
+        // endpoint did not free the memory it exists to free.
+        //
+        // The loop re-checks rather than trusting a single await: a concurrent
+        // awaiter of the same task can resume before `residentSession` has
+        // assigned `session`, and that function clears `loadTask` in a `defer`
+        // after the assignment — so waiting for the field to clear is waiting for
+        // the assignment to have happened.
+        while let task = loadTask, !Task.isCancelled {
+            _ = try? await task.value
+            await Task.yield()
+        }
         while session != nil {
             if Task.isCancelled {
                 // Giving up without unloading: the model is still resident, so
