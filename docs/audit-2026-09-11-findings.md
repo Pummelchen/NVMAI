@@ -231,6 +231,21 @@ and index come from *different* sources:
   `config * config` narrowings (`numKV * headDim`, `dim * streams`) that feed
   kernel arguments cannot exceed their ceilings.
 
+**Byte-striding in the repacker, checked.** The last derivation class: where
+the repacker turns per-expert strides and ranks into file sizes and copy
+offsets. Two of the products are written unchecked -- `LayerFilePlan.fileSize`
+is `UInt64(expertsPerLayer) * expertStride`, and the verifier repeats it -- while
+the *format* validator derives the same product with `gturboCheckedMultiply` and
+compares it against the manifest's file size on the load path
+(`PackedExpertsLayout.decode` -> `GTurboV1StructuralValidator.crossValidate`).
+A wrapped product therefore cannot survive to a read: the install it describes
+fails that cross-check with a thrown `indexCorrupt` before any tensor is
+touched. The copy offsets themselves are derived from `physicalRank * stride`
+and range-checked by the same validators. Recorded as a positive assertion
+rather than changed, because making the planner's property throwing would ripple
+through the copy path for a failure the load path already refuses -- but a reader
+should know *which* layer is the one that catches it.
+
 **Invariant (b), executed: no trap reachable from input.** All 283 `precondition`/
 `preconditionFailure`/`fatalError` sites in `sources/` were classified by the
 layer the value comes from rather than one at a time:
