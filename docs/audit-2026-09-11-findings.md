@@ -246,6 +246,19 @@ rather than changed, because making the planner's property throwing would ripple
 through the copy path for a failure the load path already refuses -- but a reader
 should know *which* layer is the one that catches it.
 
+**Narrowing conversions on file headers, checked.** The class C75 found one of
+(the `Int(...)` trap) does not appear again in the format layer. The resident
+index decoder is the clearest case: it derives the entry table with
+`gturboCheckedMultiply`/`gturboCheckedAdd`, then **`guard tableEnd <=
+header.indexSize, header.entryCount <= UInt64(Int.max)`** *before* any
+`Int(header.entryCount)` (`GTurboResidentIndexV1.swift:64-80`), and bounds each
+name the same way (`nameLength <= UInt64(Int.max)`, `:92`) before converting it.
+A corrupt or hand-edited `model_weights.bin` therefore gets a thrown
+`invalid`/`truncated`, not a trap. One product in that function is unchecked --
+`Int(header.entryCount) * 3` sizing a `reserveCapacity` hint -- and it is bounded
+by the file size the guard above already pinned (it would need a ~2 EiB file), a
+capacity hint besides.
+
 **The repacker's per-expert sizing, checked (the producer half of C74).** Where
 the C74 guard on the runtime side is defence in depth, this is why: the planner
 derives `perExpertWeightSize`/`perExpertScaleSize`/`perExpertBiasSize` by
