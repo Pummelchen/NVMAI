@@ -64,8 +64,11 @@ struct DynamicServingHTTPTests {
             let list = try object(data)
             #expect(list["object"] as? String == "list")
             let models = try #require(list["data"] as? [[String: Any]])
+            // The dense install is listed once with its alternative engine as
+            // a real choice; a single-engine install is listed bare.
             #expect(models.compactMap { $0["id"] as? String }
-                    == ["alpha_4-Bit", "flash_8-Bit", "small-2b"])
+                    == ["alpha_4-Bit", "flash_8-Bit", "small-2b",
+                        RoutingFixture.dense.id, "\(RoutingFixture.dense.id)@cpu"])
             #expect(models.allSatisfy { $0["object"] as? String == "model" })
             #expect(models.allSatisfy { $0["owned_by"] as? String == "nvmai" })
         }
@@ -77,10 +80,11 @@ struct DynamicServingHTTPTests {
             let list = try object(data)
             #expect(list["has_more"] as? Bool == false)
             #expect(list["first_id"] as? String == "alpha_4-Bit")
-            #expect(list["last_id"] as? String == "small-2b")
+            #expect(list["last_id"] as? String == "\(RoutingFixture.dense.id)@cpu")
             let models = try #require(list["data"] as? [[String: Any]])
             #expect(models.compactMap { $0["display_name"] as? String }
-                    == ["Alpha 35B", "Flash 125B", "Small 2B"])
+                    == ["Alpha 35B", "Flash 125B", "Small 2B",
+                        "Dense 2B", "Dense 2B (CPU)"])
             #expect(models.allSatisfy { $0["type"] as? String == "model" })
             #expect(models.allSatisfy { $0["created_at"] is String })
             #expect(Set(models.flatMap(\.keys)) == ["type", "id", "display_name", "created_at"])

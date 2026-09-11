@@ -190,7 +190,7 @@ struct ModelCatalogTests {
                                sampling: GenerationDefaults.house, sizeBytes: 36_200_000_000),
         ])
         let text = String(decoding: try catalog.jsonData(), as: UTF8.self)
-        #expect(text == #"{"models":[{"id":"qwen3.6-35b-a3b_8-Bit","name":"Qwen 3.6 35B-A3B","family":"qwen36","quant":8,"backend":"gpu","path":"/abs/path","thinking":["off","on"],"sampling":{"temperature":0.6,"top_p":0.95,"top_k":20},"size_gb":36.2}]}"#)
+        #expect(text == #"{"models":[{"id":"qwen3.6-35b-a3b_8-Bit","name":"Qwen 3.6 35B-A3B","family":"qwen36","quant":8,"backend":"gpu","engines":"gpu","path":"/abs/path","thinking":["off","on"],"sampling":{"temperature":0.6,"top_p":0.95,"top_k":20},"size_gb":36.2}]}"#)
     }
 
     @Test func aCPUModelAndAnEffortModelReportWhatTheyWillUse() throws {
@@ -213,5 +213,43 @@ struct ModelCatalogTests {
         #expect(models[1]["family"] as? String == "qwen3_5_dense")
         #expect(models[1]["thinking"] as? [String] == ["off", "on"])
         #expect((models[1]["sampling"] as? [String: Any])?["top_p"] as? Double == 0.95)
+    }
+    /// An install declares which engines can serve it, and only the dense family
+    /// declares two: its `.gturbo` payload is the same file for the CPU and the
+    /// GPU engine, so the engine is a request-level choice rather than a
+    /// property of the model.
+    @Test func onlyTheDenseFamilyIsServedByBothEngines() {
+        let dense = ModelCatalog.Entry(
+            id: "dense_4-Bit", name: "Dense", kind: .gpu(.qwen35Dense), quant: 4,
+            path: URL(fileURLWithPath: "/models/dense_4Bit"),
+            sampling: GenerationDefaults.house, engines: [.gpu, .cpu])
+        #expect(dense.backend == .gpu)
+        #expect(dense.engines == [.gpu, .cpu])
+        // The alias keeps the install and switches the engine.
+        let cpu = dense.served(by: .cpu, id: "dense_4-Bit@cpu")
+        #expect(cpu?.kind == .cpu(.qwen35Dense))
+        #expect(cpu?.path == dense.path)
+        #expect(cpu?.quant == dense.quant)
+        #expect(cpu?.engines == [.gpu, .cpu])
+        // And the other direction, for a request that names `@gpu` explicitly.
+        #expect(dense.served(by: .gpu, id: "dense_4-Bit@gpu")?.kind == .gpu(.qwen35Dense))
+
+        // Every other family has one engine, and asking for the other is
+        // refused rather than silently served by the wrong one.
+        let moe = ModelCatalog.Entry(
+            id: "moe_4-Bit", name: "MoE", kind: .gpu(.qwen36), quant: 4,
+            path: URL(fileURLWithPath: "/models/moe_4Bit"),
+            sampling: GenerationDefaults.house)
+        #expect(moe.engines == [.gpu])
+        #expect(moe.served(by: .cpu, id: "moe_4-Bit@cpu") == nil)
+        let snapshot = ModelCatalog.Entry(
+            id: "snap", name: "Snap", kind: .cpu(.qwen35Dense), quant: 8,
+            path: URL(fileURLWithPath: "/models/snap"),
+            sampling: CPUModelFamily.qwen35Dense.samplingDefaults)
+        // A converted snapshot is CPU-only whatever the family: the GPU path
+        // reads `.gturbo` installs, so there is no GPU engine to name.
+        #expect(snapshot.engines == [.cpu])
+        #expect(snapshot.served(by: .gpu, id: "snap@gpu") == nil)
+        #expect(snapshot.served(by: .cpu, id: "snap@cpu")?.kind == .cpu(.qwen35Dense))
     }
 }

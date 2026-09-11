@@ -164,7 +164,9 @@ struct ModelRouterTests {
         #expect(small.displayName == "Small 2B")
         #expect(router.servedModel(named: "small-2b-fast")?.id == Fixture.small.id)
         #expect(router.servedModel(named: "nothing-fast") == nil)
-        #expect(router.servedModels.map(\.id) == [Fixture.alpha.id, Fixture.flash.id, Fixture.small.id])
+        #expect(router.servedModels.map(\.id) == [Fixture.alpha.id, Fixture.flash.id,
+                                                  Fixture.small.id, Fixture.dense.id,
+                                                  "\(Fixture.dense.id)@cpu"])
     }
 
     @Test func theServerLevelIsFittedToEachModelAndLoadedThatWay() async throws {
@@ -182,6 +184,36 @@ struct ModelRouterTests {
         #expect(choice.requested == .on)
         #expect(choice.effective == .xhigh)
         #expect(choice.effort == .xhigh)
+    }
+
+    /// A request names the engine for an install both engines serve.
+    ///
+    /// The dense Qwen 3.5 installs are the one shape with two engines, so the
+    /// router registers `@gpu` (the default, beside the bare id) and `@cpu`
+    /// beside each of them; naming one switches engines the same way naming a
+    /// different model does.
+    @Test func aRequestCanNameTheEngineOnADenseInstall() async throws {
+        let log = RoutingEventLog()
+        let router = try Fixture.router(log: log)
+        try await router.preload()
+        #expect(await router.residentModelID == Fixture.alpha.id)
+
+        let cpu = try await router.generate(Fixture.request("\(Fixture.dense.id)@cpu")) { _ in }
+        #expect(cpu.content == "\(Fixture.dense.id)@cpu")
+        #expect(await router.residentModelID == "\(Fixture.dense.id)@cpu")
+        #expect(log.loads.last == "load \(Fixture.dense.id)@cpu")
+
+        // The explicit GPU spelling resolves to the same install, not a second
+        // copy of it.
+        let gpu = try await router.generate(Fixture.request("\(Fixture.dense.id)@gpu")) { _ in }
+        #expect(gpu.content == "\(Fixture.dense.id)@gpu")
+        #expect(await router.residentModelID == "\(Fixture.dense.id)@gpu")
+
+        // An install with one engine has no alias, and asking for the other
+        // engine is an unknown model rather than a silent wrong-engine load.
+        await #expect(throws: ServerRequestError.self) {
+            _ = try await router.generate(Fixture.request("\(Fixture.alpha.id)@cpu")) { _ in }
+        }
     }
 }
 

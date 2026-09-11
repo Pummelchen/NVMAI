@@ -104,6 +104,13 @@ enum RoutingFixture {
         id: "flash_8-Bit", name: "Flash 125B", kind: .gpu(.qwen38flash), quant: 8,
         path: URL(fileURLWithPath: "/models/flash_8Bit"),
         sampling: GenerationDefaults.Sampling(temperature: 1.0, topK: 20, topP: 0.95))
+    /// A dense Qwen 3.5 install: the one shape both engines implement, so it
+    /// is listed once and reachable as `@gpu` (its default) and `@cpu`.
+    static let dense = ModelCatalog.Entry(
+        id: "dense-2b_4-Bit", name: "Dense 2B", kind: .gpu(.qwen35Dense), quant: 4,
+        path: URL(fileURLWithPath: "/models/dense_2B_4Bit"),
+        sampling: GenerationDefaults.house, engines: [.gpu, .cpu])
+
     /// A CPU snapshot, whose context the CPU engine caps.
     static let small = ModelCatalog.Entry(
         id: "small-2b", name: "Small 2B", kind: .cpu(.qwen35Dense), quant: 8,
@@ -112,7 +119,8 @@ enum RoutingFixture {
         contextLimit: 262_144)
 
     static var catalog: ModelCatalog {
-        ModelCatalog(directory: URL(fileURLWithPath: "/models"), entries: [alpha, flash, small])
+        ModelCatalog(directory: URL(fileURLWithPath: "/models"),
+                     entries: [alpha, flash, small, dense])
     }
 
     static let configuredContext = 65_536
