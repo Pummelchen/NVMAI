@@ -94,6 +94,42 @@ got wrong, and says how.
 | C70 | medium | `NVMAIServer/Core/ServerTerminationSignals.swift:50`, `tests/NVMAIServer/ServerTerminationSignalTests.swift` (was the last Unconfirmed item) | **The intermittent full-suite abort was a test killing its own test run.** The register carried "a full-suite run can end without a summary" for several rounds, with one run ending between suites and no crash report. It was not random: `ServerTerminationSignals`' handler calls `exit(1)` on a *second* signal delivery during shutdown (S33, deliberate) and `repeatedSignalDeliveryKeepsTheFirstSignal` sends two `kill`s -- so the test process ended itself. Because the delivery is asynchronous, the exit could land *after* the test returned, aborting whichever suite ran next, which is why the endings looked unrelated and the failure never named a test. The forced exit is injectable now (`forceExit: @Sendable () -> Void`, defaulting to `exit(1)`), so the behaviour is asserted without ending the process, and three tests cover it: one signal crosses into async code and reaches the waiter, a later signal calls the hook, and repeated delivery keeps the first signal for the waiter while forcing exit once. Reaching this took running the two suites that bracket the abort *together*: they reproduce it deterministically in isolation, which is how the cause was found rather than shrugged at. |
 | C71 | low-medium | `NVMAIApp/Core/Inference/DecodeServiceInferenceClient.swift:36`, `:139`, `:198`, `:394` (was O31's last item) | **A Stop pressed inside the generation-start window was dropped.** `cancel()` targets the active generation on purpose, so a late cancel cannot hit a later one (D7) -- and the service's untargeted `cancel(nil)` only cancels a generation it *already* has active. A Stop landing after the app asked for a generation but before `runGenerationSession` published its id therefore sent `cancel(nil)` while the service had nothing running, and the `generate` frame that followed ran the whole generation: the button did nothing and the GPU stayed busy for the full answer. The request is latched now and re-sent as a *targeted* cancel immediately after the generate frame (the service has the generation by then), and the latch is cleared when a new generation is requested, so a press while idle cannot cancel the next one. Read-verified: driving this needs a live decode-service socket and a Stop inside a window that is microseconds wide; the register says so rather than implying a test exists. |
 
+## Coverage — what has been read, and how deeply
+
+There is no instrumentation for a read audit, so this is measured from the tree
+and this register rather than asserted:
+
+| Measure | Value | What it means |
+| --- | --- | --- |
+| Modules read | 15 of 15 | The seven read-only passes covered every module once |
+| Source files / lines | 293 files, 76 753 lines (Swift, Metal, C, headers) | The whole tree |
+| Files carrying at least one recorded finding | 59 (20%), 32 639 lines (43%) | The evidence trail, not the reading: most files read produced nothing to record, and one row can cite a 1 700-line file for one function |
+| Findings resolved | 70 code + 8 documentation = 78 of 81 (96%) | 2 open (O5, O30), 3 disproved, 0 unconfirmed |
+| Explicitly read-verified (no executable check possible) | 6 of 70 | Each says so in its row: C53's wiring, C61 (a mid-stream fault on one of two pipelined responses), C63 (a signal inside one `pread`), C64 (a KV view no code path builds), C67 (a flag no caller sets), C69 and C71 (crafted-install and socket-timing paths) |
+
+**A second pass over the largest never-cited files** was made after the finding
+queue emptied, reading for the classes this audit has actually found (`try?`
+fallbacks, trapping conversions, wrapping arithmetic, width and chunk
+assumptions, two paths that disagree). Files and what the pass turned up:
+
+- `Runtime/Inference/RealForwardRunner+Prefill.swift` (1 689 lines): the
+  `try? bandResiduals(...)` at `:136` is a capability probe with a working
+  non-band fallback at `:176`, so it is not a silent skip;
+  `validateChunkedPrefill`'s ring check (`slidingWindow + chunkTokens`, capped by
+  `maxContext`) is conservative rather than wrong, and the scratch-vs-config
+  chunk mismatch it could hide is caught by its own `tokens.count <=
+  scratch.layout.chunkTokens` guard. `PrefillChunkPlanner.spans` covers exactly
+  `[0, tokenCount)` with no gap or overlap and rounds nothing up. No finding.
+- `Metal/MoE/moe.metal` (1 355): the `top_idx[i - 1]` chains at `:303`/`:432` are
+  insertion sorts that only run for `i > 0`. No finding.
+- `Metal/GDN/gdn.metal` (1 097) and `Server/Core/OpenAIModels.swift` (779): the
+  `try?` decodes in `OpenAIModels` are string-or-array union decoding where the
+  array branch still throws. No finding.
+
+The rest of the never-cited files have been read once (the passes) but not
+re-read with this register's eyes, and 234 of 293 is where the remaining depth
+is. Saying "audited" without that sentence would overstate what happened.
+
 ## Verification status of the fixes
 
 Unit tests and lint gate every batch (1443 tests in 223 suites, `tools/lint.sh`
