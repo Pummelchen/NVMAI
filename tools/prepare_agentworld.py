@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import signal
 import struct
 import subprocess
@@ -245,6 +246,133 @@ def outputs_for(name: str, shape: list[int]) -> list[tuple[str, list[int]]]:
     return [(new, list(shape))]
 
 
+# Checkpoints ship the routed experts in one of two shapes, and only the first
+# was handled here:
+#
+#   fused     `...mlp.experts.gate_up_proj`  [experts, 2F, hidden]
+#             `...mlp.experts.down_proj`     [experts, hidden, F]
+#   per-expert `...mlp.experts.<E>.gate_proj`  [F, hidden]
+#              `...mlp.experts.<E>.up_proj`
+#              `...mlp.experts.<E>.down_proj`  [hidden, F]
+#
+# The repacker and the runtime only understand the fused spelling, so a
+# per-expert checkpoint must be stacked into it. KAT-Coder-V2.5-Dev is the
+# per-expert shape; Qwen 3.6 / AgentWorld / Ornith are the fused one.
+PER_EXPERT_RE = re.compile(
+    r"^(?P<stem>.*\.mlp\.experts)\.(?P<expert>\d+)\.(?P<role>gate_proj|up_proj|down_proj)\.weight$")
+
+
+def per_expert_routed(out_name: str) -> tuple[str, int, str] | None:
+    """(fused target name, expert index, role) for a per-expert routed weight."""
+    m = PER_EXPERT_RE.match(out_name)
+    if not m:
+        return None
+    return (f"{m.group('stem').replace('.mlp.experts', '.mlp.switch_mlp')}"
+            f".{m.group('role')}.weight", int(m.group("expert")), m.group("role"))
+
+
+def routed_slices(name: str, value: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    """The routed-expert outputs this source tensor supplies.
+
+    A fused source supplies all experts at once; a per-expert source supplies
+    one expert, which the caller files into its slot. Both end up under the
+    fused `switch_mlp` spelling, so the repacker sees exactly what it saw
+    before.
+    """
+    routed = per_expert_routed(rename(name))
+    if routed is not None:
+        return [(routed[0], value)]
+    return [(out_name, value) for out_name, _ in outputs_for(name, list(value.shape))]
+
+
+class FusedExperts:
+    """Stacks per-expert routed weights into the fused `switch_mlp` spelling.
+
+    The repacker packs routed experts from *one tensor per layer per role*
+    (`switch_mlp.{gate,up,down}_proj.weight`), which is how the fused
+    checkpoints ship them. A per-expert checkpoint (KAT-Coder-V2.5-Dev) ships
+    256 separate tensors per layer per role instead, so each is filed into its
+    slot and the layer emitted once every expert has arrived.
+
+    It has to happen here rather than in the repacker because the fused form is
+    what the runtime's expert streaming reads. Without it the experts are
+    treated as resident weights, the manifest declares `expertsPerLayer = 0`,
+    and the model stops streaming from SSD -- the one thing this runtime is for.
+
+    Only one layer's tensors are held: `release` drops an entry as soon as its
+    last expert lands, so the peak is one layer's three projections (about
+    1.5 GiB at 4-bit) plus the writer's open block.
+    """
+
+    def __init__(self) -> None:
+        self._layers: dict[tuple[int, str], dict] = {}
+        self._seen: set[str] = set()
+
+    def add(self, name: str, value: np.ndarray, width: int,
+            writer: "OutputWriter") -> None:
+        if name in self._seen:
+            raise ValueError(f"duplicate source tensor {name}")
+        self._seen.add(name)
+        # The expert index is read from the *source* name: `routed_slices`
+        # retargets a per-expert tensor to its fused name, which no longer
+        # carries one. Counting experts is what decides when a layer is done.
+        routed = per_expert_routed(rename(name))
+        for out_name, piece in routed_slices(name, value):
+            target = self._layers.get((width, out_name))
+            if target is None:
+                target = {"stack": [], "experts": set()}
+                self._layers[(width, out_name)] = target
+            target["stack"].append(np.ascontiguousarray(piece))
+            if routed is not None:
+                target["experts"].add(routed[1])
+
+    def release(self, experts_per_layer: int,
+                writers: dict[int, "OutputWriter"]) -> None:
+        """Emit every layer whose experts have all arrived, and forget it."""
+        done = [key for key, target in self._layers.items()
+                if len(target["experts"]) >= experts_per_layer]
+        for key in done:
+            width, out_name = key
+            emit_fused(out_name, self._layers.pop(key)["stack"], width, writers)
+        if done:
+            for writer in writers.values():
+                writer.flush()
+
+    def pending(self) -> list[str]:
+        """Fused tensors still waiting for experts, as `width:name (n/m)`.
+
+        Non-empty at the end means the checkpoint disagrees with its own
+        `num_experts`, or a shard was missed. Either way the install would be
+        wrong, so `main` refuses to write the index.
+        """
+        return [f"{width}-bit {out_name} ({len(target['experts'])} experts)"
+                for (width, out_name), target in sorted(self._layers.items())]
+
+
+def emit_fused(out_name: str, stack: list[np.ndarray], width: int,
+               writers: dict[int, "OutputWriter"]) -> None:
+    """Quantize one fused tensor exactly as a fused checkpoint's would be."""
+    if len(stack) == 1 and stack[0].ndim == 3:
+        # The fused source supplies the whole expert axis in one tensor.
+        fused = stack[0]
+    else:
+        # Stacking supplies the leading expert axis the per-expert form lacks.
+        # A short stack means an expert went missing, so the shape check below
+        # is what catches an incomplete layer rather than shipping one silently.
+        fused = np.stack(stack)
+    writer = writers[width]
+    bits = quant_bits(out_name, width)
+    stem = out_name[: -len(".weight")]
+    if bits is None:
+        writer.add(out_name, fold_unit_offset(out_name, fused))
+        return
+    packed, scales, biases = quantize_affine(fused, bits)
+    writer.add(stem + ".weight", packed)
+    writer.add(stem + ".scales", scales)
+    writer.add(stem + ".biases", biases)
+
+
+
 def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
     """config.json with the `quantization` block NVMAIRepack reads: a base
     width plus every tensor whose width differs, keyed by stem."""
@@ -392,13 +520,21 @@ class OutputWriter:
             {"metadata": {"total_size": self.total}, "weight_map": final}, indent=1))
 
 
-def convert_shard(path: Path, writers: dict[int, OutputWriter]) -> None:
+def convert_shard(path: Path, writers: dict[int, OutputWriter],
+                  fused: FusedExperts, experts_per_layer: int) -> None:
     """One source shard into every requested width; the tensor is read once."""
     with safe_open(path, framework="np") as src:
         for name in src.keys():
             if skipped(name):
                 continue
             value = src.get_tensor(name)
+            if per_expert_routed(rename(name)) is not None:
+                # Emitted per completed layer rather than here: a per-expert
+                # checkpoint supplies one expert per tensor, and the repacker
+                # needs the whole layer's stack in one tensor.
+                for width, writer in writers.items():
+                    fused.add(name, value, width, writer)
+                continue
             for out_name, _ in outputs_for(name, list(value.shape)):
                 if out_name.endswith("switch_mlp.gate_proj.weight"):
                     piece = value[:, : value.shape[1] // 2, :]
@@ -417,6 +553,7 @@ def convert_shard(path: Path, writers: dict[int, OutputWriter]) -> None:
                     writer.add(stem + ".weight", packed)
                     writer.add(stem + ".scales", scales)
                     writer.add(stem + ".biases", biases)
+    fused.release(experts_per_layer, writers)
 
 
 def plan(index: dict, width: int) -> None:
@@ -427,10 +564,16 @@ def plan(index: dict, width: int) -> None:
     counts: dict[str, int] = {}
     bf16_bytes = 0
     total_out = 0
+    fused_sources = 0
     for shard, header in headers.items():
         for name, meta in header.items():
             if name == "__metadata__" or skipped(name):
                 continue
+            if per_expert_routed(rename(name)) is not None:
+                # Counted per source tensor here, but the snapshot carries one
+                # fused tensor per layer per role; say so rather than let the
+                # plan imply the repacker will see 30,720 separate experts.
+                fused_sources += 1
             for out_name, out_shape in outputs_for(name, meta["shape"]):
                 bits = quant_bits(out_name, width)
                 n = int(np.prod(out_shape))
@@ -445,6 +588,9 @@ def plan(index: dict, width: int) -> None:
                     kind = f"{bits}-bit"
                     total_out += n * bits // 8 + (n // GROUP_SIZE) * 4
                 counts[kind] = counts.get(kind, 0) + 1
+    if fused_sources:
+        print(f"  routed experts: {fused_sources} per-expert sources are fused "
+              f"into one tensor per layer and role by the converter")
     print(f"{len(shards)} shards, {sum(len(h) - 1 for h in headers.values())} tensors")
     for kind, n in sorted(counts.items()):
         print(f"  {kind:>6}: {n} tensors")
@@ -493,6 +639,14 @@ def main() -> int:
     else:
         outputs = {w: Path(f"{args.output}-{w}bit") for w in widths}
     writers = {w: OutputWriter(out) for w, out in outputs.items()}
+    # Routed experts that ship per-expert rather than fused are stacked back
+    # into the one-tensor-per-layer shape the repacker plans from. The expert
+    # count is the checkpoint's own `num_experts`, and it is only used here to
+    # decide when a layer is complete.
+    fused = FusedExperts()
+    experts_per_layer = int(config["text_config"]["num_experts"])
+    if experts_per_layer <= 0:
+        raise SystemExit(f"unusable num_experts {experts_per_layer} in the checkpoint")
 
     # Fetch shard N+1 while shard N converts; each shard is deleted once
     # converted, so at most two are on disk.
@@ -523,11 +677,18 @@ def main() -> int:
                 raise item
             done += 1
             print(f"[{done}/{len(shards)}] {item.name}", flush=True)
-            convert_shard(item, writers)
+            convert_shard(item, writers, fused, experts_per_layer)
             item.unlink()
     except BaseException:
         stop_download()
         raise
+    leftovers = fused.pending()
+    if leftovers:
+        # A layer whose experts did not all arrive would otherwise be dropped,
+        # and the repacker would plan an install with an incomplete expert set
+        # -- or silently treat the layer as resident. Fail before the index.
+        raise SystemExit("incomplete routed-expert layers: "
+                         + "; ".join(leftovers))
     for width, writer in writers.items():
         out = outputs[width]
         writer.finish()

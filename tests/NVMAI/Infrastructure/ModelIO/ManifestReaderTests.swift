@@ -1,8 +1,20 @@
 import Testing
 import Foundation
 @testable import NVMAI
+@testable import NVMAIRepackCore
 
 @Suite struct ManifestReaderTests {
+
+    /// The runtime loads `manifest.json` with its own bound and the repacker
+    /// validates the same file with another. While the runtime's was 4 MiB and
+    /// the repacker's 64 MiB, an install passed `--verify-install` and then
+    /// refused to load -- which is exactly what happened to KAT-Coder-V2.5-Dev,
+    /// whose manifest is 6.25 MB. They are asserted equal rather than merely
+    /// adequate: a manifest one accepts must be one the other can read.
+    @Test func runtimeAndRepackerAgreeOnTheManifestCeiling() {
+        #expect(ManifestReader.defaultMaxBytes == VerifiedInstallTool.metadataMaxBytes)
+        #expect(VerifiedInstallReceiptReader.defaultMaxBytes == VerifiedInstallTool.metadataMaxBytes)
+    }
 
     /// Build a manifest dictionary for a 2-layer toy ArchConfig and write it
     /// into a temp directory. Returns the directory URL and the toy config.

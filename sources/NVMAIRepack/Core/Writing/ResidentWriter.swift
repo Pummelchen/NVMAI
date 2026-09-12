@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import NVMAIFormat
 
 /// Writes the resident LM `.bin` file (`model_weights.bin`) for the streaming
 /// installer. The remote copy path (HTTPRangeSourceByteProvider) fills the
@@ -23,9 +24,18 @@ enum ResidentWriter {
 
     static func encodeIndex(plan: ResidentFilePlan) throws -> Data {
         let idxBytes = Int(plan.indexSize)
-        guard idxBytes <= BoundedScratch.defaultLimitBytes else {
-            throw RepackError.scratchExceeded(requested: idxBytes,
-                                              limit: BoundedScratch.defaultLimitBytes)
+        // Bounded by the format's own v1 ceiling, which is the same constant
+        // `GTurboResidentIndexCodec` and `VerifiedInstallTool` enforce when they
+        // read the file back. It was `BoundedScratch.defaultLimitBytes` (under
+        // 1 MB), which is the per-worker *staging* budget and has nothing to do
+        // with this allocation: the index is the finished output, and it scales
+        // with `tensors x name length`. KAT-Coder-V2.5-Dev's is ~28 MB, so the
+        // staging budget refused an install the format itself can hold -- and
+        // would have reported it as a scratch overrun rather than a size the
+        // reader would also reject.
+        let limitBytes = Int(GTurboFormatV1.residentIndexMaxBytes)
+        guard idxBytes <= limitBytes else {
+            throw RepackError.scratchExceeded(requested: idxBytes, limit: limitBytes)
         }
         // A tensor name comes from the source manifest, so its length is input,
         // not an invariant of this build: the index stores it in a UInt16 and

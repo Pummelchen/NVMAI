@@ -45,11 +45,12 @@ usage() {
   cat <<'USAGE'
 Coverage
 
-  Ornith 1.5 35B-A3B      4-bit, 8-bit, MTP draft
-  Qwen 3.6 35B-A3B        4-bit, 8-bit, MTP draft
-  Qwen3.8-Flash-Next      4-bit, 8-bit, MTP draft
-  Qwen-AgentWorld 35B-A3B 4-bit, 8-bit
-  Qwen 3.5 2B / 4B / 9B   4-bit, 8-bit (CPU models)
+  Ornith 1.5 35B-A3B        4-bit, 8-bit, MTP draft
+  Qwen 3.6 35B-A3B          4-bit, 8-bit, MTP draft
+  Qwen3.8-Flash-Next        4-bit, 8-bit, MTP draft
+  Qwen-AgentWorld 35B-A3B   4-bit, 8-bit
+  KAT-Coder-V2.5-Dev 35B-A3B 4-bit, 8-bit
+  Qwen 3.5 2B / 4B / 9B     4-bit, 8-bit (CPU models)
 
 Sources
 

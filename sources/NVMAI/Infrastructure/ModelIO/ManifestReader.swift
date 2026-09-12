@@ -143,7 +143,17 @@ public enum ManifestReader {
     /// model does not fit a 24 GB machine.
     public static let supportedWeightBits: Set<Int> = [4, 8]
 
-    public static let defaultMaxBytes: UInt64 = 4 * 1024 * 1024
+    /// Bound on `manifest.json`, which scales with the install's tensor count:
+    /// its `quant` table carries one entry per tensor whose width differs from
+    /// the install's base. A routed-expert model ships that table per expert
+    /// role, so KAT-Coder-V2.5-Dev's manifest is 6.25 MB against the ~43 KB of
+    /// the packed-expert installs, and a 4 MiB bound here refused to load an
+    /// install `--verify-install` had just validated against its own 64 MiB cap
+    /// (`VerifiedInstallTool.metadataMaxBytes`). 64 MiB is that same ceiling,
+    /// which leaves the manifest room to grow about tenfold. The bound still
+    /// exists: it caps the allocation before the JSON decoder makes its copy,
+    /// so a corrupt or hostile file cannot allocate without limit.
+    public static let defaultMaxBytes: UInt64 = 64 * 1024 * 1024
 
     /// Recognized flag keys. Anything else in `manifest.flags` is an error.
     public static let knownFlags: Set<String> = GTurboFormatV1.knownFlags

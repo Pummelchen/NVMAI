@@ -56,6 +56,10 @@ import Testing
         let expected: [(String, ModelFamily, GenerationDefaults.Sampling)] = [
             ("qwen3.6-35b-a3b", .qwen36, qwen36Series),
             ("qwen-agentworld", .qwen36, qwen36Series),
+            // A fine-tune does not inherit its base's sampling: KAT-Coder's own
+            // generation_config.json asks for 1.0, so its rows must not be
+            // swept along by the 0.6 the rest of the qwen36 series uses.
+            ("kat-coder-v2.5", .qwen36, qwen38Series),
             ("qwen3.8-flash-next", .qwen38flash, qwen38Series),
             // Not a Qwen-named series: it keeps the house values until its own
             // card is checked.

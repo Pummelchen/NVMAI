@@ -28,7 +28,7 @@ enum RemoteSnapshotLoader {
 
         try await pinned.fetchSmallFile(filename: "model.safetensors.index.json",
                                         info: indexInfo,
-                                        capBytes: 4 * 1024 * 1024,
+                                        capBytes: IndexLoader.maximumIndexBytes,
                                         outputPath: (metadataDirectory as NSString)
                                             .appendingPathComponent("model.safetensors.index.json"),
                                         audit: audit)

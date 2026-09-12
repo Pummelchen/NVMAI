@@ -3,6 +3,26 @@ import Foundation
 /// Parses `model.safetensors.index.json` and `config.json -> quantization`.
 enum IndexLoader {
 
+    /// Bound on the index file this reads, and on the one the remote loader
+    /// stages, so the two cannot drift apart and refuse the same checkpoint in
+    /// one path but accept it in the other.
+    ///
+    /// This was 4 MiB, which is below a legitimate index. The file scales with
+    /// `tensors x key length`, and the converter's renames roughly double the
+    /// key length: KAT-Coder-V2.5-Dev is 31,320 tensors with
+    /// `model.language_model.layers.N.*` names and produces a 9.7 MiB index,
+    /// so the bound refused a checkout the model's own geometry predicts. The
+    /// same 4 MiB was copied into the remote loader, so neither the local
+    /// `--input-snapshot` path nor the streaming install could build it.
+    ///
+    /// 64 MiB matches `VerifiedInstallTool.metadataMaxBytes` and the other
+    /// metadata caps, and leaves room for a checkpoint far larger than any this
+    /// runtime serves (the index would have to grow ~7x from here). The cap
+    /// still exists: it bounds the allocation before `JSONSerialization` makes
+    /// its own copy, so a corrupt or hostile file cannot make the process
+    /// allocate without limit.
+    static let maximumIndexBytes: UInt64 = 64 * 1024 * 1024
+
     struct SourceMetadata {
         let indexPath: String
         let configPath: String
@@ -28,7 +48,7 @@ enum IndexLoader {
         let weightMap: [String: String]
         do {
             let data = try Posix.readBoundedData(
-                indexPath, maximumBytes: 4 * 1024 * 1024)
+                indexPath, maximumBytes: Self.maximumIndexBytes)
             guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let m = root["weight_map"] as? [String: String] else {
                 throw RepackError.indexJsonInvalid(path: indexPath, detail: "no weight_map")

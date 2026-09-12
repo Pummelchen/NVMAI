@@ -119,7 +119,7 @@ public enum RepackError: Error, CustomStringConvertible {
         case .diskSpaceInsufficient(let p, let r, let a):
             return "insufficient disk space for \(p): required \(r), available \(a)"
         case .scratchExceeded(let r, let l):
-            return "resident index size \(r) exceeds limit \(l)"
+            return "resident index size \(r) exceeds the v1 format cap \(l)"
         case .testHookStop(let s): return "test hook stop at stage \(s)"
         case .configurationInvalid(let d): return "configuration invalid: \(d)"
         }

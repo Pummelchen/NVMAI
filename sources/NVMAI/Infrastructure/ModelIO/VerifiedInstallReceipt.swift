@@ -71,7 +71,11 @@ public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {
 
 public enum VerifiedInstallReceiptReader {
     public static let fileName = "verified-install.json"
-    public static let defaultMaxBytes: UInt64 = 4 * 1024 * 1024
+    /// The receipt itself is small (one entry per install file), but it is read
+    /// and validated beside the manifest at load, so it shares that document's
+    /// bound rather than carrying a second, unrelated one that can drift below
+    /// it. See `ManifestReader.defaultMaxBytes`.
+    public static let defaultMaxBytes: UInt64 = ManifestReader.defaultMaxBytes
 
     public static func load(directoryURL: URL,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> VerifiedInstallReceipt {
