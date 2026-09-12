@@ -423,37 +423,58 @@ def fetch_header(shard: str) -> dict:
 _in_flight: subprocess.Popen | None = None
 
 
+_in_flight: "set[subprocess.Popen]" = set()
+_in_flight_lock = threading.Lock()
+
+
 def download(shard: str, work: Path) -> Path:
-    """Fetch one shard, resuming a partial file rather than restarting it.
+    """Fetch one shard whole, retrying from empty if an attempt fails.
 
     The curl child is tracked so a failure elsewhere can stop it: a download
-    that outlives the converter keeps appending to a file the next run
-    resumes, and the shard then fails to deserialize.
+    that outlives the converter keeps writing a shard for a run that has gone
+    away. Several downloads run at once (see `prefetch_shards`), so every live
+    child is tracked, not just the newest.
 
     **HTTP/1.1 is forced deliberately.** Hugging Face resets HTTP/2 streams on
     these 5.3 GB shards every few seconds (`curl: (92) HTTP/2 stream N reset by
     server (error 0x8 CANCEL)`), and a reset ends the transfer, so the run
     churns through retries instead of downloading. Measured on this link with
     the same 25 MB range: HTTP/2 managed 214 KB/s and stopped early, HTTP/1.1
-    did 908 KB/s over the whole range. Forcing 1.1 is ~4x faster here and, more
-    importantly, does not get killed mid-stream. Parallel connections did not
-    raise the aggregate (~900 KB/s either way), so the link is the ceiling and
-    the fix is stability, not concurrency.
+    did 908 KB/s over the whole range.
+
+    **Concurrency is what beats the throttle, not a bigger pipe.** This host
+    limits each connection, and the link is not saturated by one: while a
+    running job was pulling 205 KB/s, a second connection pulled 488 KB/s
+    beside it. Four connections measured ~900 KB/s combined when each was
+    capped lower. So the converter runs a small pool of these, and the pool
+    size is the lever that matters.
     """
-    global _in_flight
     dest = work / shard
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # Every attempt starts from empty, and that is a deliberate trade of bytes
+    # for correctness: `--remove-on-error` and `-C -` are mutually exclusive in
+    # curl, and resume is the unsafe half here. A host that truncates a response
+    # (`curl: (18) end of response with N bytes missing`) can also ignore the
+    # Range a later `-C -` sends, so curl appends a fresh copy to the truncated
+    # prefix and exits 0 on a file of the wrong length -- a shard that then
+    # decodes into silently wrong weights. Re-fetching a dropped partial is
+    # cheap next to that, and the pool keeps several shards in flight.
+    #
     # curl's own retries cover a short hiccup; this loop covers an outage that
     # outlasts them (a DNS failure once ended a build at shard 6 of 16). The
     # wait backs off because a reset storm is not fixed by retrying faster.
-    # `-C -` resumes, so a failure costs the retries, never the bytes.
     for attempt in range(1, 11):
-        _in_flight = subprocess.Popen(
+        proc = subprocess.Popen(
             ["curl", "-fL", "--http1.1", "--retry", "20", "--retry-delay", "15",
-             "--retry-all-errors", "-C", "-", "--silent", "--show-error",
-             "-o", str(dest), f"{BASE}/{shard}"])
-        code = _in_flight.wait()
-        _in_flight = None
+             "--retry-all-errors", "--remove-on-error",
+             "--silent", "--show-error", "-o", str(dest), f"{BASE}/{shard}"])
+        with _in_flight_lock:
+            _in_flight.add(proc)
+        try:
+            code = proc.wait()
+        finally:
+            with _in_flight_lock:
+                _in_flight.discard(proc)
         if code == 0:
             return dest
         wait = min(30 * attempt, 300)
@@ -464,13 +485,80 @@ def download(shard: str, work: Path) -> Path:
 
 
 def stop_download() -> None:
-    proc = _in_flight
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
+    """Terminate every live download. Several run at once in the worker pool."""
+    with _in_flight_lock:
+        procs = list(_in_flight)
+    for proc in procs:
+        if proc.poll() is None:
+            proc.terminate()
+    for proc in procs:
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+# How far ahead to download, and with how many connections. The host throttles
+# per connection, so this is the lever on how long a conversion takes: one
+# connection measured ~205 KB/s while a second beside it added ~490 KB/s, and
+# four reached ~900 KB/s combined. Depth 3 holds about four 5.3 GB shards on
+# disk (~22 GB) and leaves the main thread free to convert one while the others
+# arrive. Raising it spends disk on bandwidth the link may not have.
+PREFETCH_DEPTH = 3
+FETCHERS = 3
+
+
+def prefetch_shards(shards: list[str], fetch, fetchers: int = FETCHERS,
+                    depth: int = PREFETCH_DEPTH):
+    """Yield downloaded shards as they arrive, fetching the next ones meanwhile.
+
+    A generator so the caller converts on its own thread while the pool keeps
+    the link busy. Each shard is claimed from a shared queue, so N fetchers
+    split the list instead of each downloading all of it; an exception from any
+    fetcher is re-raised in the caller, where `stop_download` can clean up.
+
+    Shards are yielded in *completion* order, not list order. That is safe here
+    because a source shard is independent of the others: the converter writes
+    each output tensor once, and the snapshot's index is built from what was
+    actually written. Order only changes which layer completes first.
+    """
+    ready: Queue = Queue(maxsize=depth)
+    pending: Queue = Queue()
+    for shard in shards:
+        pending.put(shard)
+
+    def fetcher() -> None:
+        try:
+            while True:
+                try:
+                    shard = pending.get_nowait()
+                except Exception:                        # noqa: BLE001
+                    break
+                ready.put(fetch(shard))
+        except Exception as exc:                         # noqa: BLE001
+            ready.put(exc)
+        finally:
+            ready.put(None)
+
+    for _ in range(fetchers):
+        threading.Thread(target=fetcher, daemon=True).start()
+    sentinels = 0
+    while True:
+        item = ready.get()
+        if isinstance(item, Exception):
+            # The generator closes here, so the remaining fetchers unwind on
+            # their next queue operation.
+            raise item
+        if item is None:
+            # Count the sentinels that actually arrived; do not read a shared
+            # counter. A fetcher posts its sentinel from a `finally`, so a
+            # sentinel can reach this loop before another fetcher's shards are
+            # queued, and ending the run on the first one would drop them.
+            sentinels += 1
+            if sentinels == fetchers:
+                return
+            continue
+        yield item
 
 
 def fetch_tokenizer(out: Path) -> None:
@@ -662,37 +750,21 @@ def main() -> int:
     if experts_per_layer <= 0:
         raise SystemExit(f"unusable num_experts {experts_per_layer} in the checkpoint")
 
-    # Fetch shard N+1 while shard N converts; each shard is deleted once
-    # converted, so at most two are on disk.
-    queue: Queue = Queue(maxsize=1)
-
-    def fetcher() -> None:
-        for shard in shards:
-            try:
-                queue.put(download(shard, work))
-            except Exception as exc:                     # noqa: BLE001
-                queue.put(exc)
-                return
-        queue.put(None)
-
+    # Fetch ahead with a small pool; see `prefetch_shards` for why concurrency
+    # is the lever and how deep it goes.
+    #
     # SIGTERM (pkill, a parent script dying) is not an exception in Python:
-    # without this the curl child outlives the converter and keeps writing
-    # a shard the next run resumes. Turn it into one so the except below
-    # stops the download.
+    # without this the curl children outlive the converter and keep writing
+    # shards the next run resumes. Turn it into one so the handler below stops
+    # them.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(143)))
-    threading.Thread(target=fetcher, daemon=True).start()
     done = 0
     try:
-        while True:
-            item = queue.get()
-            if item is None:
-                break
-            if isinstance(item, Exception):
-                raise item
+        for path in prefetch_shards(shards, lambda s: download(s, work)):
             done += 1
-            print(f"[{done}/{len(shards)}] {item.name}", flush=True)
-            convert_shard(item, writers, fused, experts_per_layer)
-            item.unlink()
+            print(f"[{done}/{len(shards)}] {path.name}", flush=True)
+            convert_shard(path, writers, fused, experts_per_layer)
+            path.unlink()
     except BaseException:
         stop_download()
         raise
