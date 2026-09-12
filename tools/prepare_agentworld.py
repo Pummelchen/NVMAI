@@ -399,8 +399,9 @@ def write_config(config: dict, out: Path, tensor_names, width: int) -> dict:
 
 
 # Small fetches retry like the shard download does; a single TLS hiccup on
-# the index fetch ended one 70 GB build before it started.
-RETRY = ["--retry", "5", "--retry-delay", "5", "--retry-all-errors"]
+# the index fetch ended one 70 GB build before it started. `--http1.1` for the
+# same reason the shard download forces it (see `download`).
+RETRY = ["--retry", "5", "--retry-delay", "5", "--retry-all-errors", "--http1.1"]
 
 
 def fetch_json(remote: str) -> dict:
@@ -428,24 +429,37 @@ def download(shard: str, work: Path) -> Path:
     The curl child is tracked so a failure elsewhere can stop it: a download
     that outlives the converter keeps appending to a file the next run
     resumes, and the shard then fails to deserialize.
+
+    **HTTP/1.1 is forced deliberately.** Hugging Face resets HTTP/2 streams on
+    these 5.3 GB shards every few seconds (`curl: (92) HTTP/2 stream N reset by
+    server (error 0x8 CANCEL)`), and a reset ends the transfer, so the run
+    churns through retries instead of downloading. Measured on this link with
+    the same 25 MB range: HTTP/2 managed 214 KB/s and stopped early, HTTP/1.1
+    did 908 KB/s over the whole range. Forcing 1.1 is ~4x faster here and, more
+    importantly, does not get killed mid-stream. Parallel connections did not
+    raise the aggregate (~900 KB/s either way), so the link is the ceiling and
+    the fix is stability, not concurrency.
     """
     global _in_flight
     dest = work / shard
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # curl retries cover ~5 minutes of a flaky link; the outer loop covers
-    # an outage that outlasts them (a DNS failure, exit 6, once ended a
-    # build at shard 6 of 16). Resume keeps what was fetched.
-    for attempt in range(1, 7):
+    # curl's own retries cover a short hiccup; this loop covers an outage that
+    # outlasts them (a DNS failure once ended a build at shard 6 of 16). The
+    # wait backs off because a reset storm is not fixed by retrying faster.
+    # `-C -` resumes, so a failure costs the retries, never the bytes.
+    for attempt in range(1, 11):
         _in_flight = subprocess.Popen(
-            ["curl", "-fL", "--retry", "20", "--retry-delay", "15",
+            ["curl", "-fL", "--http1.1", "--retry", "20", "--retry-delay", "15",
              "--retry-all-errors", "-C", "-", "--silent", "--show-error",
              "-o", str(dest), f"{BASE}/{shard}"])
         code = _in_flight.wait()
         _in_flight = None
         if code == 0:
             return dest
-        print(f"    {shard}: curl exit {code} (attempt {attempt}/6), waiting 60 s", flush=True)
-        time.sleep(60)
+        wait = min(30 * attempt, 300)
+        print(f"    {shard}: curl exit {code} (attempt {attempt}/10), waiting {wait} s",
+              flush=True)
+        time.sleep(wait)
     raise subprocess.CalledProcessError(code, "curl")
 
 
