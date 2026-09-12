@@ -149,9 +149,28 @@ shards on the next attempt, and `OutputWriter` never clears its output directory
 is wasted space in exactly the disk budget you were trying to fit. Before
 re-running, remove the partial output (`rm -rf .build/<key>-affine-*`), and run
 the conversion as a supervised background job with a log rather than in a
-session that might be interrupted: `SIGTERM` is handled so the in-flight `curl`
-stops, but a shard left partially written would be resumed by the next run and
-then fail to deserialize.
+session that might be interrupted.
+
+**What *does* resume is the download inside a run.** Each shard is fetched as a
+sequence of 64 MiB ranged requests, and a partial shard is continued at its own
+offset, so a dropped connection costs one chunk rather than the whole file.
+That matters on a link that truncates a long transfer: the host this was
+written against kills a 5.3 GB response every few minutes
+(`curl: (18) end of response with N bytes missing`), and a whole-file download
+could never finish because each attempt was shorter than the interval between
+truncations. Every chunk is length-checked against a size derived from the
+shard's own header, which is also what makes resuming safe — a wrongly appended
+file is the wrong length and is rejected rather than decoded into silently
+wrong weights.
+
+**The download is usually the whole critical path, so measure it before
+starting.** Three things were worth doing on a slow link, in this order:
+`--http1.1` (this host resets HTTP/2 streams continuously; 214 KB/s → 908 KB/s
+on the same range), a pool of three concurrent downloads (the throttle is per
+connection — a second connection added ~490 KB/s beside a ~205 KB/s one), and
+the chunking above. What did **not** help: relaying through a fast remote host.
+A VPS that pulled the checkpoint at 40 MB/s still delivered it to the working
+Mac at 1.40 MB/s, because the Mac's own link was the ceiling.
 Both widths come from one download when the converter is called with `--bits 4
 8`, but the **snapshot and the install exist at the same time**, so budget:
 
