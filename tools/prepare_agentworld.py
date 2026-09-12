@@ -430,6 +430,13 @@ _in_flight_lock = threading.Lock()
 CHUNK_BYTES = 64 * 1024 * 1024
 CHUNK_TIMEOUT = 300
 CHUNK_ATTEMPTS = 8
+# Abort a transfer that has effectively stopped. A dead connection does not
+# always error: one was observed sitting in `S` with its chunk file static for
+# minutes and no curl retry firing, because nothing had timed out. curl only
+# checks `--speed-time` against the *average* rate, so this floor is set far
+# below a healthy transfer (~300 KB/s observed) and only catches a real stall.
+CHUNK_MIN_BYTES_PER_SEC = 12_800
+CHUNK_STALL_SECONDS = 60
 
 
 @lru_cache(maxsize=None)
@@ -520,6 +527,8 @@ def download(shard: str, work: Path) -> Path:
                 proc = subprocess.Popen(
                     ["curl", "-fL", "--http1.1", "--retry", "5", "--retry-delay", "5",
                      "--retry-all-errors", "--remove-on-error", "--max-time", str(CHUNK_TIMEOUT),
+                     "--speed-limit", str(CHUNK_MIN_BYTES_PER_SEC),
+                     "--speed-time", str(CHUNK_STALL_SECONDS),
                      "-r", f"{done}-{done + want - 1}", "--silent", "--show-error",
                      "-o", str(chunk), url])
                 with _in_flight_lock:
