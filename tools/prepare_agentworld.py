@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from queue import Queue
 
@@ -420,68 +421,131 @@ def fetch_header(shard: str) -> dict:
     return json.loads(body)
 
 
-_in_flight: subprocess.Popen | None = None
-
-
 _in_flight: "set[subprocess.Popen]" = set()
 _in_flight_lock = threading.Lock()
 
+# One ranged request per chunk. The host truncates long transfers, so a chunk
+# bounds what a failure costs; 64 MiB is small enough that a retry is cheap and
+# large enough not to spend the run on request overhead.
+CHUNK_BYTES = 64 * 1024 * 1024
+CHUNK_TIMEOUT = 300
+CHUNK_ATTEMPTS = 8
+
+
+@lru_cache(maxsize=None)
+def expected_size(shard: str) -> int:
+    """The shard's exact size in bytes, derived from its own header.
+
+    8 bytes of header length, the header itself, then the payload the header's
+    last tensor ends at -- and the result is confirmed against the CDN's
+    `Content-Length`. This is the number that makes a partly-written file
+    detectable, so it is checked against the server rather than assumed.
+    """
+    url = f"{BASE}/{shard}"
+    prefix = subprocess.run(["curl", "-sfL", "--http1.1", *RETRY, "-r", "0-7", url],
+                            capture_output=True, check=True).stdout
+    header_len = struct.unpack("<Q", prefix[:8])[0]
+    body = subprocess.run(["curl", "-sfL", "--http1.1", *RETRY,
+                           "-r", f"8-{8 + header_len - 1}", url],
+                          capture_output=True, check=True).stdout
+    if len(body) != header_len:
+        raise RuntimeError(f"{shard}: header {len(body)} bytes, expected {header_len}")
+    tensors = json.loads(body)
+    tensors.pop("__metadata__", None)
+    if not tensors:
+        raise RuntimeError(f"{shard}: header carries no tensors")
+    payload = max(t["data_offsets"][1] for t in tensors.values())
+    derived = 8 + header_len + payload
+    reported = subprocess.run(["curl", "-sIL", "--http1.1", *RETRY, url],
+                              capture_output=True, text=True, check=True).stdout
+    lengths = [int(line.split(":", 1)[1]) for line in reported.splitlines()
+               if line.lower().startswith("content-length")]
+    if lengths and lengths[-1] != derived:
+        raise RuntimeError(f"{shard}: header derives {derived} bytes but the server "
+                           f"reports {lengths[-1]}")
+    return derived
+
+
+def resolve_url(shard: str) -> str:
+    """The CDN URL for a shard, with a fresh token.
+
+    The signed URL expires (about an hour), so a long download must resolve a
+    new one rather than reuse the first.
+    """
+    out = subprocess.run(["curl", "-sIL", "--http1.1", f"{BASE}/{shard}"],
+                         capture_output=True, text=True, check=True).stdout
+    locations = [line.split(":", 1)[1].strip()
+                 for line in out.splitlines() if line.lower().startswith("location:")]
+    return locations[-1] if locations else f"{BASE}/{shard}"
+
 
 def download(shard: str, work: Path) -> Path:
-    """Fetch one shard whole, retrying from empty if an attempt fails.
+    """Fetch one shard in verified chunks, continuing a partial file.
 
-    The curl child is tracked so a failure elsewhere can stop it: a download
-    that outlives the converter keeps writing a shard for a run that has gone
-    away. Several downloads run at once (see `prefetch_shards`), so every live
-    child is tracked, not just the newest.
+    The host cannot deliver 5.3 GB in one connection: it truncates the response
+    every few minutes (`curl: (18) end of response with N bytes missing`), and
+    a single-shot download therefore never finishes -- each attempt restarts
+    from zero, and the attempts never get longer than the interval between
+    truncations. Ranged requests do work (the CDN answers 206), so the shard is
+    fetched as a sequence of chunks and each one is length-checked before it is
+    accepted.
 
-    **HTTP/1.1 is forced deliberately.** Hugging Face resets HTTP/2 streams on
-    these 5.3 GB shards every few seconds (`curl: (92) HTTP/2 stream N reset by
-    server (error 0x8 CANCEL)`), and a reset ends the transfer, so the run
-    churns through retries instead of downloading. Measured on this link with
-    the same 25 MB range: HTTP/2 managed 214 KB/s and stopped early, HTTP/1.1
-    did 908 KB/s over the whole range.
-
-    **Concurrency is what beats the throttle, not a bigger pipe.** This host
-    limits each connection, and the link is not saturated by one: while a
-    running job was pulling 205 KB/s, a second connection pulled 488 KB/s
-    beside it. Four connections measured ~900 KB/s combined when each was
-    capped lower. So the converter runs a small pool of these, and the pool
-    size is the lever that matters.
+    Resuming is safe here, and that is what the length check buys. The
+    dangerous case -- appending a fresh copy to a truncated prefix -- produces a
+    file whose size is not the header's, so it is rejected instead of being
+    decoded into silently wrong weights.
     """
     dest = work / shard
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Every attempt starts from empty, and that is a deliberate trade of bytes
-    # for correctness: `--remove-on-error` and `-C -` are mutually exclusive in
-    # curl, and resume is the unsafe half here. A host that truncates a response
-    # (`curl: (18) end of response with N bytes missing`) can also ignore the
-    # Range a later `-C -` sends, so curl appends a fresh copy to the truncated
-    # prefix and exits 0 on a file of the wrong length -- a shard that then
-    # decodes into silently wrong weights. Re-fetching a dropped partial is
-    # cheap next to that, and the pool keeps several shards in flight.
-    #
-    # curl's own retries cover a short hiccup; this loop covers an outage that
-    # outlasts them (a DNS failure once ended a build at shard 6 of 16). The
-    # wait backs off because a reset storm is not fixed by retrying faster.
-    for attempt in range(1, 11):
-        proc = subprocess.Popen(
-            ["curl", "-fL", "--http1.1", "--retry", "20", "--retry-delay", "15",
-             "--retry-all-errors", "--remove-on-error",
-             "--silent", "--show-error", "-o", str(dest), f"{BASE}/{shard}"])
-        with _in_flight_lock:
-            _in_flight.add(proc)
-        try:
-            code = proc.wait()
-        finally:
-            with _in_flight_lock:
-                _in_flight.discard(proc)
-        if code == 0:
-            return dest
-        wait = min(30 * attempt, 300)
-        print(f"    {shard}: curl exit {code} (attempt {attempt}/10), waiting {wait} s",
+    expected = expected_size(shard)
+    have = dest.stat().st_size if dest.exists() else 0
+    if have > expected:
+        # Longer than the shard can be: a previous run appended wrongly.
+        print(f"    {shard}: {have} bytes exceeds {expected}, discarding", flush=True)
+        dest.unlink()
+        have = 0
+    if have == expected:
+        return dest
+    if have:
+        print(f"    {shard}: resuming at {have / 1e9:.2f} GB of {expected / 1e9:.2f} GB",
               flush=True)
-        time.sleep(wait)
-    raise subprocess.CalledProcessError(code, "curl")
+    mode = "ab" if have else "wb"
+    with open(dest, mode) as out:
+        done = have
+        while done < expected:
+            want = min(CHUNK_BYTES, expected - done)
+            chunk = work / f".{shard}.chunk"
+            for attempt in range(1, CHUNK_ATTEMPTS + 1):
+                url = resolve_url(shard)
+                proc = subprocess.Popen(
+                    ["curl", "-fL", "--http1.1", "--retry", "5", "--retry-delay", "5",
+                     "--retry-all-errors", "--remove-on-error", "--max-time", str(CHUNK_TIMEOUT),
+                     "-r", f"{done}-{done + want - 1}", "--silent", "--show-error",
+                     "-o", str(chunk), url])
+                with _in_flight_lock:
+                    _in_flight.add(proc)
+                try:
+                    code = proc.wait()
+                finally:
+                    with _in_flight_lock:
+                        _in_flight.discard(proc)
+                got = chunk.stat().st_size if chunk.exists() else 0
+                if code == 0 and got == want:
+                    break
+                wait = min(15 * attempt, 120)
+                print(f"    {shard} @{done}: chunk {got}/{want} bytes (curl {code}, "
+                      f"attempt {attempt}/{CHUNK_ATTEMPTS}), waiting {wait} s", flush=True)
+                time.sleep(wait)
+            else:
+                raise RuntimeError(f"{shard}: chunk at {done} failed after "
+                                   f"{CHUNK_ATTEMPTS} attempts")
+            out.write(chunk.read_bytes())
+            out.flush()
+            chunk.unlink()
+            done += want
+    if dest.stat().st_size != expected:
+        raise RuntimeError(f"{shard}: finished at {dest.stat().st_size}, expected {expected}")
+    return dest
 
 
 def stop_download() -> None:
