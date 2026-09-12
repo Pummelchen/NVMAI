@@ -57,8 +57,9 @@ try:
     from safetensors.numpy import save_file
 except ImportError as exc:  # pragma: no cover - environment, not logic
     sys.exit(f"missing dependency: {exc}\n"
-             "  python3.13 -m pip install safetensors numpy ml_dtypes")
-
+             f"  install them for the interpreter running this file: {sys.executable}\n"
+             "    -m pip install safetensors numpy ml_dtypes\n"
+             "  (or point NVMAI_PYTHON at another Python 3.10+)")
 REPO = "Qwen/Qwen3.8-Flash-Next"
 BASE = f"https://huggingface.co/{REPO}/resolve/main"
 GROUP_SIZE = 64

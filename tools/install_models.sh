@@ -16,6 +16,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/.build/arm64-apple-macosx/release/NVMAIRepack"
 MODELS="$ROOT/models"
 
+# The converters need a Python with numpy/ml_dtypes/safetensors at 3.10 or
+# newer. Resolved by capability rather than by name: `python3` is 3.9 on a
+# stock macOS and lacks the packages, while a pinned `python3.13` fails on a
+# machine whose stack lives under another version. See tools/lib/python.sh.
+# shellcheck source=tools/lib/python.sh
+source "$ROOT/tools/lib/python.sh"
+
 # name|install directory|width|source
 CATALOGUE=(
   "ornith15|ornith-1.5_35B_A3B_4Bit|4|convert_qwen35moe"
@@ -99,6 +106,10 @@ status() {
 
 install_one() {
   local want="$1" found=0
+  # Every conversion path runs a Python converter, so resolve the interpreter
+  # once, here, rather than emitting a raw "command not found" per call.
+  local python
+  python="$(nvmai_resolve_python)" || return 1
   for row in "${CATALOGUE[@]}"; do
     IFS='|' read -r name dir width source <<<"$row"
     [[ "$name" == "$want" ]] || continue
@@ -134,7 +145,7 @@ install_one() {
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
         if [[ ! -f ".build/qwen38-affine-${width}bit/model.safetensors.index.json" ]]; then
           echo "converting $name -> .build/qwen38-affine-${width}bit"
-          python3.13 tools/prepare_qwen38.py --bits "$width" \
+          "$python" tools/prepare_qwen38.py --bits "$width" \
               --output ".build/qwen38-affine-${width}bit" \
               --work .build/qwen38-shards || return 1
         fi
@@ -148,7 +159,7 @@ install_one() {
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
         if [[ ! -f ".build/qwen38-mtp-affine/model.safetensors.index.json" ]]; then
           echo "converting $name -> .build/qwen38-mtp-affine"
-          python3.13 tools/prepare_qwen38_mtp.py --bits "$width" \
+          "$python" tools/prepare_qwen38_mtp.py --bits "$width" \
               --output .build/qwen38-mtp-affine || return 1
         fi
         echo "installing $name -> models/$dir"
@@ -161,7 +172,7 @@ install_one() {
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
         if [[ ! -f ".build/qwen36-mtp-affine/model.safetensors.index.json" ]]; then
           echo "converting $name -> .build/qwen36-mtp-affine"
-          python3.13 tools/prepare_agentworld.py --model qwen36 --draft-head --bits "$width" \
+          "$python" tools/prepare_agentworld.py --model qwen36 --draft-head --bits "$width" \
               --output .build/qwen36-mtp-affine --work .build/qwen36-mtp-shards || return 1
         fi
         echo "installing $name -> models/$dir"
@@ -185,7 +196,7 @@ install_one() {
         esac
         if [[ ! -f ".build/${preset}-affine-${width}bit/model.safetensors.index.json" ]]; then
           echo "converting $preset -> .build/${preset}-affine-{4,8}bit"
-          python3.13 tools/prepare_agentworld.py --model "$preset" --bits 4 8 \
+          "$python" tools/prepare_agentworld.py --model "$preset" --bits 4 8 \
               --output ".build/${preset}-affine" \
               --work ".build/${preset}-shards" || return 1
         fi
@@ -213,7 +224,7 @@ install_one() {
         done
         if [[ ! -f ".build/ornith-mtp-affine/model.safetensors.index.json" ]]; then
           echo "converting $name -> .build/ornith-mtp-affine"
-          python3.13 tools/prepare_ornith_mtp.py --bits "$width" \
+          "$python" tools/prepare_ornith_mtp.py --bits "$width" \
               --source-shard "$src/model-00016-of-00016.safetensors" \
               --source-config "$src/config.json" --source-index "$src/model.safetensors.index.json" \
               --output .build/ornith-mtp-affine || return 1
@@ -260,7 +271,7 @@ install_one() {
             mv "$MODELS/$dir" "$stage"
           else
             echo "converting Qwen 3.5 ${size_key} ${width}-bit -> $stage"
-            python3.13 tools/prepare_qwen35.py --size "$size_key" --bits "$width" \
+            "$python" tools/prepare_qwen35.py --size "$size_key" --bits "$width" \
                 --output "$stage" \
                 --work ".build/${preset}-shards" || return 1
           fi

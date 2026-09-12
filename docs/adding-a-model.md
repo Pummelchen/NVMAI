@@ -123,13 +123,21 @@ even though the converter would not complain.
 Validate 1 before any download:
 
 ```bash
-python3.13 tools/prepare_agentworld.py --model <key> --plan
+python3 tools/prepare_agentworld.py --model <key> --plan
 ```
 
 It fetches the config and the index only, and prints the shard count, the
 tensor split per width, the bf16 keeps and the output size. `--plan` writing no
 files is the point: it is the cheap place to discover that a last dimension is
 not group-aligned.
+
+The converters need **Python 3.10+ with numpy, ml_dtypes and safetensors**, and
+they resolve that themselves: `tools/lib/python.sh` tries `python3.14` down to
+`python3`, testing version *and* imports for each, and takes the first that
+passes. Use whichever name it resolved, or point `NVMAI_PYTHON` at a specific
+interpreter (a virtualenv, say). A bare `python3` is not safe to assume: on a
+stock macOS it is 3.9 from `/usr/bin`, older than these scripts' syntax and
+without the packages.
 
 ## 3. Convert and install
 

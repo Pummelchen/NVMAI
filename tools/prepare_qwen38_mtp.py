@@ -30,8 +30,9 @@ try:
     from safetensors.numpy import save_file
 except ImportError as exc:  # pragma: no cover
     sys.exit(f"missing dependency: {exc}\n"
-             "  python3.13 -m pip install safetensors numpy ml_dtypes")
-
+             f"  install them for the interpreter running this file: {sys.executable}\n"
+             "    -m pip install safetensors numpy ml_dtypes\n"
+             "  (or point NVMAI_PYTHON at another Python 3.10+)")
 _HERE = Path(__file__).parent
 _spec = importlib.util.spec_from_file_location("prepare_qwen38",
                                                _HERE / "prepare_qwen38.py")

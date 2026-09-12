@@ -53,8 +53,9 @@ try:
     from safetensors.numpy import save_file
 except ImportError as exc:  # pragma: no cover - environment, not logic
     sys.exit(f"missing dependency: {exc}\n"
-             "  python3.13 -m pip install safetensors numpy ml_dtypes")
-
+             f"  install them for the interpreter running this file: {sys.executable}\n"
+             "    -m pip install safetensors numpy ml_dtypes\n"
+             "  (or point NVMAI_PYTHON at another Python 3.10+)")
 # Every Qwen3.5-MoE 35B-A3B release this converter builds. Pinned commits:
 # the install receipt records the source, and a moved `main` must not
 # silently change what "AgentWorld 4-bit" means.

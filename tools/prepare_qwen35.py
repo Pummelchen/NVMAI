@@ -89,9 +89,9 @@ try:
     import numpy as np
 except ImportError as exc:  # pragma: no cover - environment, not logic
     sys.exit(f"missing dependency: {exc}\n"
-             "  python3.13 -m pip install numpy ml_dtypes")
-
-
+             f"  install them for the interpreter running this file: {sys.executable}\n"
+             "    -m pip install safetensors numpy ml_dtypes\n"
+             "  (or point NVMAI_PYTHON at another Python 3.10+)")
 # NamedTuple, not a dataclass: the precision tools load this file with
 # `spec_from_file_location` and never register it in `sys.modules`, and a
 # dataclass under postponed annotations looks its module up there and fails.
