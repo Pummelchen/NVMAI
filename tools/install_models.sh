@@ -23,21 +23,28 @@ MODELS="$ROOT/models"
 # shellcheck source=tools/lib/python.sh
 source "$ROOT/tools/lib/python.sh"
 
-# name|install directory|width|source
+# name|install directory|width|source[|preset[|both-widths-directory]]
+#
+# The last two fields only appear on rows whose source is `convert_qwen35moe`.
+# Those are all Qwen3.5-MoE checkpoints, and their converter can write *both*
+# widths from one 70 GB download -- so a row names the sibling width it pairs
+# with. That is what makes `tools/install_models.sh katcoder both` cost one
+# download instead of two, and it also lets a second width reuse a snapshot a
+# previous run already converted.
 CATALOGUE=(
-  "ornith15|ornith-1.5_35B_A3B_4Bit|4|convert_qwen35moe"
-  "ornith15-8bit|ornith-1.5_35B_A3B_8Bit|8|convert_qwen35moe"
+  "ornith15|ornith-1.5_35B_A3B_4Bit|4|convert_qwen35moe|ornith15|ornith15-8bit"
+  "ornith15-8bit|ornith-1.5_35B_A3B_8Bit|8|convert_qwen35moe|ornith15|ornith15"
   "ornith15-mtp|ornith-1.5_35B_A3B_MTP_4Bit|4|prepare_ornith_mtp"
-  "qwen36|qwen3.6_35B_A3B_4Bit|4|convert_qwen35moe"
-  "qwen36-8bit|qwen3.6_35B_A3B_8Bit|8|convert_qwen35moe"
+  "qwen36|qwen3.6_35B_A3B_4Bit|4|convert_qwen35moe|qwen36|qwen36-8bit"
+  "qwen36-8bit|qwen3.6_35B_A3B_8Bit|8|convert_qwen35moe|qwen36|qwen36"
   "qwen36-mtp|qwen3.6_35B_A3B_MTP_4Bit|4|convert_qwen36_mtp"
   "qwen38flash|qwen3.8-flash-next_125B_A6B_4Bit|4|convert"
   "qwen38flash-8bit|qwen3.8-flash-next_125B_A6B_8Bit|8|convert"
   "qwen38flash-mtp|qwen3.8-flash-next_125B_A6B_MTP_4Bit|4|convert_qwen38_mtp"
-  "katcoder|kat-coder-v2.5_35B_A3B_4Bit|4|convert_qwen35moe"
-  "katcoder-8bit|kat-coder-v2.5_35B_A3B_8Bit|8|convert_qwen35moe"
-  "agentworld|qwen-agentworld_35B_A3B_4Bit|4|convert_qwen35moe"
-  "agentworld-8bit|qwen-agentworld_35B_A3B_8Bit|8|convert_qwen35moe"
+  "katcoder|kat-coder-v2.5_35B_A3B_4Bit|4|convert_qwen35moe|katcoder|katcoder-8bit"
+  "katcoder-8bit|kat-coder-v2.5_35B_A3B_8Bit|8|convert_qwen35moe|katcoder|katcoder"
+  "agentworld|qwen-agentworld_35B_A3B_4Bit|4|convert_qwen35moe|agentworld|agentworld-8bit"
+  "agentworld-8bit|qwen-agentworld_35B_A3B_8Bit|8|convert_qwen35moe|agentworld|agentworld"
   # The dense Qwen 3.5 models. Small enough to run on the CPU, and the only
   # installs that do: the 2B beside a big GPU model, the 9B on its own.
   "qwen35-2b|qwen3.5_2B_4Bit|4|convert_qwen35"
@@ -69,7 +76,10 @@ Sources
   at bf16 in both widths.
 
   convert_qwen35moe   tools/prepare_agentworld.py --model {ornith15,qwen36,agentworld,katcoder}
-                      One ~70 GB download yields both widths.
+                      One ~70 GB download yields both widths, so
+                      `<name> both` installs 4-bit and 8-bit for the cost of
+                      one fetch; one width alone already converts both and
+                      keeps the other snapshot for a later run.
   convert_qwen35      tools/prepare_qwen35.py --size {2b,4b,9b}, then
                       NVMAIRepack --input-snapshot. One fetch yields both
                       widths. These are the dense models, and the only ones
@@ -91,7 +101,7 @@ USAGE
 status() {
   printf '%-20s %-8s %-10s %s\n' MODEL WIDTH STATE SOURCE
   for row in "${CATALOGUE[@]}"; do
-    IFS='|' read -r name dir width source <<<"$row"
+    IFS='|' read -r name dir width source preset_field sibling_field <<<"$row"
     if [[ -d "$MODELS/$dir" ]]; then
       state="installed"
     else
@@ -100,8 +110,9 @@ status() {
     printf '%-20s %-8s %-10s %s\n' "$name" "${width}-bit" "$state" "$source"
   done
   echo
-  echo "tools/install_models.sh <name>   to install one"
-  echo "tools/install_models.sh --help   for sources and disk sizes"
+  echo "tools/install_models.sh <name>          install one width"
+  echo "tools/install_models.sh <name> both     4-bit and 8-bit from one download"
+  echo "tools/install_models.sh --help          sources and disk sizes"
 }
 
 install_one() {
@@ -111,7 +122,9 @@ install_one() {
   local python
   python="$(nvmai_resolve_python)" || return 1
   for row in "${CATALOGUE[@]}"; do
-    IFS='|' read -r name dir width source <<<"$row"
+    # Six fields on the MoE rows, four elsewhere; the trailing two are only
+    # read by the convert_qwen35moe branch.
+    IFS='|' read -r name dir width source preset_field sibling_field <<<"$row"
     [[ "$name" == "$want" ]] || continue
     found=1
     if [[ -d "$MODELS/$dir" ]]; then
@@ -182,26 +195,36 @@ install_one() {
       convert_qwen35moe)
         # Qwen's own bf16 release, quantized one shard at a time by
         # tools/prepare_agentworld.py (about 70 GB fetched, at most two
-        # shards on disk), then repacked. Both widths come from one download,
-        # so the other width installs without a second fetch. The snapshot
-        # and the install exist at the same time: ~40 GB at 4-bit, ~75 GB at
-        # 8-bit.
+        # shards on disk), then repacked. `--bits 4 8` writes *both* widths
+        # from that one download, to `.build/<preset>-affine-{4,8}bit`, so
+        # neither width may be thrown away: the snapshot is kept until both
+        # installs exist, and the other width then costs no fetch at all.
         [[ -x "$BIN" ]] || { echo "build NVMAIRepack first: swift build -c release" >&2; return 1; }
-        local preset="${name%-8bit}" model_id
+        local preset="${preset_field:-${name%-8bit}}" model_id
         case "$preset" in
           agentworld) model_id="qwen-agentworld" ;;
           katcoder)   model_id="kat-coder-v2.5" ;;
           qwen36)     model_id="qwen3.6-35b-a3b" ;;
           ornith15)   model_id="ornith-1.5-35b-a3b" ;;
         esac
-        if [[ ! -f ".build/${preset}-affine-${width}bit/model.safetensors.index.json" ]]; then
+        # Reuse whichever snapshot already exists, in either spelling: the
+        # paired `-8bit` form this script writes, or the plain directory an
+        # earlier manual `--bits 8` run leaves behind. Without this second
+        # check a model already converted by hand re-downloads 70 GB.
+        local snap=".build/${preset}-affine-${width}bit"
+        if [[ ! -f "$snap/model.safetensors.index.json" \
+              && "$width" == 8 && -f ".build/${preset}-affine/model.safetensors.index.json" ]]; then
+          snap=".build/${preset}-affine"
+        fi
+        if [[ ! -f "$snap/model.safetensors.index.json" ]]; then
           echo "converting $preset -> .build/${preset}-affine-{4,8}bit"
           "$python" tools/prepare_agentworld.py --model "$preset" --bits 4 8 \
               --output ".build/${preset}-affine" \
               --work ".build/${preset}-shards" || return 1
+          snap=".build/${preset}-affine-${width}bit"
         fi
         echo "installing $name -> models/$dir"
-        "$BIN" --input-snapshot ".build/${preset}-affine-${width}bit" \
+        "$BIN" --input-snapshot "$snap" \
             --model-id "$model_id" --output "$MODELS/$dir"
         ;;
       prepare_ornith_mtp)
@@ -317,6 +340,32 @@ EOF
   [[ "$found" == 1 ]] || { echo "unknown model: $want" >&2; status >&2; return 2; }
 }
 
+# Install one model's 4-bit and 8-bit builds from a single download.
+#
+# Only the Qwen3.5-MoE rows have a sibling width; for anything else there is
+# nothing to pair with, so say so rather than silently installing one width.
+install_both() {
+  local want="$1" row name dir width source preset sibling
+  for row in "${CATALOGUE[@]}"; do
+    IFS='|' read -r name dir width source preset sibling <<<"$row"
+    [[ "$name" == "$want" ]] || continue
+    if [[ "$source" != convert_qwen35moe || -z "$sibling" ]]; then
+      echo "$want has no second width to pair with; install it by name instead" >&2
+      return 2
+    fi
+    # The 4-bit row carries the sibling; install it first so the one download
+    # converts into both snapshots, then the 8-bit install reuses what is on
+    # disk. `install_one` finds it because it checks both snapshot spellings.
+    echo "installing $want at both widths from one download"
+    install_one "$name" || return 1
+    install_one "$sibling" || return 1
+    return 0
+  done
+  echo "unknown model: $want" >&2
+  status >&2
+  return 2
+}
+
 case "${1:-}" in
   "")            status ;;
   --help|-h)     usage ;;
@@ -324,5 +373,11 @@ case "${1:-}" in
                    [[ "$w" == 4 ]] && install_one "$n"; done ;;
   --all-8bit)    for row in "${CATALOGUE[@]}"; do IFS='|' read -r n _ w _ <<<"$row"
                    [[ "$w" == 8 ]] && install_one "$n"; done ;;
-  *)             install_one "$1" ;;
+  # `both` installs a model's 4-bit and 8-bit builds from ONE download. The
+  # MoE checkpoints convert both widths in a single pass, so asking for them
+  # one at a time would fetch the same ~70 GB twice; this is the cheap way and
+  # the one the help text points at.
+  both)          [[ -n "${2:-}" ]] || { echo "usage: tools/install_models.sh <model> both" >&2; exit 2; }
+                 install_both "$2" ;;
+  *)             if [[ "${2:-}" == "both" ]]; then install_both "$1"; else install_one "$1"; fi ;;
 esac
