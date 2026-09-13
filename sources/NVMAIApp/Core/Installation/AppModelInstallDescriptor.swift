@@ -142,15 +142,22 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         "Qwen-AgentWorld 35B-A3B 8-bit", "Qwen/Qwen-AgentWorld-35B-A3B",
         "cf0056887d0985c96aae3939a8bdcd371a1c762dac49ea9bd07e549e42108b95",
         37_800_000_000, "qwen-agentworld_35B_A3B_8Bit")
-    // KAT-Coder-V2.5-Dev's two descriptors belong here, and the reason they
-    // are not is worth recording: this field is the **converted snapshot's**
-    // index hash -- the same value the install manifest records as
-    // `sourceSnapshotHash` -- not the source repository's. It cannot be known
-    // before `tools/prepare_agentworld.py --model katcoder` has written a
-    // snapshot, so the entries land with the install, reading the value back
-    // from `models/kat-coder-v2.5_35B_A3B_{4,8}Bit/manifest.json`. Until then
-    // the app recognizes a KAT install by nothing, which is why
-    // `everyInstalledBuildIsSelectableAndRecognized` still lists eight builds.
+    // KAT-Coder-V2.5-Dev. This fingerprint is the **converted snapshot's**
+    // index hash -- the value the install manifest records as
+    // `sourceSnapshotHash` -- not the source repository's, so it could only be
+    // pinned once `tools/prepare_agentworld.py --model katcoder` had written a
+    // snapshot; both values were read back from
+    // `models/kat-coder-v2.5_35B_A3B_{4,8}Bit/manifest.json`. They differ per
+    // width because each snapshot is its own file, which is what the
+    // uniqueness assertion in `AppModelInstallTests` wants.
+    public static let katcoder = converted(
+        "KAT-Coder-V2.5-Dev 35B-A3B 4-bit", "Kwaipilot/KAT-Coder-V2.5-Dev",
+        "a93f88d20d79a8f65f85b4ffdb8d4ae0589e9a004087c6c6fb4035ed79e4116f",
+        20_000_000_000, "kat-coder-v2.5_35B_A3B_4Bit")
+    public static let katcoder8bit = converted(
+        "KAT-Coder-V2.5-Dev 35B-A3B 8-bit", "Kwaipilot/KAT-Coder-V2.5-Dev",
+        "cbac13d5b917d12fa9cf2ca430f2fda4897b19b6306aa9dce8c00082f9d1714b",
+        36_900_000_000, "kat-coder-v2.5_35B_A3B_8Bit")
     public static let qwen38 = converted(
         "Qwen3.8-Flash-Next 125B-A6B 4-bit", "Qwen/Qwen3.8-Flash-Next",
         "331102fda39f492e5957d4f773d78927addc6b998570e52389c748c84966be23",
@@ -168,6 +175,7 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         .ornith15Converted, .ornith15Converted8bit,
         .qwen36Converted, .qwen36Converted8bit,
         .agentworld, .agentworld8bit,
+        .katcoder, .katcoder8bit,
         .qwen38, .qwen38_8bit,
         .qwen36, .qwen36_6bit, .qwen36_8bit, .ornith15, .ornith15_8bit,
     ]
@@ -182,6 +190,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case "qwen3.6_35B_A3B_8Bit": return "qwen36-8bit"
         case "qwen-agentworld_35B_A3B_4Bit": return "agentworld"
         case "qwen-agentworld_35B_A3B_8Bit": return "agentworld-8bit"
+        case "kat-coder-v2.5_35B_A3B_4Bit": return "katcoder"
+        case "kat-coder-v2.5_35B_A3B_8Bit": return "katcoder-8bit"
         case "qwen3.8-flash-next_125B_A6B_4Bit": return "qwen38flash"
         case "qwen3.8-flash-next_125B_A6B_8Bit": return "qwen38flash-8bit"
         default: return "--help"
@@ -229,6 +239,8 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         case "qwen36-8bit", "qwen3.6-8bit": return .qwen36Converted8bit
         case "agentworld": return .agentworld
         case "agentworld-8bit": return .agentworld8bit
+        case "katcoder", "kat", "kat-coder": return .katcoder
+        case "katcoder-8bit", "kat-8bit": return .katcoder8bit
         case "qwen38", "qwen3.8": return .qwen38
         case "qwen38-8bit", "qwen3.8-8bit": return .qwen38_8bit
         // The MLX repacks the app can still download.

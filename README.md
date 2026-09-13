@@ -52,9 +52,10 @@ Peak decode on a base 8-core M3 MacBook Pro with 24 GB.
   Qwen 3.6 35B-A3B, at 4-bit and 8-bit
   (`tools/install_models.sh katcoder|katcoder-8bit`). Same geometry as Qwen 3.6,
   with the checkpoint's own sampling (temperature 1.0) rather than the Qwen 3.6
-  series' 0.6. **The install path and the checkpoint's geometry are verified;
-  its first real-model verification is pending**, so treat it as new rather
-  than proven.
+  series' 0.6. Verified on the real install at both widths: the three
+  continuations behave (`…France is` → ` Paris`, `Once upon a` → ` time`,
+  `…the lazy` → ` dog`), and each width has a stored golden baseline that
+  re-checks byte-identical.
 - **Qwen-AgentWorld 35B-A3B**
 - **Ornith 1.5 35B-A3B**
 - **Qwen 3.6 35B-A3B**

@@ -122,7 +122,7 @@ import NVMAIRepackCore
     #expect(fourBit.isInstallable && eightBit.isInstallable)
   }
 
-  /// The plain selectors name the eight builds `tools/install_models.sh`
+  /// The plain selectors name the ten builds `tools/install_models.sh`
   /// produces, which are what is on disk; the app recognizes and runs them
   /// but cannot download them (they need the converter it does not carry).
   @Test func everyInstalledBuildIsSelectableAndRecognized() {
@@ -133,6 +133,8 @@ import NVMAIRepackCore
       ("qwen36-8bit", "qwen3.6_35B_A3B_8Bit"),
       ("agentworld", "qwen-agentworld_35B_A3B_4Bit"),
       ("agentworld-8bit", "qwen-agentworld_35B_A3B_8Bit"),
+      ("katcoder", "kat-coder-v2.5_35B_A3B_4Bit"),
+      ("katcoder-8bit", "kat-coder-v2.5_35B_A3B_8Bit"),
       ("qwen38", "qwen3.8-flash-next_125B_A6B_4Bit"),
       ("qwen38-8bit", "qwen3.8-flash-next_125B_A6B_8Bit"),
     ]
