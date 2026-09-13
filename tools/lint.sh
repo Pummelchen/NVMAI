@@ -274,12 +274,75 @@ check_unchecked_sendable() {
   echo "  ok ($(echo "$current" | grep -c .) undocumented, 0 new)"
 }
 
+# --- converter: expert placement ---------------------------------------------
+# A routed-expert checkpoint may ship experts one tensor at a time, and the
+# converter stacks them into the fused axis the repacker packs. The experts
+# arrive in whatever order the shards and the (lexicographic) index put them --
+# KAT's arrive 0, 1, 10, 100, ... -- so filing them by arrival order puts expert
+# k's weights in expert j's slot. Everything downstream still passes: the bytes
+# match the checkpoint, the shapes are right, `validateRoleUniformity` passes,
+# the receipt verifies, and the model answers fluently from the wrong experts.
+# It has to be caught here, because no Swift test can see a converter bug.
+check_converter_expert_order() {
+  echo "== converter-expert-order: experts file at their own index =="
+  if ! command -v python3 >/dev/null 2>&1 && ! command -v python3.13 >/dev/null 2>&1; then
+    echo "  SKIP: no python3 available to run the converter check"
+    return
+  fi
+  local py out rc
+  py="$(command -v python3.13 || command -v python3)"
+  out="$("$py" - <<'PY' 2>&1
+import sys
+sys.path.insert(0, "tools")
+try:
+    import numpy as np
+    import prepare_agentworld as P
+except ImportError as exc:
+    print("SKIP: {} (converter deps unavailable)".format(exc))
+    sys.exit(0)
+
+class W:
+    def __init__(self): self.added = {}
+    def add(self, n, v): self.added[n] = np.asarray(v)
+    def flush(self): pass
+
+NE = 8
+order = [3, 0, 7, 1, 5, 2, 6, 4]          # deliberately not ascending
+w = W(); f = P.FusedExperts()
+for e in order:
+    f.add("model.language_model.layers.0.mlp.experts.%d.gate_proj.weight" % e,
+          np.full((512, 2048), float(e), dtype=np.float32), 4, w)
+f.release(NE, {4: w})
+key = "language_model.model.layers.0.mlp.switch_mlp.gate_proj.biases"
+bi = w.added.get(key)
+if bi is None:
+    print("FAIL: the fused tensor was never emitted")
+    sys.exit(1)
+got = [float(bi[e].astype(np.float32).mean()) for e in range(NE)]
+want = [float(e) for e in range(NE)]
+# Each expert carries its index as its value, so the axis must read 0..NE-1.
+if [round(x, 3) for x in got] != [round(x, 3) for x in want]:
+    print("FAIL: experts landed by arrival order: %s (want %s)" % (got, want))
+    sys.exit(1)
+print("ok")
+PY
+)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "$out" | sed 's/^/  /'
+    status=1
+  else
+    echo "  $(echo "$out" | tail -1)"
+  fi
+}
+
 case "$want" in
-  all)         check_force_cast; check_func_length; check_unchecked_sendable ;;
+  all)         check_force_cast; check_func_length; check_unchecked_sendable; check_converter_expert_order ;;
   force-cast)  check_force_cast ;;
   func-length) check_func_length ;;
   sendable)    check_unchecked_sendable ;;
-  *) echo "unknown check: $want (all|force-cast|func-length|sendable)" >&2; exit 2 ;;
+  converter)   check_converter_expert_order ;;
+  *) echo "unknown check: $want (all|force-cast|func-length|sendable|converter)" >&2; exit 2 ;;
 esac
 
 exit $status

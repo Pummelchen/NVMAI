@@ -301,6 +301,17 @@ class FusedExperts:
     treated as resident weights, the manifest declares `expertsPerLayer = 0`,
     and the model stops streaming from SSD -- the one thing this runtime is for.
 
+    **Each expert is placed at its own index, never appended.** A fused source
+    supplies the whole axis in one tensor, and for a per-expert source the
+    tensors arrive in whatever order the shards happen to hold them -- KAT's
+    layer-0 experts are spread across shards, so ascending arrival is not
+    guaranteed. Appending would put expert *k*'s weights in expert *j*'s slot:
+    every byte still matches the checkpoint, the shapes and the manifest are
+    right, `validateRoleUniformity` passes, and the model then routes to one
+    expert while reading another's weights -- fluent, partly-informed nonsense
+    that no downstream check can see. The ordering is therefore asserted, not
+    assumed.
+
     Only one layer's tensors are held: `release` drops an entry as soon as its
     last expert lands, so the peak is one layer's three projections (about
     1.5 GiB at 4-bit) plus the writer's open block.
@@ -315,18 +326,39 @@ class FusedExperts:
         if name in self._seen:
             raise ValueError(f"duplicate source tensor {name}")
         self._seen.add(name)
-        # The expert index is read from the *source* name: `routed_slices`
+        # The expert index comes from the *source* name: `routed_slices`
         # retargets a per-expert tensor to its fused name, which no longer
-        # carries one. Counting experts is what decides when a layer is done.
+        # carries one.
         routed = per_expert_routed(rename(name))
         for out_name, piece in routed_slices(name, value):
             target = self._layers.get((width, out_name))
             if target is None:
-                target = {"stack": [], "experts": set()}
+                target = {"stack": None, "experts": set()}
                 self._layers[(width, out_name)] = target
-            target["stack"].append(np.ascontiguousarray(piece))
-            if routed is not None:
-                target["experts"].add(routed[1])
+            piece = np.ascontiguousarray(piece)
+            if routed is None:
+                # Fused source: this one tensor is the whole expert axis.
+                target["stack"] = piece
+                continue
+            expert = routed[1]
+            if expert in target["experts"]:
+                raise ValueError(f"duplicate expert {expert} for {out_name}")
+            stack = target["stack"]
+            if stack is None:
+                # Preallocate the expert axis and file every expert at its own
+                # index. Appending would order the axis by *arrival*, which a
+                # per-expert checkpoint does not guarantee -- expert k's weights
+                # would land in expert j's slot, so routing would select one
+                # expert and read another's weights. Every byte would still
+                # match the checkpoint and every shape check would pass.
+                stack = np.empty((0, *piece.shape), dtype=piece.dtype)
+            if expert >= stack.shape[0]:
+                grown = np.empty((expert + 1, *piece.shape), dtype=piece.dtype)
+                grown[: stack.shape[0]] = stack
+                stack = grown
+                target["stack"] = stack
+            stack[expert] = piece
+            target["experts"].add(expert)
 
     def release(self, experts_per_layer: int,
                 writers: dict[int, "OutputWriter"]) -> None:
