@@ -168,38 +168,17 @@ may depend on them.
 *The reference implementation of this standard.* Runbook:
 `docs/release-process.md`. Mechanism: `tools/release.sh`.
 
-### Fork status — detach required, via Support
+### Fork status — not upstreamed, deliberately not detached
 
-This repository is still a GitHub **fork** of `drumih/turbo-fieldfare`, and
-**nothing here is upstreamed**: no pull requests, cherry-picks or patches go to
-the parent, and every change stays inside this repository. The fork relationship
-should therefore be severed — but unlike OpenRA, the **self-service path is
-unavailable**. Leaving the fork network requires that the fork have no child
-forks, and this one has two, neither of them ours to delete:
+This repository is a GitHub **fork** of `drumih/turbo-fieldfare`, and it is
+**deliberately left as a fork** — do not detach it from the fork network. Leaving
+is permanent, and the standalone repository would not retain its wiki, issues, pull
+requests, stars, watchers or child forks; the wiki alone holds 15 pages across 223
+commits, alongside 21 releases.
 
-| Child fork | Owner | Created | Last push | Size |
-| --- | --- | --- | --- | --- |
-| `Rc121122/Titanic` | Rc121122 — third party | 2026-09-15 | 2026-09-14 | ~12.7 MB |
-| `exadeci/NVMAI` | exadeci — third party | 2026-08-08 | 2026-08-08 | ~3.0 MB |
-
-Only those owners can remove them, so detachment goes through **GitHub Support**
-(<https://support.github.com/request/fork>) rather than the Danger Zone button.
-
-**Detaching is permanent and the standalone repository retains no wiki, issues,
-pull requests, stars, watchers or child forks.** Git commits and tags survive. The
-exposure here is real, not theoretical — **15 wiki pages across 223 commits**,
-**21 releases**, 7 issues, 2 pull requests, 43 stars, 4 watchers.
-
-**Sequence:** back up → land or close open pull requests → detach → recommit the
-wiki. Open pull request **#10** (`docs/release-rules`) is destroyed by detaching,
-so it must be landed or closed first; the *branch* survives as a plain git ref even
-though the PR does not.
-
-Backups of everything above are held at `~/Downloads/wiki-backups/`
-(`TinyTitan.wiki.git` bare mirror, `TinyTitan.export/` Markdown, `TinyTitan.wiki-backup.tar.gz`,
-`metadata/TinyTitan.threads.md`, `metadata/TinyTitan.*.json`). Since the wiki does
-not survive, its content belongs **in the repository** to outlive the move —
-commit `TinyTitan.export/` under `docs/wiki/`.
+The fork relationship is inert. Nothing here is upstreamed: **no pull requests,
+cherry-picks or patches go to the parent**, and every change stays inside this
+repository.
 
 - **Identity** `vX.Y.Z`. The only version literal in the tree is
   `CFBundleVersion` / `CFBundleShortVersionString` in `tools/install_tinytitan.sh`;
@@ -373,43 +352,18 @@ apply here.*
 requests, cherry-picks or patches against `OpenRA/OpenRA`; nothing developed here
 is intended for the upstream project.
 
-This repository is still a GitHub **fork** of `OpenRA/OpenRA`, and a fork is
-exactly the configuration that invites contribution back — so the fork
-relationship should be severed. Detaching is a **manual GitHub action, not an API
-one**; there is no REST endpoint for it.
+This repository is a GitHub fork of `OpenRA/OpenRA` and is **deliberately left as
+one** — do not detach it from the fork network. Leaving is permanent, and the
+standalone repository would not retain its wiki, issues, pull requests, stars,
+watchers or comments; the wiki alone holds 5 pages across 30 commits. The fork
+relationship is inert: nothing reaches upstream unless someone explicitly pushes it
+there, and the rule above already forbids that.
 
-This repository **qualifies for the self-service path**: it is public, ~243 MB
-(under the 1 GB limit), and has no child forks.
-
-> **Settings → General → Danger Zone → Leave fork network**
-
-Before clicking, know what is discarded. Leaving the fork network is
-**permanent** — the repository cannot be reconnected — and the standalone
-repository **does not retain its wiki, issues, pull requests, stars, watchers,
-comments or child forks**. Git commits and tags are preserved.
-
-- **Wiki: 5 pages across 30 commits** (`Home`, `Goals`, `Architecture`,
-  `Gameplay`, `_Sidebar`) — the only real loss here. Backed up before detaching.
-- Releases: none. Open issues and pull requests: none.
-
-### Backups taken before detaching
-
-Held outside the repository at `~/Downloads/wiki-backups/`:
-
-| Path | Contents |
-| --- | --- |
-| `OpenRA.wiki.git` | bare mirror — full 30-commit wiki history |
-| `OpenRA.export/` | the 5 pages as plain Markdown |
-| `OpenRA.wiki-backup.tar.gz` | the same, archived |
-| `metadata/OpenRA.threads.md` | all 4 issues with comments |
-| `metadata/OpenRA.issues.json`, `metadata/OpenRA.releases.json` | raw API payloads |
-
-Because a wiki does not survive detachment, its content belongs **in the
-repository** if it is to outlive the move: commit the exported Markdown under
-`docs/wiki/` and keep the mirror as history.
-
-Until it is detached, this repository is a downstream of upstream's and no release
-process here should pretend otherwise.
+- **Identity** semantic version, not yet established.
+- **Releases** none expected while this is a downstream — upstream cuts OpenRA's
+  releases. If this repository ever ships artifacts of its own, they are its own
+  concern and this section must say so explicitly rather than borrowing upstream's
+  process.
 
 ## FXNews — MQL5, source and compiled artifact
 
