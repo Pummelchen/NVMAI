@@ -179,38 +179,17 @@ Leave previous releases' notes and performance tables alone.
 *The reference implementation of this standard.* Runbook:
 `docs/release-process.md`. Mechanism: `tools/release.sh`.
 
-### Fork status — detach required, via Support
+### Fork status — not upstreamed, deliberately not detached
 
-This repository is still a GitHub **fork** of `drumih/turbo-fieldfare`, and
-**nothing here is upstreamed**: no pull requests, cherry-picks or patches go to
-the parent, and every change stays inside this repository. The fork relationship
-should therefore be severed — but unlike OpenRA, the **self-service path is
-unavailable**. Leaving the fork network requires that the fork have no child
-forks, and this one has two, neither of them ours to delete:
+This repository is a GitHub **fork** of `drumih/turbo-fieldfare`, and it is
+**deliberately left as a fork** — do not detach it from the fork network. Leaving
+is permanent, and the standalone repository would not retain its wiki, issues, pull
+requests, stars, watchers or child forks; the wiki alone holds 15 pages across 223
+commits, alongside 21 releases.
 
-| Child fork | Owner | Created | Last push | Size |
-| --- | --- | --- | --- | --- |
-| `Rc121122/Titanic` | Rc121122 — third party | 2026-09-15 | 2026-09-14 | ~12.7 MB |
-| `exadeci/NVMAI` | exadeci — third party | 2026-08-08 | 2026-08-08 | ~3.0 MB |
-
-Only those owners can remove them, so detachment goes through **GitHub Support**
-(<https://support.github.com/request/fork>) rather than the Danger Zone button.
-
-**Detaching is permanent and the standalone repository retains no wiki, issues,
-pull requests, stars, watchers or child forks.** Git commits and tags survive. The
-exposure here is real, not theoretical — **15 wiki pages across 223 commits**,
-**21 releases**, 7 issues, 2 pull requests, 43 stars, 4 watchers.
-
-**Sequence:** back up → land or close open pull requests → detach → recommit the
-wiki. Open pull request **#10** (`docs/release-rules`) is destroyed by detaching,
-so it must be landed or closed first; the *branch* survives as a plain git ref even
-though the PR does not.
-
-Backups of everything above are held at `~/Downloads/wiki-backups/`
-(`TinyTitan.wiki.git` bare mirror, `TinyTitan.export/` Markdown, `TinyTitan.wiki-backup.tar.gz`,
-`metadata/TinyTitan.threads.md`, `metadata/TinyTitan.*.json`). Since the wiki does
-not survive, its content belongs **in the repository** to outlive the move —
-commit `TinyTitan.export/` under `docs/wiki/`.
+The fork relationship is inert. Nothing here is upstreamed: **no pull requests,
+cherry-picks or patches go to the parent**, and every change stays inside this
+repository.
 
 - **Identity** `vX.Y.Z`. The only version literal in the tree is
   `CFBundleVersion` / `CFBundleShortVersionString` in `tools/install_tinytitan.sh`;
