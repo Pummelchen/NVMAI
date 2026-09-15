@@ -263,7 +263,13 @@ def main() -> int:
                   f"   AGENTS.md{'' if ag_ok else ' stale/missing'}")
             continue
 
-        agents = get_file(repo, "AGENTS.md", base)
+        # Prefer the branch's own AGENTS.md so the repository's own body is
+        # preserved; only the marked release block is ever rewritten. Reading the
+        # default branch instead would overwrite a body that exists only on the
+        # branch with the bare stub.
+        agents = get_file(repo, "AGENTS.md", BRANCH)
+        if agents is None:
+            agents = get_file(repo, "AGENTS.md", base)
         want_agents = build_agents_md(repo, agents[0] if agents else None)
 
         if args.dry_run:
