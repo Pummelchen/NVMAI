@@ -164,8 +164,20 @@ Leave previous releases' notes and performance tables alone.
   deployed copy** — the next run overwrites it.
 - **Repository rules live in the master, not in shell-script comments.** A rule an
   agent cannot find is a rule that will be broken.
-- **`AGENTS.md` is the discovery point.** Every repository that builds software
-  carries one, and its release section states the non-negotiables and points here.
+- **`AGENTS.md` is the one instruction file, and every harness must reach it.** This
+  account works with Codex, Claude Code, DeepSeek Harness, OpenCode, Qwen Code,
+  Qoder and Zed. Six read `AGENTS.md` directly; **Claude Code does not** — its
+  documentation is explicit that it reads `CLAUDE.md`, not `AGENTS.md` — so every
+  repository also carries a committed `CLAUDE.md` whose entire content is the
+  `@AGENTS.md` import. Commit it: a symlink made on one machine is invisible to a
+  fresh clone, to CI and to every other checkout, and on Windows it needs
+  Administrator rights. Qwen Code reads `AGENTS.md` alongside its own `QWEN.md`, so
+  there is nothing to duplicate for it.
+- **Never add a file that shadows `AGENTS.md`.** Zed takes the *first match* from
+  `.rules`, `.cursorrules`, `.windsurfrules`, `.clinerules`,
+  `.github/copilot-instructions.md`, `AGENT.md`, and only then `AGENTS.md` — so any
+  of those six silently replaces this file for every Zed user.
+  `tools/sync-release-rules.py --check` fails when one appears.
 - **An archived repository is read-only.** Nothing can be committed to it, so no
   release step may depend on one. Name the exclusion rather than leaving a gap.
 - **A check that has never been seen to fail is not yet trusted.**
