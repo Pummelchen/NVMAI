@@ -155,7 +155,14 @@ Leave previous releases' notes and performance tables alone.
 
 ## 1.10 Cross-repository
 
-- **Repository rules live in this file, not in shell-script comments.** A rule an
+- **This file is the master; every repository's copy is generated from it.** The
+  master is `docs/release-rules.md` in `TinyTitan`, and its
+  `tools/sync-release-rules.py` splits it into Part 1 and each repository's Part 2
+  and deploys the resulting `RELEASE.md` plus the `## Releasing` section of each
+  `AGENTS.md`. Edit the master and run `--apply`; `--check` is the drift gate and
+  exits non-zero when a committed copy no longer matches. **Never hand-edit a
+  deployed copy** — the next run overwrites it.
+- **Repository rules live in the master, not in shell-script comments.** A rule an
   agent cannot find is a rule that will be broken.
 - **`AGENTS.md` is the discovery point.** Every repository that builds software
   carries one, and its release section states the non-negotiables and points here.
