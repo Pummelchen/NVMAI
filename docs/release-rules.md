@@ -277,25 +277,41 @@ apply here.*
   named archive. A rename to `converter-X.Y-macos-arm64` with the licence and a
   `README-binaries.txt` inside would satisfy §1.6 without changing how it is used.
 
-## MCPSearch — Swift, no release yet
+## MCPSearch — Swift, semantic version, 1 release
 
-- **Identity** semantic version, not yet established; set `VERSION` before the
-  first release.
+- **Identity** `vX.Y.Z`, and it is **declared in three unconnected places**: the
+  authoritative-looking `static let serverVersion = "1.0.0"` in
+  `Sources/SwiftWebSearchMCP/MCPServer.swift`, a second literal in the
+  `clientInfo` dictionary in
+  `Sources/WebSearchCore/Providers/ParallelMCPProvider.swift`, and the
+  `CHANGELOG.md` heading. There is **no `VERSION` file and no check tying them
+  together**, so bumping the version is manual and a half-done bump ships a server
+  that misreports itself over MCP. Introducing the `VERSION` file plus an agreement
+  check is the obvious next step here.
+- **Artifacts** `mcps-X.Y.Z-macos-arm64.tar.gz` + `SHA256SUMS`, with the install
+  instructions carried in the release notes. `v1.0.0` (2026-09-15) is the first.
+- **There is no release script.** `v1.0.0` was cut by hand — no `tools/release.sh`
+  exists — so the packaging, digest and notes sequence in Part 1 has to be walked
+  manually and is not yet reproducible from one command.
 - **`main` is unprotected** and carries no rulesets: nothing gates a merge today,
   so the checks below are advisory until that changes.
-- **Code scanning** runs CodeQL **default setup**. **AI Scan for pull requests is
-  deliberately disabled** on this repository and every other non-archived one — the
-  Autofind job asks `api.individual.githubcopilot.com` for a model an individual
-  Copilot plan does not serve, so it failed on every PR head with
-  `CAPIError: 400 The requested model is not supported` and could never report a
-  finding. Re-enable only with an entitlement that serves the requested model:
+- **Code scanning uses CodeQL advanced setup** (`.github/workflows/codeql.yml`,
+  `build-mode: manual`, weekly cron). **Do not switch it to default setup** — the
+  runner image ships Swift 6.3.3, which cannot parse this package's 6.4 manifest, so
+  default setup analyses nothing while appearing to run, and removes SAST silently.
+- **AI Scan for pull requests is deliberately disabled** on this repository and
+  every other non-archived one — the Autofind job asks
+  `api.individual.githubcopilot.com` for a model an individual Copilot plan does not
+  serve, so it failed on every PR head with `CAPIError: 400 The requested model is
+  not supported` and could never report a finding. Re-enable only with an
+  entitlement that serves the requested model:
   `PATCH /repos/{owner}/{repo}/code-scanning/ai-scan` with `{"pr_scan":"enabled"}`.
   The decision is recorded in `AUDIT/HANDOVER.md` as ISSUE-21.
 - **Audit material** lives under `AUDIT/`; `AUDIT/HANDOVER.md` lists what is open
   — notably ISSUE-20, rotating the GitHub PAT in cleartext in the local wiki
   clones' `.git/config`.
-- **Before the first release** it needs: a `VERSION` file, a release script, a
-  Release with the binary attached, and a `README-binaries.txt`.
+- **Next release needs**, in order: a `VERSION` file, a release script, and the
+  three version literals reduced to one.
 
 ## ChatBots — Swift, no release yet
 
